@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +86,88 @@ func TestReserveSandboxClaimAllowsRetryWithoutAnotherQuotaSlot(t *testing.T) {
 	current, err := store.CountActiveSandboxes(ctx, "team-1")
 	require.NoError(t, err)
 	require.Equal(t, int64(1), current)
+}
+
+func TestReserveSandboxClaimBindsRotatesAndCleansCredentialProjectionIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	repository := egressauthstore.NewRepository(pool,
+		egressauthstore.WithDefaultStorageKind(egressauthstore.CredentialSourceStorageKindPlaintextPG))
+	putSource := func(token string) *egressauthstore.CredentialSourceMetadata {
+		metadata, err := repository.PutSource(ctx, "team-credential", &egressauthstore.CredentialSourceWriteRequest{
+			Name: "claim-source", ResolverKind: "static_headers",
+			StorageKind: egressauthstore.CredentialSourceStorageKindPlaintextPG,
+			Spec: egressauthstore.CredentialSourceSecretSpec{StaticHeaders: &egressauthstore.StaticHeadersSourceSpec{
+				Values: map[string]string{"token": token},
+			}},
+		})
+		require.NoError(t, err)
+		return metadata
+	}
+	first := putSource("first")
+	t.Cleanup(func() {
+		_ = repository.DeleteBindings(context.Background(), "team-credential", "sandbox-credential")
+		_ = repository.DeleteSource(context.Background(), "team-credential", "claim-source")
+	})
+	binding := egressauthstore.CredentialBinding{
+		Ref: "api-auth", SourceRef: "claim-source",
+		Projection: egressauthstore.ProjectionSpec{
+			Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &egressauthstore.HTTPHeadersProjection{Headers: []egressauthstore.ProjectedHeader{{
+				Name: "Authorization", ValueTemplate: "Bearer {{.token}}",
+			}}},
+		},
+	}
+	record := rootFSTestSandboxRecord("sandbox-credential", "team-credential")
+	record.RuntimeBackend = SandboxRuntimeBackendNomad
+	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
+		Record: record, OperationID: "operation-credential", LeaseTTL: 15 * time.Second,
+		CredentialBindings: []egressauthstore.CredentialBinding{binding},
+	})
+	require.NoError(t, err)
+	bound, err := store.GetNomadSandboxCredentialBindings(ctx, record.TeamID, record.ID)
+	require.NoError(t, err)
+	require.Equal(t, credentialbinding.DigestStore([]egressauthstore.CredentialBinding{binding}), bound.Digest)
+	require.Len(t, bound.Bindings, 1)
+	require.Equal(t, first.CurrentVersion, bound.Bindings[0].SourceVersion)
+
+	changed := binding
+	changed.Projection.HTTPHeaders.Headers[0].ValueTemplate = "Token {{.token}}"
+	_, _, err = store.RetrySandboxClaim(ctx, &RetrySandboxClaimRequest{
+		Record: record, OperationID: "operation-credential", LeaseTTL: 15 * time.Second,
+		CredentialBindings: []egressauthstore.CredentialBinding{changed},
+	})
+	require.ErrorIs(t, err, ErrSandboxClaimReservationConflict)
+	rotated := putSource("rotated")
+	bound, err = store.GetNomadSandboxCredentialBindings(ctx, record.TeamID, record.ID)
+	require.NoError(t, err)
+	require.Equal(t, rotated.CurrentVersion, bound.Bindings[0].SourceVersion)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE sandbox_id = $1
+	`, record.ID)
+	require.NoError(t, err)
+	_, err = store.FenceSandboxRuntimeClaimForCleanup(
+		ctx, record.ID, "operation-credential", "claim lease expired before commit",
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.MarkSandboxDeleted(ctx, record.ID, time.Now().UTC()))
+	require.NoError(t, store.MarkSandboxRuntimeClaimCleaned(ctx, record.ID, "operation-credential"))
+	current, err := repository.GetBindings(ctx, record.TeamID, record.ID)
+	require.NoError(t, err)
+	require.Nil(t, current, "claim cleanup retained credential bindings")
+	require.NoError(t, repository.UpsertBindings(ctx, &egressauthstore.BindingRecord{
+		TeamID: record.TeamID, SandboxID: record.ID,
+		Bindings: []egressauthstore.CredentialBinding{binding},
+	}))
+	require.NoError(t, store.MarkSandboxRuntimeClaimCleaned(ctx, record.ID, "operation-credential"))
+	current, err = repository.GetBindings(ctx, record.TeamID, record.ID)
+	require.NoError(t, err)
+	require.Nil(t, current, "cleaned-claim retry did not repair credential bindings")
+	require.NoError(t, repository.DeleteSource(ctx, record.TeamID, "claim-source"))
 }
 
 func TestCompleteSandboxClaimRequiresExactActiveRuntimeSlot(t *testing.T) {

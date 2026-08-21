@@ -96,12 +96,19 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 	if tag.RowsAffected() != 1 {
 		return nil, fmt.Errorf("%w: target sandbox was concurrently reserved", ErrNomadSandboxForkConflict)
 	}
+	credentialBindingDigest, err := cloneNomadSandboxCredentialBindingsTx(
+		ctx, tx, source.TeamID, source.ID, normalized.Target.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
 	claimOperationID := NomadSandboxForkClaimOperationID(normalized.OperationID, normalized.Target.ID)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.sandbox_runtime_claims (
-			sandbox_id, operation_id, phase, lease_expires_at
-		) VALUES ($1, $2, $3, NULL)
-	`, normalized.Target.ID, claimOperationID, SandboxRuntimeClaimPhaseReady); err != nil {
+			sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
+		) VALUES ($1, $2, $3, NULL, $4)
+	`, normalized.Target.ID, claimOperationID, SandboxRuntimeClaimPhaseReady,
+		credentialBindingDigest); err != nil {
 		return nil, mapSandboxClaimConflict("insert Nomad paused-fork target claim", err)
 	}
 	filesystem, err := forkRootFSFilesystem(ctx, tx, &ForkRootFSFilesystemRequest{

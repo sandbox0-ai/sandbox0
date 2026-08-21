@@ -11,6 +11,8 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
@@ -27,20 +29,22 @@ import (
 )
 
 type memorySandboxStore struct {
-	mu                sync.Mutex
-	records           map[string]*sandboxstore.SandboxRecord
-	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
-	rootFSStates      map[string]*sandboxstore.SandboxRootFSState
-	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
-	rootFSSnapshots   map[string]*sandboxstore.RootFSSnapshot
-	runtimeSlots      map[string]*sandboxstore.RuntimeSlot
-	deletes           []string
-	saves             int
-	pauses            int
-	lockCalls         int
-	activeTxnGets     int
-	lockStarted       chan struct{}
-	blockLock         chan struct{}
+	mu                 sync.Mutex
+	records            map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns      map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSStates       map[string]*sandboxstore.SandboxRootFSState
+	rootFSFilesystems  map[string]*sandboxstore.RootFSFilesystem
+	rootFSSnapshots    map[string]*sandboxstore.RootFSSnapshot
+	runtimeSlots       map[string]*sandboxstore.RuntimeSlot
+	credentialBindings map[string][]egressauthstore.CredentialBinding
+	credentialDigests  map[string]string
+	deletes            []string
+	saves              int
+	pauses             int
+	lockCalls          int
+	activeTxnGets      int
+	lockStarted        chan struct{}
+	blockLock          chan struct{}
 }
 
 func (s *memorySandboxStore) GetRuntimeSlotBySandboxID(_ context.Context, sandboxID string) (*sandboxstore.RuntimeSlot, error) {
@@ -56,6 +60,20 @@ func (s *memorySandboxStore) GetRuntimeSlotBySandboxID(_ context.Context, sandbo
 	clone := *slot
 	clone.CommandReadyDigest = append([]byte(nil), slot.CommandReadyDigest...)
 	return &clone, nil
+}
+
+func (s *memorySandboxStore) GetNomadSandboxCredentialBindings(
+	_ context.Context,
+	_, sandboxID string,
+) (*sandboxstore.NomadSandboxCredentialBindings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bindings := credentialbinding.CloneStore(s.credentialBindings[sandboxID])
+	digest := s.credentialDigests[sandboxID]
+	if digest == "" {
+		digest = credentialbinding.DigestStore(bindings)
+	}
+	return &sandboxstore.NomadSandboxCredentialBindings{Digest: digest, Bindings: bindings}, nil
 }
 
 type memorySandboxStoreTx struct {
@@ -285,20 +303,24 @@ func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID stri
 }
 
 type memorySandboxStoreSnapshot struct {
-	records           map[string]*sandboxstore.SandboxRecord
-	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
-	rootFSStates      map[string]*sandboxstore.SandboxRootFSState
-	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
+	records            map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns      map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSStates       map[string]*sandboxstore.SandboxRootFSState
+	rootFSFilesystems  map[string]*sandboxstore.RootFSFilesystem
+	credentialBindings map[string][]egressauthstore.CredentialBinding
+	credentialDigests  map[string]string
 }
 
 func (s *memorySandboxStore) snapshot() memorySandboxStoreSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return memorySandboxStoreSnapshot{
-		records:           cloneSandboxRecordMap(s.records),
-		lifecycleTxns:     cloneSandboxLifecycleTxnMap(s.lifecycleTxns),
-		rootFSStates:      cloneSandboxRootFSStateMap(s.rootFSStates),
-		rootFSFilesystems: cloneRootFSFilesystemMap(s.rootFSFilesystems),
+		records:            cloneSandboxRecordMap(s.records),
+		lifecycleTxns:      cloneSandboxLifecycleTxnMap(s.lifecycleTxns),
+		rootFSStates:       cloneSandboxRootFSStateMap(s.rootFSStates),
+		rootFSFilesystems:  cloneRootFSFilesystemMap(s.rootFSFilesystems),
+		credentialBindings: cloneMemoryCredentialBindings(s.credentialBindings),
+		credentialDigests:  cloneCredentialDigestMap(s.credentialDigests),
 	}
 }
 
@@ -309,6 +331,51 @@ func (s *memorySandboxStore) restore(snapshot memorySandboxStoreSnapshot) {
 	s.lifecycleTxns = snapshot.lifecycleTxns
 	s.rootFSStates = snapshot.rootFSStates
 	s.rootFSFilesystems = snapshot.rootFSFilesystems
+	s.credentialBindings = snapshot.credentialBindings
+	s.credentialDigests = snapshot.credentialDigests
+}
+
+func (t memorySandboxStoreTx) ReplaceNomadSandboxCredentialBindings(
+	_ context.Context,
+	_, sandboxID string,
+	bindings []egressauthstore.CredentialBinding,
+) (string, error) {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	if t.store.credentialBindings == nil {
+		t.store.credentialBindings = make(map[string][]egressauthstore.CredentialBinding)
+	}
+	if t.store.credentialDigests == nil {
+		t.store.credentialDigests = make(map[string]string)
+	}
+	t.store.credentialBindings[sandboxID] = credentialbinding.CloneStore(bindings)
+	digest := credentialbinding.DigestStore(bindings)
+	t.store.credentialDigests[sandboxID] = digest
+	return digest, nil
+}
+
+func cloneMemoryCredentialBindings(
+	in map[string][]egressauthstore.CredentialBinding,
+) map[string][]egressauthstore.CredentialBinding {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]egressauthstore.CredentialBinding, len(in))
+	for key, bindings := range in {
+		out[key] = credentialbinding.CloneStore(bindings)
+	}
+	return out
+}
+
+func cloneCredentialDigestMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *memorySandboxStore) setSandboxDesiredState(sandboxID, desiredState string) {

@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -709,8 +711,26 @@ func TestRootFSObjectAuditRejectsLogicalSizeMismatch(t *testing.T) {
 func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := newSandboxStoreIntegrationDatabase(t)
+	prepareSandboxStoreCredentialSchema(t, pool)
 	require.NoError(t, RunSandboxStoreMigrations(context.Background(), pool, noopSandboxStoreMigrateLogger{}))
 	return pool
+}
+
+func prepareSandboxStoreCredentialSchema(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `
+		CREATE SCHEMA IF NOT EXISTS scheduler;
+		CREATE OR REPLACE FUNCTION scheduler.update_updated_at_column()
+		RETURNS TRIGGER AS $$
+		BEGIN
+			NEW.updated_at = NOW();
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+	`)
+	require.NoError(t, err)
+	require.NoError(t, egressauthstore.RunMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
 }
 
 func TestVolumeRuntimeMetadataRetirementMigration(t *testing.T) {
@@ -771,6 +791,7 @@ SELECT EXISTS (
 func newSandboxStoreIntegrationPoolThrough(t *testing.T, maximumPrefix string) *pgxpool.Pool {
 	t.Helper()
 	pool := newSandboxStoreIntegrationDatabase(t)
+	prepareSandboxStoreCredentialSchema(t, pool)
 	require.NoError(t, migrate.Up(context.Background(), pool, ".",
 		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, maximumPrefix)),
 		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
@@ -790,7 +811,9 @@ func newSandboxStoreIntegrationDatabase(t *testing.T) *pgxpool.Pool {
 	}
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL: dbURL, Schema: "scheduler", MaxConns: 10,
+	})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 

@@ -92,6 +92,7 @@ func (s *Server) resolveSOCKS5ProxyAuth(ctx context.Context, req *adapterRequest
 	}
 	key := egressAuthCacheKey{
 		SandboxID:       req.Compiled.SandboxID,
+		BindingDigest:   req.Compiled.CredentialBindingDigest,
 		AuthRef:         cfg.CredentialRef,
 		Destination:     egressProxyDestination(req),
 		DestinationPort: req.DestPort,

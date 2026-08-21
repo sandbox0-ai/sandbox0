@@ -11,6 +11,10 @@ type NetworkPolicySpec struct {
 	// TeamID is the team that owns this sandbox
 	TeamID string `json:"teamId"`
 
+	// CredentialBindingDigest binds source-version-independent projection
+	// semantics into policy acknowledgement and runtime cache identity.
+	CredentialBindingDigest string `json:"credentialBindingDigest,omitempty"`
+
 	// Mode controls the baseline policy for egress
 	Mode NetworkPolicyMode `json:"mode"`
 
@@ -29,7 +33,7 @@ func NetworkPolicyRequiresSynchronousApply(spec *NetworkPolicySpec) bool {
 	if mode == "" {
 		mode = NetworkModeAllowAll
 	}
-	return mode != NetworkModeAllowAll || spec.Egress != nil
+	return mode != NetworkModeAllowAll || spec.Egress != nil || spec.CredentialBindingDigest != ""
 }
 
 // PortSpec defines a port specification

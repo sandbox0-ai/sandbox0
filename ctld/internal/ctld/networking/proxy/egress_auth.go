@@ -71,6 +71,7 @@ type egressAuthCache interface {
 
 type egressAuthCacheKey struct {
 	SandboxID       string
+	BindingDigest   string
 	AuthRef         string
 	Destination     string
 	DestinationPort int
@@ -754,6 +755,7 @@ func policyFailureOpen() v1alpha1.EgressAuthFailurePolicy {
 func buildEgressAuthCacheKey(req *adapterRequest, decision trafficDecision) egressAuthCacheKey {
 	return egressAuthCacheKey{
 		SandboxID:       compiledSandboxID(req.Compiled),
+		BindingDigest:   compiledCredentialBindingDigest(req.Compiled),
 		AuthRef:         decision.MatchedAuthRule.AuthRef,
 		Destination:     authDestination(req),
 		DestinationPort: req.DestPort,
@@ -780,6 +782,13 @@ func compiledSandboxID(compiled *policy.CompiledPolicy) string {
 		return ""
 	}
 	return compiled.SandboxID
+}
+
+func compiledCredentialBindingDigest(compiled *policy.CompiledPolicy) string {
+	if compiled == nil {
+		return ""
+	}
+	return compiled.CredentialBindingDigest
 }
 
 func compiledTeamID(compiled *policy.CompiledPolicy) string {

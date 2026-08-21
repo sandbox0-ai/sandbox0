@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -64,7 +66,7 @@ func TestNomadSandboxNetworkPolicyServiceFencesActiveSlotDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := store.records["sandbox-a"]
-	_, annotation, err := service.buildPolicy(record, record.Config.Network)
+	_, annotation, _, err := service.buildStoredPolicy(context.Background(), record, record.Config.Network)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestNomadSandboxNetworkPolicyServiceFencesActiveSlotDigest(t *testing.T) {
 	}
 }
 
-func TestNomadSandboxNetworkPolicyServiceRejectsUnsafeUpdates(t *testing.T) {
+func TestNomadSandboxNetworkPolicyServiceFencesUpdatesAndPublishesPausedCredentials(t *testing.T) {
 	if _, err := NewNomadSandboxNetworkPolicyService(nil, networkpolicy.NewNetworkPolicyService(zap.NewNop())); err == nil {
 		t.Fatal("nil network store was accepted")
 	}
@@ -127,8 +129,13 @@ func TestNomadSandboxNetworkPolicyServiceRejectsUnsafeUpdates(t *testing.T) {
 		}}},
 		CredentialBindings: testCredentialBindings("api-auth", "Bearer token"),
 	}
-	if _, err := service.UpdateNetworkPolicy(context.Background(), "sandbox-a", credentialPolicy); !errors.Is(err, ErrSandboxRuntimeUpdateUnavailable) {
+	credentialResult, err := service.UpdateNetworkPolicy(context.Background(), "sandbox-a", credentialPolicy)
+	if err != nil {
 		t.Fatalf("credential update error = %v", err)
+	}
+	if len(credentialResult.CredentialBindings) != 1 ||
+		credentialResult.CredentialBindings[0].Ref != "api-auth" {
+		t.Fatalf("credential update result = %+v", credentialResult)
 	}
 	store.records["sandbox-a"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendKubernetes
 	if _, err := service.GetNetworkPolicy(context.Background(), "sandbox-a"); !apierrors.IsConflict(err) {
@@ -150,7 +157,7 @@ func TestNomadSandboxNetworkPolicyServiceActiveUpdateSurvivesResponseLossAndRest
 		t.Fatal(err)
 	}
 	record := base.records["sandbox-a"]
-	_, currentAnnotation, err := service.buildPolicy(record, record.Config.Network)
+	_, currentAnnotation, _, err := service.buildStoredPolicy(context.Background(), record, record.Config.Network)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +239,7 @@ func TestNomadSandboxNetworkPolicyServiceRejectsMismatchedAppliedToken(t *testin
 		t.Fatal(err)
 	}
 	record := base.records["sandbox-a"]
-	_, currentAnnotation, err := service.buildPolicy(record, record.Config.Network)
+	_, currentAnnotation, _, err := service.buildStoredPolicy(context.Background(), record, record.Config.Network)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +255,74 @@ func TestNomadSandboxNetworkPolicyServiceRejectsMismatchedAppliedToken(t *testin
 	}
 	if base.records["sandbox-a"].Config.Network.Mode == v1alpha1.NetworkModeAllowAll {
 		t.Fatal("mismatched token published desired config")
+	}
+}
+
+func TestNomadSandboxNetworkPolicyServiceActiveBindingOnlyUpdateWaitsForAck(t *testing.T) {
+	base := nomadNetworkPolicyTestStore(sandboxstore.SandboxDesiredStateActive)
+	record := base.records["sandbox-a"]
+	credentialRules := []v1alpha1.EgressCredentialRule{{
+		Name: "api", CredentialRef: "api-auth", Protocol: v1alpha1.EgressAuthProtocolHTTP,
+		Domains: []string{"api.example.com"},
+	}}
+	record.Config.Network = &v1alpha1.SandboxNetworkPolicy{
+		Mode:   v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{CredentialRules: credentialRules},
+	}
+	oldBinding := testCredentialBindings("api-auth", "Bearer {{.token}}")
+	oldBinding[0].SourceRef = "source-old"
+	base.credentialBindings = map[string][]egressauthstore.CredentialBinding{
+		record.ID: credentialbinding.ToStore(oldBinding),
+	}
+	base.credentialDigests = map[string]string{
+		record.ID: credentialbinding.DigestPublic(oldBinding),
+	}
+	store := &nomadNetworkMutationTestStore{memorySandboxStore: base}
+	preparer := &nomadNetworkPreparerTest{}
+	service, err := NewNomadSandboxNetworkPolicyService(
+		store, networkpolicy.NewNetworkPolicyService(zap.NewNop()), preparer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, currentAnnotation, _, err := service.buildStoredPolicy(context.Background(), record, record.Config.Network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.runtimeSlots[record.ID] = activeNomadNetworkTestSlot(record, currentAnnotation)
+
+	newBinding := testCredentialBindings("api-auth", "Bearer {{.token}}")
+	newBinding[0].SourceRef = "source-new"
+	desired := &v1alpha1.SandboxNetworkPolicy{
+		Mode:               v1alpha1.NetworkModeBlockAll,
+		Egress:             &v1alpha1.NetworkEgressPolicy{CredentialRules: credentialRules},
+		CredentialBindings: newBinding,
+	}
+	updated, err := service.UpdateNetworkPolicy(context.Background(), record.ID, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preparer.requests) != 1 {
+		t.Fatalf("network prepare calls = %d", len(preparer.requests))
+	}
+	if preparer.requests[0].PolicyDigest == protocol.NetworkPolicyDigest(currentAnnotation) {
+		t.Fatal("binding-only update retained the old policy digest")
+	}
+	if len(updated.CredentialBindings) != 1 || updated.CredentialBindings[0].SourceRef != "source-new" {
+		t.Fatalf("updated credential policy = %+v", updated)
+	}
+	if got := base.credentialBindings[record.ID]; len(got) != 1 || got[0].SourceRef != "source-new" {
+		t.Fatalf("published credential bindings = %+v", got)
+	}
+	if base.records[record.ID].Config.Network.CredentialBindings != nil {
+		t.Fatal("credential bindings leaked into sandbox config")
+	}
+	loaded, err := service.GetNetworkPolicy(context.Background(), record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.CredentialBindings) != 1 || loaded.CredentialBindings[0].SourceRef != "source-new" {
+		t.Fatalf("loaded credential policy = %+v", loaded)
 	}
 }
 
@@ -287,7 +362,8 @@ func nomadNetworkPolicyTestStore(desiredState string) *memorySandboxStore {
 
 type nomadNetworkMutationTestStore struct {
 	*memorySandboxStore
-	mutation *sandboxstore.NomadSandboxNetworkMutation
+	mutation        *sandboxstore.NomadSandboxNetworkMutation
+	pendingBindings []egressauthstore.CredentialBinding
 }
 
 func (s *nomadNetworkMutationTestStore) BeginNomadSandboxNetworkMutation(
@@ -316,9 +392,11 @@ func (s *nomadNetworkMutationTestStore) BeginNomadSandboxNetworkMutation(
 		NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
 		ClaimID: slot.ClaimID, CurrentPolicyDigest: request.ExpectedCurrentPolicyDigest,
 		DesiredPolicy: request.DesiredPolicy, DesiredPolicyDigest: request.DesiredPolicyDigest,
-		RequestPolicy: sanitizedNetworkPolicyForPersistence(request.RequestPolicy),
-		Phase:         sandboxstore.NomadSandboxNetworkMutationPhasePending,
+		CredentialBindingDigest: credentialbinding.DigestStore(request.CredentialBindings),
+		RequestPolicy:           sanitizedNetworkPolicyForPersistence(request.RequestPolicy),
+		Phase:                   sandboxstore.NomadSandboxNetworkMutationPhasePending,
 	}
+	s.pendingBindings = credentialbinding.CloneStore(request.CredentialBindings)
 	return cloneNomadNetworkMutation(s.mutation), nil
 }
 
@@ -365,6 +443,15 @@ func (s *nomadNetworkMutationTestStore) CommitNomadSandboxNetworkMutation(
 		return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
 	}
 	record.Config.Network = sanitizedNetworkPolicyForPersistence(s.mutation.RequestPolicy)
+	if s.credentialBindings == nil {
+		s.credentialBindings = make(map[string][]egressauthstore.CredentialBinding)
+	}
+	if s.credentialDigests == nil {
+		s.credentialDigests = make(map[string]string)
+	}
+	s.credentialBindings[sandboxID] = credentialbinding.CloneStore(s.pendingBindings)
+	s.credentialDigests[sandboxID] = s.mutation.CredentialBindingDigest
+	s.pendingBindings = nil
 	slot.ClaimNetworkPolicyDigest = s.mutation.DesiredPolicyDigest
 	slot.Revision++
 	tokenCopy := token

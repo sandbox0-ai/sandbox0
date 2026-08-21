@@ -63,56 +63,7 @@ func (r *Repository) GetBindings(ctx context.Context, teamID, sandboxID string) 
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
-	if teamID == "" {
-		return nil, fmt.Errorf("team_id is required")
-	}
-	if sandboxID == "" {
-		return nil, fmt.Errorf("sandbox_id is required")
-	}
-
-	var (
-		record       BindingRecord
-		bindingsJSON []byte
-	)
-	err := r.pool.QueryRow(ctx, `
-		SELECT
-			sandbox_id,
-			team_id,
-			COALESCE(
-				jsonb_agg(
-					jsonb_build_object(
-						'ref', ref,
-						'sourceRef', source_ref,
-						'sourceId', source_id,
-						'sourceVersion', source_version,
-						'projection', projection,
-						'cachePolicy', cache_policy
-					) ORDER BY ref
-				),
-				'[]'::jsonb
-			) AS bindings,
-			MAX(updated_at) AS updated_at
-		FROM sandbox_egress_credential_bindings
-		WHERE team_id = $1 AND sandbox_id = $2
-		GROUP BY team_id, sandbox_id
-	`, teamID, sandboxID).Scan(
-		&record.SandboxID,
-		&record.TeamID,
-		&bindingsJSON,
-		&record.UpdatedAt,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get bindings: %w", err)
-	}
-	if len(bindingsJSON) > 0 {
-		if err := json.Unmarshal(bindingsJSON, &record.Bindings); err != nil {
-			return nil, fmt.Errorf("unmarshal bindings: %w", err)
-		}
-	}
-	return &record, nil
+	return GetCurrentBindings(ctx, r.pool, teamID, sandboxID)
 }
 
 func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) error {
@@ -129,14 +80,6 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 		return fmt.Errorf("sandbox_id is required")
 	}
 
-	if record.UpdatedAt.IsZero() {
-		record.UpdatedAt = time.Now().UTC()
-	}
-
-	if r.pool == nil {
-		return fmt.Errorf("binding repository pool is not configured")
-	}
-
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin binding upsert transaction: %w", err)
@@ -145,35 +88,21 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 		_ = tx.Rollback(ctx)
 	}()
 
-	if _, err := tx.Exec(ctx, `
-		DELETE FROM sandbox_egress_credential_bindings
-		WHERE team_id = $1 AND sandbox_id = $2
-	`, record.TeamID, record.SandboxID); err != nil {
-		return fmt.Errorf("delete existing bindings: %w", err)
+	updatedAt := record.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
 	}
-
-	for _, binding := range record.Bindings {
-		projectionJSON, err := json.Marshal(binding.Projection)
-		if err != nil {
-			return fmt.Errorf("marshal projection for %q: %w", binding.Ref, err)
-		}
-		cachePolicyJSON, err := json.Marshal(binding.CachePolicy)
-		if err != nil {
-			return fmt.Errorf("marshal cache policy for %q: %w", binding.Ref, err)
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO sandbox_egress_credential_bindings (
-				team_id, sandbox_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, record.TeamID, record.SandboxID, binding.Ref, binding.SourceRef, binding.SourceID, binding.SourceVersion, projectionJSON, cachePolicyJSON, record.UpdatedAt); err != nil {
-			return fmt.Errorf("insert binding %q: %w", binding.Ref, err)
-		}
+	materialized, err := ReplaceCurrentBindingsTx(ctx, tx, record.TeamID, record.SandboxID,
+		record.Bindings, updatedAt)
+	if err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit binding upsert: %w", err)
 	}
+	record.Bindings = materialized
+	record.UpdatedAt = updatedAt
 	return nil
 }
 
@@ -181,18 +110,16 @@ func (r *Repository) DeleteBindings(ctx context.Context, teamID, sandboxID strin
 	if r == nil || r.pool == nil {
 		return fmt.Errorf("binding repository is not configured")
 	}
-	if teamID == "" {
-		return fmt.Errorf("team_id is required")
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin binding deletion transaction: %w", err)
 	}
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := DeleteCurrentBindingsTx(ctx, tx, teamID, sandboxID); err != nil {
+		return err
 	}
-
-	if _, err := r.pool.Exec(ctx, `
-		DELETE FROM sandbox_egress_credential_bindings
-		WHERE team_id = $1 AND sandbox_id = $2
-	`, teamID, sandboxID); err != nil {
-		return fmt.Errorf("delete bindings: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit binding deletion: %w", err)
 	}
 	return nil
 }

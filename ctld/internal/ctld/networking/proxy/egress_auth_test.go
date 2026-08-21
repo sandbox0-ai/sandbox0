@@ -130,6 +130,25 @@ func TestMemoryEgressAuthCacheRejectsStaleResolvedMaterialAfterInvalidation(t *t
 	}
 }
 
+func TestMemoryEgressAuthCacheSeparatesBindingDigests(t *testing.T) {
+	cache := newMemoryEgressAuthCache()
+	oldKey := egressAuthCacheKey{
+		SandboxID: "sandbox-a", BindingDigest: "sha256:old", AuthRef: "api-auth",
+		Destination: "api.example.com", DestinationPort: 443, Transport: "tcp", Protocol: "https",
+	}
+	newKey := oldKey
+	newKey.BindingDigest = "sha256:new"
+	cache.Put(oldKey, resolvedHeaderResponse(
+		"api-auth", "old", "team-1", "source", 1, 1, time.Now().Add(time.Minute).UTC(),
+	))
+	if _, ok := cache.Get(newKey); ok {
+		t.Fatal("new credential binding digest reused old resolved material")
+	}
+	if _, ok := cache.Get(oldKey); !ok {
+		t.Fatal("old credential binding digest entry disappeared")
+	}
+}
+
 func TestAttachEgressAuthUsesCacheBeforeResolver(t *testing.T) {
 	expiresAt := time.Now().Add(time.Minute).UTC()
 	cache := newMemoryEgressAuthCache()

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strconv"
@@ -109,12 +110,13 @@ type CompiledHTTPValueMatch struct {
 }
 
 type CompiledPolicy struct {
-	SandboxID string
-	TeamID    string
-	OwnerKind string
-	Mode      v1alpha1.NetworkPolicyMode
-	Egress    CompiledRuleSet
-	Platform  *PlatformPolicy
+	SandboxID               string
+	TeamID                  string
+	CredentialBindingDigest string
+	OwnerKind               string
+	Mode                    v1alpha1.NetworkPolicyMode
+	Egress                  CompiledRuleSet
+	Platform                *PlatformPolicy
 }
 
 func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, error) {
@@ -129,11 +131,23 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 	if mode == "" {
 		mode = v1alpha1.NetworkModeAllowAll
 	}
+	if spec.CredentialBindingDigest != "" {
+		const prefix = "sha256:"
+		encoded := strings.TrimPrefix(spec.CredentialBindingDigest, prefix)
+		if len(encoded) != 64 || prefix+encoded != spec.CredentialBindingDigest {
+			return nil, fmt.Errorf("credential binding digest must be a canonical SHA-256 digest")
+		}
+		decoded, err := hex.DecodeString(encoded)
+		if err != nil || hex.EncodeToString(decoded) != encoded {
+			return nil, fmt.Errorf("credential binding digest must be a canonical SHA-256 digest")
+		}
+	}
 
 	compiled := &CompiledPolicy{
-		SandboxID: spec.SandboxID,
-		TeamID:    spec.TeamID,
-		Mode:      mode,
+		SandboxID:               spec.SandboxID,
+		TeamID:                  spec.TeamID,
+		CredentialBindingDigest: spec.CredentialBindingDigest,
+		Mode:                    mode,
 	}
 
 	if spec.Egress != nil {

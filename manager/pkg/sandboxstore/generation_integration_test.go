@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/stretchr/testify/require"
@@ -697,7 +698,45 @@ func TestForkNomadPausedSandboxCommitsLogicalTargetAndRootFSAtomicallyIntegratio
 	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStatePaused, source.DesiredState)
+	repository := egressauthstore.NewRepository(fixture.pool,
+		egressauthstore.WithDefaultStorageKind(egressauthstore.CredentialSourceStorageKindPlaintextPG))
+	_, err = repository.PutSource(fixture.ctx, source.TeamID, &egressauthstore.CredentialSourceWriteRequest{
+		Name: "paused-fork-source", ResolverKind: "static_headers",
+		StorageKind: egressauthstore.CredentialSourceStorageKindPlaintextPG,
+		Spec: egressauthstore.CredentialSourceSecretSpec{StaticHeaders: &egressauthstore.StaticHeadersSourceSpec{
+			Values: map[string]string{"token": "fork-token"},
+		}},
+	})
+	require.NoError(t, err)
+	binding := egressauthstore.CredentialBinding{
+		Ref: "api-auth", SourceRef: "paused-fork-source",
+		Projection: egressauthstore.ProjectionSpec{
+			Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &egressauthstore.HTTPHeadersProjection{Headers: []egressauthstore.ProjectedHeader{{
+				Name: "Authorization", ValueTemplate: "Bearer {{.token}}",
+			}}},
+		},
+	}
+	require.NoError(t, fixture.store.WithSandboxLock(fixture.ctx, source.ID, func(
+		ctx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		credentialTx, ok := tx.(SandboxCredentialBindingTx)
+		if !ok {
+			return fmt.Errorf("credential transaction is unavailable")
+		}
+		_, err := credentialTx.ReplaceNomadSandboxCredentialBindings(
+			ctx, source.TeamID, source.ID, []egressauthstore.CredentialBinding{binding},
+		)
+		return err
+	}))
 	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-paused-fork-target")
+	t.Cleanup(func() {
+		_ = repository.DeleteBindings(context.Background(), source.TeamID, source.ID)
+		_ = repository.DeleteBindings(context.Background(), source.TeamID, target.ID)
+		_ = repository.DeleteSource(context.Background(), source.TeamID, "paused-fork-source")
+	})
 	request := &NomadSandboxForkRequest{
 		OperationID: "nomad-paused-fork-operation", SourceSandboxID: source.ID,
 		ExpectedTeamID: source.TeamID, Target: target,
@@ -729,6 +768,12 @@ func TestForkNomadPausedSandboxCommitsLogicalTargetAndRootFSAtomicallyIntegratio
 	require.Equal(t, SandboxLifecyclePhaseCommitted, lifecyclePhase)
 	require.Equal(t, sourceFilesystem.HeadGenerationID, expectedHead)
 	require.Equal(t, expectedHead, preparedHead)
+	targetBindings, err := fixture.store.GetNomadSandboxCredentialBindings(
+		fixture.ctx, target.TeamID, target.ID,
+	)
+	require.NoError(t, err)
+	require.Len(t, targetBindings.Bindings, 1)
+	require.Equal(t, binding.SourceRef, targetBindings.Bindings[0].SourceRef)
 
 	changedSource := *source
 	autoResume := false

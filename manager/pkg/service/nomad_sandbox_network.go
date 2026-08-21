@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -25,12 +26,19 @@ import (
 // NomadSandboxNetworkPolicyService owns the durable paused policy that is
 // consumed by the next exact runtime-slot claim.
 type NomadSandboxNetworkPolicyService struct {
-	store         NomadSandboxMutationStore
+	store         NomadSandboxNetworkStore
 	mutationStore NomadSandboxNetworkMutationStore
 	policies      *networkpolicy.NetworkPolicyService
 	preparer      runtimeslotclaim.NetworkPreparer
 	enqueuerMu    sync.RWMutex
 	enqueuer      NomadSandboxNetworkMutationEnqueuer
+}
+
+// NomadSandboxNetworkStore joins sandbox/config locking with the external
+// current credential-binding projection.
+type NomadSandboxNetworkStore interface {
+	NomadSandboxMutationStore
+	GetNomadSandboxCredentialBindings(context.Context, string, string) (*sandboxstore.NomadSandboxCredentialBindings, error)
 }
 
 // NomadSandboxNetworkMutationStore is the PostgreSQL desired/apply/ack
@@ -52,7 +60,7 @@ type NomadSandboxNetworkMutationEnqueuer interface {
 // NewNomadSandboxNetworkPolicyService creates a policy service that never
 // mutates a Kubernetes runtime object.
 func NewNomadSandboxNetworkPolicyService(
-	store NomadSandboxMutationStore,
+	store NomadSandboxNetworkStore,
 	policies *networkpolicy.NetworkPolicyService,
 	preparers ...runtimeslotclaim.NetworkPreparer,
 ) (*NomadSandboxNetworkPolicyService, error) {
@@ -102,7 +110,7 @@ func (s *NomadSandboxNetworkPolicyService) GetNetworkPolicy(
 	if err := validateNomadNetworkPolicyRecord(record, sandboxID); err != nil {
 		return nil, err
 	}
-	state, annotation, err := s.buildPolicy(record, record.Config.Network)
+	state, annotation, _, err := s.buildStoredPolicy(ctx, record, record.Config.Network)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +180,15 @@ func (s *NomadSandboxNetworkPolicyService) UpdateNetworkPolicy(
 		if effective == nil || effective.PolicySpec == nil {
 			return fmt.Errorf("build Nomad network policy")
 		}
-		if len(effective.CredentialBindings) > 0 {
-			return fmt.Errorf("%w: Nomad credential binding projection is not configured", ErrSandboxRuntimeUpdateUnavailable)
+		credentialTx, ok := tx.(sandboxstore.SandboxCredentialBindingTx)
+		if !ok {
+			return fmt.Errorf("%w: transactional credential binding authority is unavailable",
+				ErrSandboxRuntimeUpdateUnavailable)
+		}
+		if _, err := credentialTx.ReplaceNomadSandboxCredentialBindings(
+			lockCtx, record.TeamID, record.ID, credentialbinding.ToStore(effective.CredentialBindings),
+		); err != nil {
+			return err
 		}
 		updated := cloneSandboxRecordForLifecycle(record)
 		config := CloneSandboxConfig(&record.Config)
@@ -207,10 +222,7 @@ func (s *NomadSandboxNetworkPolicyService) updateActiveNetworkPolicy(
 	if effective == nil || effective.PolicySpec == nil {
 		return nil, fmt.Errorf("build Nomad network policy")
 	}
-	if len(effective.CredentialBindings) > 0 {
-		return nil, fmt.Errorf("%w: Nomad credential binding projection is not configured",
-			ErrSandboxRuntimeUpdateUnavailable)
-	}
+	desiredBindingDigest := credentialbinding.DigestPublic(effective.CredentialBindings)
 	desiredPolicy, err := v1alpha1.NetworkPolicyToAnnotation(effective.PolicySpec)
 	if err != nil {
 		return nil, fmt.Errorf("serialize desired Nomad network policy: %w", err)
@@ -219,7 +231,7 @@ func (s *NomadSandboxNetworkPolicyService) updateActiveNetworkPolicy(
 		return nil, fmt.Errorf("%w: effective network policy exceeds %d bytes",
 			ErrInvalidNetworkPolicy, protocol.MaxNetworkPolicyBytes)
 	}
-	_, currentPolicy, err := s.buildPolicy(record, record.Config.Network)
+	_, currentPolicy, currentBindings, err := s.buildStoredPolicy(ctx, record, record.Config.Network)
 	if err != nil {
 		return nil, err
 	}
@@ -246,19 +258,21 @@ func (s *NomadSandboxNetworkPolicyService) updateActiveNetworkPolicy(
 		return nil, fmt.Errorf("%w: requested network policy exceeds %d bytes",
 			ErrInvalidNetworkPolicy, protocol.MaxNetworkPolicyBytes)
 	}
-	if bytes.Equal(currentRequestPayload, desiredRequestPayload) {
+	if bytes.Equal(currentRequestPayload, desiredRequestPayload) &&
+		currentBindings.Digest == desiredBindingDigest {
 		return sandboxNetworkPolicyFromState(effective), nil
 	}
 	operationID := nomadSandboxNetworkMutationOperationID(
 		record.ID, slot, currentDigest, protocol.NetworkPolicyDigest(desiredPolicy),
-		currentRequestPayload, desiredRequestPayload,
+		currentBindings.Digest, desiredBindingDigest, currentRequestPayload, desiredRequestPayload,
 	)
 	_, err = s.mutationStore.BeginNomadSandboxNetworkMutation(ctx,
 		&sandboxstore.BeginNomadSandboxNetworkMutationRequest{
 			SandboxID: record.ID, OperationID: operationID, ExpectedTeamID: record.TeamID,
 			ExpectedCurrentPolicyDigest: currentDigest,
 			DesiredPolicy:               desiredPolicy, DesiredPolicyDigest: protocol.NetworkPolicyDigest(desiredPolicy),
-			RequestPolicy: desiredRequest,
+			RequestPolicy:      desiredRequest,
+			CredentialBindings: credentialbinding.ToStore(effective.CredentialBindings),
 		})
 	if err != nil {
 		return nil, mapNomadSandboxNetworkMutationError(record.ID, "begin", err)
@@ -339,23 +353,27 @@ func nomadSandboxNetworkMutationOperationID(
 	sandboxID string,
 	slot *sandboxstore.RuntimeSlot,
 	currentDigest, desiredDigest string,
+	currentBindingDigest, desiredBindingDigest string,
 	currentRequest, desiredRequest []byte,
 ) string {
 	payload := struct {
-		Version        int    `json:"version"`
-		SandboxID      string `json:"sandbox_id"`
-		SlotID         string `json:"slot_id"`
-		SlotRevision   int64  `json:"slot_revision"`
-		AllocationID   string `json:"allocation_id"`
-		NodeBootID     string `json:"node_boot_id"`
-		CurrentDigest  string `json:"current_digest"`
-		DesiredDigest  string `json:"desired_digest"`
-		CurrentRequest string `json:"current_request"`
-		DesiredRequest string `json:"desired_request"`
+		Version              int    `json:"version"`
+		SandboxID            string `json:"sandbox_id"`
+		SlotID               string `json:"slot_id"`
+		SlotRevision         int64  `json:"slot_revision"`
+		AllocationID         string `json:"allocation_id"`
+		NodeBootID           string `json:"node_boot_id"`
+		CurrentDigest        string `json:"current_digest"`
+		DesiredDigest        string `json:"desired_digest"`
+		CurrentBindingDigest string `json:"current_binding_digest"`
+		DesiredBindingDigest string `json:"desired_binding_digest"`
+		CurrentRequest       string `json:"current_request"`
+		DesiredRequest       string `json:"desired_request"`
 	}{
 		Version: 1, SandboxID: sandboxID, SlotID: slot.ID, SlotRevision: slot.Revision,
 		AllocationID: slot.AllocationID, NodeBootID: slot.NodeBootID,
 		CurrentDigest: currentDigest, DesiredDigest: desiredDigest,
+		CurrentBindingDigest: currentBindingDigest, DesiredBindingDigest: desiredBindingDigest,
 		CurrentRequest: string(currentRequest), DesiredRequest: string(desiredRequest),
 	}
 	encoded, _ := json.Marshal(payload)
@@ -402,23 +420,32 @@ func mapNomadSandboxNetworkMutationError(sandboxID, action string, err error) er
 	}
 }
 
-func (s *NomadSandboxNetworkPolicyService) buildPolicy(
+func (s *NomadSandboxNetworkPolicyService) buildStoredPolicy(
+	ctx context.Context,
 	record *sandboxstore.SandboxRecord,
 	policy *v1alpha1.SandboxNetworkPolicy,
-) (*networkpolicy.BuildNetworkPolicyResult, string, error) {
+) (*networkpolicy.BuildNetworkPolicyResult, string, *sandboxstore.NomadSandboxCredentialBindings, error) {
+	stored, err := s.store.GetNomadSandboxCredentialBindings(ctx, record.TeamID, record.ID)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("load Nomad credential bindings: %w", err)
+	}
+	if stored == nil {
+		return nil, "", nil, fmt.Errorf("%w: Nomad credential binding authority is missing", ErrDataPlaneNotReady)
+	}
 	request := s.buildRequest(record, policy)
+	request.RequestBindings = credentialbinding.FromStore(stored.Bindings)
 	state := s.policies.BuildNetworkPolicyState(request)
 	if state == nil || state.PolicySpec == nil {
-		return nil, "", fmt.Errorf("build Nomad network policy")
+		return nil, "", nil, fmt.Errorf("build Nomad network policy")
 	}
-	if len(state.CredentialBindings) > 0 {
-		return nil, "", fmt.Errorf("%w: Nomad credential binding projection is not configured", ErrDataPlaneNotReady)
+	if credentialbinding.DigestPublic(state.CredentialBindings) != stored.Digest {
+		return nil, "", nil, fmt.Errorf("%w: Nomad credential binding projection changed", ErrDataPlaneNotReady)
 	}
 	annotation, err := v1alpha1.NetworkPolicyToAnnotation(state.PolicySpec)
 	if err != nil {
-		return nil, "", fmt.Errorf("serialize Nomad network policy: %w", err)
+		return nil, "", nil, fmt.Errorf("serialize Nomad network policy: %w", err)
 	}
-	return state, annotation, nil
+	return state, annotation, stored, nil
 }
 
 func (s *NomadSandboxNetworkPolicyService) buildRequest(

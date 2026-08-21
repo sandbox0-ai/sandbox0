@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
@@ -51,17 +53,18 @@ func (e *ActiveSandboxQuotaExceededError) Unwrap() error {
 // logical sandbox. It is separate from desired lifecycle state: a ready claim
 // can subsequently be paused, resumed, or deleted.
 type SandboxRuntimeClaim struct {
-	SandboxID        string
-	OperationID      string
-	Phase            string
-	LeaseExpiresAt   time.Time
-	LastError        string
-	CompletedAt      time.Time
-	CleanupStartedAt time.Time
-	CleanedAt        time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	AuthorityNow     time.Time
+	SandboxID               string
+	OperationID             string
+	CredentialBindingDigest string
+	Phase                   string
+	LeaseExpiresAt          time.Time
+	LastError               string
+	CompletedAt             time.Time
+	CleanupStartedAt        time.Time
+	CleanedAt               time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	AuthorityNow            time.Time
 }
 
 // ReserveSandboxClaimRequest is the complete admission input for a new
@@ -71,14 +74,16 @@ type ReserveSandboxClaimRequest struct {
 	OperationID        string
 	LeaseTTL           time.Duration
 	ActiveSandboxLimit *int64
+	CredentialBindings []egressauthstore.CredentialBinding
 }
 
 // RetrySandboxClaimRequest renews an exact in-progress operation without
 // consulting quota policy again.
 type RetrySandboxClaimRequest struct {
-	Record      *SandboxRecord
-	OperationID string
-	LeaseTTL    time.Duration
+	Record             *SandboxRecord
+	OperationID        string
+	LeaseTTL           time.Duration
+	CredentialBindings []egressauthstore.CredentialBinding
 }
 
 // CompleteSandboxClaimRequest publishes the exact active runtime binding only
@@ -101,6 +106,13 @@ type SandboxClaimCleanupCandidate struct {
 	PhysicalStateRequired bool
 }
 
+// NomadSandboxCredentialBindings joins claim-bound semantics to the current
+// source versions materialized for runtime resolution.
+type NomadSandboxCredentialBindings struct {
+	Digest   string
+	Bindings []egressauthstore.CredentialBinding
+}
+
 // RetrySandboxClaim locks and renews an exact claim if its deterministic
 // sandbox identity already exists. Cleanup fencing wins atomically over late
 // retries.
@@ -117,7 +129,9 @@ func (s *PGSandboxStore) RetrySandboxClaim(ctx context.Context, request *RetrySa
 		return nil, false, fmt.Errorf("begin sandbox claim retry tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	existing, found, err := retrySandboxClaimTx(ctx, tx, record, operationID, leaseTTL)
+	bindings := credentialbinding.CloneStore(request.CredentialBindings)
+	bindingDigest := credentialbinding.DigestStore(bindings)
+	existing, found, err := retrySandboxClaimTx(ctx, tx, record, operationID, leaseTTL, bindingDigest, bindings)
 	if err != nil || !found {
 		return nil, found, err
 	}
@@ -148,6 +162,8 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	if err != nil {
 		return nil, err
 	}
+	bindings := credentialbinding.CloneStore(request.CredentialBindings)
+	bindingDigest := credentialbinding.DigestStore(bindings)
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -157,7 +173,7 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	if err := lockActiveSandboxQuotaTeam(ctx, tx, record.TeamID); err != nil {
 		return nil, fmt.Errorf("lock team sandbox claims: %w", err)
 	}
-	if existing, found, err := retrySandboxClaimTx(ctx, tx, record, operationID, leaseTTL); err != nil {
+	if existing, found, err := retrySandboxClaimTx(ctx, tx, record, operationID, leaseTTL, bindingDigest, bindings); err != nil {
 		return nil, err
 	} else if found {
 		if err := tx.Commit(ctx); err != nil {
@@ -187,10 +203,15 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.sandbox_runtime_claims (
-			sandbox_id, operation_id, phase, lease_expires_at
-		) VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 millisecond'))
-	`, record.ID, operationID, SandboxRuntimeClaimPhaseClaiming, leaseTTL.Milliseconds()); err != nil {
+			sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
+		) VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 millisecond'), $5)
+	`, record.ID, operationID, SandboxRuntimeClaimPhaseClaiming, leaseTTL.Milliseconds(), bindingDigest); err != nil {
 		return nil, mapSandboxClaimConflict("insert sandbox runtime claim", err)
+	}
+	if _, err := egressauthstore.ReplaceCurrentBindingsTx(
+		ctx, tx, record.TeamID, record.ID, bindings, time.Time{},
+	); err != nil {
+		return nil, fmt.Errorf("materialize sandbox claim credential bindings: %w", err)
 	}
 	reserved, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxRecordSelectSQL()+`
 		WHERE sandbox_id = $1
@@ -799,6 +820,9 @@ func (s *PGSandboxStore) MarkSandboxRuntimeClaimCleaned(ctx context.Context, san
 		return fmt.Errorf("%w: cleanup operation identity changed", ErrSandboxClaimReservationConflict)
 	}
 	if claim.Phase == SandboxRuntimeClaimPhaseCleaned {
+		if err := egressauthstore.DeleteCurrentBindingsTx(ctx, tx, record.TeamID, record.ID); err != nil {
+			return fmt.Errorf("repair cleaned sandbox credential bindings: %w", err)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit cleaned sandbox claim retry: %w", err)
 		}
@@ -806,6 +830,9 @@ func (s *PGSandboxStore) MarkSandboxRuntimeClaimCleaned(ctx context.Context, san
 	}
 	if claim.Phase != SandboxRuntimeClaimPhaseCleanupPending || record.DeletedAt.IsZero() || record.DesiredState != SandboxDesiredStateDeleted {
 		return fmt.Errorf("%w: sandbox claim cleanup is not complete", ErrSandboxClaimReservationConflict)
+	}
+	if err := egressauthstore.DeleteCurrentBindingsTx(ctx, tx, record.TeamID, record.ID); err != nil {
+		return fmt.Errorf("delete sandbox credential bindings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandbox_runtime_claims
@@ -826,6 +853,8 @@ func retrySandboxClaimTx(
 	expected *SandboxRecord,
 	operationID string,
 	leaseTTL time.Duration,
+	bindingDigest string,
+	bindings []egressauthstore.CredentialBinding,
 ) (*SandboxRecord, bool, error) {
 	existing, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxRecordSelectSQL()+`
 		WHERE sandbox_id = $1
@@ -846,6 +875,14 @@ func retrySandboxClaimTx(
 	}
 	if claim.OperationID != operationID {
 		return nil, true, fmt.Errorf("%w: operation identity changed", ErrSandboxClaimReservationConflict)
+	}
+	if claim.CredentialBindingDigest != bindingDigest {
+		return nil, true, fmt.Errorf("%w: credential binding identity changed", ErrSandboxClaimReservationConflict)
+	}
+	if _, err := egressauthstore.ReplaceCurrentBindingsTx(
+		ctx, tx, existing.TeamID, existing.ID, bindings, time.Time{},
+	); err != nil {
+		return nil, true, fmt.Errorf("rematerialize sandbox claim credential bindings: %w", err)
 	}
 	switch claim.Phase {
 	case SandboxRuntimeClaimPhaseReady:
@@ -949,7 +986,7 @@ func lockSandboxRuntimeClaim(ctx context.Context, tx pgx.Tx, sandboxID string) (
 
 func sandboxRuntimeClaimSelectSQL() string {
 	return `
-		SELECT sandbox_id, operation_id, phase, lease_expires_at, last_error,
+		SELECT sandbox_id, operation_id, credential_binding_digest, phase, lease_expires_at, last_error,
 			completed_at, cleanup_started_at, cleaned_at, created_at, updated_at, NOW()
 		FROM manager.sandbox_runtime_claims`
 }
@@ -962,7 +999,7 @@ func scanSandboxRuntimeClaim(scanner sandboxRuntimeClaimScanner) (*SandboxRuntim
 	var claim SandboxRuntimeClaim
 	var lease, completed, cleanupStarted, cleaned pgtype.Timestamptz
 	if err := scanner.Scan(
-		&claim.SandboxID, &claim.OperationID, &claim.Phase, &lease, &claim.LastError,
+		&claim.SandboxID, &claim.OperationID, &claim.CredentialBindingDigest, &claim.Phase, &lease, &claim.LastError,
 		&completed, &cleanupStarted, &cleaned, &claim.CreatedAt, &claim.UpdatedAt, &claim.AuthorityNow,
 	); err != nil {
 		return nil, err

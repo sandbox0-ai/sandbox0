@@ -15,6 +15,8 @@ import (
 	distref "github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
@@ -47,6 +49,7 @@ type Store interface {
 	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
+	GetNomadSandboxCredentialBindings(context.Context, string, string) (*sandboxstore.NomadSandboxCredentialBindings, error)
 	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestHardExpiredSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestNomadSandboxPause(context.Context, string, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
@@ -370,7 +373,7 @@ func (s *Service) resumeNomadSandbox(
 		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
 			fmt.Errorf("sandbox is not owned by the Nomad runtime backend"))
 	}
-	plan, err := s.prepareNomadResumePlan(record)
+	plan, err := s.prepareNomadResumePlan(ctx, record)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -445,7 +448,7 @@ func (s *Service) resumeNomadSandbox(
 	return completed, result, nil
 }
 
-func (s *Service) prepareNomadResumePlan(record *sandboxstore.SandboxRecord) (nomadResumePlan, error) {
+func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxstore.SandboxRecord) (nomadResumePlan, error) {
 	if record == nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad sandbox is missing", service.ErrSandboxLifecycleUnavailable)
 	}
@@ -478,13 +481,31 @@ func (s *Service) prepareNomadResumePlan(record *sandboxstore.SandboxRecord) (no
 		SandboxID: record.ID, TeamID: record.TeamID, UserID: record.UserID,
 		Template: record.TemplateID, Config: config, RuntimeGeneration: record.RuntimeGeneration + 1,
 	}
+	persistedBindings, err := s.store.GetNomadSandboxCredentialBindings(ctx, record.TeamID, record.ID)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: load stored Nomad credential bindings: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
+	if persistedBindings == nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad credential binding authority is missing",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	if len(persistedBindings.Bindings) > 0 {
+		if req.Config == nil {
+			req.Config = &sandboxstore.SandboxConfig{}
+		}
+		if req.Config.Network == nil {
+			req.Config.Network = &v1alpha1.SandboxNetworkPolicy{}
+		}
+		req.Config.Network.CredentialBindings = credentialbinding.FromStore(persistedBindings.Bindings)
+	}
 	policy, credentials, err := s.networkPolicy(record.TemplateSpec, &req)
 	if err != nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: rebuild stored Nomad network policy: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
 	}
-	if len(credentials) > 0 {
-		return nomadResumePlan{}, fmt.Errorf("%w: Nomad credential binding projection is not configured",
+	if credentialbinding.DigestPublic(credentials) != persistedBindings.Digest {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad credential binding semantics changed",
 			service.ErrSandboxLifecycleUnavailable)
 	}
 	assignment := runtimeAssignment(record.TemplateSpec, &req)
@@ -720,6 +741,12 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 		return nil, fmt.Errorf("%w: signed team and operation identities are required", service.ErrInvalidClaimRequest)
 	}
 	req.Config = service.CloneSandboxConfig(request.Config)
+	if request.Config != nil && request.Config.Network != nil {
+		if req.Config == nil {
+			req.Config = &sandboxstore.SandboxConfig{}
+		}
+		req.Config.Network = request.Config.Network.DeepCopy()
+	}
 	if err := service.NormalizeSandboxConfigForPersistence(req.Config); err != nil {
 		return nil, err
 	}
@@ -769,9 +796,8 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, err
 	}
-	if len(credentials) > 0 {
-		return nil, fmt.Errorf("%w: Nomad credential binding projection is not configured", service.ErrDataPlaneNotReady)
-	}
+	storeBindings := credentialbinding.ToStore(credentials)
+	sanitizeNomadCredentialBindings(req.Config)
 	assignment := runtimeAssignment(tpl.Spec, &req)
 	if err := assignment.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
@@ -786,7 +812,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, profile.ClusterID, now)
-	if err := s.ensureClaimRecord(ctx, record, req.OperationID); err != nil {
+	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
 		return nil, err
 	}
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {
@@ -855,11 +881,15 @@ func (s *Service) networkPolicy(spec v1alpha1.SandboxTemplateSpec, req *service.
 			requestPolicy = service.AppendWebhookNetworkPolicy(requestPolicy, req.Config.Webhook.URL)
 		}
 	}
-	state := s.networkPolicies.BuildNetworkPolicyState(&networkpolicy.BuildNetworkPolicyRequest{
+	request := &networkpolicy.BuildNetworkPolicyRequest{
 		SandboxID: req.SandboxID, TeamID: req.TeamID,
 		TemplateSpec: spec.Network, RequestSpec: requestPolicy,
 		TemplateBindings: credentialBindings(spec.Network), RequestBindings: requestCredentialBindings(req.Config),
-	})
+	}
+	if err := s.networkPolicies.ValidateNetworkPolicyRequest(request); err != nil {
+		return "", nil, fmt.Errorf("%w: invalid Nomad network policy: %v", service.ErrInvalidClaimRequest, err)
+	}
+	state := s.networkPolicies.BuildNetworkPolicyState(request)
 	if state == nil || state.PolicySpec == nil {
 		return "", nil, fmt.Errorf("build Nomad network policy")
 	}
@@ -1041,9 +1071,15 @@ func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimReque
 	return record
 }
 
-func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.SandboxRecord, operationID string) error {
+func (s *Service) ensureClaimRecord(
+	ctx context.Context,
+	expected *sandboxstore.SandboxRecord,
+	operationID string,
+	bindings []egressauthstore.CredentialBinding,
+) error {
 	existing, found, err := s.store.RetrySandboxClaim(ctx, &sandboxstore.RetrySandboxClaimRequest{
 		Record: expected, OperationID: operationID, LeaseTTL: s.claimTTL,
+		CredentialBindings: bindings,
 	})
 	if err != nil {
 		return mapClaimReservationError("retry sandbox claim", err)
@@ -1064,7 +1100,7 @@ func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.
 	}
 	existing, err = s.store.ReserveSandboxClaim(ctx, &sandboxstore.ReserveSandboxClaimRequest{
 		Record: expected, OperationID: operationID, LeaseTTL: s.claimTTL,
-		ActiveSandboxLimit: activeLimit,
+		ActiveSandboxLimit: activeLimit, CredentialBindings: bindings,
 	})
 	if err != nil {
 		return mapClaimReservationError("reserve sandbox claim", err)
@@ -1158,6 +1194,13 @@ func requestCredentialBindings(config *sandboxstore.SandboxConfig) []v1alpha1.Cr
 		return nil
 	}
 	return credentialBindings(config.Network)
+}
+
+func sanitizeNomadCredentialBindings(config *sandboxstore.SandboxConfig) {
+	if config == nil || config.Network == nil {
+		return
+	}
+	config.Network.CredentialBindings = nil
 }
 
 var _ service.SandboxRuntimeBackend = (*Service)(nil)

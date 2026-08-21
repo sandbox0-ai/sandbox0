@@ -151,6 +151,9 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
 		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
 	}
+	if result.PolicySpec.CredentialBindingDigest == "" {
+		t.Fatal("credential binding digest was not bound into runtime policy")
+	}
 	rule := result.PolicySpec.Egress.CredentialRules[0]
 	if rule.CredentialRef != "request-ref" {
 		t.Fatalf("credentialRef = %q, want request-ref", rule.CredentialRef)

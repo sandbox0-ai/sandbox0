@@ -8,7 +8,8 @@ import (
 
 func TestCompileNetworkPolicy(t *testing.T) {
 	spec := &v1alpha1.NetworkPolicySpec{
-		Mode: v1alpha1.NetworkModeBlockAll,
+		Mode:                    v1alpha1.NetworkModeBlockAll,
+		CredentialBindingDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Egress: &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs:   []string{"10.0.0.0/24"},
 			DeniedCIDRs:    []string{"10.0.0.5/32"},
@@ -79,6 +80,9 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if compiled.Mode != v1alpha1.NetworkModeBlockAll {
 		t.Fatalf("unexpected mode: %v", compiled.Mode)
 	}
+	if compiled.CredentialBindingDigest != spec.CredentialBindingDigest {
+		t.Fatalf("credential binding digest = %q", compiled.CredentialBindingDigest)
+	}
 	if len(compiled.Egress.TrafficRules) != 1 {
 		t.Fatalf("expected one normalized traffic rule, got %d", len(compiled.Egress.TrafficRules))
 	}
@@ -108,6 +112,18 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	}
 	if compiled.Egress.AuthRules[5].Protocol != v1alpha1.EgressAuthProtocolSSH {
 		t.Fatalf("unexpected sixth auth rule protocol: %s", compiled.Egress.AuthRules[5].Protocol)
+	}
+}
+
+func TestCompileNetworkPolicyRejectsMalformedCredentialBindingDigest(t *testing.T) {
+	for _, digest := range []string{"sha256:short", "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "md5:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} {
+		t.Run(digest, func(t *testing.T) {
+			if _, err := CompileNetworkPolicy(&v1alpha1.NetworkPolicySpec{
+				Mode: v1alpha1.NetworkModeAllowAll, CredentialBindingDigest: digest,
+			}); err == nil {
+				t.Fatal("malformed credential binding digest was accepted")
+			}
+		})
 	}
 }
 

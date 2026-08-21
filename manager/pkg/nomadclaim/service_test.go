@@ -13,6 +13,8 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
@@ -52,6 +54,8 @@ type fakeClaimStore struct {
 	records                  map[string]*sandboxstore.SandboxRecord
 	operations               map[string]string
 	claimPhases              map[string]string
+	credentialBindings       map[string][]egressauthstore.CredentialBinding
+	credentialDigests        map[string]string
 	artifact                 *sandboxstore.RootFSBaseArtifact
 	ensureCalls              []*sandboxstore.EnsureInitialRootFSGenerationRequest
 	restoreCalls             []*sandboxstore.RestoreRootFSFromSnapshotRequest
@@ -524,6 +528,9 @@ func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandbox
 		if !sameClaimRecord(existing, request.Record) || f.operations[request.Record.ID] != request.OperationID {
 			return nil, sandboxstore.ErrSandboxClaimReservationConflict
 		}
+		if !credentialbinding.EqualStoreSemantic(f.credentialBindings[request.Record.ID], request.CredentialBindings) {
+			return nil, sandboxstore.ErrSandboxClaimReservationConflict
+		}
 		return cloneClaimRecord(existing), nil
 	}
 	if request.ActiveSandboxLimit != nil {
@@ -546,6 +553,12 @@ func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandbox
 	f.records[request.Record.ID] = cloneClaimRecord(request.Record)
 	f.operations[request.Record.ID] = request.OperationID
 	f.claimPhases[request.Record.ID] = sandboxstore.SandboxRuntimeClaimPhaseClaiming
+	if f.credentialBindings == nil {
+		f.credentialBindings = make(map[string][]egressauthstore.CredentialBinding)
+		f.credentialDigests = make(map[string]string)
+	}
+	f.credentialBindings[request.Record.ID] = credentialbinding.CloneStore(request.CredentialBindings)
+	f.credentialDigests[request.Record.ID] = credentialbinding.DigestStore(request.CredentialBindings)
 	f.writeCount++
 	return cloneClaimRecord(request.Record), nil
 }
@@ -561,11 +574,26 @@ func (f *fakeClaimStore) RetrySandboxClaim(_ context.Context, request *sandboxst
 	if !sameClaimRecord(existing, request.Record) || f.operations[request.Record.ID] != request.OperationID {
 		return nil, true, sandboxstore.ErrSandboxClaimReservationConflict
 	}
+	if !credentialbinding.EqualStoreSemantic(f.credentialBindings[request.Record.ID], request.CredentialBindings) {
+		return nil, true, sandboxstore.ErrSandboxClaimReservationConflict
+	}
 	phase := f.claimPhases[request.Record.ID]
 	if phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending || phase == sandboxstore.SandboxRuntimeClaimPhaseCleaned {
 		return nil, true, sandboxstore.ErrSandboxClaimCleanupPending
 	}
 	return cloneClaimRecord(existing), true, nil
+}
+
+func (f *fakeClaimStore) GetNomadSandboxCredentialBindings(
+	_ context.Context,
+	_, sandboxID string,
+) (*sandboxstore.NomadSandboxCredentialBindings, error) {
+	bindings := credentialbinding.CloneStore(f.credentialBindings[sandboxID])
+	digest := f.credentialDigests[sandboxID]
+	if digest == "" {
+		digest = credentialbinding.DigestStore(bindings)
+	}
+	return &sandboxstore.NomadSandboxCredentialBindings{Digest: digest, Bindings: bindings}, nil
 }
 
 func (f *fakeClaimStore) CompleteSandboxClaim(_ context.Context, request *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error) {
@@ -826,6 +854,83 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 	if retried.SandboxID != response.SandboxID || len(fixture.planner.requests) != 2 ||
 		fixture.planner.requests[1].OperationID != fixture.planner.requests[0].OperationID {
 		t.Fatalf("retry response=%+v requests=%+v", retried, fixture.planner.requests)
+	}
+}
+
+func TestServiceClaimsAndResumesWithExternalCredentialBindings(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	binding := v1alpha1.CredentialBinding{
+		Ref: "api-auth", SourceRef: "team-api-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &v1alpha1.HTTPHeadersProjection{Headers: []v1alpha1.ProjectedHeader{{
+				Name: "Authorization", ValueTemplate: "Bearer {{.token}}",
+			}}},
+		},
+	}
+	request := &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-credential",
+		Config: &sandboxstore.SandboxConfig{Network: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{CredentialRules: []v1alpha1.EgressCredentialRule{{
+				Name: "api", CredentialRef: binding.Ref, Protocol: v1alpha1.EgressAuthProtocolHTTP,
+				Domains: []string{"api.example.com"},
+			}}},
+			CredentialBindings: []v1alpha1.CredentialBinding{binding},
+		}},
+	}
+	response, err := fixture.service.ClaimSandbox(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.store.records[response.SandboxID]
+	if record == nil || record.Config.Network == nil || record.Config.Network.CredentialBindings != nil {
+		t.Fatalf("persisted sandbox credential policy = %+v", record)
+	}
+	stored := fixture.store.credentialBindings[response.SandboxID]
+	if len(stored) != 1 || stored[0].SourceRef != binding.SourceRef {
+		t.Fatalf("external credential bindings = %+v", stored)
+	}
+	parsed, err := v1alpha1.ParseNetworkPolicyFromAnnotationStrict(fixture.planner.requests[0].NetworkPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.CredentialBindingDigest != credentialbinding.DigestPublic([]v1alpha1.CredentialBinding{binding}) {
+		t.Fatalf("network credential digest = %q", parsed.CredentialBindingDigest)
+	}
+
+	changed := *request
+	changed.Config = service.CloneSandboxConfig(request.Config)
+	changed.Config.Network = request.Config.Network.DeepCopy()
+	changed.Config.Network.CredentialBindings[0].SourceRef = "another-source"
+	if _, err := fixture.service.ClaimSandbox(context.Background(), &changed); !errors.Is(err, service.ErrClaimConflict) {
+		t.Fatalf("changed credential retry error = %v", err)
+	}
+
+	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
+	fixture.store.records[response.SandboxID] = record
+	fixture.store.resumeCandidate = &sandboxstore.NomadSandboxResumeCandidate{
+		SandboxID: response.SandboxID, OperationID: "resume-credential", RuntimeGeneration: 2,
+		LifecyclePhase: sandboxstore.SandboxLifecyclePhasePreparing,
+		FilesystemID:   "filesystem-credential", SourceGenerationID: "generation-credential",
+		Record: cloneClaimRecord(record),
+	}
+	fixture.planner.requests = nil
+	if _, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), response.SandboxID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.planner.requests) != 1 {
+		t.Fatalf("resume planner requests = %d", len(fixture.planner.requests))
+	}
+	resumedPolicy, err := v1alpha1.ParseNetworkPolicyFromAnnotationStrict(fixture.planner.requests[0].NetworkPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumedPolicy.CredentialBindingDigest != parsed.CredentialBindingDigest {
+		t.Fatalf("resume credential digest = %q, want %q",
+			resumedPolicy.CredentialBindingDigest, parsed.CredentialBindingDigest)
 	}
 }
 

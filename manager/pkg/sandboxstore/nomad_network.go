@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
@@ -34,31 +36,32 @@ var (
 // for an exact active runtime-slot network incarnation. RequestPolicy remains
 // unpublished until the node's applied token is committed in PostgreSQL.
 type NomadSandboxNetworkMutation struct {
-	SandboxID           string
-	OperationID         string
-	SlotID              string
-	SlotRevision        int64
-	TeamID              string
-	ClusterID           string
-	AllocationID        string
-	AllocationNamespace string
-	NodeID              string
-	NodeUID             string
-	NodeBootID          string
-	NetNSIdentity       string
-	ClaimID             string
-	CurrentPolicyDigest string
-	DesiredPolicy       string
-	DesiredPolicyDigest string
-	RequestPolicy       *v1alpha1.SandboxNetworkPolicy
-	Phase               string
-	AppliedPolicyToken  *rootfshandoff.NetworkPolicyToken
-	AppliedTokenDigest  []byte
-	CancellationReason  string
-	AppliedAt           time.Time
-	CanceledAt          time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	SandboxID               string
+	OperationID             string
+	SlotID                  string
+	SlotRevision            int64
+	TeamID                  string
+	ClusterID               string
+	AllocationID            string
+	AllocationNamespace     string
+	NodeID                  string
+	NodeUID                 string
+	NodeBootID              string
+	NetNSIdentity           string
+	ClaimID                 string
+	CurrentPolicyDigest     string
+	DesiredPolicy           string
+	DesiredPolicyDigest     string
+	CredentialBindingDigest string
+	RequestPolicy           *v1alpha1.SandboxNetworkPolicy
+	Phase                   string
+	AppliedPolicyToken      *rootfshandoff.NetworkPolicyToken
+	AppliedTokenDigest      []byte
+	CancellationReason      string
+	AppliedAt               time.Time
+	CanceledAt              time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // BeginNomadSandboxNetworkMutationRequest binds desired policy bytes to the
@@ -70,7 +73,9 @@ type BeginNomadSandboxNetworkMutationRequest struct {
 	ExpectedCurrentPolicyDigest string
 	DesiredPolicy               string
 	DesiredPolicyDigest         string
+	CredentialBindingDigest     string
 	RequestPolicy               *v1alpha1.SandboxNetworkPolicy
+	CredentialBindings          []egressauthstore.CredentialBinding
 }
 
 // BeginNomadSandboxNetworkMutation stores desired policy without publishing
@@ -122,7 +127,12 @@ func (s *PGSandboxStore) BeginNomadSandboxNetworkMutation(
 		return nil, err
 	}
 	if existing != nil && existing.Phase == NomadSandboxNetworkMutationPhasePending {
-		if !nomadSandboxNetworkMutationBeginMatches(existing, normalized, requestPolicy, slot) {
+		pendingBindings, bindingErr := loadNomadSandboxNetworkMutationBindings(ctx, tx, existing.OperationID)
+		if bindingErr != nil {
+			return nil, bindingErr
+		}
+		if !nomadSandboxNetworkMutationBeginMatches(existing, normalized, requestPolicy, slot) ||
+			!credentialbinding.EqualStoreSemantic(pendingBindings, normalized.CredentialBindings) {
 			return nil, fmt.Errorf("%w: another policy update is pending",
 				ErrNomadSandboxNetworkMutationConflict)
 		}
@@ -131,17 +141,20 @@ func (s *PGSandboxStore) BeginNomadSandboxNetworkMutation(
 		}
 		return existing, nil
 	}
+	if err := deleteNomadSandboxNetworkMutationBindingsForSandbox(ctx, tx, record.ID); err != nil {
+		return nil, err
+	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO manager.sandbox_network_mutations (
 			sandbox_id, operation_id, slot_id, slot_revision, team_id,
 			cluster_id, allocation_id, allocation_namespace,
 			node_id, node_uid, node_boot_id, netns_identity, claim_id,
-			current_policy_digest, desired_policy, desired_policy_digest,
+			current_policy_digest, desired_policy, desired_policy_digest, credential_binding_digest,
 			request_policy, phase, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			$14, $15, $16, $17::jsonb, $18, NOW(), NOW()
+			$14, $15, $16, $17, $18::jsonb, $19, NOW(), NOW()
 		)
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			operation_id = EXCLUDED.operation_id,
@@ -159,6 +172,7 @@ func (s *PGSandboxStore) BeginNomadSandboxNetworkMutation(
 			current_policy_digest = EXCLUDED.current_policy_digest,
 			desired_policy = EXCLUDED.desired_policy,
 			desired_policy_digest = EXCLUDED.desired_policy_digest,
+			credential_binding_digest = EXCLUDED.credential_binding_digest,
 			request_policy = EXCLUDED.request_policy,
 			phase = EXCLUDED.phase,
 			applied_policy_token = NULL,
@@ -172,10 +186,15 @@ func (s *PGSandboxStore) BeginNomadSandboxNetworkMutation(
 		slot.ClusterID, slot.AllocationID, slot.AllocationNamespace,
 		slot.NodeID, slot.NodeUID, slot.NodeBootID, slot.NetNSIdentity, slot.ClaimID,
 		normalized.ExpectedCurrentPolicyDigest, normalized.DesiredPolicy,
-		normalized.DesiredPolicyDigest, string(requestPolicy),
+		normalized.DesiredPolicyDigest, normalized.CredentialBindingDigest, string(requestPolicy),
 		NomadSandboxNetworkMutationPhasePending)
 	if err != nil {
 		return nil, mapNomadSandboxNetworkMutationConflict("persist Nomad sandbox network mutation", err)
+	}
+	if err := stageNomadSandboxNetworkMutationBindings(
+		ctx, tx, normalized.OperationID, record.TeamID, record.ID, normalized.CredentialBindings,
+	); err != nil {
+		return nil, err
 	}
 	mutation, err := getNomadSandboxNetworkMutationForUpdate(ctx, tx, record.ID)
 	if err != nil {
@@ -324,6 +343,9 @@ func (s *PGSandboxStore) CommitNomadSandboxNetworkMutation(
 	if err := validateNomadSandboxNetworkPolicyToken(token, mutation); err != nil {
 		return nil, err
 	}
+	if err := publishNomadSandboxNetworkMutationBindings(ctx, tx, mutation); err != nil {
+		return nil, err
+	}
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE manager.runtime_slots
@@ -370,6 +392,9 @@ func (s *PGSandboxStore) CommitNomadSandboxNetworkMutation(
 	if tag.RowsAffected() != 1 {
 		return nil, fmt.Errorf("%w: mutation changed during acknowledgement",
 			ErrNomadSandboxNetworkMutationConflict)
+	}
+	if err := deleteNomadSandboxNetworkMutationBindings(ctx, tx, operationID); err != nil {
+		return nil, err
 	}
 	result, err := getNomadSandboxNetworkMutationForUpdate(ctx, tx, sandboxID)
 	if err != nil {
@@ -517,7 +542,7 @@ func cancelNomadSandboxNetworkMutation(ctx context.Context, tx pgx.Tx, operation
 		return fmt.Errorf("%w: pending mutation changed during cancellation",
 			ErrNomadSandboxNetworkMutationConflict)
 	}
-	return nil
+	return deleteNomadSandboxNetworkMutationBindings(ctx, tx, operationID)
 }
 
 func cancelPendingNomadSandboxNetworkMutationForSandbox(
@@ -531,6 +556,12 @@ func cancelPendingNomadSandboxNetworkMutationForSandbox(
 	}
 	if len(reason) > 1024 {
 		reason = reason[:1024]
+	}
+	if _, err := exec.Exec(ctx, `
+		DELETE FROM manager.sandbox_network_mutation_bindings
+		WHERE sandbox_id = $1
+	`, sandboxID); err != nil {
+		return fmt.Errorf("delete preempted Nomad credential bindings: %w", err)
 	}
 	_, err := exec.Exec(ctx, `
 		UPDATE manager.sandbox_network_mutations
@@ -589,6 +620,9 @@ func normalizeBeginNomadSandboxNetworkMutationRequest(
 	if request == nil || request.RequestPolicy == nil {
 		return nil, nil, fmt.Errorf("Nomad sandbox network mutation request and request policy are required")
 	}
+	if len(request.RequestPolicy.CredentialBindings) > 0 {
+		return nil, nil, fmt.Errorf("requested network policy must not embed credential bindings")
+	}
 	normalized := *request
 	for name, value := range map[string]string{
 		"sandbox_id":       normalized.SandboxID,
@@ -610,6 +644,15 @@ func normalizeBeginNomadSandboxNetworkMutationRequest(
 		policySpec.SandboxID != normalized.SandboxID || policySpec.TeamID != normalized.ExpectedTeamID ||
 		(policySpec.Mode != v1alpha1.NetworkModeAllowAll && policySpec.Mode != v1alpha1.NetworkModeBlockAll) {
 		return nil, nil, fmt.Errorf("desired policy must be v1 and match the requested sandbox and team")
+	}
+	normalized.CredentialBindings = credentialbinding.CloneStore(normalized.CredentialBindings)
+	normalized.CredentialBindingDigest = credentialbinding.DigestStore(normalized.CredentialBindings)
+	policyBindingDigest := policySpec.CredentialBindingDigest
+	if policyBindingDigest == "" && len(normalized.CredentialBindings) == 0 {
+		policyBindingDigest = credentialbinding.EmptyDigest
+	}
+	if policyBindingDigest != normalized.CredentialBindingDigest {
+		return nil, nil, fmt.Errorf("desired policy credential binding digest does not match binding semantics")
 	}
 	for name, value := range map[string]string{
 		"expected_current_policy_digest": normalized.ExpectedCurrentPolicyDigest,
@@ -647,6 +690,7 @@ func nomadSandboxNetworkMutationBeginMatches(
 		mutation.CurrentPolicyDigest == request.ExpectedCurrentPolicyDigest &&
 		mutation.DesiredPolicy == request.DesiredPolicy &&
 		mutation.DesiredPolicyDigest == request.DesiredPolicyDigest &&
+		mutation.CredentialBindingDigest == request.CredentialBindingDigest &&
 		bytes.Equal(storedPolicy, requestPolicy) && nomadSandboxNetworkMutationSlotMatches(mutation, slot) &&
 		mutation.SlotRevision == slot.Revision
 }
@@ -670,7 +714,7 @@ func nomadSandboxNetworkMutationSelectSQL() string {
 		SELECT sandbox_id, operation_id, slot_id, slot_revision, team_id,
 			cluster_id, allocation_id, allocation_namespace,
 			node_id, node_uid, node_boot_id, netns_identity, claim_id,
-			current_policy_digest, desired_policy, desired_policy_digest,
+			current_policy_digest, desired_policy, desired_policy_digest, credential_binding_digest,
 			request_policy, phase, applied_policy_token, applied_token_digest,
 			cancellation_reason, applied_at, canceled_at, created_at, updated_at
 		FROM manager.sandbox_network_mutations`
@@ -689,7 +733,7 @@ func scanNomadSandboxNetworkMutation(scanner nomadSandboxNetworkMutationScanner)
 		&mutation.TeamID, &mutation.ClusterID, &mutation.AllocationID, &mutation.AllocationNamespace,
 		&mutation.NodeID, &mutation.NodeUID, &mutation.NodeBootID, &mutation.NetNSIdentity,
 		&mutation.ClaimID, &mutation.CurrentPolicyDigest, &mutation.DesiredPolicy,
-		&mutation.DesiredPolicyDigest, &requestPolicy, &mutation.Phase, &appliedToken,
+		&mutation.DesiredPolicyDigest, &mutation.CredentialBindingDigest, &requestPolicy, &mutation.Phase, &appliedToken,
 		&mutation.AppliedTokenDigest, &mutation.CancellationReason, &appliedAt, &canceledAt,
 		&mutation.CreatedAt, &mutation.UpdatedAt,
 	); err != nil {

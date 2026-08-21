@@ -12,6 +12,14 @@ func TestNetworkPolicyRequiresSynchronousApply(t *testing.T) {
 		{name: "implicit allow all", spec: &NetworkPolicySpec{}},
 		{name: "explicit allow all", spec: &NetworkPolicySpec{Mode: NetworkModeAllowAll}},
 		{
+			name: "allow all with credential binding digest",
+			spec: &NetworkPolicySpec{
+				Mode:                    NetworkModeAllowAll,
+				CredentialBindingDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+			want: true,
+		},
+		{
 			name: "allow all with egress policy",
 			spec: &NetworkPolicySpec{
 				Mode:   NetworkModeAllowAll,

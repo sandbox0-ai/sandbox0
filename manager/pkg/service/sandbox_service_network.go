@@ -12,11 +12,11 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -318,222 +318,27 @@ func toStoreCredentialBindings(
 	teamID string,
 	in []v1alpha1.CredentialBinding,
 ) ([]egressauthstore.CredentialBinding, error) {
-	if len(in) == 0 {
-		return nil, nil
-	}
-	out := make([]egressauthstore.CredentialBinding, 0, len(in))
-	for _, binding := range in {
-		source, err := store.GetSourceByRef(ctx, teamID, binding.SourceRef)
+	out := credentialbinding.ToStore(in)
+	for index := range out {
+		source, err := store.GetSourceByRef(ctx, teamID, out[index].SourceRef)
 		if err != nil {
-			return nil, fmt.Errorf("resolve credential source %q: %w", binding.SourceRef, err)
+			return nil, fmt.Errorf("resolve credential source %q: %w", out[index].SourceRef, err)
 		}
 		if source == nil {
-			return nil, fmt.Errorf("credential source %q not found", binding.SourceRef)
+			return nil, fmt.Errorf("credential source %q not found", out[index].SourceRef)
 		}
-		storeBinding := egressauthstore.CredentialBinding{
-			Ref:           binding.Ref,
-			SourceRef:     binding.SourceRef,
-			SourceID:      source.ID,
-			SourceVersion: source.CurrentVersion,
-			Projection:    toStoreProjection(binding.Projection),
-			CachePolicy:   toStoreCachePolicy(binding.CachePolicy),
-		}
-		out = append(out, storeBinding)
+		out[index].SourceID = source.ID
+		out[index].SourceVersion = source.CurrentVersion
 	}
 	return out, nil
 }
 
 func cloneStoreCredentialBindings(in []egressauthstore.CredentialBinding) []egressauthstore.CredentialBinding {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]egressauthstore.CredentialBinding, 0, len(in))
-	for _, binding := range in {
-		cloned := egressauthstore.CredentialBinding{
-			Ref:           binding.Ref,
-			SourceRef:     binding.SourceRef,
-			SourceID:      binding.SourceID,
-			SourceVersion: binding.SourceVersion,
-			Projection:    cloneStoreProjection(binding.Projection),
-			CachePolicy:   cloneStoreCachePolicy(binding.CachePolicy),
-		}
-		out = append(out, cloned)
-	}
-	return out
+	return credentialbinding.CloneStore(in)
 }
 
 func fromStoreCredentialBindings(in []egressauthstore.CredentialBinding) []v1alpha1.CredentialBinding {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]v1alpha1.CredentialBinding, 0, len(in))
-	for _, binding := range in {
-		policyBinding := v1alpha1.CredentialBinding{
-			Ref:         binding.Ref,
-			SourceRef:   binding.SourceRef,
-			Projection:  fromStoreProjection(binding.Projection),
-			CachePolicy: fromStoreCachePolicy(binding.CachePolicy),
-		}
-		out = append(out, policyBinding)
-	}
-	return out
-}
-
-// toStoreProjection maps the public CRD schema into egress auth storage state.
-// Keep the conversion explicit so schema changes and nested deep-copy requirements stay visible.
-func toStoreProjection(in v1alpha1.ProjectionSpec) egressauthstore.ProjectionSpec {
-	out := egressauthstore.ProjectionSpec{
-		Type: egressauthstore.CredentialProjectionType(in.Type),
-	}
-	if in.HTTPHeaders != nil {
-		out.HTTPHeaders = &egressauthstore.HTTPHeadersProjection{
-			Headers: make([]egressauthstore.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
-		}
-		for _, header := range in.HTTPHeaders.Headers {
-			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, egressauthstore.ProjectedHeader{
-				Name:          header.Name,
-				ValueTemplate: header.ValueTemplate,
-			})
-		}
-	}
-	if in.PlaceholderSubstitution != nil {
-		out.PlaceholderSubstitution = &egressauthstore.PlaceholderSubstitutionProjection{
-			Replacements: make([]egressauthstore.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
-		}
-		for _, replacement := range in.PlaceholderSubstitution.Replacements {
-			locations := make([]egressauth.PlaceholderSubstitutionLocation, 0, len(replacement.Locations))
-			for _, location := range replacement.Locations {
-				locations = append(locations, egressauth.PlaceholderSubstitutionLocation(location))
-			}
-			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauthstore.PlaceholderReplacement{
-				Placeholder:   replacement.Placeholder,
-				ValueTemplate: replacement.ValueTemplate,
-				Locations:     locations,
-			})
-		}
-	}
-	if in.TLSClientCertificate != nil {
-		out.TLSClientCertificate = &egressauthstore.TLSClientCertificateProjection{}
-	}
-	if in.UsernamePassword != nil {
-		out.UsernamePassword = &egressauthstore.UsernamePasswordProjection{}
-	}
-	if in.SSHProxy != nil {
-		out.SSHProxy = &egressauthstore.SSHProxyProjection{
-			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
-			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
-			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
-		}
-	}
-	return out
-}
-
-func cloneStoreProjection(in egressauthstore.ProjectionSpec) egressauthstore.ProjectionSpec {
-	out := egressauthstore.ProjectionSpec{
-		Type: in.Type,
-	}
-	if in.HTTPHeaders != nil {
-		out.HTTPHeaders = &egressauthstore.HTTPHeadersProjection{
-			Headers: make([]egressauthstore.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
-		}
-		out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, in.HTTPHeaders.Headers...)
-	}
-	if in.PlaceholderSubstitution != nil {
-		out.PlaceholderSubstitution = &egressauthstore.PlaceholderSubstitutionProjection{
-			Replacements: make([]egressauthstore.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
-		}
-		for _, replacement := range in.PlaceholderSubstitution.Replacements {
-			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauthstore.PlaceholderReplacement{
-				Placeholder:   replacement.Placeholder,
-				ValueTemplate: replacement.ValueTemplate,
-				Locations:     append([]egressauth.PlaceholderSubstitutionLocation(nil), replacement.Locations...),
-			})
-		}
-	}
-	if in.TLSClientCertificate != nil {
-		out.TLSClientCertificate = &egressauthstore.TLSClientCertificateProjection{}
-	}
-	if in.UsernamePassword != nil {
-		out.UsernamePassword = &egressauthstore.UsernamePasswordProjection{}
-	}
-	if in.SSHProxy != nil {
-		out.SSHProxy = &egressauthstore.SSHProxyProjection{
-			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
-			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
-			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
-		}
-	}
-	return out
-}
-
-// fromStoreProjection maps egress auth storage state back into the public CRD schema.
-// It intentionally mirrors toStoreProjection at this schema boundary.
-func fromStoreProjection(in egressauthstore.ProjectionSpec) v1alpha1.ProjectionSpec {
-	out := v1alpha1.ProjectionSpec{
-		Type: v1alpha1.CredentialProjectionType(in.Type),
-	}
-	if in.HTTPHeaders != nil {
-		out.HTTPHeaders = &v1alpha1.HTTPHeadersProjection{
-			Headers: make([]v1alpha1.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
-		}
-		for _, header := range in.HTTPHeaders.Headers {
-			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, v1alpha1.ProjectedHeader{
-				Name:          header.Name,
-				ValueTemplate: header.ValueTemplate,
-			})
-		}
-	}
-	if in.PlaceholderSubstitution != nil {
-		out.PlaceholderSubstitution = &v1alpha1.PlaceholderSubstitutionProjection{
-			Replacements: make([]v1alpha1.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
-		}
-		for _, replacement := range in.PlaceholderSubstitution.Replacements {
-			locations := make([]v1alpha1.PlaceholderSubstitutionLocation, 0, len(replacement.Locations))
-			for _, location := range replacement.Locations {
-				locations = append(locations, v1alpha1.PlaceholderSubstitutionLocation(location))
-			}
-			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, v1alpha1.PlaceholderReplacement{
-				Placeholder:   replacement.Placeholder,
-				ValueTemplate: replacement.ValueTemplate,
-				Locations:     locations,
-			})
-		}
-	}
-	if in.TLSClientCertificate != nil {
-		out.TLSClientCertificate = &v1alpha1.TLSClientCertificateProjection{}
-	}
-	if in.UsernamePassword != nil {
-		out.UsernamePassword = &v1alpha1.UsernamePasswordProjection{}
-	}
-	if in.SSHProxy != nil {
-		out.SSHProxy = &v1alpha1.SSHProxyProjection{
-			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
-			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
-			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
-		}
-	}
-	return out
-}
-
-func toStoreCachePolicy(in *v1alpha1.CachePolicySpec) *egressauthstore.CachePolicySpec {
-	if in == nil {
-		return nil
-	}
-	return &egressauthstore.CachePolicySpec{TTL: in.TTL}
-}
-
-func cloneStoreCachePolicy(in *egressauthstore.CachePolicySpec) *egressauthstore.CachePolicySpec {
-	if in == nil {
-		return nil
-	}
-	return &egressauthstore.CachePolicySpec{TTL: in.TTL}
-}
-
-func fromStoreCachePolicy(in *egressauthstore.CachePolicySpec) *v1alpha1.CachePolicySpec {
-	if in == nil {
-		return nil
-	}
-	return &v1alpha1.CachePolicySpec{TTL: in.TTL}
+	return credentialbinding.FromStore(in)
 }
 
 func sanitizedNetworkPolicyForPersistence(policy *v1alpha1.SandboxNetworkPolicy) *v1alpha1.SandboxNetworkPolicy {

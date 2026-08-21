@@ -294,10 +294,14 @@ func main() {
 	procdHTTPClient := obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})
 	procdClient := procdapi.NewProcdClientWithHTTPClient(procdHTTPClient)
 
-	var quotaUsageStore quota.UsageStore
+	var meteringQuotaUsageStore quota.UsageStore
 	if meteringSink != nil {
-		quotaUsageStore = meteringSink
+		meteringQuotaUsageStore = meteringSink
 	}
+	quotaUsageStore := quota.UsageStore(&managerQuotaUsageStore{
+		activeSandboxes: sandboxStore,
+		metering:        meteringQuotaUsageStore,
+	})
 	quotaRepo, err := buildQuotaRepository(ctx, pool, cfg, quotaUsageStore)
 	if err != nil {
 		logger.Fatal("Invalid quota configuration", zap.Error(err))

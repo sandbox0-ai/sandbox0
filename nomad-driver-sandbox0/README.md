@@ -263,7 +263,7 @@ command-ready commit without operation, sandbox, or slot labels.
 Run the serial gate against the public regional URL with a prewarmed compatible
 pool and hot RootFS working set. Build once, record the executable hash, and use
 the same binary for both reports; `go run` is not acceptable evidence because
-it does not preserve the executed artifact. Report version 4 also records the
+it does not preserve the executed artifact. Report version 5 also records the
 SHA-256 of its own executable so each JSON remains bound to that artifact:
 
 ```sh
@@ -333,7 +333,7 @@ the `404` must also contain the canonical public `not_found` envelope, so a
 proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
 therefore requires the asynchronous terminal worker and physical slot cleanup
 to converge within the configured timeout rather than merely accepting
-deletion intent. Report version 4 records the cleanup distribution separately
+deletion intent. Report version 5 records the cleanup distribution separately
 and fails when terminal absence does not converge within `--cleanup-timeout`;
 cleanup is outside the one-second claim interval. The report also hard-gates
 the harness's monotonic public claim round trip at one second. This is a
@@ -348,6 +348,10 @@ below one second. A signed regional ingress timestamp up to five seconds ahead
 of the manager clock is admitted so small host-clock offsets do not break
 sandbox creation, but that sample is forced to `missed`; a larger lead is
 rejected.
+The report records the claim-body digest and every timing-control input
+(`request-timeout`, cleanup timeout/poll, batch settle, hard limit, and p50
+target), so the JSON is sufficient to reject a report generated with a
+different body or cadence.
 Cold S3, unclean replay, Nomad refill,
 full-cold-node, and 1/8/32 concurrency results must be recorded as separate
 labeled reports rather than mixed into the hot distribution.

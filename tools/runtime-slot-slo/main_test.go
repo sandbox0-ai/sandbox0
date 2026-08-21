@@ -69,7 +69,11 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 	if claims.Load() != 4 || deletes.Load() != 4 {
 		t.Fatalf("claims=%d deletes=%d", claims.Load(), deletes.Load())
 	}
-	if result.Version != 4 || len(result.ExecutableSHA256) != sha256.Size*2 || result.Cleanup.Count != 4 {
+	bodyDigest := sha256.Sum256(cfg.body)
+	if result.Version != 5 || len(result.ExecutableSHA256) != sha256.Size*2 ||
+		result.ClaimBodySHA256 != fmt.Sprintf("%x", bodyDigest[:]) ||
+		result.RequestTimeout != cfg.requestTimeout || result.CleanupTimeout != cfg.cleanupTimeout ||
+		result.CleanupPoll != cfg.cleanupPoll || result.BatchSettle != cfg.settle || result.Cleanup.Count != 4 {
 		t.Fatalf("cleanup convergence report = %+v", result)
 	}
 }
@@ -333,14 +337,22 @@ func TestClaimIdentityAndSLOHeaderRequireCanonicalWireValues(t *testing.T) {
 }
 
 func TestConfigRejectsNonClaimEndpoint(t *testing.T) {
-	cfg := config{
-		endpoint: "https://example.test/api/v1/sandboxes/extra", token: "token", body: []byte(`{}`),
-		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: time.Second,
-		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
-		p50Target: 500 * time.Millisecond,
-	}
-	if err := cfg.validate(); err == nil {
-		t.Fatal("non-claim endpoint was accepted")
+	for _, endpoint := range []string{
+		"https://example.test/api/v1/sandboxes/extra",
+		"https://example.test/api/v1//sandboxes",
+		"https://example.test/api/v1/other/../sandboxes",
+		"https://example.test/api/v1/%73andboxes",
+		"https://example.test/api/v1/sandboxes?",
+	} {
+		cfg := config{
+			endpoint: endpoint, token: "token", body: []byte(`{}`),
+			batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: time.Second,
+			cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
+			p50Target: 500 * time.Millisecond,
+		}
+		if err := cfg.validate(); err == nil {
+			t.Fatalf("noncanonical claim endpoint %q was accepted", endpoint)
+		}
 	}
 }
 

@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,15 +70,19 @@ type distribution struct {
 type report struct {
 	Version          int           `json:"version"`
 	ExecutableSHA256 string        `json:"executable_sha256"`
+	ClaimBodySHA256  string        `json:"claim_body_sha256"`
 	Label            string        `json:"label,omitempty"`
 	StartedAt        time.Time     `json:"started_at"`
 	CompletedAt      time.Time     `json:"completed_at"`
 	Endpoint         string        `json:"endpoint"`
 	Batches          int           `json:"batches"`
 	Concurrency      int           `json:"concurrency"`
+	RequestTimeout   time.Duration `json:"request_timeout_ns"`
+	CleanupTimeout   time.Duration `json:"cleanup_timeout_ns"`
+	CleanupPoll      time.Duration `json:"cleanup_poll_ns"`
+	BatchSettle      time.Duration `json:"batch_settle_ns"`
 	HardLimit        time.Duration `json:"hard_limit_ns"`
 	P50Target        time.Duration `json:"p50_target_ns"`
-	CleanupTimeout   time.Duration `json:"cleanup_timeout_ns"`
 	CommandReady     distribution  `json:"command_ready"`
 	Wall             distribution  `json:"wall"`
 	Cleanup          distribution  `json:"cleanup"`
@@ -159,10 +162,10 @@ func (c config) validate() error {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
 		return errors.New("url must be an absolute HTTPS regional claim endpoint")
 	}
-	if path.Clean(parsed.Path) != "/api/v1/sandboxes" {
-		return errors.New("url path must be /api/v1/sandboxes")
+	if parsed.Path != "/api/v1/sandboxes" || parsed.RawPath != "" {
+		return errors.New("url path must be canonical /api/v1/sandboxes")
 	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return errors.New("url must not contain a query or fragment")
 	}
 	if c.token == "" {
@@ -195,11 +198,15 @@ func run(ctx context.Context, cfg config) (report, error) {
 	if err != nil {
 		return report{}, fmt.Errorf("hash acceptance executable: %w", err)
 	}
+	bodyDigest := sha256.Sum256(cfg.body)
 	result := report{
-		Version: 4, ExecutableSHA256: executableDigest,
-		Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
-		Batches: cfg.batches, Concurrency: cfg.concurrency, HardLimit: cfg.hardLimit,
-		P50Target: cfg.p50Target, CleanupTimeout: cfg.cleanupTimeout,
+		Version: 5, ExecutableSHA256: executableDigest,
+		ClaimBodySHA256: fmt.Sprintf("%x", bodyDigest[:]),
+		Label:           cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
+		Batches: cfg.batches, Concurrency: cfg.concurrency,
+		RequestTimeout: cfg.requestTimeout, CleanupTimeout: cfg.cleanupTimeout,
+		CleanupPoll: cfg.cleanupPoll, BatchSettle: cfg.settle,
+		HardLimit: cfg.hardLimit, P50Target: cfg.p50Target,
 		Samples: make([]sample, cfg.batches*cfg.concurrency),
 	}
 	var cleanupErrors atomic.Int64

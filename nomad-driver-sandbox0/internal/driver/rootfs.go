@@ -15,9 +15,11 @@
 package driver
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
@@ -50,25 +52,32 @@ func validateRootFSConfig(config *PluginConfig) error {
 	}
 	for name, value := range map[string]string{
 		"rootfs_node_socket": config.RootFSNodeSocket,
-		"rootfs_mount_root":  config.RootFSMountRoot,
 	} {
 		value = strings.TrimSpace(value)
 		if !filepath.IsAbs(value) || filepath.Clean(value) == string(filepath.Separator) {
 			return fmt.Errorf("%s must be a non-root absolute path", name)
 		}
 	}
-	if config.RootFSMaxDirtyTailBytes < 0 {
-		return fmt.Errorf("rootfs_max_dirty_tail_bytes must be non-negative")
-	}
-	if config.RootFSMaxNodeDirtyTailBytes < 0 {
-		return fmt.Errorf("rootfs_max_node_dirty_tail_bytes must be non-negative")
-	}
-	if config.RootFSDirtyTailRetirementReserveBytes < 0 {
-		return fmt.Errorf("rootfs_dirty_tail_retirement_reserve_bytes must be non-negative")
-	}
-	if config.RootFSMaxNodeDirtyTailBytes > 0 &&
-		config.RootFSDirtyTailRetirementReserveBytes > config.RootFSMaxNodeDirtyTailBytes {
-		return fmt.Errorf("rootfs_dirty_tail_retirement_reserve_bytes must not exceed rootfs_max_node_dirty_tail_bytes")
-	}
 	return nil
+}
+
+type rootFSRuntimeInfoProvider interface {
+	RuntimeInfo(context.Context) (nomadruntime.RuntimeInfo, error)
+}
+
+func loadRootFSRuntimeInfo(ctx context.Context, runtime RootFSRuntime) (nomadruntime.RuntimeInfo, error) {
+	provider, ok := runtime.(rootFSRuntimeInfoProvider)
+	if !ok {
+		return nomadruntime.RuntimeInfo{}, fmt.Errorf("RootFS runtime cannot report ctld-owned metadata")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	info, err := provider.RuntimeInfo(requestCtx)
+	if err != nil {
+		return nomadruntime.RuntimeInfo{}, fmt.Errorf("read ctld Nomad runtime info: %w", err)
+	}
+	if err := info.Validate(); err != nil {
+		return nomadruntime.RuntimeInfo{}, fmt.Errorf("validate ctld Nomad runtime info: %w", err)
+	}
+	return info, nil
 }

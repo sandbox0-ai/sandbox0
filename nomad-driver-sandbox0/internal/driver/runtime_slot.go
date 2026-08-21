@@ -89,13 +89,10 @@ type networkReadyProof struct {
 }
 
 type storageReadyProof struct {
-	Version                         int    `json:"version"`
-	SlotID                          string `json:"slot_id"`
-	NodeRuntimeSocket               string `json:"node_runtime_socket"`
-	RootFSMountRoot                 string `json:"rootfs_mount_root"`
-	MaxDirtyTailBytes               int64  `json:"max_dirty_tail_bytes"`
-	MaxNodeDirtyTailBytes           int64  `json:"max_node_dirty_tail_bytes"`
-	DirtyTailRetirementReserveBytes int64  `json:"dirty_tail_retirement_reserve_bytes"`
+	Version           int    `json:"version"`
+	SlotID            string `json:"slot_id"`
+	NodeRuntimeSocket string `json:"node_runtime_socket"`
+	RuntimeInfoDigest string `json:"runtime_info_digest"`
 }
 
 type runtimeSlotClaimNetworkProof struct {
@@ -107,10 +104,6 @@ type runtimeSlotClaimNetworkProof struct {
 	NetworkChain        string                           `json:"network_chain"`
 	PolicyDigest        string                           `json:"policy_digest"`
 	ExpectedPolicyToken rootfshandoff.NetworkPolicyToken `json:"expected_policy_token"`
-}
-
-type runtimeSlotStorageHealth interface {
-	Ping(context.Context) error
 }
 
 type runtimeSlotNodeJournal interface {
@@ -276,15 +269,13 @@ func newRuntimeSlotLifecycle(
 	if err != nil {
 		return nil, fmt.Errorf("read runsc version for runtime slot: %w", err)
 	}
-	storage, ok := rootfs.(runtimeSlotStorageHealth)
-	if !ok {
-		return nil, fmt.Errorf("RootFS runtime cannot prove ctld Nomad runtime health")
-	}
-	healthCtx, cancelHealth := context.WithTimeout(ctx, 2*time.Second)
-	err = storage.Ping(healthCtx)
-	cancelHealth()
+	storageInfo, err := loadRootFSRuntimeInfo(ctx, rootfs)
 	if err != nil {
-		return nil, fmt.Errorf("prove RootFS ctld Nomad runtime health: %w", err)
+		return nil, fmt.Errorf("prove RootFS ctld Nomad runtime metadata: %w", err)
+	}
+	storageInfoDigest, err := storageInfo.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("digest RootFS ctld Nomad runtime metadata: %w", err)
 	}
 	journal, ok := rootfs.(runtimeSlotNodeJournal)
 	if !ok {
@@ -320,9 +311,7 @@ func newRuntimeSlotLifecycle(
 	}
 	storageProof, err := proofDigest(storageReadyProof{
 		Version: runtimeSlotProofVersion, SlotID: task.ID,
-		NodeRuntimeSocket: config.RootFSNodeSocket, RootFSMountRoot: config.RootFSMountRoot,
-		MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes, MaxNodeDirtyTailBytes: config.RootFSMaxNodeDirtyTailBytes,
-		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,
+		NodeRuntimeSocket: config.RootFSNodeSocket, RuntimeInfoDigest: storageInfoDigest,
 	})
 	if err != nil {
 		return nil, err

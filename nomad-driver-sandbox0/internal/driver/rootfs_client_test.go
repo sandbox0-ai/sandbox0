@@ -15,35 +15,28 @@
 package driver
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	"github.com/stretchr/testify/require"
 )
 
 func TestRootFSConfigRequiresCtldNodeRuntimeOnly(t *testing.T) {
 	config := defaultPluginConfig()
 	config.RootFSEnabled = true
-	config.RootFSMountRoot = "/run/sandbox0/rootfs"
 	require.NoError(t, validateRootFSConfig(config))
 
 	config.RootFSNodeSocket = ""
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_node_socket")
-	config.RootFSNodeSocket = "/run/sandbox0/ctld-nomad-runtime.sock"
-
-	config.RootFSMaxDirtyTailBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_dirty_tail_bytes")
-	config.RootFSMaxDirtyTailBytes = 0
-	config.RootFSMaxNodeDirtyTailBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_node_dirty_tail_bytes")
-	config.RootFSMaxNodeDirtyTailBytes = 0
-	config.RootFSDirtyTailRetirementReserveBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_dirty_tail_retirement_reserve_bytes")
 }
 
 func TestPluginFingerprintRequiresHealthyCtldNomadRuntime(t *testing.T) {
@@ -51,13 +44,24 @@ func TestPluginFingerprintRequiresHealthyCtldNomadRuntime(t *testing.T) {
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(socket, 0o600))
+	var includeInfo atomic.Bool
+	includeInfo.Store(true)
 	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPut || request.URL.Path != "/v1/health" {
 			http.NotFound(writer, request)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte("{}"))
+		if !includeInfo.Load() {
+			_, _ = writer.Write([]byte("{}"))
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"info": nomadruntime.RuntimeInfo{
+			Version: nomadruntime.RuntimeInfoVersion, MountRoot: "/run/sandbox0/rootfs",
+			MaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
+			MaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
+			DirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
+		}})
 	})}
 	go func() { _ = server.Serve(listener) }()
 
@@ -69,6 +73,11 @@ func TestPluginFingerprintRequiresHealthyCtldNomadRuntime(t *testing.T) {
 	ctldRuntime, ok := fingerprint.Attributes["driver.sandbox0_gvisor.ctld_runtime"].GetBool()
 	require.True(t, ok)
 	require.True(t, ctldRuntime)
+
+	includeInfo.Store(false)
+	fingerprint = plugin.buildFingerprint()
+	require.Equal(t, drivers.HealthStateUndetected, fingerprint.Health)
+	includeInfo.Store(true)
 
 	require.NoError(t, server.Close())
 	fingerprint = plugin.buildFingerprint()

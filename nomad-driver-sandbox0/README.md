@@ -401,7 +401,6 @@ plugin "sandbox0-gvisor" {
     network_policy_enabled = true
     rootfs_enabled             = true
     rootfs_node_socket         = "/run/sandbox0/ctld-nomad-runtime.sock"
-    rootfs_mount_root          = "/run/sandbox0/rootfs"
     rootfs_authority_url              = "https://regional-authority.internal:9443"
     rootfs_authority_ca_file          = "/etc/sandbox0/pki/ca.pem"
     rootfs_authority_client_cert_file = "/etc/sandbox0/pki/node.pem"
@@ -447,11 +446,14 @@ the plugin can advertise a RootFS-capable warm slot.
 
 Ctld configuration owns object credentials, node-side writer/channel
 credentials, NBD paths, dirty-tail budgets, node identity, and Nomad catalog
-credentials. The plugin keeps the ctld node socket, stable-mount compatibility
-guard, storage-cap compatibility proof, and the regional slot lifecycle mTLS
-credentials used for registration and heartbeat. Its fingerprint remains
-unhealthy until the root-owned mode-`0600` ctld socket, durable journals,
-network registry, and Nomad allocation catalog are healthy.
+credentials. The plugin keeps only the ctld node socket and the regional slot
+lifecycle mTLS credentials used for registration and heartbeat. It reads the
+canonical mount root and all dirty-tail limits from ctld's versioned health
+response, validates that metadata, and binds its digest into slot storage
+readiness; those root-owned values are not copied into plugin HCL. Its
+fingerprint remains unhealthy until the root-owned mode-`0600` ctld socket,
+runtime metadata, durable journals, network registry, and Nomad allocation
+catalog are healthy.
 
 Consumer registration resolves `/opt/nomad` and `/var/run/netns`, persists
 their canonical path and device/inode identity, and rejects a driver in a

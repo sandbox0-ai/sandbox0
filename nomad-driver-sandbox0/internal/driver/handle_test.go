@@ -29,6 +29,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/rootfsbuilder"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	rootfshandoff "github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -182,12 +183,24 @@ type fakeRootFSRuntime struct {
 	pressurePlans    []rootfssession.DirtyTailPressureSession
 	pressurePlanErr  error
 	recoverySessions []rootfssession.RecoverySession
+	runtimeInfo      nomadruntime.RuntimeInfo
 }
 
-func (r *fakeRootFSRuntime) Ping(context.Context) error {
+func (r *fakeRootFSRuntime) RuntimeInfo(context.Context) (nomadruntime.RuntimeInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.pingErr
+	if r.pingErr != nil {
+		return nomadruntime.RuntimeInfo{}, r.pingErr
+	}
+	if r.runtimeInfo.Version != 0 {
+		return r.runtimeInfo, nil
+	}
+	return nomadruntime.RuntimeInfo{
+		Version: nomadruntime.RuntimeInfoVersion, MountRoot: "/run/sandbox0/rootfs",
+		MaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
+		MaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
+		DirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
+	}, nil
 }
 
 type fakeNetworkRuntime struct {

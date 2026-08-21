@@ -11,7 +11,6 @@ plugin "sandbox0-gvisor" {
     network_policy_enabled        = true
     rootfs_enabled                = true
     rootfs_node_socket            = "/run/sandbox0/ctld-nomad-runtime.sock"
-    rootfs_mount_root             = "/run/sandbox0/rootfs"
     rootfs_authority_url          = "https://replace-with-regional-authority:9443"
     rootfs_authority_ca_file      = "/etc/sandbox0/pki/manager-ca.pem"
     rootfs_authority_client_cert_file = "/etc/sandbox0/pki/ctld.pem"

@@ -141,6 +141,18 @@ type fakeRootFSRuntime struct {
 	pressurePlans    []rootfssession.DirtyTailPressureSession
 	pressurePlanErr  error
 	recoverySessions []rootfssession.RecoverySession
+	runtimeInfo      RuntimeInfo
+	runtimeInfoErr   error
+}
+
+func (r *fakeRootFSRuntime) RuntimeInfo() (RuntimeInfo, error) {
+	if r.runtimeInfoErr != nil {
+		return RuntimeInfo{}, r.runtimeInfoErr
+	}
+	if r.runtimeInfo.Version == 0 {
+		return runtimeInfoFromConfig(Config{RootFSMountRoot: "/run/sandbox0/rootfs"}), nil
+	}
+	return r.runtimeInfo, nil
 }
 
 func (r *fakeRootFSRuntime) Ensure(

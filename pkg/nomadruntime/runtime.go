@@ -43,11 +43,23 @@ import (
 type rootfsRuntime struct {
 	sessions          *rootfssession.Manager
 	authority         rootFSWriterAuthority
+	info              RuntimeInfo
 	logger            logger
 	consumerMountRoot string
 	consumerNetNSRoot string
 	renewalMu         sync.Mutex
 	renewals          map[string]*rootfsRenewal
+}
+
+// RuntimeInfo returns the immutable configuration owned by this ctld runtime.
+func (r *rootfsRuntime) RuntimeInfo() (RuntimeInfo, error) {
+	if r == nil {
+		return RuntimeInfo{}, fmt.Errorf("RootFS runtime is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if err := r.info.Validate(); err != nil {
+		return RuntimeInfo{}, fmt.Errorf("validate ctld Nomad runtime info: %w", err)
+	}
+	return r.info, nil
 }
 
 type rootFSWriterAuthority interface {
@@ -340,7 +352,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		authority = client
 	}
 	return &rootfsRuntime{
-		sessions: sessions, authority: authority, logger: logger,
+		sessions: sessions, authority: authority, info: runtimeInfoFromConfig(*config), logger: logger,
 		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),
 		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),

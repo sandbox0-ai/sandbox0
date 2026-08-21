@@ -51,6 +51,7 @@ type nodeRuntimeRPCRequest struct {
 }
 
 type nodeRuntimeRPCResponse struct {
+	Info        *RuntimeInfo                              `json:"info,omitempty"`
 	Mount       rootfssession.Mount                       `json:"mount,omitempty"`
 	Lease       ConsumerLease                             `json:"lease,omitempty"`
 	Retire      rootfssession.RetireResult                `json:"retire,omitempty"`
@@ -70,9 +71,29 @@ type runtimeSlotCleaner interface {
 	CleanupRuntimeSlot(context.Context, protocol.NodeCleanupControlRequest) (protocol.NodeCleanupControlProof, error)
 }
 
+type runtimeInfoProvider interface {
+	RuntimeInfo() (RuntimeInfo, error)
+}
+
 func (c *Client) Ping(ctx context.Context) error {
 	var response nodeRuntimeRPCResponse
 	return c.call(ctx, "/v1/health", nodeRuntimeRPCRequest{}, &response)
+}
+
+// RuntimeInfo returns validated root-owned ctld metadata from the same health
+// transaction used to prove the privileged node runtime is available.
+func (c *Client) RuntimeInfo(ctx context.Context) (RuntimeInfo, error) {
+	var response nodeRuntimeRPCResponse
+	if err := c.call(ctx, "/v1/health", nodeRuntimeRPCRequest{}, &response); err != nil {
+		return RuntimeInfo{}, err
+	}
+	if response.Info == nil {
+		return RuntimeInfo{}, fmt.Errorf("ctld Nomad runtime health response lacks runtime info: %w", errdefs.ErrUnavailable)
+	}
+	if err := response.Info.Validate(); err != nil {
+		return RuntimeInfo{}, fmt.Errorf("validate ctld Nomad runtime health response: %w", err)
+	}
+	return *response.Info, nil
 }
 
 func NewClient(socketPath string) (*Client, error) {
@@ -336,9 +357,19 @@ func nodeRuntimeRPCHandler(
 	})
 	handle("/v1/health", func(ctx context.Context, _ nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
 		if health != nil {
-			return nodeRuntimeRPCResponse{}, health(ctx)
+			if err := health(ctx); err != nil {
+				return nodeRuntimeRPCResponse{}, err
+			}
 		}
-		return nodeRuntimeRPCResponse{}, nil
+		provider, ok := runtime.(runtimeInfoProvider)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, nil
+		}
+		info, err := provider.RuntimeInfo()
+		if err != nil {
+			return nodeRuntimeRPCResponse{}, err
+		}
+		return nodeRuntimeRPCResponse{Info: &info}, nil
 	})
 	handle("/v1/sessions/consumer/register", func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
 		lease, err := runtime.RegisterConsumer(ctx, request.Stage, request.Consumer)

@@ -32,7 +32,6 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/hashicorp/nomad/plugins/shared/structs"
-	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -97,19 +96,6 @@ var (
 			hclspec.NewAttr("rootfs_node_socket", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/ctld-nomad-runtime.sock"`),
 		),
-		"rootfs_mount_root": hclspec.NewAttr("rootfs_mount_root", "string", false),
-		"rootfs_max_dirty_tail_bytes": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_max_dirty_tail_bytes", "number", false),
-			hclspec.NewLiteral(`10737418240`),
-		),
-		"rootfs_max_node_dirty_tail_bytes": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_max_node_dirty_tail_bytes", "number", false),
-			hclspec.NewLiteral(`42949672960`),
-		),
-		"rootfs_dirty_tail_retirement_reserve_bytes": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_dirty_tail_retirement_reserve_bytes", "number", false),
-			hclspec.NewLiteral(`67108864`),
-		),
 		"rootfs_authority_url":              hclspec.NewAttr("rootfs_authority_url", "string", false),
 		"rootfs_authority_ca_file":          hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
 		"rootfs_authority_client_cert_file": hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
@@ -161,17 +147,13 @@ type PluginConfig struct {
 	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
 	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
-	RootFSEnabled                         bool   `codec:"rootfs_enabled"`
-	RootFSNodeSocket                      string `codec:"rootfs_node_socket"`
-	RootFSMountRoot                       string `codec:"rootfs_mount_root"`
-	RootFSMaxDirtyTailBytes               int64  `codec:"rootfs_max_dirty_tail_bytes"`
-	RootFSMaxNodeDirtyTailBytes           int64  `codec:"rootfs_max_node_dirty_tail_bytes"`
-	RootFSDirtyTailRetirementReserveBytes int64  `codec:"rootfs_dirty_tail_retirement_reserve_bytes"`
-	RootFSAuthorityURL                    string `codec:"rootfs_authority_url"`
-	RootFSAuthorityCAFile                 string `codec:"rootfs_authority_ca_file"`
-	RootFSAuthorityClientCertFile         string `codec:"rootfs_authority_client_cert_file"`
-	RootFSAuthorityClientKeyFile          string `codec:"rootfs_authority_client_key_file"`
-	RootFSAuthorityTokenFile              string `codec:"rootfs_authority_token_file"`
+	RootFSEnabled                 bool   `codec:"rootfs_enabled"`
+	RootFSNodeSocket              string `codec:"rootfs_node_socket"`
+	RootFSAuthorityURL            string `codec:"rootfs_authority_url"`
+	RootFSAuthorityCAFile         string `codec:"rootfs_authority_ca_file"`
+	RootFSAuthorityClientCertFile string `codec:"rootfs_authority_client_cert_file"`
+	RootFSAuthorityClientKeyFile  string `codec:"rootfs_authority_client_key_file"`
+	RootFSAuthorityTokenFile      string `codec:"rootfs_authority_token_file"`
 
 	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
 	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
@@ -232,20 +214,17 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
-		RunscPath:                             "/usr/local/bin/runsc",
-		RunscRoot:                             "/run/sandbox0/runsc",
-		ControlDir:                            "/run/sandbox0/nomad-slots",
-		AllowedRootfsDir:                      "/var/lib/sandbox0/rootfs",
-		Platform:                              "systrap",
-		Overlay2:                              "none",
-		FileAccess:                            "shared",
-		DirectFS:                              true,
-		DevSmokeEnabled:                       false,
-		RootFSMaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
-		RootFSMaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
-		RootFSDirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
-		RootFSNodeSocket:                      "/run/sandbox0/ctld-nomad-runtime.sock",
-		RuntimeSlotNodeBootIDFile:             "/proc/sys/kernel/random/boot_id",
+		RunscPath:                 "/usr/local/bin/runsc",
+		RunscRoot:                 "/run/sandbox0/runsc",
+		ControlDir:                "/run/sandbox0/nomad-slots",
+		AllowedRootfsDir:          "/var/lib/sandbox0/rootfs",
+		Platform:                  "systrap",
+		Overlay2:                  "none",
+		FileAccess:                "shared",
+		DirectFS:                  true,
+		DevSmokeEnabled:           false,
+		RootFSNodeSocket:          "/run/sandbox0/ctld-nomad-runtime.sock",
+		RuntimeSlotNodeBootIDFile: "/proc/sys/kernel/random/boot_id",
 	}
 }
 
@@ -383,7 +362,7 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 			return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
 		}
 		healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		err = client.Ping(healthCtx)
+		_, err = client.RuntimeInfo(healthCtx)
 		cancel()
 		if err != nil {
 			return &drivers.Fingerprint{
@@ -452,6 +431,14 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	if err != nil {
 		return nil, nil, err
 	}
+	rootfsAllowedRoot := ""
+	if rootfs != nil {
+		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
+		if err != nil {
+			return nil, nil, err
+		}
+		rootfsAllowedRoot = info.MountRoot
+	}
 
 	handle := newTaskHandle(taskHandleOptions{
 		taskConfig:        config,
@@ -462,7 +449,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		runner:            p.newRunner(*p.config),
 		mounter:           systemMounter{},
 		allowedRoot:       p.config.AllowedRootfsDir,
-		rootfsAllowedRoot: p.config.RootFSMountRoot,
+		rootfsAllowedRoot: rootfsAllowedRoot,
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
 		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
@@ -550,6 +537,14 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	if err != nil {
 		return err
 	}
+	rootfsAllowedRoot := ""
+	if rootfs != nil {
+		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
+		if err != nil {
+			return err
+		}
+		rootfsAllowedRoot = info.MountRoot
+	}
 	recovered := newTaskHandle(taskHandleOptions{
 		taskConfig:        state.TaskConfig,
 		driverConfig:      taskConfig,
@@ -560,7 +555,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		runner:            runner,
 		mounter:           systemMounter{},
 		allowedRoot:       p.config.AllowedRootfsDir,
-		rootfsAllowedRoot: p.config.RootFSMountRoot,
+		rootfsAllowedRoot: rootfsAllowedRoot,
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
 		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,

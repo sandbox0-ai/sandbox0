@@ -39,6 +39,10 @@ func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	clientRuntime, err := NewClient(socket)
 	require.NoError(t, err)
 	require.NoError(t, clientRuntime.Ping(t.Context()))
+	info, err := clientRuntime.RuntimeInfo(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, RuntimeInfoVersion, info.Version)
+	require.Equal(t, "/run/sandbox0/rootfs", info.MountRoot)
 	stage := rootfshandoff.StageRequest{Parent: "parent", Identity: rootfshandoff.Identity{
 		RootFSID: "rootfs", WriterEpoch: 1,
 	}}

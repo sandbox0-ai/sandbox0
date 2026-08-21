@@ -127,7 +127,11 @@ func TestNomadPluginExampleUsesCtldRuntimeOnly(t *testing.T) {
 			t.Fatalf("Nomad plugin example lacks %q", required)
 		}
 	}
-	for _, forbidden := range []string{"rootfs_sessiond", "rootfs_object_bucket", "rootfs_nbd_devices"} {
+	for _, forbidden := range []string{
+		"rootfs_sessiond", "rootfs_object_bucket", "rootfs_nbd_devices", "rootfs_mount_root",
+		"rootfs_max_dirty_tail_bytes", "rootfs_max_node_dirty_tail_bytes",
+		"rootfs_dirty_tail_retirement_reserve_bytes",
+	} {
 		if strings.Contains(config, forbidden) {
 			t.Fatalf("Nomad plugin example contains ctld-owned setting %q", forbidden)
 		}

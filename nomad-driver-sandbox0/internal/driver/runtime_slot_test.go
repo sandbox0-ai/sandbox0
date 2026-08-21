@@ -32,7 +32,9 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
@@ -284,7 +286,7 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	config.NetworkPolicyEnabled = true
 	config.RootFSEnabled = true
 	config.RootFSNodeSocket = filepath.Join(tempDir, "ctld-runtime.sock")
-	config.RootFSMountRoot = filepath.Join(tempDir, "rootfs-mounts")
+	rootFSMountRoot := filepath.Join(tempDir, "rootfs-mounts")
 	config.RootFSAuthorityURL = "https://regional.example.test"
 	config.RootFSAuthorityCAFile = filepath.Join(tempDir, "ca.pem")
 	config.RootFSAuthorityClientCertFile = filepath.Join(tempDir, "client.pem")
@@ -315,7 +317,12 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 		t.Fatalf("encode task config: %v", err)
 	}
 	runner := newFakeRunsc()
-	rootfs := &fakeRootFSRuntime{}
+	rootfs := &fakeRootFSRuntime{runtimeInfo: nomadruntime.RuntimeInfo{
+		Version: nomadruntime.RuntimeInfoVersion, MountRoot: rootFSMountRoot,
+		MaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
+		MaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
+		DirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
+	}}
 	network := &fakeNetworkRuntime{}
 	authority := newFakeRuntimeSlotAuthority()
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return runner }).(*Plugin)
@@ -404,6 +411,44 @@ func TestStartTaskRegistersReadyRuntimeSlotBeforeReturning(t *testing.T) {
 	var persisted PersistedState
 	if err := handle.GetDriverState(&persisted); err != nil || persisted.Phase != phaseWarm {
 		t.Fatalf("Nomad state = %+v, error = %v", persisted, err)
+	}
+}
+
+func TestRuntimeSlotStorageProofBindsCtldOwnedRuntimeInfo(t *testing.T) {
+	readyDigest := func(t *testing.T, nodeLimit int64) string {
+		t.Helper()
+		fixture := newRuntimeSlotPluginFixture(t)
+		fixture.rootfs.runtimeInfo.MaxNodeDirtyTailBytes = nodeLimit
+		_, _, err := fixture.plugin.StartTask(fixture.task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.plugin.cancel()
+		fixture.authority.mu.Lock()
+		defer fixture.authority.mu.Unlock()
+		if len(fixture.authority.readiness) != 1 {
+			t.Fatalf("readiness calls = %d", len(fixture.authority.readiness))
+		}
+		return fixture.authority.readiness[0].StorageReadyDigest
+	}
+
+	first := readyDigest(t, rootfssession.DefaultMaxNodeDirtyTailBytes)
+	second := readyDigest(t, rootfssession.DefaultMaxNodeDirtyTailBytes+1)
+	if first == second {
+		t.Fatal("slot storage proof did not bind ctld-owned runtime metadata")
+	}
+}
+
+func TestStartTaskRejectsInvalidCtldRuntimeInfoBeforeRegistration(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	fixture.rootfs.runtimeInfo.Version++
+	if _, _, err := fixture.plugin.StartTask(fixture.task); err == nil || !strings.Contains(err.Error(), "runtime info version") {
+		t.Fatalf("StartTask() error = %v", err)
+	}
+	fixture.authority.mu.Lock()
+	defer fixture.authority.mu.Unlock()
+	if len(fixture.authority.calls) != 0 {
+		t.Fatalf("authority calls after invalid ctld info = %v", fixture.authority.calls)
 	}
 }
 
@@ -507,7 +552,7 @@ func prepareRuntimeSlotClaim(
 	}
 	mounter := &fakeMounter{}
 	handle.mounter = mounter
-	source := filepath.Join(fixture.config.RootFSMountRoot, "claim-source")
+	source := filepath.Join(fixture.rootfs.runtimeInfo.MountRoot, "claim-source")
 	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
 		t.Fatalf("create RootFS claim source: %v", err)
 	}

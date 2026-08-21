@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,21 +42,38 @@ func (r *recordingSandboxClaimer) ClaimSandbox(_ context.Context, request *servi
 func TestClaimSandboxPropagatesSignedOperationIdentityOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	startedAt := time.Date(2026, 8, 20, 4, 5, 6, 0, time.FixedZone("offset", 8*60*60))
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 keypair: %v", err)
+	}
+	token, err := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller: internalauth.ServiceClusterGateway, PrivateKey: privateKey, TTL: time.Minute,
+	}).Generate(internalauth.ServiceManager, "team-1", "user-1", internalauth.GenerateOptions{
+		Audit: &internalauth.AuditContext{OperationID: "operation-signed", IngressStartedAt: &startedAt},
+	})
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
 	claimer := &recordingSandboxClaimer{}
-	server := &Server{sandboxClaimer: claimer, logger: zap.NewNop()}
+	server := &Server{
+		sandboxClaimer: claimer,
+		authValidator: internalauth.NewValidator(internalauth.ValidatorConfig{
+			Target:             internalauth.ServiceManager,
+			PublicKey:          publicKey,
+			AllowedCallers:     []string{internalauth.ServiceClusterGateway},
+			ClockSkewTolerance: 5 * time.Second,
+		}),
+		logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.POST("/api/v1/sandboxes", server.authMiddleware(), server.claimSandbox)
 	recorder := httptest.NewRecorder()
-	ginContext, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes?operation_id=spoofed", strings.NewReader(
 		`{"template":"default","operation_id":"spoofed","started_at":"2000-01-01T00:00:00Z"}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
-		TeamID: "team-1", UserID: "user-1",
-		Audit: &internalauth.AuditContext{OperationID: "operation-signed", IngressStartedAt: &startedAt},
-	}))
-	ginContext.Request = request
-
-	server.claimSandbox(ginContext)
+	request.Header.Set(internalauth.DefaultTokenHeader, token)
+	router.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())

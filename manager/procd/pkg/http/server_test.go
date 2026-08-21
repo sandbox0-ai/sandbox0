@@ -43,6 +43,28 @@ func TestCommandReadyProbeFailsWithoutProcessIdentity(t *testing.T) {
 	}
 }
 
+func TestCommandReadyProbeRouteUsesPublicContractPath(t *testing.T) {
+	server := NewServer(
+		&procdconfig.Config{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		zap.NewNop(),
+		nil,
+		nil,
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, procdapi.CommandReadyProbePath, nil)
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want routed authentication failure %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestProbeHandlersUseProbeCheckers(t *testing.T) {
 	server := &Server{
 		probeRunner: func(kind sandboxprobe.Kind) sandboxprobe.Response {

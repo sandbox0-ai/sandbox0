@@ -29,6 +29,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const apiV1Prefix = "/api/v1"
+
 // Server is the Procd HTTP server.
 type Server struct {
 	router      *mux.Router
@@ -99,14 +101,14 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
 
 	// Local-only API (localhost access only, no auth)
-	local := s.router.PathPrefix("/api/v1").Subrouter()
+	local := s.router.PathPrefix(apiV1Prefix).Subrouter()
 	local.Use(s.localhostOnlyMiddleware)
 
 	webhookHandler := handlers.NewWebhookHandler(s.webhookDispatcher)
 	local.HandleFunc("/webhook/publish", webhookHandler.Publish).Methods("POST")
 
 	// API v1 (auth required if enabled)
-	api := s.router.PathPrefix("/api/v1").Subrouter()
+	api := s.router.PathPrefix(apiV1Prefix).Subrouter()
 
 	// Apply auth middleware to all API routes
 	api.Use(s.authMiddleware)
@@ -117,7 +119,7 @@ func (s *Server) setupRoutes() {
 	// Sandbox-level handlers (pause/resume all processes)
 	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.sessionSupervisor, s.webhookDispatcher, s.logger)
 	api.HandleFunc("/lifecycle/barrier", s.lifecycleBarrierHandler).Methods("PUT")
-	api.HandleFunc(procdapi.CommandReadyProbePath, s.commandReadyProbeHandler).Methods("PUT")
+	api.HandleFunc(strings.TrimPrefix(procdapi.CommandReadyProbePath, apiV1Prefix), s.commandReadyProbeHandler).Methods("PUT")
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
 	api.HandleFunc("/sandbox/stats", sandboxHandler.Stats).Methods("GET")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -67,7 +68,7 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 	if claims.Load() != 4 || deletes.Load() != 4 {
 		t.Fatalf("claims=%d deletes=%d", claims.Load(), deletes.Load())
 	}
-	if result.Version != 3 || result.Cleanup.Count != 4 {
+	if result.Version != 4 || len(result.ExecutableSHA256) != sha256.Size*2 || result.Cleanup.Count != 4 {
 		t.Fatalf("cleanup convergence report = %+v", result)
 	}
 }
@@ -284,5 +285,17 @@ func TestConfigRejectsNonClaimEndpoint(t *testing.T) {
 	}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("non-claim endpoint was accepted")
+	}
+}
+
+func TestConfigRejectsCleartextClaimEndpoint(t *testing.T) {
+	cfg := config{
+		endpoint: "http://example.test/api/v1/sandboxes", token: "token", body: []byte(`{}`),
+		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: time.Second,
+		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
+		p50Target: 500 * time.Millisecond,
+	}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("cleartext claim endpoint was accepted")
 	}
 }

@@ -263,7 +263,8 @@ command-ready commit without operation, sandbox, or slot labels.
 Run the serial gate against the public regional URL with a prewarmed compatible
 pool and hot RootFS working set. Build once, record the executable hash, and use
 the same binary for both reports; `go run` is not acceptable evidence because
-it does not preserve the executed artifact:
+it does not preserve the executed artifact. Report version 4 also records the
+SHA-256 of its own executable so each JSON remains bound to that artifact:
 
 ```sh
 go build -buildvcs=false -trimpath -o /tmp/runtime-slot-slo ./tools/runtime-slot-slo
@@ -325,7 +326,7 @@ the `404` must also contain the canonical public `not_found` envelope, so a
 proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
 therefore requires the asynchronous terminal worker and physical slot cleanup
 to converge within the configured timeout rather than merely accepting
-deletion intent. Report version 3 records the cleanup distribution separately
+deletion intent. Report version 4 records the cleanup distribution separately
 and fails when terminal absence does not converge within `--cleanup-timeout`;
 cleanup is outside the one-second claim interval. The report also hard-gates
 the harness's monotonic public claim round trip at one second. This is a

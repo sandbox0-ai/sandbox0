@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -68,30 +69,37 @@ type distribution struct {
 }
 
 type report struct {
-	Version        int           `json:"version"`
-	Label          string        `json:"label,omitempty"`
-	StartedAt      time.Time     `json:"started_at"`
-	CompletedAt    time.Time     `json:"completed_at"`
-	Endpoint       string        `json:"endpoint"`
-	Batches        int           `json:"batches"`
-	Concurrency    int           `json:"concurrency"`
-	HardLimit      time.Duration `json:"hard_limit_ns"`
-	P50Target      time.Duration `json:"p50_target_ns"`
-	CleanupTimeout time.Duration `json:"cleanup_timeout_ns"`
-	CommandReady   distribution  `json:"command_ready"`
-	Wall           distribution  `json:"wall"`
-	Cleanup        distribution  `json:"cleanup"`
-	Errors         int           `json:"errors"`
-	SLOMisses      int           `json:"slo_misses"`
-	WallMisses     int           `json:"wall_misses"`
-	CleanupErrors  int           `json:"cleanup_errors"`
-	Passed         bool          `json:"passed"`
-	Samples        []sample      `json:"samples"`
+	Version          int           `json:"version"`
+	ExecutableSHA256 string        `json:"executable_sha256"`
+	Label            string        `json:"label,omitempty"`
+	StartedAt        time.Time     `json:"started_at"`
+	CompletedAt      time.Time     `json:"completed_at"`
+	Endpoint         string        `json:"endpoint"`
+	Batches          int           `json:"batches"`
+	Concurrency      int           `json:"concurrency"`
+	HardLimit        time.Duration `json:"hard_limit_ns"`
+	P50Target        time.Duration `json:"p50_target_ns"`
+	CleanupTimeout   time.Duration `json:"cleanup_timeout_ns"`
+	CommandReady     distribution  `json:"command_ready"`
+	Wall             distribution  `json:"wall"`
+	Cleanup          distribution  `json:"cleanup"`
+	Errors           int           `json:"errors"`
+	SLOMisses        int           `json:"slo_misses"`
+	WallMisses       int           `json:"wall_misses"`
+	CleanupErrors    int           `json:"cleanup_errors"`
+	Passed           bool          `json:"passed"`
+	Samples          []sample      `json:"samples"`
 }
 
 type claimResponse struct {
 	SandboxID string `json:"sandbox_id"`
 }
+
+var (
+	executableSHAOnce sync.Once
+	executableSHA     string
+	executableSHAErr  error
+)
 
 func main() {
 	var (
@@ -148,8 +156,8 @@ func main() {
 
 func (c config) validate() error {
 	parsed, err := url.Parse(c.endpoint)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-		return errors.New("url must be an absolute HTTP(S) regional claim endpoint")
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return errors.New("url must be an absolute HTTPS regional claim endpoint")
 	}
 	if path.Clean(parsed.Path) != "/api/v1/sandboxes" {
 		return errors.New("url path must be /api/v1/sandboxes")
@@ -183,8 +191,13 @@ func run(ctx context.Context, cfg config) (report, error) {
 	if cfg.client == nil {
 		return report{}, errors.New("HTTP client is required")
 	}
+	executableDigest, err := currentExecutableSHA256()
+	if err != nil {
+		return report{}, fmt.Errorf("hash acceptance executable: %w", err)
+	}
 	result := report{
-		Version: 3, Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
+		Version: 4, ExecutableSHA256: executableDigest,
+		Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
 		Batches: cfg.batches, Concurrency: cfg.concurrency, HardLimit: cfg.hardLimit,
 		P50Target: cfg.p50Target, CleanupTimeout: cfg.cleanupTimeout,
 		Samples: make([]sample, cfg.batches*cfg.concurrency),
@@ -269,6 +282,38 @@ func run(ctx context.Context, cfg config) (report, error) {
 		)
 	}
 	return result, nil
+}
+
+func currentExecutableSHA256() (string, error) {
+	executableSHAOnce.Do(func() {
+		path, err := os.Executable()
+		if err != nil {
+			executableSHAErr = err
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			executableSHAErr = err
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			executableSHAErr = err
+			return
+		}
+		if !info.Mode().IsRegular() || info.Size() <= 0 {
+			executableSHAErr = errors.New("acceptance executable is not a non-empty regular file")
+			return
+		}
+		digest := sha256.New()
+		if _, err := io.Copy(digest, file); err != nil {
+			executableSHAErr = err
+			return
+		}
+		executableSHA = fmt.Sprintf("%x", digest.Sum(nil))
+	})
+	return executableSHA, executableSHAErr
 }
 
 func claim(ctx context.Context, cfg config, index, batch, lane int) sample {

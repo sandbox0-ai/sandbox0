@@ -471,9 +471,17 @@ executor still live in sessiond and must move into the final ctld-owned
 runtime before legacy removal. The task driver no longer installs its PoC
 namespace-local iptables policy for regional runtime slots. That legacy path
 remains only for non-runtime-slot compatibility and must be deleted at final
-cutover. The
-10,000-slot Bolt test proves local page reuse only; it does not constitute the
-required privileged, multi-node, end-to-end 24-hour soak.
+cutover. The 10,000-slot Bolt test proves local page reuse only; it does not
+constitute the required privileged, multi-node, end-to-end 24-hour soak. The
+opt-in `TestRuntimeSlotJournalTwentyFourHourSoak` companion distributes 10,000
+exact terminal cleanup proofs across a real 24-hour clock, prunes them through
+the production journal, reopens Bolt at one-third of the run, emits fsynced
+JSONL evidence outside the repository, and requires final size to stay within
+one host page of its warm size. It must pass together with the real
+PostgreSQL/RustFS `tools/rootfs-materializer-soak` gate; neither short smoke
+mode nor the accelerated 10,000-record unit test may be reported as 24-hour
+evidence. The full `go test` invocation must set `-timeout 25h` because Go's
+default test timeout is too short for this gate.
 
 The regional terminal controller also needs trusted HTTPS endpoints for each
 Nomad server cluster and exact client node. Its ACL policy must permit

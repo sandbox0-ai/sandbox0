@@ -41,3 +41,19 @@ RustFS growth stays within 4,096 files and 512 MiB. The default invocation is
 the acceptance gate; shorter duration, lower generation count, and reduced
 maximum delay are only smoke-test controls and must not be reported as 24-hour
 evidence.
+
+Run the production runtime-slot Bolt journal companion for the same wall-clock
+window from the nested driver module:
+
+```sh
+SANDBOX0_RUNTIME_SLOT_SOAK_DURATION=24h \
+SANDBOX0_RUNTIME_SLOT_SOAK_PROOFS=10000 \
+SANDBOX0_RUNTIME_SLOT_SOAK_OUTPUT=/tmp/runtime-slot-journal-soak.jsonl \
+go test ./internal/driver \
+    -run '^TestRuntimeSlotJournalTwentyFourHourSoak$' -count=1 -timeout 25h -v
+```
+
+It writes and prunes the exact terminal cleanup record/proof format, reopens
+the journal at one-third of the run, and requires the final Bolt file to remain
+within one host page of its warm size. Both final JSONL events are required for
+the combined 10,000/24-hour gate.

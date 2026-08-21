@@ -1503,6 +1503,14 @@ func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[
 }
 
 func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now time.Time, forced bool) bool {
+	if session.ExternalCrash && session.BranchRemoved {
+		// The regional authority and physical cleanup were already verified.
+		// Keep the compact local proof for the bounded response-replay window,
+		// but do not poll the authority once per second for every retained
+		// terminal session. Reconcile once more at expiry to verify and forget
+		// the proof.
+		return !now.Before(session.CrashRequestedAt.Add(2 * runtimeSlotProofRetention))
+	}
 	if forced || session.Kind == rootfssession.RecoveryPlannedRetire {
 		return true
 	}

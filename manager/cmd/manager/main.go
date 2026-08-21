@@ -446,6 +446,13 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
 	}
+	var sandboxReader httpserver.SandboxReader = sandboxService
+	if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
+		sandboxReader, err = service.NewNomadSandboxReader(sandboxStore)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad sandbox query service", zap.Error(err))
+		}
+	}
 	if managerNodeAuthority != nil {
 		pressurePauser, ok := sandboxBackend.(rootfswriterauthority.PressurePauser)
 		if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad && !ok {
@@ -566,7 +573,7 @@ func main() {
 
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
-		SandboxReader:           sandboxService,
+		SandboxReader:           sandboxReader,
 		SandboxUpdater:          sandboxService,
 		SandboxNetworkPolicy:    sandboxService,
 		SandboxRootFS:           sandboxService,

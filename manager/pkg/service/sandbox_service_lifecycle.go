@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -881,34 +879,7 @@ func (s *SandboxService) projectNomadSandboxRecord(
 		}
 		return nil, fmt.Errorf("get Nomad runtime slot projection: %w", err)
 	}
-	if slot == nil || slot.SandboxID != record.ID {
-		return nil, fmt.Errorf("Nomad runtime slot projection does not match sandbox %s", record.ID)
-	}
-	projected.PodName = slot.AllocationID
-	switch slot.State {
-	case sandboxstore.RuntimeSlotStateActive:
-		if slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
-			slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
-			projected.Status = managerapi.SandboxStatusFailed
-			return projected, nil
-		}
-		if err := runtimeslot.ValidateNomadProcdAddress(slot.ProcdAddress); err != nil {
-			projected.Status = managerapi.SandboxStatusFailed
-			return projected, nil
-		}
-		projected.Status = managerapi.SandboxStatusRunning
-		projected.InternalAddr = slot.ProcdAddress
-	case sandboxstore.RuntimeSlotStateClaiming, sandboxstore.RuntimeSlotStateStarting:
-		projected.Status = managerapi.SandboxStatusStarting
-	case sandboxstore.RuntimeSlotStateQuiescing, sandboxstore.RuntimeSlotStateOrphaned:
-		projected.Status = managerapi.SandboxStatusFailed
-	default:
-		projected.Status = managerapi.SandboxStatusFailed
-	}
-	if sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
-		projected.InternalAddr = ""
-	}
-	return projected, nil
+	return projectNomadSandboxSlot(record, activeTxn, projected, slot)
 }
 
 // UpdateSandbox updates mutable sandbox configuration fields.
@@ -1428,6 +1399,10 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *manage
 }
 
 func (s *SandboxService) recordToSandbox(record *sandboxstore.SandboxRecord) *managerapi.Sandbox {
+	return sandboxRecordToSandbox(record)
+}
+
+func sandboxRecordToSandbox(record *sandboxstore.SandboxRecord) *managerapi.Sandbox {
 	if record == nil {
 		return nil
 	}
@@ -1574,20 +1549,7 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 		return nil, err
 	}
 
-	status := map[string]any{
-		"sandbox_id":      sandbox.ID,
-		"template_id":     sandbox.TemplateID,
-		"team_id":         sandbox.TeamID,
-		"user_id":         sandbox.UserID,
-		"pod_name":        sandbox.PodName,
-		"status":          sandbox.Status,
-		"claimed_at":      sandbox.ClaimedAt.Format(time.RFC3339),
-		"expires_at":      sandbox.ExpiresAt,
-		"hard_expires_at": sandbox.HardExpiresAt,
-		"created_at":      sandbox.CreatedAt.Format(time.RFC3339),
-	}
-
-	return status, nil
+	return sandboxStatusResponse(sandbox), nil
 }
 
 // RefreshRequest represents a sandbox refresh request

@@ -363,6 +363,51 @@ func TestManagerExternalCrashFenceCannotBeAdoptedByLocalAuthority(t *testing.T) 
 	require.Equal(t, result, retry)
 }
 
+func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.T) {
+	manager, _, request := newTestManager(t, "external-replaces-planned")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "local-planned-operation"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	planned, err := manager.RetireResult(request.Parent, request.Identity, "local-planned-operation")
+	require.NoError(t, err)
+	require.NotEmpty(t, planned.Descriptor)
+	require.NotEmpty(t, planned.DetachProof)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "regional-crash-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "local-planned-operation", stored.RetireOperationID)
+
+	observation, err := manager.CrashFenceExternal(
+		request.WithoutWriterGrantToken(), "regional-crash-operation",
+	)
+	require.NoError(t, err)
+	require.NoError(t, observation.Validate())
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.RetireOperationID)
+	require.Empty(t, stored.SealedDescriptor)
+	require.Empty(t, stored.SealedBlockHead)
+	require.Empty(t, stored.SealedDurability)
+	require.Empty(t, stored.DetachProof)
+	require.NotNil(t, stored.CrashFence)
+	require.True(t, stored.CrashFence.External)
+	require.NotNil(t, stored.CrashFence.Result)
+	require.True(t, stored.BranchRemoved)
+	terminal, err := terminalDeviceProof(stored)
+	require.NoError(t, err)
+	require.True(t, terminal)
+
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.True(t, recovery[0].ExternalCrash)
+	require.Equal(t, "regional-crash-operation", recovery[0].CrashOperationID)
+}
+
 func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {
 	manager, _, request := newTestManager(t, "forget-planned")
 	_, err := manager.Ensure(t.Context(), request)

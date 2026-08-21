@@ -381,6 +381,12 @@ func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, op
 	return r.ensureCalls, r.retireCalls, r.lastParent, r.lastOperation
 }
 
+func (r *fakeRootFSRuntime) terminalCallsSnapshot() (retireCalls, crashCalls int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.retireCalls, r.crashCalls
+}
+
 func (m *fakeMounter) Bind(source, target string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

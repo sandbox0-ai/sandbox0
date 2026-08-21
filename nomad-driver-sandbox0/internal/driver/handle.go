@@ -445,7 +445,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	sessionAttached := false
 	claimSucceeded := false
 	defer func() {
-		if durableStage == nil || !sessionAttached || claimSucceeded || h.rootfs == nil {
+		if runtimeSlotNeeded || durableStage == nil || !sessionAttached || claimSucceeded || h.rootfs == nil {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -533,6 +533,12 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			if !errors.As(err, &consumedErr) {
 				_ = h.rollbackClaim()
 				return attachErr
+			}
+			if runtimeSlotNeeded {
+				return h.poisonClaimLaunch(errors.Join(
+					attachErr,
+					errors.New("regional runtime-slot cleanup is required for the consumed writer"),
+				), false)
 			}
 			fenceErr := h.crashAbandonPersistedRootFS(errors.New("RootFS attach failed; writer was crash-abandoned"))
 			if fenceErr != nil {
@@ -921,12 +927,16 @@ func (h *taskHandle) Close(force bool) error {
 		_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	}
 	firstErr := h.runner.Delete(cleanupCtx, h.containerID, true)
-	if rootMounted && (phase != phasePoisoned || stage == nil) {
+	if rootMounted && (h.runtimeSlotNeeded || phase != phasePoisoned || stage == nil) {
 		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if stage != nil && rootMounted && h.rootfs != nil {
+	// The regional runtime-slot reconciler is the sole terminal writer owner.
+	// The plugin removes its task-facing bind, but leaves the durable RootFS
+	// session for authenticated node cleanup so Nomad StopTask cannot race a
+	// crash-abandon transaction with a competing planned retirement.
+	if !h.runtimeSlotNeeded && stage != nil && rootMounted && h.rootfs != nil {
 		retireCtx, retireCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		var err error
 		if phase == phasePoisoned {
@@ -1142,6 +1152,21 @@ func (h *taskHandle) recoverCrashedRootFS() error {
 	_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	if err := h.runner.Delete(cleanupCtx, h.containerID, true); err != nil {
 		return fmt.Errorf("delete crashed gVisor task: %w", err)
+	}
+	if h.runtimeSlotNeeded {
+		if err := h.mounter.Unmount(h.rootMount); err != nil {
+			return fmt.Errorf("unmount crashed runtime-slot task root: %w", err)
+		}
+		h.mu.Lock()
+		h.rootMounted = false
+		h.phase = phasePoisoned
+		h.exitResult = &drivers.ExitResult{Err: errors.New("task driver restarted; regional runtime-slot cleanup is required")}
+		if h.completedAt.IsZero() {
+			h.completedAt = time.Now()
+		}
+		closeDoneLocked(h.done)
+		h.mu.Unlock()
+		return h.persist()
 	}
 	return h.crashAbandonPersistedRootFS(errors.New("task driver restarted; RootFS writer was crash-abandoned"))
 }

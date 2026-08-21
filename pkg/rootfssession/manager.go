@@ -1580,11 +1580,30 @@ func (m *Manager) crashFence(
 			current.DirtyTailPressure.OperationID, errdefs.ErrFailedPrecondition,
 		)
 	}
-	if current.State != stateTombstoned || current.RetireOperationID != "" {
+	if current.State != stateTombstoned {
 		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session is not an unplanned tombstone: %w", errdefs.ErrFailedPrecondition)
 	}
 	if strings.TrimSpace(current.BranchPath) == "" {
 		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session lacks a recorded physical attachment: %w", errdefs.ErrFailedPrecondition)
+	}
+	if current.RetireOperationID != "" {
+		if !external {
+			return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session is not an unplanned tombstone: %w", errdefs.ErrFailedPrecondition)
+		}
+		// A node-local planned retirement can complete before the regional
+		// runtime-slot owner records its crash-abandon decision. The regional
+		// writer fence is authoritative for that exact binding, so replace only
+		// the unpublished local result after physical teardown. Dirty-tail
+		// retirements are rejected above because their sealed data must publish.
+		current.RetireOperationID = ""
+		current.SealedDescriptor = nil
+		current.SealedBlockHead = ""
+		current.SealedDurability = ""
+		current.DetachProof = ""
+		current.CrashFence = nil
+		if err := m.save(current); err != nil {
+			return rootfshandoff.CrashFenceSessionObservation{}, err
+		}
 	}
 	if current.CrashFence != nil {
 		if current.CrashFence.OperationID != operationID {

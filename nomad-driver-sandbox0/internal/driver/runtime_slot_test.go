@@ -418,6 +418,10 @@ func TestStartTaskRegistersReadyRuntimeSlotBeforeReturning(t *testing.T) {
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
 	}
+	retireCalls, crashCalls := fixture.rootfs.terminalCallsSnapshot()
+	if retireCalls != 0 || crashCalls != 0 {
+		t.Fatalf("runtime-slot plugin terminal calls = retire %d crash %d, want regional owner", retireCalls, crashCalls)
+	}
 	var persisted PersistedState
 	if err := handle.GetDriverState(&persisted); err != nil || persisted.Phase != phaseWarm {
 		t.Fatalf("Nomad state = %+v, error = %v", persisted, err)
@@ -720,9 +724,41 @@ func TestRuntimeSlotClaimStartingRejectionPoisonsWithoutRunsc(t *testing.T) {
 	if len(unmounts) == 0 || unmounts[len(unmounts)-1] != handle.rootMount {
 		t.Fatalf("unmounts = %v, want claimed root detached", unmounts)
 	}
-	_, retireCalls, _, _ := fixture.rootfs.snapshot()
-	if retireCalls != 1 {
-		t.Fatalf("RootFS retire calls = %d, want consumed writer retired", retireCalls)
+	retireCalls, crashCalls := fixture.rootfs.terminalCallsSnapshot()
+	if retireCalls != 0 || crashCalls != 0 {
+		t.Fatalf("runtime-slot claim abort terminal calls = retire %d crash %d, want regional owner", retireCalls, crashCalls)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRuntimeSlotConsumedAttachFailureLeavesTerminalWriteForRegionalOwner(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, mounter := prepareRuntimeSlotClaim(t, fixture)
+	fixture.rootfs.mu.Lock()
+	fixture.rootfs.ensureErr = &consumedRootFSAttachError{Err: errors.New("injected attach failure")}
+	fixture.rootfs.mu.Unlock()
+
+	err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "regional runtime-slot cleanup is required") {
+		t.Fatalf("Claim() error = %v, want regional cleanup requirement", err)
+	}
+	status := handle.TaskStatus()
+	if status.DriverAttributes["phase"] != string(phasePoisoned) || status.DriverAttributes["root_mounted"] != "false" {
+		t.Fatalf("status = %+v, want poisoned and detached", status.DriverAttributes)
+	}
+	retireCalls, crashCalls := fixture.rootfs.terminalCallsSnapshot()
+	if retireCalls != 0 || crashCalls != 0 {
+		t.Fatalf("runtime-slot attach failure terminal calls = retire %d crash %d, want regional owner", retireCalls, crashCalls)
+	}
+	_, unmounts := mounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != handle.rootMount {
+		t.Fatalf("unmounts = %v, want task-facing root detached", unmounts)
 	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
@@ -919,20 +955,12 @@ func TestRuntimeSlotCommandReadyRejectionFencesWriter(t *testing.T) {
 		t.Fatal("regional command-ready rejection did not poison the writer")
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		fixture.rootfs.mu.Lock()
-		crashCalls := fixture.rootfs.crashCalls
-		fixture.rootfs.mu.Unlock()
-		if crashCalls == 1 {
-			break
-		}
+	for time.Now().Before(deadline) && handle.TaskStatus().DriverAttributes["root_mounted"] != "false" {
 		time.Sleep(time.Millisecond)
 	}
-	fixture.rootfs.mu.Lock()
-	crashCalls := fixture.rootfs.crashCalls
-	fixture.rootfs.mu.Unlock()
-	if crashCalls != 1 {
-		t.Fatalf("RootFS crash-fence calls = %d, want 1", crashCalls)
+	retireCalls, crashCalls := fixture.rootfs.terminalCallsSnapshot()
+	if retireCalls != 0 || crashCalls != 0 {
+		t.Fatalf("runtime-slot rejection terminal calls = retire %d crash %d, want regional owner", retireCalls, crashCalls)
 	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
@@ -992,6 +1020,51 @@ func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
 	}
 	if err := recovered.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRecoverRuntimeSlotLeavesTerminalWriteForRegionalOwner(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	if err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	state := handle.PersistedState()
+	handle.stopExitWatch()
+	handle.stopConsumerRenewal()
+	fixture.plugin.cancel()
+
+	recoveredRunner := newFakeRunsc()
+	recoveredRunner.setState("running")
+	recoveredMounter := &fakeMounter{}
+	recovered := newTaskHandle(taskHandleOptions{
+		taskConfig: state.TaskConfig, bundleDir: state.BundleDir, containerID: state.ContainerID,
+		rootMount: state.RootMount, socketPath: filepath.Join(t.TempDir(), "recovered.sock"),
+		runner: recoveredRunner, mounter: recoveredMounter, rootfs: fixture.rootfs,
+		allowedRoot: fixture.config.AllowedRootfsDir, rootfsAllowedRoot: fixture.rootfs.runtimeInfo.MountRoot,
+		runtimeSlotNeeded: true, logger: hclog.NewNullLogger(),
+	})
+	if err := recovered.Recover(state); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	status := recovered.TaskStatus()
+	if status.DriverAttributes["phase"] != string(phasePoisoned) || status.DriverAttributes["root_mounted"] != "false" {
+		t.Fatalf("recovered status = %+v, want poisoned and detached", status.DriverAttributes)
+	}
+	retireCalls, crashCalls := fixture.rootfs.terminalCallsSnapshot()
+	if retireCalls != 0 || crashCalls != 0 {
+		t.Fatalf("runtime-slot recovery terminal calls = retire %d crash %d, want regional owner", retireCalls, crashCalls)
+	}
+	if calls := recoveredRunner.callsSnapshot(); !contains(calls, "kill:KILL") || !contains(calls, "delete:force") {
+		t.Fatalf("runner calls = %v, want forced runtime removal", calls)
+	}
+	_, unmounts := recoveredMounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != state.RootMount {
+		t.Fatalf("unmounts = %v, want task-facing root detached", unmounts)
 	}
 }
 

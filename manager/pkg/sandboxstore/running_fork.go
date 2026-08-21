@@ -132,6 +132,13 @@ func forkRunningRootFSFilesystem(
 	sourceSandbox *SandboxRecord,
 	req *ForkRunningRootFSFilesystemRequest,
 ) (*RootFSFilesystem, error) {
+	intent, err := getNomadTemplateCaptureIntentForUpdate(ctx, tx, req.OperationID)
+	if err != nil {
+		return nil, err
+	}
+	if intent != nil {
+		return captureRunningRootFSTemplate(ctx, tx, sourceSandbox, intent, req)
+	}
 	if retry, err := loadRunningRootFSForkRetry(ctx, tx, req); err != nil || retry != nil {
 		return retry, err
 	}
@@ -142,7 +149,7 @@ func forkRunningRootFSFilesystem(
 	}
 	targetSandbox, err := scanSandboxRecord(tx.QueryRow(ctx,
 		sandboxRecordSelectSQL()+` WHERE sandbox_id = $1 FOR UPDATE`, req.TargetSandboxID))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || targetSandbox == nil {
 		return nil, fmt.Errorf("%w: target sandbox %s", ErrRootFSFilesystemNotFound, req.TargetSandboxID)
 	}
 	if err != nil {

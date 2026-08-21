@@ -258,7 +258,9 @@ func createRootFSSnapshot(ctx context.Context, db rootFSStoreDB, req *CreateRoot
 			FROM manager.sandbox_rootfs_bindings b
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 			JOIN manager.sandboxes sb ON sb.sandbox_id = b.sandbox_id
-			LEFT JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
+			LEFT JOIN manager.rootfs_generations g
+			  ON g.generation_id = f.head_generation_id
+			 AND g.filesystem_id = f.filesystem_id
 			LEFT JOIN manager.rootfs_layers l ON l.layer_id = f.head_layer_id
 			WHERE b.sandbox_id = $1
 				AND (
@@ -321,7 +323,9 @@ func (s *PGSandboxStore) ListRootFSSnapshots(ctx context.Context, req *ListRootF
 			COALESCE(g.source_oci_digest, l.base_image_digest, ''),
 			s.name, s.description, s.created_at, s.expires_at
 		FROM manager.rootfs_snapshots s
-		LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+		LEFT JOIN manager.rootfs_generations g
+		  ON g.generation_id = s.head_generation_id
+		 AND g.filesystem_id = s.filesystem_id
 		LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
 		WHERE s.source_sandbox_id = $1
 			AND ($2 = '' OR s.team_id = $2)
@@ -359,7 +363,9 @@ func (s *PGSandboxStore) GetRootFSSnapshot(ctx context.Context, snapshotID, team
 			COALESCE(g.source_oci_digest, l.base_image_digest, ''),
 			s.name, s.description, s.created_at, s.expires_at
 		FROM manager.rootfs_snapshots s
-		LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+		LEFT JOIN manager.rootfs_generations g
+		  ON g.generation_id = s.head_generation_id
+		 AND g.filesystem_id = s.filesystem_id
 		LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
 		WHERE s.snapshot_id = $1
 			AND ($2 = '' OR s.team_id = $2)
@@ -579,7 +585,9 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				COALESCE(g.writer_epoch, 0) AS head_writer_epoch
 			FROM manager.rootfs_snapshots s
 			LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
-			LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+			LEFT JOIN manager.rootfs_generations g
+			  ON g.generation_id = s.head_generation_id
+			 AND g.filesystem_id = s.filesystem_id
 			LEFT JOIN manager.rootfs_base_artifacts a ON a.artifact_digest = g.base_artifact_digest
 			WHERE s.snapshot_id = $2
 				AND ($3 = '' OR s.team_id = $3)
@@ -848,6 +856,10 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	if err != nil {
 		return nil, err
 	}
+	deletedTemplateCaptures, err := s.DeleteReleasedNomadTemplateCaptures(ctx, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
 	deletedFilesystems, err := s.DeleteUnreferencedRootFSFilesystems(ctx, teamID, limit)
 	if err != nil {
 		return nil, err
@@ -862,7 +874,7 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 		Layers:             layers,
 		DeletedObjectKeys:  deletedObjectKeys,
 		ExpiredSnapshots:   expiredSnapshots,
-		DeletedFilesystems: deletedFilesystems,
+		DeletedFilesystems: deletedTemplateCaptures + deletedFilesystems,
 	}
 	if err != nil {
 		return result, err
@@ -963,6 +975,11 @@ func (s *PGSandboxStore) deleteUnreferencedRootFSFilesystemLeaves(ctx context.Co
 					SELECT 1
 					FROM manager.rootfs_filesystems child
 					WHERE child.source_filesystem_id = f.filesystem_id
+				)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM manager.rootfs_running_template_captures capture
+					WHERE capture.target_filesystem_id = f.filesystem_id
 				)
 			ORDER BY f.updated_at ASC
 			LIMIT $2

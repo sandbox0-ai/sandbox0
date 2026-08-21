@@ -75,10 +75,10 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	}
 
 	if s.templateBuildWorker != nil {
-		go logControllerError(ctx, s.logger, "Template image build worker stopped", func() error {
+		go logControllerError(ctx, s.logger, "Template RootFS build worker stopped", func() error {
 			return s.templateBuildWorker.Run(ctx)
 		})
-		s.logger.Info("Template image build worker started",
+		s.logger.Info("Template RootFS build worker started",
 			zap.String("clusterID", naming.ClusterIDOrDefault(&s.cfg.DefaultClusterId)),
 		)
 	}

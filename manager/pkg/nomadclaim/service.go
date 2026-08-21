@@ -66,6 +66,7 @@ type Store interface {
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
+	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
 	GetRootFSSnapshot(context.Context, string, string) (*sandboxstore.RootFSSnapshot, error)
 	RestoreRootFSFromSnapshot(context.Context, *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error)
 }
@@ -894,6 +895,9 @@ func (s *Service) prepareRootFS(
 		if snapshot == nil || snapshot.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 {
 			return rootFSPlan{}, sandboxstore.ErrRootFSSnapshotNotFound
 		}
+		if _, err := s.validateSnapshotGeneration(ctx, snapshot); err != nil {
+			return rootFSPlan{}, err
+		}
 		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(ctx, snapshot.BaseArtifactDigest, platform)
 		if err != nil {
 			return rootFSPlan{}, err
@@ -902,6 +906,54 @@ func (s *Service) prepareRootFS(
 			return rootFSPlan{}, fmt.Errorf("%w: snapshot Base artifact attestation changed", sandboxstore.ErrRootFSBaseArtifactConflict)
 		}
 		return rootFSPlan{snapshotID: snapshotID}, nil
+	}
+	if tpl.RootFS != nil {
+		source := *tpl.RootFS
+		if err := source.Validate(); err != nil {
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS attestation: %v", service.ErrInvalidClaimRequest, err)
+		}
+		templateDigest, err := digestPinnedImage(strings.TrimSpace(tpl.Spec.MainContainer.Image))
+		if err != nil || templateDigest != source.SourceOCIDigest {
+			return rootFSPlan{}, fmt.Errorf("%w: template image does not match its captured RootFS",
+				service.ErrInvalidClaimRequest)
+		}
+		if source.Platform.OS != platform.OS || source.Platform.Architecture != platform.Architecture ||
+			source.Platform.Variant != platform.Variant {
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS platform does not match the warm-slot profile",
+				service.ErrDataPlaneNotReady)
+		}
+		snapshot, err := s.store.GetRootFSSnapshot(ctx, source.SnapshotID, req.TeamID)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
+		if snapshot == nil || snapshot.StorageFormat != source.StorageFormat ||
+			snapshot.HeadGenerationID != source.GenerationID ||
+			snapshot.SourceOCIDigest != source.SourceOCIDigest ||
+			snapshot.BaseArtifactDigest != source.BaseArtifactDigest ||
+			snapshot.FormatGeneration != source.FormatGeneration {
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS snapshot attestation changed",
+				sandboxstore.ErrRootFSGenerationConflict)
+		}
+		generation, err := s.validateSnapshotGeneration(ctx, snapshot)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
+		if generation.SourceOCIDigest != source.SourceOCIDigest ||
+			generation.BaseArtifactDigest != source.BaseArtifactDigest ||
+			generation.FormatGeneration != source.FormatGeneration {
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS generation attestation changed",
+				sandboxstore.ErrRootFSGenerationConflict)
+		}
+		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(ctx, source.BaseArtifactDigest, platform)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
+		if artifact.SourceOCIDigest != source.SourceOCIDigest ||
+			artifact.FormatGeneration != source.FormatGeneration {
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS base artifact attestation changed",
+				sandboxstore.ErrRootFSBaseArtifactConflict)
+		}
+		return rootFSPlan{snapshotID: source.SnapshotID}, nil
 	}
 	sourceRef := strings.TrimSpace(tpl.Spec.MainContainer.Image)
 	sourceDigest, err := digestPinnedImage(sourceRef)
@@ -919,6 +971,31 @@ func (s *Service) prepareRootFS(
 		sourceRef: sourceRef, sourceDigest: sourceDigest,
 		baseArtifactDigest: artifact.ArtifactDigest,
 	}, nil
+}
+
+func (s *Service) validateSnapshotGeneration(
+	ctx context.Context,
+	snapshot *sandboxstore.RootFSSnapshot,
+) (*sandboxstore.RootFSGeneration, error) {
+	if snapshot == nil || snapshot.HeadGenerationID == "" || snapshot.HeadLayerID != "" {
+		return nil, fmt.Errorf("%w: snapshot has no block generation", sandboxstore.ErrRootFSGenerationConflict)
+	}
+	generation, err := s.store.GetRootFSGeneration(ctx, snapshot.HeadGenerationID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load snapshot generation: %v",
+			sandboxstore.ErrRootFSGenerationConflict, err)
+	}
+	if generation == nil || generation.ID != snapshot.HeadGenerationID ||
+		generation.FilesystemID != snapshot.FilesystemID ||
+		generation.SourceOCIDigest != snapshot.SourceOCIDigest ||
+		generation.BaseArtifactDigest != snapshot.BaseArtifactDigest ||
+		generation.FormatGeneration != snapshot.FormatGeneration ||
+		(generation.DurabilityState != sandboxstore.RootFSGenerationStateCompositeDurable &&
+			generation.DurabilityState != sandboxstore.RootFSGenerationStateS3Materialized) {
+		return nil, fmt.Errorf("%w: snapshot generation attestation changed",
+			sandboxstore.ErrRootFSGenerationConflict)
+	}
+	return generation, nil
 }
 
 func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimRequest, plan rootFSPlan) error {

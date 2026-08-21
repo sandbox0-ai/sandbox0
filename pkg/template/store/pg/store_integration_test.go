@@ -2,14 +2,18 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -18,6 +22,176 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestPublishRootFSTemplateBuildRetainsAttestationAndQueuesDeletion(t *testing.T) {
+	store, pool := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+
+	buildID := uuid.NewString()
+	tpl := &template.Template{
+		TemplateID: "block-derived", Scope: naming.ScopeTeam, TeamID: "team-1", UserID: "user-1",
+		Spec:      integrationTemplateSpec("registry.example/source@" + digest.FromString("source").String()),
+		CreatedAt: time.Now().UTC(),
+	}
+	build := &template.TemplateBuild{
+		BuildID: buildID, TemplateID: tpl.TemplateID, Scope: tpl.Scope, TeamID: tpl.TeamID,
+		UserID: tpl.UserID, SourceSandboxID: "source-sandbox", TargetClusterID: "cluster-a",
+		RequestHash: strings.Repeat("9", 64), SnapshotID: "template-build-" + strings.ReplaceAll(buildID, "-", ""),
+	}
+	if _, _, err := store.CreateTemplateBuild(ctx, tpl, build); err != nil {
+		t.Fatalf("CreateTemplateBuild() error = %v", err)
+	}
+	if _, err := store.ClaimTemplateBuild(ctx, "cluster-a", "block-worker", template.TemplateBuildCaptureVersionBlockCOW, time.Minute); err != nil {
+		t.Fatalf("ClaimTemplateBuild() error = %v", err)
+	}
+	capturedAt := time.Now().UTC().Add(-time.Second)
+	source := template.RootFSTemplateSource{
+		StorageFormat: template.RootFSTemplateStorageFormatBlockCOWV1,
+		SnapshotID:    build.SnapshotID, GenerationID: "generation-1",
+		SourceOCIDigest:    digest.FromString("source").String(),
+		BaseArtifactDigest: digest.FromString("artifact").String(), FormatGeneration: 4,
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64", Variant: "v3"},
+	}
+	captureMetadata := fmt.Sprintf(
+		`{"version":2,"snapshot_id":%q,"storage_format":%q,"head_generation_id":%q,"source_oci_digest":%q,"base_artifact_digest":%q,"format_generation":%d,"platform":{"os":%q,"architecture":%q,"variant":%q}}`,
+		source.SnapshotID, source.StorageFormat, source.GenerationID, source.SourceOCIDigest,
+		source.BaseArtifactDigest, source.FormatGeneration, source.Platform.OS,
+		source.Platform.Architecture, source.Platform.Variant,
+	)
+	if err := store.MarkTemplateBuildCaptured(
+		ctx, buildID, "block-worker", build.SnapshotID, []byte(captureMetadata), capturedAt,
+	); err != nil {
+		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
+	}
+	if err := store.ReleaseTemplateBuild(ctx, buildID, "block-worker", time.Now().UTC(), "regional handoff"); err != nil {
+		t.Fatalf("ReleaseTemplateBuild() error = %v", err)
+	}
+	wrongMode, err := store.ClaimTemplateBuild(
+		ctx, "cluster-b", "oci-worker", template.TemplateBuildCaptureVersionOCI, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("wrong-mode ClaimTemplateBuild() error = %v", err)
+	}
+	if wrongMode != nil {
+		t.Fatalf("OCI worker claimed block-COW publication = %#v", wrongMode)
+	}
+	claimed, err := store.ClaimTemplateBuild(
+		ctx, "cluster-b", "block-publish-worker",
+		template.TemplateBuildCaptureVersionBlockCOW, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("block publishing ClaimTemplateBuild() error = %v", err)
+	}
+	if claimed == nil || claimed.BuildID != buildID {
+		t.Fatalf("block publishing claim = %#v", claimed)
+	}
+	if err := store.PublishTemplateBuild(
+		ctx, buildID, "block-publish-worker", tpl.Spec, tpl.Spec.MainContainer.Image,
+	); !errors.Is(err, template.ErrTemplateBuildLeaseLost) {
+		t.Fatalf("OCI publication of block capture error = %v, want lease lost", err)
+	}
+	mismatchedSource := source
+	mismatchedSource.GenerationID = "substituted-generation"
+	if err := store.PublishRootFSTemplateBuild(
+		ctx, buildID, "block-publish-worker", mismatchedSource, capturedAt,
+	); !errors.Is(err, template.ErrTemplateBuildLeaseLost) {
+		t.Fatalf("mismatched RootFS publication error = %v, want lease lost", err)
+	}
+	if err := store.PublishRootFSTemplateBuild(ctx, buildID, "block-publish-worker", source, capturedAt); err != nil {
+		t.Fatalf("PublishRootFSTemplateBuild() error = %v", err)
+	}
+
+	loaded, err := store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() error = %v", err)
+	}
+	if loaded == nil || !loaded.ReadyForClaim() || loaded.RootFS == nil || !reflect.DeepEqual(*loaded.RootFS, source) {
+		t.Fatalf("published template = %#v", loaded)
+	}
+	var builds int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM scheduler_template_builds WHERE build_id = $1::uuid`, buildID).Scan(&builds); err != nil {
+		t.Fatalf("count published build rows: %v", err)
+	}
+	if builds != 0 {
+		t.Fatalf("published build rows = %d, want 0", builds)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO scheduler_template_rootfs_deletions (snapshot_id, team_id)
+		VALUES ($1, $2)
+	`, source.SnapshotID, tpl.TeamID); err != nil {
+		t.Fatalf("insert stale cleanup tombstone: %v", err)
+	}
+	cleanup, err := store.ClaimTemplateRootFSDeletion(ctx, "premature-cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("premature ClaimTemplateRootFSDeletion() error = %v", err)
+	}
+	if cleanup != nil {
+		t.Fatalf("cleanup claimed snapshot still referenced by template = %#v", cleanup)
+	}
+	deleted, err := store.CancelTemplateBuildAndDeleteTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil || !deleted {
+		t.Fatalf("CancelTemplateBuildAndDeleteTemplate() = deleted %v, error %v", deleted, err)
+	}
+	cleanup, err = store.ClaimTemplateRootFSDeletion(ctx, "cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimTemplateRootFSDeletion() error = %v", err)
+	}
+	if cleanup == nil || cleanup.SnapshotID != source.SnapshotID || cleanup.TeamID != tpl.TeamID {
+		t.Fatalf("cleanup tombstone = %#v", cleanup)
+	}
+	if err := store.FinishTemplateRootFSDeletion(ctx, cleanup.SnapshotID, "cleanup-worker"); err != nil {
+		t.Fatalf("FinishTemplateRootFSDeletion() error = %v", err)
+	}
+}
+
+func TestTemplateRootFSDeletionWaitsForCanceledBuildCleanup(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	buildID := uuid.NewString()
+	tpl := &template.Template{
+		TemplateID: "canceled-before-capture", Scope: naming.ScopeTeam,
+		TeamID: "team-1", UserID: "user-1",
+		Spec: integrationTemplateSpec("registry.example/source@" + digest.FromString("source").String()),
+	}
+	build := &template.TemplateBuild{
+		BuildID: buildID, TemplateID: tpl.TemplateID, Scope: tpl.Scope, TeamID: tpl.TeamID,
+		UserID: tpl.UserID, SourceSandboxID: "source-sandbox", TargetClusterID: "cluster-a",
+		RequestHash: strings.Repeat("8", 64), SnapshotID: template.BuildSnapshotID(buildID),
+	}
+	if _, _, err := store.CreateTemplateBuild(ctx, tpl, build); err != nil {
+		t.Fatalf("CreateTemplateBuild() error = %v", err)
+	}
+	if _, err := store.CancelTemplateBuildAndDeleteTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		t.Fatalf("CancelTemplateBuildAndDeleteTemplate() error = %v", err)
+	}
+	deletion, err := store.ClaimTemplateRootFSDeletion(ctx, "cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("premature ClaimTemplateRootFSDeletion() error = %v", err)
+	}
+	if deletion != nil {
+		t.Fatalf("cleanup claimed snapshot still owned by canceled build = %#v", deletion)
+	}
+	canceled, err := store.ClaimTemplateBuild(
+		ctx, "cluster-b", "canceled-build-worker",
+		template.TemplateBuildCaptureVersionBlockCOW, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("ClaimTemplateBuild() error = %v", err)
+	}
+	if canceled == nil || canceled.BuildID != buildID || canceled.CancelRequestedAt.IsZero() {
+		t.Fatalf("canceled build claim = %#v", canceled)
+	}
+	if err := store.FinishTemplateBuild(ctx, buildID, "canceled-build-worker"); err != nil {
+		t.Fatalf("FinishTemplateBuild() error = %v", err)
+	}
+	deletion, err = store.ClaimTemplateRootFSDeletion(ctx, "cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimTemplateRootFSDeletion() error = %v", err)
+	}
+	if deletion == nil || deletion.SnapshotID != build.SnapshotID {
+		t.Fatalf("cleanup tombstone = %#v", deletion)
+	}
+}
 
 func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing.T) {
 	store, pool := newTemplateStoreIntegrationTest(t)
@@ -50,14 +224,14 @@ func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing
 		t.Fatal("CreateTemplateBuild() created = false, want true")
 	}
 
-	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker-before-crash", time.Minute)
+	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker-before-crash", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("ClaimTemplateBuild() error = %v", err)
 	}
 	if claimed == nil || claimed.Stage != v1alpha1.TemplateCreationStageCapturing {
 		t.Fatalf("initial claimed build = %#v, want capturing", claimed)
 	}
-	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker-before-crash", build.SnapshotID, nil, time.Now().UTC()); err != nil {
+	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker-before-crash", build.SnapshotID, []byte(`{"version":1}`), time.Now().UTC()); err != nil {
 		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
 	}
 	finalSpec := integrationTemplateSpec("registry.internal/team-1/derived@sha256:" + strings.Repeat("b", 64))
@@ -73,7 +247,7 @@ func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing
 		t.Fatalf("expire crashed worker lease: %v", err)
 	}
 
-	recovered, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", time.Minute)
+	recovered, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("recovery ClaimTemplateBuild() error = %v", err)
 	}
@@ -129,10 +303,10 @@ func TestClaimTemplateBuildRecoversFailedBuildCleanupAfterWorkerCrash(t *testing
 	if _, _, err := store.CreateTemplateBuild(ctx, tpl, build); err != nil {
 		t.Fatalf("CreateTemplateBuild() error = %v", err)
 	}
-	if _, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker-before-crash", time.Minute); err != nil {
+	if _, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker-before-crash", template.TemplateBuildCaptureVersionOCI, time.Minute); err != nil {
 		t.Fatalf("ClaimTemplateBuild() error = %v", err)
 	}
-	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker-before-crash", build.SnapshotID, nil, time.Now().UTC()); err != nil {
+	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker-before-crash", build.SnapshotID, []byte(`{"version":1}`), time.Now().UTC()); err != nil {
 		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
 	}
 	if err := store.FailTemplateBuild(ctx, buildID, "worker-before-crash", "publish_failed", "registry unavailable"); err != nil {
@@ -146,7 +320,7 @@ func TestClaimTemplateBuildRecoversFailedBuildCleanupAfterWorkerCrash(t *testing
 		t.Fatalf("expire failed worker lease: %v", err)
 	}
 
-	recovered, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", time.Minute)
+	recovered, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("cleanup ClaimTemplateBuild() error = %v", err)
 	}
@@ -197,13 +371,13 @@ func TestClaimTemplateBuildKeepsCaptureSourceBoundAndAllowsPublishingTakeover(t 
 		t.Fatalf("CreateTemplateBuild() error = %v", err)
 	}
 
-	if claimed, err := store.ClaimTemplateBuild(ctx, "cluster-b", "wrong-cluster-worker", time.Minute); err != nil {
+	if claimed, err := store.ClaimTemplateBuild(ctx, "cluster-b", "wrong-cluster-worker", template.TemplateBuildCaptureVersionOCI, time.Minute); err != nil {
 		t.Fatalf("cross-cluster capturing claim error = %v", err)
 	} else if claimed != nil {
 		t.Fatalf("cross-cluster capturing claim = %#v, want nil", claimed)
 	}
 
-	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "capture-worker", time.Minute)
+	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "capture-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("source-cluster capturing claim error = %v", err)
 	}
@@ -215,7 +389,7 @@ func TestClaimTemplateBuildKeepsCaptureSourceBoundAndAllowsPublishingTakeover(t 
 		buildID,
 		"capture-worker",
 		build.SnapshotID,
-		[]byte(`{"durable":true}`),
+		[]byte(`{"version":1,"durable":true}`),
 		time.Now().UTC(),
 	); err != nil {
 		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
@@ -224,7 +398,17 @@ func TestClaimTemplateBuildKeepsCaptureSourceBoundAndAllowsPublishingTakeover(t 
 		t.Fatalf("ReleaseTemplateBuild() error = %v", err)
 	}
 
-	takenOver, err := store.ClaimTemplateBuild(ctx, "cluster-b", "publish-worker", time.Minute)
+	wrongMode, err := store.ClaimTemplateBuild(
+		ctx, "cluster-b", "block-publish-worker",
+		template.TemplateBuildCaptureVersionBlockCOW, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("wrong-mode publishing claim error = %v", err)
+	}
+	if wrongMode != nil {
+		t.Fatalf("block worker claimed OCI publication = %#v", wrongMode)
+	}
+	takenOver, err := store.ClaimTemplateBuild(ctx, "cluster-b", "publish-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("publishing takeover claim error = %v", err)
 	}
@@ -288,7 +472,7 @@ func TestFailCapturingTemplateBuildsForClusterLeavesCapturedBuildsTakeoverEligib
 	if _, _, err := store.CreateTemplateBuild(ctx, capturedTemplate, capturedBuild); err != nil {
 		t.Fatalf("create captured build: %v", err)
 	}
-	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "capture-worker", time.Minute)
+	claimed, err := store.ClaimTemplateBuild(ctx, "cluster-a", "capture-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("claim build to capture: %v", err)
 	}
@@ -300,7 +484,7 @@ func TestFailCapturingTemplateBuildsForClusterLeavesCapturedBuildsTakeoverEligib
 		capturedBuildID,
 		"capture-worker",
 		capturedBuild.SnapshotID,
-		[]byte(`{"durable":true}`),
+		[]byte(`{"version":1,"durable":true}`),
 		time.Now().UTC(),
 	); err != nil {
 		t.Fatalf("mark second build captured: %v", err)
@@ -332,7 +516,7 @@ func TestFailCapturingTemplateBuildsForClusterLeavesCapturedBuildsTakeoverEligib
 		t.Fatalf("uncaptured template creation = %#v, want source-cluster failure", loaded.Status)
 	}
 
-	cleanup, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", time.Minute)
+	cleanup, err := store.ClaimTemplateBuild(ctx, "cluster-b", "cleanup-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("claim cancellation cleanup from another cluster: %v", err)
 	}
@@ -343,7 +527,7 @@ func TestFailCapturingTemplateBuildsForClusterLeavesCapturedBuildsTakeoverEligib
 		t.Fatalf("finish cancellation cleanup: %v", err)
 	}
 
-	publishing, err := store.ClaimTemplateBuild(ctx, "cluster-b", "publish-worker", time.Minute)
+	publishing, err := store.ClaimTemplateBuild(ctx, "cluster-b", "publish-worker", template.TemplateBuildCaptureVersionOCI, time.Minute)
 	if err != nil {
 		t.Fatalf("claim captured build from another cluster: %v", err)
 	}
@@ -382,10 +566,10 @@ func TestUpdateTemplatePreservesBuildIdempotencyBindingAndProvenance(t *testing.
 	if _, _, err := store.CreateTemplateBuild(ctx, tpl, build); err != nil {
 		t.Fatalf("CreateTemplateBuild() error = %v", err)
 	}
-	if _, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker", time.Minute); err != nil {
+	if _, err := store.ClaimTemplateBuild(ctx, "cluster-a", "worker", template.TemplateBuildCaptureVersionOCI, time.Minute); err != nil {
 		t.Fatalf("ClaimTemplateBuild() error = %v", err)
 	}
-	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker", build.SnapshotID, nil, time.Now().UTC()); err != nil {
+	if err := store.MarkTemplateBuildCaptured(ctx, buildID, "worker", build.SnapshotID, []byte(`{"version":1}`), time.Now().UTC()); err != nil {
 		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
 	}
 	outputImage := "registry.internal/team-1/derived@sha256:" + strings.Repeat("d", 64)
@@ -443,6 +627,103 @@ func TestUpdateTemplatePreservesBuildIdempotencyBindingAndProvenance(t *testing.
 	}
 }
 
+func TestUpdateTemplatePreservesOrReleasesCapturedRootFSByImageIdentity(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	tpl, source := publishRootFSTemplateForIntegration(t, store, "block-update")
+
+	sameImage := *tpl
+	sameImage.Spec = *tpl.Spec.DeepCopy()
+	sameImage.Spec.Description = "metadata-only update"
+	sameImage.UserID = "user-2"
+	if err := store.UpdateTemplate(ctx, &sameImage); err != nil {
+		t.Fatalf("same-image UpdateTemplate() error = %v", err)
+	}
+	loaded, err := store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() error = %v", err)
+	}
+	if loaded.RootFS == nil || !reflect.DeepEqual(*loaded.RootFS, source) {
+		t.Fatalf("same-image update changed RootFS source = %#v", loaded.RootFS)
+	}
+	deletion, err := store.ClaimTemplateRootFSDeletion(ctx, "cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimTemplateRootFSDeletion() error = %v", err)
+	}
+	if deletion != nil {
+		t.Fatalf("same-image update queued cleanup = %#v", deletion)
+	}
+
+	changedImage := *loaded
+	changedImage.Spec = *loaded.Spec.DeepCopy()
+	changedImage.Spec.MainContainer.Image = "registry.example/replacement@" + digest.FromString("replacement").String()
+	if err := store.UpdateTemplate(ctx, &changedImage); err != nil {
+		t.Fatalf("changed-image UpdateTemplate() error = %v", err)
+	}
+	loaded, err = store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() after image update error = %v", err)
+	}
+	if loaded.RootFS != nil {
+		t.Fatalf("changed-image update retained stale RootFS = %#v", loaded.RootFS)
+	}
+	deletion, err = store.ClaimTemplateRootFSDeletion(ctx, "cleanup-worker", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimTemplateRootFSDeletion() after image update error = %v", err)
+	}
+	if deletion == nil || deletion.SnapshotID != source.SnapshotID {
+		t.Fatalf("changed-image cleanup tombstone = %#v", deletion)
+	}
+}
+
+func publishRootFSTemplateForIntegration(
+	t *testing.T,
+	store *Store,
+	templateID string,
+) (*template.Template, template.RootFSTemplateSource) {
+	t.Helper()
+	ctx := context.Background()
+	buildID := uuid.NewString()
+	sourceDigest := digest.FromString("source-" + templateID).String()
+	tpl := &template.Template{
+		TemplateID: templateID, Scope: naming.ScopeTeam, TeamID: "team-1", UserID: "user-1",
+		Spec: integrationTemplateSpec("registry.example/source@" + sourceDigest),
+	}
+	build := &template.TemplateBuild{
+		BuildID: buildID, TemplateID: tpl.TemplateID, Scope: tpl.Scope, TeamID: tpl.TeamID,
+		UserID: tpl.UserID, SourceSandboxID: "source-sandbox", TargetClusterID: "cluster-a",
+		RequestHash: strings.Repeat("7", 64), SnapshotID: template.BuildSnapshotID(buildID),
+	}
+	if _, _, err := store.CreateTemplateBuild(ctx, tpl, build); err != nil {
+		t.Fatalf("CreateTemplateBuild() error = %v", err)
+	}
+	if _, err := store.ClaimTemplateBuild(
+		ctx, "cluster-a", "block-worker", template.TemplateBuildCaptureVersionBlockCOW, time.Minute,
+	); err != nil {
+		t.Fatalf("ClaimTemplateBuild() error = %v", err)
+	}
+	capturedAt := time.Now().UTC()
+	if err := store.MarkTemplateBuildCaptured(
+		ctx, buildID, "block-worker", build.SnapshotID, []byte(`{"version":2}`), capturedAt,
+	); err != nil {
+		t.Fatalf("MarkTemplateBuildCaptured() error = %v", err)
+	}
+	source := template.RootFSTemplateSource{
+		StorageFormat: template.RootFSTemplateStorageFormatBlockCOWV1,
+		SnapshotID:    build.SnapshotID, GenerationID: "generation-" + templateID,
+		SourceOCIDigest: sourceDigest, BaseArtifactDigest: digest.FromString("artifact-" + templateID).String(),
+		FormatGeneration: 1, Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+	}
+	if err := store.PublishRootFSTemplateBuild(ctx, buildID, "block-worker", source, capturedAt); err != nil {
+		t.Fatalf("PublishRootFSTemplateBuild() error = %v", err)
+	}
+	loaded, err := store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() error = %v", err)
+	}
+	return loaded, source
+}
+
 func newTemplateStoreIntegrationTest(t *testing.T) (*Store, *pgxpool.Pool) {
 	t.Helper()
 
@@ -456,7 +737,7 @@ func newTemplateStoreIntegrationTest(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	ctx := context.Background()
 	schema := "template_store_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	pool, err := dbpool.New(ctx, dbpool.Options{DatabaseURL: databaseURL, Schema: schema})
+	pool, err := dbpool.New(ctx, dbpool.Options{DatabaseURL: databaseURL, Schema: schema, DefaultMaxConns: 4})
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
 	}

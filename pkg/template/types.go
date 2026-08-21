@@ -3,10 +3,26 @@ package template
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+)
+
+// RootFSTemplateStorageFormatBlockCOWV1 is the only runtime-native template
+// capture format. It identifies an immutable regional block generation rather
+// than an OCI diff layer.
+const RootFSTemplateStorageFormatBlockCOWV1 = "block-cow-v1"
+
+const (
+	// TemplateBuildCaptureVersionOCI identifies the legacy OCI-layer handoff.
+	TemplateBuildCaptureVersionOCI = 1
+	// TemplateBuildCaptureVersionBlockCOW identifies the runtime-native block
+	// generation handoff. Workers must not claim another version's publication.
+	TemplateBuildCaptureVersionBlockCOW = 2
 )
 
 // AnnotationCopiedRootFS marks cluster templates whose image includes a
@@ -32,9 +48,52 @@ type Template struct {
 
 	// CreationBuildID and idempotency fields are control-plane state and are
 	// intentionally excluded from the public template representation.
-	CreationBuildID        string `json:"-"`
-	CreationIdempotencyKey string `json:"-"`
-	CreationRequestHash    string `json:"-"`
+	CreationBuildID        string                `json:"-"`
+	CreationIdempotencyKey string                `json:"-"`
+	CreationRequestHash    string                `json:"-"`
+	RootFS                 *RootFSTemplateSource `json:"-"`
+}
+
+// RootFSTemplateSource is the internal immutable RootFS attestation retained
+// by a template created from a sandbox. Public callers can neither submit nor
+// mutate these fields.
+type RootFSTemplateSource struct {
+	StorageFormat      string
+	SnapshotID         string
+	GenerationID       string
+	SourceOCIDigest    string
+	BaseArtifactDigest string
+	FormatGeneration   int
+	Platform           ocispec.Platform
+}
+
+// Validate rejects partial, mutable, or unattested RootFS template sources.
+func (s RootFSTemplateSource) Validate() error {
+	if s.StorageFormat != RootFSTemplateStorageFormatBlockCOWV1 {
+		return fmt.Errorf("unsupported template RootFS storage format %q", s.StorageFormat)
+	}
+	for name, value := range map[string]string{
+		"snapshot_id": s.SnapshotID, "generation_id": s.GenerationID,
+		"source_oci_digest": s.SourceOCIDigest, "base_artifact_digest": s.BaseArtifactDigest,
+		"platform_os": s.Platform.OS, "platform_architecture": s.Platform.Architecture,
+	} {
+		if strings.TrimSpace(value) == "" || strings.TrimSpace(value) != value {
+			return fmt.Errorf("%s must be canonical and non-empty", name)
+		}
+	}
+	if s.FormatGeneration <= 0 {
+		return fmt.Errorf("format_generation must be positive")
+	}
+	if parsed, err := digest.Parse(s.SourceOCIDigest); err != nil || parsed.String() != s.SourceOCIDigest {
+		return fmt.Errorf("source_oci_digest must be canonical")
+	}
+	if parsed, err := digest.Parse(s.BaseArtifactDigest); err != nil || parsed.String() != s.BaseArtifactDigest {
+		return fmt.Errorf("base_artifact_digest must be canonical")
+	}
+	if strings.TrimSpace(s.Platform.Variant) != s.Platform.Variant {
+		return fmt.Errorf("platform_variant must be canonical")
+	}
+	return nil
 }
 
 // ReadyForClaim reports whether a template may be used to create sandboxes.
@@ -58,7 +117,7 @@ func (t *Template) ReadyForReconcile() bool {
 			creation.Stage == v1alpha1.TemplateCreationStageReconciling)
 }
 
-// TemplateBuild is one durable, cluster-targeted template image build.
+// TemplateBuild is one durable, cluster-targeted template RootFS build.
 type TemplateBuild struct {
 	BuildID           string
 	Scope             string
@@ -83,6 +142,16 @@ type TemplateBuild struct {
 	LastError         string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// TemplateRootFSDeletion is a durable cleanup tombstone created before a
+// template releases its internal RootFS snapshot.
+type TemplateRootFSDeletion struct {
+	SnapshotID     string
+	TeamID         string
+	AttemptCount   int
+	LeaseOwner     string
+	LeaseExpiresAt time.Time
 }
 
 // SandboxTemplateSource is the durable template context captured when a
@@ -110,6 +179,10 @@ var (
 	ErrTemplateIdempotencyConflict = errors.New("idempotency key conflicts with an existing request")
 	// ErrTemplateBuildLeaseLost indicates a worker no longer owns a build lease.
 	ErrTemplateBuildLeaseLost = errors.New("template build lease lost")
+	// ErrTemplateRootFSPublicationUncertain indicates PostgreSQL may have
+	// committed the retained RootFS binding despite returning an error. Callers
+	// must not release or delete the capture based on this result.
+	ErrTemplateRootFSPublicationUncertain = errors.New("template RootFS publication outcome is uncertain")
 	// ErrTemplateNotReady indicates asynchronous creation has not produced a
 	// claimable template.
 	ErrTemplateNotReady = errors.New("template is not ready")

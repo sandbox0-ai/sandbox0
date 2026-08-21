@@ -19,14 +19,15 @@ import (
 	"go.uber.org/zap"
 )
 
-const templateBuildFailureReason = "TemplateImageBuildFailed"
+const templateBuildFailureReason = "TemplateRootFSBuildFailed"
 
 // Queue owns durable template build claim and lease state.
 type Queue interface {
-	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error)
+	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, captureVersion int, leaseDuration time.Duration) (*template.TemplateBuild, error)
 	RenewTemplateBuildLease(ctx context.Context, buildID, workerID string, leaseDuration time.Duration) error
 	MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error
 	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error
+	PublishRootFSTemplateBuild(ctx context.Context, buildID, workerID string, source template.RootFSTemplateSource, capturedAt time.Time) error
 	FailTemplateBuild(ctx context.Context, buildID, workerID, reason, message string) error
 	ReleaseTemplateBuild(ctx context.Context, buildID, workerID string, retryAt time.Time, lastError string) error
 	TemplateBuildCancelled(ctx context.Context, buildID string) (bool, error)
@@ -35,7 +36,7 @@ type Queue interface {
 
 var _ Queue = (templatestore.TemplateBuildStore)(nil)
 
-// Capturer checkpoints a source sandbox for publication.
+// Capturer checkpoints a source sandbox for publication or regional retention.
 type Capturer interface {
 	EnsureTemplateBuildCapture(ctx context.Context, sandboxID, teamID, snapshotID string, desiredSpec v1alpha1.SandboxTemplateSpec) (*TemplateBuildCaptureMetadata, error)
 	DeleteTemplateBuildCapture(ctx context.Context, snapshotID, teamID string) error
@@ -58,15 +59,17 @@ type TemplateBuildWorkerConfig struct {
 	MaxAttempts       int
 }
 
-// TemplateBuildWorker checkpoints source sandboxes and publishes template
-// images for builds targeted at the local cluster.
+// TemplateBuildWorker checkpoints source sandboxes and publishes their
+// claimable RootFS representation for builds targeted at the local cluster.
 type TemplateBuildWorker struct {
-	queue     Queue
-	capturer  Capturer
-	publisher Publisher
-	objects   templateimage.ObjectReader
-	config    TemplateBuildWorkerConfig
-	logger    *zap.Logger
+	queue          Queue
+	capturer       Capturer
+	publisher      Publisher
+	objects        templateimage.ObjectReader
+	config         TemplateBuildWorkerConfig
+	logger         *zap.Logger
+	blockCOW       bool
+	captureVersion int
 }
 
 func NewTemplateBuildWorker(
@@ -80,6 +83,42 @@ func NewTemplateBuildWorker(
 	if queue == nil || capturer == nil || publisher == nil || objects == nil {
 		return nil, fmt.Errorf("template build queue, capturer, publisher, and object reader are required")
 	}
+	worker, err := newTemplateBuildWorker(queue, capturer, config, logger)
+	if err != nil {
+		return nil, err
+	}
+	worker.publisher = publisher
+	worker.objects = objects
+	worker.captureVersion = CaptureMetadataVersion
+	return worker, nil
+}
+
+// NewBlockTemplateBuildWorker creates a worker that retains an immutable
+// regional block-COW snapshot instead of converting it into OCI layers.
+func NewBlockTemplateBuildWorker(
+	queue Queue,
+	capturer Capturer,
+	config TemplateBuildWorkerConfig,
+	logger *zap.Logger,
+) (*TemplateBuildWorker, error) {
+	if queue == nil || capturer == nil {
+		return nil, fmt.Errorf("template build queue and block-COW capturer are required")
+	}
+	worker, err := newTemplateBuildWorker(queue, capturer, config, logger)
+	if err != nil {
+		return nil, err
+	}
+	worker.blockCOW = true
+	worker.captureVersion = BlockCaptureMetadataVersion
+	return worker, nil
+}
+
+func newTemplateBuildWorker(
+	queue Queue,
+	capturer Capturer,
+	config TemplateBuildWorkerConfig,
+	logger *zap.Logger,
+) (*TemplateBuildWorker, error) {
 	if strings.TrimSpace(config.ClusterID) == "" {
 		return nil, fmt.Errorf("template build cluster_id is required")
 	}
@@ -110,14 +149,7 @@ func NewTemplateBuildWorker(
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &TemplateBuildWorker{
-		queue:     queue,
-		capturer:  capturer,
-		publisher: publisher,
-		objects:   objects,
-		config:    config,
-		logger:    logger,
-	}, nil
+	return &TemplateBuildWorker{queue: queue, capturer: capturer, config: config, logger: logger}, nil
 }
 
 // Run claims builds until ctx is cancelled.
@@ -132,7 +164,7 @@ func (w *TemplateBuildWorker) Run(ctx context.Context) error {
 		}
 		worked, err := w.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			w.logger.Error("Template image build iteration failed", zap.Error(err))
+			w.logger.Error("Template RootFS build iteration failed", zap.Error(err))
 		}
 		delay := w.config.PollInterval
 		if worked {
@@ -144,7 +176,18 @@ func (w *TemplateBuildWorker) Run(ctx context.Context) error {
 
 // RunOnce claims and processes at most one build.
 func (w *TemplateBuildWorker) RunOnce(ctx context.Context) (bool, error) {
-	build, err := w.queue.ClaimTemplateBuild(ctx, w.config.ClusterID, w.config.WorkerID, w.config.LeaseDuration)
+	if deletions, ok := w.queue.(templatestore.TemplateRootFSDeletionStore); ok {
+		deletion, err := deletions.ClaimTemplateRootFSDeletion(ctx, w.config.WorkerID, w.config.LeaseDuration)
+		if err != nil {
+			return false, err
+		}
+		if deletion != nil {
+			return true, w.processRootFSDeletion(ctx, deletions, deletion)
+		}
+	}
+	build, err := w.queue.ClaimTemplateBuild(
+		ctx, w.config.ClusterID, w.config.WorkerID, w.captureVersion, w.config.LeaseDuration,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -196,7 +239,18 @@ func (w *TemplateBuildWorker) processClaim(ctx context.Context, build *template.
 		return w.cleanupAndFinish(ctx, build)
 	}
 
-	err = w.captureAndPublish(workCtx, build)
+	retained, nativePublishAttempted, err := w.captureAndPublish(workCtx, build)
+	if retained {
+		return nil
+	}
+	// A PostgreSQL commit response can be lost after the block snapshot became
+	// the template's permanent GC root and the build row was removed. Never
+	// delete or release that snapshot from the uncertain publication attempt;
+	// a deletion tombstone owns cleanup if the template was concurrently
+	// removed, while an extant build becomes reclaimable after lease expiry.
+	if nativePublishAttempted && errors.Is(err, template.ErrTemplateRootFSPublicationUncertain) {
+		return err
+	}
 	if leaseErr := state.error(); leaseErr != nil {
 		return leaseErr
 	}
@@ -227,10 +281,24 @@ func (w *TemplateBuildWorker) processClaim(ctx context.Context, build *template.
 	return err
 }
 
-func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *template.TemplateBuild) error {
+func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *template.TemplateBuild) (bool, bool, error) {
 	capture, err := w.captureMetadata(ctx, build)
 	if err != nil {
-		return err
+		return false, false, err
+	}
+	if capture.Version == BlockCaptureMetadataVersion {
+		source := template.RootFSTemplateSource{
+			StorageFormat: capture.StorageFormat, SnapshotID: capture.SnapshotID,
+			GenerationID: capture.HeadGenerationID, SourceOCIDigest: capture.SourceOCIDigest,
+			BaseArtifactDigest: capture.BaseArtifactDigest, FormatGeneration: capture.FormatGeneration,
+			Platform: capture.Platform,
+		}
+		if err := w.queue.PublishRootFSTemplateBuild(
+			ctx, build.BuildID, w.config.WorkerID, source, capture.CapturedAt,
+		); err != nil {
+			return false, true, err
+		}
+		return true, true, nil
 	}
 	finalSpec := *build.DesiredSpec.DeepCopy()
 	result, err := w.publisher.Publish(ctx, templateimage.BuildRequest{
@@ -245,18 +313,18 @@ func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *temp
 		CreatedAt:       capture.CapturedAt,
 	})
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	if result == nil || strings.TrimSpace(result.PullReference) == "" {
-		return fmt.Errorf("template image publisher returned no pull reference")
+		return false, false, fmt.Errorf("template image publisher returned no pull reference")
 	}
 	finalSpec.MainContainer.Image = result.PullReference
 	if err := w.queue.PublishTemplateBuild(ctx, build.BuildID, w.config.WorkerID, finalSpec, result.PullReference); err != nil {
-		return err
+		return false, false, err
 	}
 	build.Stage = v1alpha1.TemplateCreationStageReconciling
 	build.OutputImage = result.PullReference
-	return nil
+	return false, false, nil
 }
 
 func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *template.TemplateBuild) (*TemplateBuildCaptureMetadata, error) {
@@ -266,6 +334,9 @@ func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *templa
 			return nil, fmt.Errorf("%w: decode template build capture metadata: %v", errTemplateBuildCaptureInvalid, err)
 		}
 		if err := validateTemplateBuildCapture(build, &capture); err != nil {
+			return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
+		}
+		if err := w.validateCaptureMode(&capture); err != nil {
 			return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
 		}
 		return &capture, nil
@@ -287,9 +358,14 @@ func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *templa
 	if err != nil {
 		return nil, err
 	}
-	capture.Layers, err = templateimage.ResolveLayerDiffIDs(ctx, w.objects, capture.Layers)
-	if err != nil {
-		return nil, err
+	if err := w.validateCaptureMode(capture); err != nil {
+		return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
+	}
+	if capture.Version == CaptureMetadataVersion {
+		capture.Layers, err = templateimage.ResolveLayerDiffIDs(ctx, w.objects, capture.Layers)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := validateTemplateBuildCapture(build, capture); err != nil {
 		return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
@@ -307,26 +383,72 @@ func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *templa
 	return capture, nil
 }
 
+func (w *TemplateBuildWorker) validateCaptureMode(capture *TemplateBuildCaptureMetadata) error {
+	if capture == nil {
+		return fmt.Errorf("template build capture metadata is required")
+	}
+	if w.blockCOW && capture.Version != BlockCaptureMetadataVersion {
+		return fmt.Errorf("block-COW worker received legacy capture version %d", capture.Version)
+	}
+	if !w.blockCOW && capture.Version != CaptureMetadataVersion {
+		return fmt.Errorf("OCI image worker received block-COW capture version %d", capture.Version)
+	}
+	return nil
+}
+
 func validateTemplateBuildCapture(build *template.TemplateBuild, capture *TemplateBuildCaptureMetadata) error {
 	if capture == nil {
 		return fmt.Errorf("template build capture metadata is required")
 	}
-	if capture.Version != templateBuildCaptureMetadataVersion {
-		return fmt.Errorf("unsupported template build capture metadata version %d", capture.Version)
-	}
 	if strings.TrimSpace(capture.SnapshotID) == "" || capture.SnapshotID != build.SnapshotID {
 		return fmt.Errorf("template build capture snapshot does not match build")
-	}
-	if strings.TrimSpace(capture.HeadLayerID) == "" || len(capture.Layers) == 0 {
-		return fmt.Errorf("template build capture has no rootfs layer chain")
 	}
 	if capture.Platform.OS == "" || capture.Platform.Architecture == "" {
 		return fmt.Errorf("template build capture has no source platform")
 	}
-	if capture.BaseImageRef == "" || capture.BaseImageDigest == "" {
-		return fmt.Errorf("template build capture has no base image identity")
+	switch capture.Version {
+	case templateBuildCaptureMetadataVersion:
+		if strings.TrimSpace(capture.HeadLayerID) == "" || len(capture.Layers) == 0 {
+			return fmt.Errorf("template build capture has no rootfs layer chain")
+		}
+		if capture.BaseImageRef == "" || capture.BaseImageDigest == "" {
+			return fmt.Errorf("template build capture has no base image identity")
+		}
+	case BlockCaptureMetadataVersion:
+		source := template.RootFSTemplateSource{
+			StorageFormat: capture.StorageFormat, SnapshotID: capture.SnapshotID,
+			GenerationID: capture.HeadGenerationID, SourceOCIDigest: capture.SourceOCIDigest,
+			BaseArtifactDigest: capture.BaseArtifactDigest, FormatGeneration: capture.FormatGeneration,
+			Platform: capture.Platform,
+		}
+		if err := source.Validate(); err != nil {
+			return err
+		}
+		if capture.HeadLayerID != "" || len(capture.Layers) != 0 || capture.BaseImageRef != "" || capture.BaseImageDigest != "" {
+			return fmt.Errorf("block-COW capture contains legacy OCI layer fields")
+		}
+	default:
+		return fmt.Errorf("unsupported template build capture metadata version %d", capture.Version)
 	}
 	return nil
+}
+
+func (w *TemplateBuildWorker) processRootFSDeletion(
+	ctx context.Context,
+	queue templatestore.TemplateRootFSDeletionStore,
+	deletion *template.TemplateRootFSDeletion,
+) error {
+	err := w.capturer.DeleteTemplateBuildCapture(ctx, deletion.SnapshotID, deletion.TeamID)
+	if err == nil {
+		return queue.FinishTemplateRootFSDeletion(ctx, deletion.SnapshotID, w.config.WorkerID)
+	}
+	retryAt := time.Now().UTC().Add(w.retryDelay(deletion.AttemptCount))
+	if releaseErr := queue.ReleaseTemplateRootFSDeletion(
+		ctx, deletion.SnapshotID, w.config.WorkerID, retryAt, publicTemplateBuildError(err),
+	); releaseErr != nil {
+		return errors.Join(err, releaseErr)
+	}
+	return err
 }
 
 func (w *TemplateBuildWorker) cleanupAndFinish(ctx context.Context, build *template.TemplateBuild) error {

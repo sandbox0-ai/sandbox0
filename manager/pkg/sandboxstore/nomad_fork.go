@@ -493,6 +493,34 @@ func lockNomadRunningForkLiveWriter(
 	lifecycle *SandboxLifecycleTxn,
 	targetGenerationID string,
 ) (*NomadSandboxRunningForkCandidate, error) {
+	writer, err := lockExactNomadLiveWriter(ctx, tx, source)
+	if err != nil {
+		return nil, err
+	}
+	if lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != writer.generation.ID {
+		return nil, fmt.Errorf("%w: source lifecycle head changed", ErrNomadSandboxForkConflict)
+	}
+	return &NomadSandboxRunningForkCandidate{
+		OperationID: lifecycle.ID, TargetGenerationID: targetGenerationID,
+		Source: source, Target: target, Slot: writer.slot,
+		SourceFilesystemID: writer.filesystem.ID, SourceGenerationID: writer.generation.ID,
+		SourceWriterGrantID: writer.grant.ID, SourceWriterEpoch: writer.grant.WriterEpoch,
+		BindingVersion: writer.grant.BindingVersion, BindingDigest: append([]byte(nil), writer.grant.BindingDigest...),
+	}, nil
+}
+
+type exactNomadLiveWriter struct {
+	slot       *RuntimeSlot
+	filesystem *RootFSFilesystem
+	generation *RootFSGeneration
+	grant      *RootFSWriterGrant
+}
+
+func lockExactNomadLiveWriter(
+	ctx context.Context,
+	tx pgx.Tx,
+	source *SandboxRecord,
+) (*exactNomadLiveWriter, error) {
 	if err := validateNomadRunningForkSourceRecord(source); err != nil {
 		return nil, err
 	}
@@ -538,15 +566,10 @@ func lockNomadRunningForkLiveWriter(
 		grant.NodeBootID != slot.NodeBootID || parseErr != nil || runtimeGeneration != source.RuntimeGeneration {
 		return nil, fmt.Errorf("%w: source RootFS writer authority changed", ErrNomadSandboxForkNotReady)
 	}
-	if lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != generation.ID {
-		return nil, fmt.Errorf("%w: source lifecycle head changed", ErrNomadSandboxForkConflict)
-	}
-	return &NomadSandboxRunningForkCandidate{
-		OperationID: lifecycle.ID, TargetGenerationID: targetGenerationID,
-		Source: source, Target: target, Slot: slot,
-		SourceFilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
-		SourceWriterGrantID: grant.ID, SourceWriterEpoch: grant.WriterEpoch,
-		BindingVersion: grant.BindingVersion, BindingDigest: append([]byte(nil), grant.BindingDigest...),
+	grantCopy := *grant
+	grantCopy.BindingDigest = append([]byte(nil), grant.BindingDigest...)
+	return &exactNomadLiveWriter{
+		slot: slot, filesystem: filesystem, generation: generation, grant: &grantCopy,
 	}, nil
 }
 

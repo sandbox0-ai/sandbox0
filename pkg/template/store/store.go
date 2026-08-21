@@ -28,22 +28,31 @@ type AllocationStore interface {
 	DeleteAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) error
 }
 
-// TemplateBuildStore persists asynchronous template image builds.
+// TemplateBuildStore persists asynchronous template RootFS builds.
 type TemplateBuildStore interface {
 	// CreateTemplateBuild atomically creates the visible template and its
 	// durable build. Replayed idempotent requests return the existing template
 	// with created=false.
 	CreateTemplateBuild(ctx context.Context, tpl *template.Template, build *template.TemplateBuild) (createdTemplate *template.Template, created bool, err error)
 	GetTemplateByIdempotencyKey(ctx context.Context, scope, teamID, idempotencyKey string) (*template.Template, error)
-	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error)
+	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, captureVersion int, leaseDuration time.Duration) (*template.TemplateBuild, error)
 	RenewTemplateBuildLease(ctx context.Context, buildID, workerID string, leaseDuration time.Duration) error
 	MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error
 	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error
+	PublishRootFSTemplateBuild(ctx context.Context, buildID, workerID string, source template.RootFSTemplateSource, capturedAt time.Time) error
 	FailTemplateBuild(ctx context.Context, buildID, workerID, reason, message string) error
 	ReleaseTemplateBuild(ctx context.Context, buildID, workerID string, retryAt time.Time, lastError string) error
 	TemplateBuildCancelled(ctx context.Context, buildID string) (bool, error)
 	FinishTemplateBuild(ctx context.Context, buildID, workerID string) error
 	CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope, teamID, templateID string) (bool, error)
+}
+
+// TemplateRootFSDeletionStore owns snapshot cleanup tombstones after a
+// visible template or canceled build releases its internal capture.
+type TemplateRootFSDeletionStore interface {
+	ClaimTemplateRootFSDeletion(ctx context.Context, workerID string, leaseDuration time.Duration) (*template.TemplateRootFSDeletion, error)
+	FinishTemplateRootFSDeletion(ctx context.Context, snapshotID, workerID string) error
+	ReleaseTemplateRootFSDeletion(ctx context.Context, snapshotID, workerID string, retryAt time.Time, lastError string) error
 }
 
 // TemplateBuildLifecycleStore terminates builds that can no longer capture

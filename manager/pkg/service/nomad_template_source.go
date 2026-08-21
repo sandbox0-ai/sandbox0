@@ -16,17 +16,17 @@ import (
 // NomadSandboxTemplateSourceResolver validates source sandboxes from the
 // regional PostgreSQL projection and exact runtime-slot readiness.
 type NomadSandboxTemplateSourceResolver struct {
-	store               NomadSandboxProjectionStore
-	reader              *NomadSandboxReader
-	imageBuildAvailable bool
-	now                 func() time.Time
+	store            NomadSandboxProjectionStore
+	reader           *NomadSandboxReader
+	captureAvailable bool
+	now              func() time.Time
 }
 
 // NewNomadSandboxTemplateSourceResolver creates a source resolver that never
 // consults a Kubernetes runtime object.
 func NewNomadSandboxTemplateSourceResolver(
 	store NomadSandboxProjectionStore,
-	imageBuildAvailable bool,
+	captureAvailable bool,
 	now func() time.Time,
 ) (*NomadSandboxTemplateSourceResolver, error) {
 	if store == nil {
@@ -40,7 +40,7 @@ func NewNomadSandboxTemplateSourceResolver(
 		now = time.Now
 	}
 	return &NomadSandboxTemplateSourceResolver{
-		store: store, reader: reader, imageBuildAvailable: imageBuildAvailable, now: now,
+		store: store, reader: reader, captureAvailable: captureAvailable, now: now,
 	}, nil
 }
 
@@ -50,8 +50,8 @@ func (r *NomadSandboxTemplateSourceResolver) ResolveSandboxTemplateSource(
 	ctx context.Context,
 	sandboxID, teamID string,
 ) (*template.SandboxTemplateSource, error) {
-	if !r.imageBuildAvailable {
-		return nil, fmt.Errorf("%w: template image publisher is not configured in the source cluster", template.ErrTemplateSourceUnavailable)
+	if !r.captureAvailable {
+		return nil, fmt.Errorf("%w: template RootFS capture is not configured in the source cluster", template.ErrTemplateSourceUnavailable)
 	}
 	sandboxID = strings.TrimSpace(sandboxID)
 	teamID = strings.TrimSpace(teamID)

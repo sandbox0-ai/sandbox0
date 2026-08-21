@@ -242,6 +242,13 @@ func templateBuildLayerPlatformMismatch(layer *sandboxstore.SandboxRootFSLayer, 
 
 // DeleteTemplateBuildCapture releases the temporary snapshot GC pin.
 func (s *SandboxService) DeleteTemplateBuildCapture(ctx context.Context, snapshotID, teamID string) error {
+	if cleaner, ok := s.sandboxStore.(interface {
+		DeleteTemplateBuildRootFSCapture(context.Context, string, string) error
+	}); ok {
+		return cleaner.DeleteTemplateBuildRootFSCapture(
+			ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID),
+		)
+	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
 		return err

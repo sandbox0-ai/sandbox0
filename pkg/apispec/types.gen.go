@@ -3393,7 +3393,7 @@ type TemplateCreationStatus struct {
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 	Message     *string    `json:"message,omitempty"`
 
-	// OutputImage Digest-pinned image reference published to the configured team registry.
+	// OutputImage Optional digest-pinned image produced by image-publisher backends. Runtime-native block-COW captures omit this field.
 	OutputImage *string                     `json:"outputImage,omitempty"`
 	Reason      *string                     `json:"reason,omitempty"`
 	Stage       TemplateCreationStatusStage `json:"stage"`
@@ -3754,7 +3754,7 @@ type GetApiV1SandboxesIdSessionsSessionIdWsParams struct {
 
 // PostApiV1TemplatesFromSandboxParams defines parameters for PostApiV1TemplatesFromSandbox.
 type PostApiV1TemplatesFromSandboxParams struct {
-	// IdempotencyKey Optional key for retrying creation without starting a duplicate image build.
+	// IdempotencyKey Optional key for retrying creation without starting a duplicate RootFS capture.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 

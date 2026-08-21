@@ -1055,7 +1055,7 @@ spec:
                   type: object
                 type: array
               creation:
-                description: Creation reports asynchronous image creation for templates
+                description: Creation reports asynchronous RootFS creation for templates
                   created from a sandbox.
                 properties:
                   capturedAt:
@@ -1068,8 +1068,8 @@ spec:
                     type: string
                   outputImage:
                     description: |-
-                      OutputImage is the immutable image produced by the original
-                      from-sandbox build. A later manual template update does not rewrite it.
+                      OutputImage is populated only by image-publisher backends. Runtime-native
+                      block-COW captures retain an internal generation and leave it empty.
                     type: string
                   reason:
                     type: string

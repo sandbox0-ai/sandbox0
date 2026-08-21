@@ -11,12 +11,14 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -47,52 +49,57 @@ func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templa
 }
 
 type fakeClaimStore struct {
-	records             map[string]*sandboxstore.SandboxRecord
-	operations          map[string]string
-	claimPhases         map[string]string
-	artifact            *sandboxstore.RootFSBaseArtifact
-	ensureCalls         []*sandboxstore.EnsureInitialRootFSGenerationRequest
-	restoreCalls        []*sandboxstore.RestoreRootFSFromSnapshotRequest
-	cleanupCalls        []string
-	cleanupErr          error
-	pauseCandidate      *sandboxstore.NomadSandboxPauseCandidate
-	pauseErr            error
-	pauseSources        []string
-	pressurePause       *sandboxstore.NomadSandboxPauseCandidate
-	pressurePauseErr    error
-	pressureRequests    []*sandboxstore.RootFSWriterPressurePauseRequest
-	resumeCandidate     *sandboxstore.NomadSandboxResumeCandidate
-	resumeErr           error
-	resumeRequested     bool
-	resumeRetryErr      error
-	resumeRetryRequests []*sandboxstore.RetryNomadSandboxResumeRequest
-	resumeRequests      []*sandboxstore.RequestNomadSandboxResumeRequest
-	resumeCompleteErr   error
-	resumeCompleteCalls []*sandboxstore.CompleteNomadSandboxResumeRequest
-	forkCandidate       *sandboxstore.NomadSandboxRunningForkCandidate
-	forkErr             error
-	forkRequests        []*sandboxstore.NomadSandboxForkRequest
-	pausedForkErr       error
-	pausedForkRequests  []*sandboxstore.NomadSandboxForkRequest
-	pausedForkCompleted map[string]*sandboxstore.SandboxRecord
-	activeLifecycles    map[string]*sandboxstore.SandboxLifecycleTxn
-	lifecyclesByID      map[string]*sandboxstore.SandboxLifecycleTxn
-	forkAbortCalls      [][4]string
-	forkAbortErr        error
-	activeSlot          *sandboxstore.RuntimeSlot
-	runtimeSlotErr      error
-	quiesceCalls        []*sandboxstore.BeginRuntimeSlotQuiesceRequest
-	snapshot            *sandboxstore.RootFSSnapshot
-	rebaseCandidate     *sandboxstore.NomadPausedRebaseCandidate
-	rebaseErr           error
-	rebaseRequests      []*sandboxstore.NomadPausedRebaseRequest
-	rebasePublishErr    error
-	rebasePublishes     []*sandboxstore.PublishPausedRootFSRebaseRequest
-	rebaseRejectErr     error
-	rebaseRejects       [][]byte
-	rebaseAckErr        error
-	rebaseAcks          [][]byte
-	writeCount          int
+	records                  map[string]*sandboxstore.SandboxRecord
+	operations               map[string]string
+	claimPhases              map[string]string
+	artifact                 *sandboxstore.RootFSBaseArtifact
+	ensureCalls              []*sandboxstore.EnsureInitialRootFSGenerationRequest
+	restoreCalls             []*sandboxstore.RestoreRootFSFromSnapshotRequest
+	cleanupCalls             []string
+	cleanupErr               error
+	pauseCandidate           *sandboxstore.NomadSandboxPauseCandidate
+	pauseErr                 error
+	pauseSources             []string
+	pressurePause            *sandboxstore.NomadSandboxPauseCandidate
+	pressurePauseErr         error
+	pressureRequests         []*sandboxstore.RootFSWriterPressurePauseRequest
+	resumeCandidate          *sandboxstore.NomadSandboxResumeCandidate
+	resumeErr                error
+	resumeRequested          bool
+	resumeRetryErr           error
+	resumeRetryRequests      []*sandboxstore.RetryNomadSandboxResumeRequest
+	resumeRequests           []*sandboxstore.RequestNomadSandboxResumeRequest
+	resumeCompleteErr        error
+	resumeCompleteCalls      []*sandboxstore.CompleteNomadSandboxResumeRequest
+	forkCandidate            *sandboxstore.NomadSandboxRunningForkCandidate
+	forkErr                  error
+	forkRequests             []*sandboxstore.NomadSandboxForkRequest
+	pausedForkErr            error
+	pausedForkRequests       []*sandboxstore.NomadSandboxForkRequest
+	pausedForkCompleted      map[string]*sandboxstore.SandboxRecord
+	activeLifecycles         map[string]*sandboxstore.SandboxLifecycleTxn
+	lifecyclesByID           map[string]*sandboxstore.SandboxLifecycleTxn
+	forkAbortCalls           [][4]string
+	forkAbortErr             error
+	activeSlot               *sandboxstore.RuntimeSlot
+	runtimeSlotErr           error
+	quiesceCalls             []*sandboxstore.BeginRuntimeSlotQuiesceRequest
+	snapshot                 *sandboxstore.RootFSSnapshot
+	generation               *sandboxstore.RootFSGeneration
+	createdSnapshots         []*sandboxstore.CreateRootFSSnapshotRequest
+	deletedSnapshots         []string
+	templateCaptureCandidate *sandboxstore.NomadTemplateCaptureCandidate
+	templateCaptureRequests  []*sandboxstore.NomadTemplateCaptureRequest
+	rebaseCandidate          *sandboxstore.NomadPausedRebaseCandidate
+	rebaseErr                error
+	rebaseRequests           []*sandboxstore.NomadPausedRebaseRequest
+	rebasePublishErr         error
+	rebasePublishes          []*sandboxstore.PublishPausedRootFSRebaseRequest
+	rebaseRejectErr          error
+	rebaseRejects            [][]byte
+	rebaseAckErr             error
+	rebaseAcks               [][]byte
+	writeCount               int
 }
 
 func (f *fakeClaimStore) RequestNomadSandboxRunningFork(
@@ -664,6 +671,72 @@ func (f *fakeClaimStore) GetRootFSSnapshot(_ context.Context, snapshotID, teamID
 	return &copy, nil
 }
 
+func (f *fakeClaimStore) CreateRootFSSnapshot(
+	_ context.Context,
+	request *sandboxstore.CreateRootFSSnapshotRequest,
+) (*sandboxstore.RootFSSnapshot, error) {
+	copyRequest := *request
+	f.createdSnapshots = append(f.createdSnapshots, &copyRequest)
+	record := f.records[request.SandboxID]
+	if record == nil || f.generation == nil {
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
+	}
+	f.snapshot = &sandboxstore.RootFSSnapshot{
+		ID: request.SnapshotID, FilesystemID: f.generation.FilesystemID,
+		TeamID: record.TeamID, SourceSandboxID: request.SandboxID,
+		HeadGenerationID: f.generation.ID, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		BaseArtifactDigest: f.generation.BaseArtifactDigest,
+		FormatGeneration:   f.generation.FormatGeneration, SourceOCIDigest: f.generation.SourceOCIDigest,
+		Name: request.Name, Description: request.Description, CreatedAt: time.Unix(100, 0).UTC(),
+	}
+	copy := *f.snapshot
+	return &copy, nil
+}
+
+func (f *fakeClaimStore) GetRootFSGeneration(_ context.Context, generationID string) (*sandboxstore.RootFSGeneration, error) {
+	if f.generation == nil || f.generation.ID != generationID {
+		return nil, sandboxstore.ErrRootFSGenerationConflict
+	}
+	copy := *f.generation
+	copy.Descriptor = append([]byte(nil), f.generation.Descriptor...)
+	return &copy, nil
+}
+
+func (f *fakeClaimStore) DeleteRootFSSnapshot(_ context.Context, snapshotID, teamID string) error {
+	if f.snapshot == nil || f.snapshot.ID != snapshotID || f.snapshot.TeamID != teamID {
+		return sandboxstore.ErrRootFSSnapshotNotFound
+	}
+	f.deletedSnapshots = append(f.deletedSnapshots, snapshotID)
+	f.snapshot = nil
+	return nil
+}
+
+func (f *fakeClaimStore) DeleteTemplateBuildRootFSCapture(ctx context.Context, snapshotID, teamID string) error {
+	return f.DeleteRootFSSnapshot(ctx, snapshotID, teamID)
+}
+
+func (f *fakeClaimStore) RequestNomadRunningTemplateCapture(
+	_ context.Context,
+	request *sandboxstore.NomadTemplateCaptureRequest,
+) (*sandboxstore.NomadTemplateCaptureCandidate, error) {
+	copyRequest := *request
+	f.templateCaptureRequests = append(f.templateCaptureRequests, &copyRequest)
+	if f.templateCaptureCandidate == nil {
+		return nil, sandboxstore.ErrNomadTemplateCaptureNotReady
+	}
+	copy := *f.templateCaptureCandidate
+	copy.BindingDigest = append([]byte(nil), f.templateCaptureCandidate.BindingDigest...)
+	if f.templateCaptureCandidate.Slot != nil {
+		slot := *f.templateCaptureCandidate.Slot
+		copy.Slot = &slot
+	}
+	if f.templateCaptureCandidate.Snapshot != nil {
+		snapshot := *f.templateCaptureCandidate.Snapshot
+		copy.Snapshot = &snapshot
+	}
+	return &copy, nil
+}
+
 func (f *fakeClaimStore) RestoreRootFSFromSnapshot(_ context.Context, request *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error) {
 	copy := *request
 	f.restoreCalls = append(f.restoreCalls, &copy)
@@ -1154,10 +1227,19 @@ func TestServiceRejectsBaseArtifactFromDifferentPlatform(t *testing.T) {
 func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
-		ID: "snapshot-1", TeamID: "team-1", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		ID: "snapshot-1", FilesystemID: "snapshot-filesystem", TeamID: "team-1",
+		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
+		HeadGenerationID:   "snapshot-generation",
 		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
 		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
 		FormatGeneration:   fixture.store.artifact.FormatGeneration,
+	}
+	fixture.store.generation = &sandboxstore.RootFSGeneration{
+		ID: fixture.store.snapshot.HeadGenerationID, FilesystemID: fixture.store.snapshot.FilesystemID,
+		SourceOCIDigest:    fixture.store.snapshot.SourceOCIDigest,
+		BaseArtifactDigest: fixture.store.snapshot.BaseArtifactDigest,
+		FormatGeneration:   fixture.store.snapshot.FormatGeneration,
+		DurabilityState:    sandboxstore.RootFSGenerationStateS3Materialized,
 	}
 	response, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
 		TeamID: "team-1", UserID: "user-1", Template: "default",
@@ -1171,6 +1253,253 @@ func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 		fixture.store.restoreCalls[0].OperationID != "operation-snapshot/initial-restore" ||
 		len(fixture.store.ensureCalls) != 0 {
 		t.Fatalf("restore calls = %+v ensure calls = %+v", fixture.store.restoreCalls, fixture.store.ensureCalls)
+	}
+}
+
+func TestServiceRestoresAttestedTemplateRootFSBeforeClaim(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	tpl := fixture.service.templates.(*fakeTemplateStore).template
+	tpl.RootFS = &templatepkg.RootFSTemplateSource{
+		StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
+		SnapshotID:    "template-build-capture", GenerationID: "captured-generation",
+		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+		FormatGeneration:   fixture.store.artifact.FormatGeneration,
+		Platform:           ocispec.Platform{OS: "linux", Architecture: "amd64"},
+	}
+	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
+		ID: tpl.RootFS.SnapshotID, FilesystemID: "captured-filesystem",
+		TeamID: "team-1", SourceSandboxID: "source-sandbox",
+		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
+		HeadGenerationID:   tpl.RootFS.GenerationID,
+		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
+		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
+		FormatGeneration:   tpl.RootFS.FormatGeneration,
+	}
+	fixture.store.generation = &sandboxstore.RootFSGeneration{
+		ID: tpl.RootFS.GenerationID, FilesystemID: fixture.store.snapshot.FilesystemID,
+		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
+		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
+		FormatGeneration:   tpl.RootFS.FormatGeneration,
+		DurabilityState:    sandboxstore.RootFSGenerationStateCompositeDurable,
+	}
+
+	response, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-template-rootfs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.restoreCalls) != 1 ||
+		fixture.store.restoreCalls[0].SandboxID != response.SandboxID ||
+		fixture.store.restoreCalls[0].SnapshotID != tpl.RootFS.SnapshotID ||
+		len(fixture.store.ensureCalls) != 0 {
+		t.Fatalf("restore calls = %+v ensure calls = %+v", fixture.store.restoreCalls, fixture.store.ensureCalls)
+	}
+}
+
+func TestServiceRejectsChangedTemplateRootFSAttestationBeforePersistence(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	tpl := fixture.service.templates.(*fakeTemplateStore).template
+	tpl.RootFS = &templatepkg.RootFSTemplateSource{
+		StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
+		SnapshotID:    "template-build-capture", GenerationID: "captured-generation",
+		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+		FormatGeneration:   fixture.store.artifact.FormatGeneration,
+		Platform:           ocispec.Platform{OS: "linux", Architecture: "amd64"},
+	}
+	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
+		ID: tpl.RootFS.SnapshotID, TeamID: "team-1", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		HeadGenerationID: "substituted-generation", BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
+		SourceOCIDigest: tpl.RootFS.SourceOCIDigest, FormatGeneration: tpl.RootFS.FormatGeneration,
+	}
+
+	_, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-changed-rootfs",
+	})
+	if !errors.Is(err, sandboxstore.ErrRootFSGenerationConflict) {
+		t.Fatalf("claim error = %v, want generation conflict", err)
+	}
+	if fixture.store.writeCount != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: writes=%d planner=%d", fixture.store.writeCount, len(fixture.planner.requests))
+	}
+}
+
+func TestServiceRejectsTemplateSnapshotGenerationFilesystemMismatch(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	tpl := fixture.service.templates.(*fakeTemplateStore).template
+	tpl.RootFS = &templatepkg.RootFSTemplateSource{
+		StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
+		SnapshotID:    "template-build-capture", GenerationID: "captured-generation",
+		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+		FormatGeneration:   fixture.store.artifact.FormatGeneration,
+		Platform:           ocispec.Platform{OS: "linux", Architecture: "amd64"},
+	}
+	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
+		ID: tpl.RootFS.SnapshotID, FilesystemID: "substituted-filesystem", TeamID: "team-1",
+		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
+		HeadGenerationID:   tpl.RootFS.GenerationID,
+		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
+		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
+		FormatGeneration:   tpl.RootFS.FormatGeneration,
+	}
+	fixture.store.generation = &sandboxstore.RootFSGeneration{
+		ID: tpl.RootFS.GenerationID, FilesystemID: "captured-filesystem",
+		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
+		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
+		FormatGeneration:   tpl.RootFS.FormatGeneration,
+		DurabilityState:    sandboxstore.RootFSGenerationStateS3Materialized,
+	}
+
+	_, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default",
+		OperationID: "operation-cross-filesystem-rootfs",
+	})
+	if !errors.Is(err, sandboxstore.ErrRootFSGenerationConflict) {
+		t.Fatalf("claim error = %v, want generation conflict", err)
+	}
+	if fixture.store.writeCount != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: writes=%d planner=%d", fixture.store.writeCount, len(fixture.planner.requests))
+	}
+}
+
+func TestServiceCapturesPausedNomadTemplateAsBlockGeneration(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
+	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
+		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
+		RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		DesiredState:   sandboxstore.SandboxDesiredStatePaused,
+		TemplateSpec:   sourceSpec,
+	}
+	fixture.store.generation = &sandboxstore.RootFSGeneration{
+		ID: "generation-captured", FilesystemID: "source-sandbox",
+		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+		FormatGeneration:   fixture.store.artifact.FormatGeneration,
+		DurabilityState:    sandboxstore.RootFSGenerationStateCompositeDurable,
+	}
+	snapshotID := templatepkg.BuildSnapshotID("11111111-1111-1111-1111-111111111111")
+	capture, err := fixture.service.EnsureTemplateBuildCapture(
+		context.Background(), "source-sandbox", "team-1", snapshotID, sourceSpec,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capture.Version != templatebuild.BlockCaptureMetadataVersion ||
+		capture.SnapshotID != snapshotID || capture.HeadGenerationID != fixture.store.generation.ID ||
+		capture.SourceOCIDigest != fixture.store.artifact.SourceOCIDigest ||
+		capture.BaseArtifactDigest != fixture.store.artifact.ArtifactDigest ||
+		capture.Platform.Architecture != "amd64" || len(capture.Layers) != 0 {
+		t.Fatalf("capture = %#v", capture)
+	}
+	if len(fixture.store.createdSnapshots) != 1 {
+		t.Fatalf("snapshot creates = %+v", fixture.store.createdSnapshots)
+	}
+	if err := fixture.service.DeleteTemplateBuildCapture(context.Background(), snapshotID, "team-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.deletedSnapshots) != 1 || fixture.store.deletedSnapshots[0] != snapshotID {
+		t.Fatalf("snapshot deletions = %v", fixture.store.deletedSnapshots)
+	}
+}
+
+func TestServiceCapturesActiveNomadTemplateThroughExactWriter(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
+	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
+		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
+		RuntimeBackend:    sandboxstore.SandboxRuntimeBackendNomad,
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		RuntimeGeneration: 3, CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+		TemplateSpec: sourceSpec,
+	}
+	snapshotID := templatepkg.BuildSnapshotID("22222222-2222-2222-2222-222222222222")
+	operationID := "nomad-template-capture-" + strings.TrimPrefix(snapshotID, "template-build-")
+	targetFilesystemID := sandboxstore.NomadTemplateCaptureFilesystemID(operationID, snapshotID)
+	targetGenerationID := sandboxstore.NomadTemplateCaptureGenerationID(operationID, snapshotID)
+	binding := sha256.Sum256([]byte("template-capture-binding"))
+	fixture.store.templateCaptureCandidate = &sandboxstore.NomadTemplateCaptureCandidate{
+		OperationID: operationID, SnapshotID: snapshotID,
+		TargetFilesystemID: targetFilesystemID, TargetGenerationID: targetGenerationID,
+		Slot: &sandboxstore.RuntimeSlot{
+			ID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+			NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		},
+		SourceFilesystemID: "source-filesystem", SourceGenerationID: "source-generation",
+		SourceWriterGrantID: "writer-grant", SourceWriterEpoch: 7,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: binding[:],
+	}
+	currentHead := digest.FromString("template-capture-head").String()
+	baseRoot := digest.FromString("template-capture-base").String()
+	descriptor := testNomadRebaseDescriptor(t, "template-capture", currentHead)
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version:     rootfshandoff.RunningForkCheckpointVersion,
+		OperationID: operationID, SourceSandboxID: "source-sandbox",
+		SourceFilesystemID: "source-filesystem", TargetSandboxID: targetFilesystemID,
+		SourceWriterGrantID: "writer-grant", SourceWriterEpoch: 7,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: "source-generation", CheckpointGenerationID: targetGenerationID,
+		CheckpointSequence: 1, CheckpointDescriptorDigest: digest.FromBytes(descriptor).String(),
+	}
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.runningFork.result = rootfshandoff.RunningForkCheckpointResult{
+		Generation: rootfshandoff.GenerationDescriptor{
+			Version:      rootfshandoff.GenerationDescriptorVersion,
+			GenerationID: targetGenerationID, FilesystemID: targetFilesystemID,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			BaseBlockRoot:      baseRoot, CurrentBlockHead: currentHead,
+			WriterEpoch: 7, FormatGeneration: fixture.store.artifact.FormatGeneration,
+			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
+			LocatorVersion:  2, Descriptor: descriptor,
+		},
+		Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
+	}
+	fixture.runningFork.onCall = func() {
+		fixture.store.generation = &sandboxstore.RootFSGeneration{
+			ID: targetGenerationID, FilesystemID: targetFilesystemID,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			BaseBlockRoot:      baseRoot, CurrentBlockHead: currentHead,
+			WriterEpoch: 7, FormatGeneration: fixture.store.artifact.FormatGeneration,
+			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
+			LocatorVersion:  2, Descriptor: descriptor,
+		}
+		fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
+			ID: snapshotID, FilesystemID: targetFilesystemID, TeamID: "team-1",
+			SourceSandboxID: "source-sandbox", HeadGenerationID: targetGenerationID,
+			StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			FormatGeneration:   fixture.store.artifact.FormatGeneration,
+			CreatedAt:          time.Unix(200, 0).UTC(),
+		}
+		fixture.store.templateCaptureCandidate.Completed = true
+		fixture.store.templateCaptureCandidate.Snapshot = fixture.store.snapshot
+	}
+
+	capture, err := fixture.service.EnsureTemplateBuildCapture(
+		context.Background(), "source-sandbox", "team-1", snapshotID, sourceSpec,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capture.HeadGenerationID != targetGenerationID || capture.SnapshotID != snapshotID ||
+		len(fixture.runningFork.requests) != 1 || len(fixture.store.templateCaptureRequests) != 2 {
+		t.Fatalf("capture=%#v requests=%d store requests=%d", capture,
+			len(fixture.runningFork.requests), len(fixture.store.templateCaptureRequests))
+	}
+	nodeRequest := fixture.runningFork.requests[0]
+	if nodeRequest.Fork.TargetSandboxID != targetFilesystemID ||
+		nodeRequest.Fork.TargetGenerationID != targetGenerationID ||
+		nodeRequest.SourceWriterGrantID != "writer-grant" {
+		t.Fatalf("node capture request = %#v", nodeRequest)
 	}
 }
 

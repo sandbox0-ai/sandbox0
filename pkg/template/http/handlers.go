@@ -442,7 +442,7 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusCreated, responseTemplate)
 }
 
-// CreateTemplateFromSandbox creates a template and enqueues its image build.
+// CreateTemplateFromSandbox creates a template and enqueues its RootFS build.
 func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 	var req TemplateFromSandboxRequest
 	if err := decodeStrictJSON(c, &req); err != nil {
@@ -488,7 +488,7 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 		return
 	}
 	if h.BuildStore == nil {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template RootFS builds are unavailable")
 		return
 	}
 
@@ -550,7 +550,7 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 		return
 	}
 	if h.SourceResolver == nil {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template RootFS builds are unavailable")
 		return
 	}
 

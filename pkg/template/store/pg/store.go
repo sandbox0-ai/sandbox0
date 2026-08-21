@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +36,10 @@ const templateSelectColumns = `
 	template_id, scope, team_id, user_id, spec, created_at, updated_at,
 	creation_build_id::text, creation_idempotency_key, creation_request_hash,
 	creation_state, creation_stage, creation_started_at, creation_captured_at,
-	creation_completed_at, creation_output_image, creation_reason, creation_message
+	creation_completed_at, creation_output_image, creation_reason, creation_message,
+	rootfs_storage_format, rootfs_snapshot_id, rootfs_generation_id,
+	rootfs_source_oci_digest, rootfs_base_artifact_digest, rootfs_format_generation,
+	rootfs_platform_os, rootfs_platform_architecture, rootfs_platform_variant
 `
 
 type rowScanner interface {
@@ -48,6 +52,10 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 	var buildID, idempotencyKey, requestHash *string
 	var creationState string
 	var creationStage, outputImage, reason, message *string
+	var rootFSStorageFormat, rootFSSnapshotID, rootFSGenerationID *string
+	var rootFSSourceOCIDigest, rootFSBaseArtifactDigest *string
+	var rootFSFormatGeneration *int
+	var rootFSPlatformOS, rootFSPlatformArchitecture, rootFSPlatformVariant *string
 	var startedAt, capturedAt, completedAt *time.Time
 	if err := row.Scan(
 		&tpl.TemplateID,
@@ -68,6 +76,15 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 		&outputImage,
 		&reason,
 		&message,
+		&rootFSStorageFormat,
+		&rootFSSnapshotID,
+		&rootFSGenerationID,
+		&rootFSSourceOCIDigest,
+		&rootFSBaseArtifactDigest,
+		&rootFSFormatGeneration,
+		&rootFSPlatformOS,
+		&rootFSPlatformArchitecture,
+		&rootFSPlatformVariant,
 	); err != nil {
 		return nil, err
 	}
@@ -90,6 +107,19 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 				Reason:      stringValue(reason),
 				Message:     stringValue(message),
 			},
+		}
+	}
+	if rootFSSnapshotID != nil {
+		tpl.RootFS = &template.RootFSTemplateSource{
+			StorageFormat: stringValue(rootFSStorageFormat),
+			SnapshotID:    stringValue(rootFSSnapshotID), GenerationID: stringValue(rootFSGenerationID),
+			SourceOCIDigest:    stringValue(rootFSSourceOCIDigest),
+			BaseArtifactDigest: stringValue(rootFSBaseArtifactDigest),
+			Platform: ocispec.Platform{OS: stringValue(rootFSPlatformOS),
+				Architecture: stringValue(rootFSPlatformArchitecture), Variant: stringValue(rootFSPlatformVariant)},
+		}
+		if rootFSFormatGeneration != nil {
+			tpl.RootFS.FormatGeneration = *rootFSFormatGeneration
 		}
 	}
 	return &tpl, nil
@@ -332,25 +362,92 @@ func (s *Store) UpdateTemplate(ctx context.Context, tpl *template.Template) erro
 	if err != nil {
 		return fmt.Errorf("marshal spec: %w", err)
 	}
-
-	_, err = s.pool.Exec(ctx, `
-		UPDATE scheduler_templates
-		SET spec = $5, user_id = $4
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin update template: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var oldSpecJSON []byte
+	var snapshotID *string
+	err = tx.QueryRow(ctx, `
+		SELECT spec, rootfs_snapshot_id
+		FROM scheduler_templates
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-	`, tpl.Scope, tpl.TeamID, tpl.TemplateID, tpl.UserID, specJSON)
+		FOR UPDATE
+	`, tpl.Scope, tpl.TeamID, tpl.TemplateID).Scan(&oldSpecJSON, &snapshotID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock template for update: %w", err)
+	}
+	clearRootFS := false
+	if snapshotID != nil {
+		var oldSpec v1alpha1.SandboxTemplateSpec
+		if err := json.Unmarshal(oldSpecJSON, &oldSpec); err != nil {
+			return fmt.Errorf("decode stored template spec: %w", err)
+		}
+		clearRootFS = strings.TrimSpace(oldSpec.MainContainer.Image) !=
+			strings.TrimSpace(tpl.Spec.MainContainer.Image)
+		if clearRootFS {
+			if err := enqueueTemplateRootFSDeletion(ctx, tx, stringValue(snapshotID), tpl.TeamID); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE scheduler_templates
+		SET spec = $5, user_id = $4,
+			rootfs_storage_format = CASE WHEN $6 THEN NULL ELSE rootfs_storage_format END,
+			rootfs_snapshot_id = CASE WHEN $6 THEN NULL ELSE rootfs_snapshot_id END,
+			rootfs_generation_id = CASE WHEN $6 THEN NULL ELSE rootfs_generation_id END,
+			rootfs_source_oci_digest = CASE WHEN $6 THEN NULL ELSE rootfs_source_oci_digest END,
+			rootfs_base_artifact_digest = CASE WHEN $6 THEN NULL ELSE rootfs_base_artifact_digest END,
+			rootfs_format_generation = CASE WHEN $6 THEN NULL ELSE rootfs_format_generation END,
+			rootfs_platform_os = CASE WHEN $6 THEN NULL ELSE rootfs_platform_os END,
+			rootfs_platform_architecture = CASE WHEN $6 THEN NULL ELSE rootfs_platform_architecture END,
+			rootfs_platform_variant = CASE WHEN $6 THEN NULL ELSE rootfs_platform_variant END
+		WHERE scope = $1 AND team_id = $2 AND template_id = $3
+	`, tpl.Scope, tpl.TeamID, tpl.TemplateID, tpl.UserID, specJSON, clearRootFS)
 	if err != nil {
 		return fmt.Errorf("update template: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update template: %w", err)
 	}
 	return nil
 }
 
 // DeleteTemplate deletes a template.
 func (s *Store) DeleteTemplate(ctx context.Context, scope, teamID, templateID string) error {
-	_, err := s.pool.Exec(ctx, `
-		DELETE FROM scheduler_templates WHERE scope = $1 AND team_id = $2 AND template_id = $3
-	`, scope, teamID, templateID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin delete template: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var snapshotID *string
+	err = tx.QueryRow(ctx, `
+		SELECT rootfs_snapshot_id
+		FROM scheduler_templates
+		WHERE scope = $1 AND team_id = $2 AND template_id = $3
+		FOR UPDATE
+	`, scope, teamID, templateID).Scan(&snapshotID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock template for deletion: %w", err)
+	}
+	if err := enqueueTemplateRootFSDeletion(ctx, tx, stringValue(snapshotID), teamID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `
+		DELETE FROM scheduler_templates WHERE scope = $1 AND team_id = $2 AND template_id = $3
+	`, scope, teamID, templateID); err != nil {
 		return fmt.Errorf("delete template: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete template: %w", err)
 	}
 	return nil
 }
@@ -414,10 +511,21 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 // ClaimTemplateBuild leases one build to a manager in the local region.
 // Capturing remains bound to the source cluster. Once capture is durable,
 // publishing, reconciliation cleanup, and cancellation cleanup may be taken
-// over by any manager that shares the region's PostgreSQL and object storage.
-func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error) {
+// over by any compatible manager that shares the region's PostgreSQL and
+// object storage. Capture-version fencing prevents an OCI worker from
+// interpreting a block-COW handoff, or vice versa.
+func (s *Store) ClaimTemplateBuild(
+	ctx context.Context,
+	targetClusterID, workerID string,
+	captureVersion int,
+	leaseDuration time.Duration,
+) (*template.TemplateBuild, error) {
 	if strings.TrimSpace(targetClusterID) == "" || strings.TrimSpace(workerID) == "" {
 		return nil, fmt.Errorf("target_cluster_id and worker_id are required")
+	}
+	if captureVersion != template.TemplateBuildCaptureVersionOCI &&
+		captureVersion != template.TemplateBuildCaptureVersionBlockCOW {
+		return nil, fmt.Errorf("unsupported template capture version %d", captureVersion)
 	}
 	if leaseDuration <= 0 {
 		leaseDuration = 2 * time.Minute
@@ -445,7 +553,13 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 			WHERE b.next_attempt_at <= NOW()
 			  AND (b.lease_expires_at IS NULL OR b.lease_expires_at <= NOW())
 			  AND (
-				b.cancel_requested_at IS NOT NULL
+				(
+					b.cancel_requested_at IS NOT NULL
+					AND (
+						b.capture_metadata IS NULL
+						OR b.capture_metadata->>'version' = $4
+					)
+				)
 				OR (
 					b.cancel_requested_at IS NULL
 					AND t.creation_build_id IS NOT NULL
@@ -458,6 +572,7 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 						)
 						OR (
 							b.stage = 'publishing'
+							AND b.capture_metadata->>'version' = $4
 							AND t.creation_state = 'creating'
 							AND t.creation_stage = 'publishing'
 							AND (
@@ -471,6 +586,7 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 						)
 						OR (
 							b.stage = 'reconciling'
+							AND b.capture_metadata->>'version' = $4
 							AND (
 								(t.creation_state = 'creating' AND t.creation_stage = 'reconciling')
 								OR t.creation_state = 'ready'
@@ -491,7 +607,7 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 		FROM candidate
 		WHERE b.build_id = candidate.build_id
 		RETURNING `+templateBuildSelectColumnsWithAlias("b")+`
-	`, targetClusterID, workerID, leaseMillis))
+	`, targetClusterID, workerID, leaseMillis, fmt.Sprintf("%d", captureVersion)))
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -625,6 +741,18 @@ func (s *Store) RenewTemplateBuildLease(ctx context.Context, buildID, workerID s
 // MarkTemplateBuildCaptured records the immutable rootfs snapshot and advances
 // both the job and public template status to publishing.
 func (s *Store) MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if snapshotID == "" {
+		return fmt.Errorf("captured template snapshot_id is required")
+	}
+	var metadataVersion struct {
+		Version int `json:"version"`
+	}
+	if len(captureMetadata) == 0 || json.Unmarshal(captureMetadata, &metadataVersion) != nil ||
+		(metadataVersion.Version != template.TemplateBuildCaptureVersionOCI &&
+			metadataVersion.Version != template.TemplateBuildCaptureVersionBlockCOW) {
+		return fmt.Errorf("captured template metadata has no supported version")
+	}
 	if capturedAt.IsZero() {
 		capturedAt = time.Now().UTC()
 	}
@@ -644,9 +772,13 @@ func (s *Store) MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID
 		  AND status = 'running' AND cancel_requested_at IS NULL
 		  AND (
 			stage = 'capturing'
-			OR (stage = 'publishing' AND snapshot_id = $3)
+			OR (
+				stage = 'publishing' AND snapshot_id = $3
+				AND capture_metadata->>'version' = $5
+				AND capture_metadata = $4::jsonb
+			)
 		  )
-	`, buildID, workerID, snapshotID, nullableJSON(captureMetadata))
+	`, buildID, workerID, snapshotID, nullableJSON(captureMetadata), fmt.Sprintf("%d", metadataVersion.Version))
 	if err != nil {
 		return fmt.Errorf("mark build captured: %w", err)
 	}
@@ -692,6 +824,7 @@ func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID stri
 		SET stage = 'reconciling', output_image = $3, last_error = NULL
 		WHERE build_id = $1::uuid AND lease_owner = $2
 		  AND status = 'running' AND cancel_requested_at IS NULL
+		  AND capture_metadata->>'version' = '1'
 		  AND (
 			stage = 'publishing'
 			OR (stage = 'reconciling' AND output_image = $3)
@@ -721,6 +854,93 @@ func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID stri
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit published template build: %w", err)
+	}
+	return nil
+}
+
+// PublishRootFSTemplateBuild atomically retains an immutable regional RootFS
+// snapshot, makes the template claimable, and removes its queue row. Unlike an
+// OCI image build, no temporary capture may be deleted after this commit.
+func (s *Store) PublishRootFSTemplateBuild(
+	ctx context.Context,
+	buildID, workerID string,
+	source template.RootFSTemplateSource,
+	capturedAt time.Time,
+) error {
+	if err := source.Validate(); err != nil {
+		return fmt.Errorf("validate published template RootFS: %w", err)
+	}
+	if capturedAt.IsZero() {
+		capturedAt = time.Now().UTC()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin publish RootFS template build: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var templateID, scope, teamID string
+	err = tx.QueryRow(ctx, `
+		DELETE FROM scheduler_template_builds
+		WHERE build_id = $1::uuid AND lease_owner = $2
+		  AND status = 'running' AND cancel_requested_at IS NULL
+		  AND stage = 'publishing' AND snapshot_id = $3
+		  AND capture_metadata->>'version' = '2'
+		  AND capture_metadata->>'storage_format' = $4
+		  AND capture_metadata->>'head_generation_id' = $5
+		  AND capture_metadata->>'source_oci_digest' = $6
+		  AND capture_metadata->>'base_artifact_digest' = $7
+		  AND capture_metadata->>'format_generation' = $8
+		  AND capture_metadata#>>'{platform,os}' = $9
+		  AND capture_metadata#>>'{platform,architecture}' = $10
+		  AND COALESCE(capture_metadata#>>'{platform,variant}', '') = $11
+		RETURNING template_id, scope, team_id
+	`, buildID, workerID, source.SnapshotID, source.StorageFormat,
+		source.GenerationID, source.SourceOCIDigest, source.BaseArtifactDigest,
+		fmt.Sprintf("%d", source.FormatGeneration), source.Platform.OS,
+		source.Platform.Architecture, source.Platform.Variant,
+	).Scan(&templateID, &scope, &teamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return template.ErrTemplateBuildLeaseLost
+	}
+	if err != nil {
+		return fmt.Errorf("finish published RootFS template build: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE scheduler_templates
+		SET creation_state = 'ready',
+			creation_stage = 'reconciling',
+			creation_captured_at = COALESCE(creation_captured_at, $5),
+			creation_completed_at = COALESCE(creation_completed_at, NOW()),
+			creation_output_image = NULL,
+			creation_reason = NULL,
+			creation_message = NULL,
+			rootfs_storage_format = $6,
+			rootfs_snapshot_id = $7,
+			rootfs_generation_id = $8,
+			rootfs_source_oci_digest = $9,
+			rootfs_base_artifact_digest = $10,
+			rootfs_format_generation = $11,
+			rootfs_platform_os = $12,
+			rootfs_platform_architecture = $13,
+			rootfs_platform_variant = $14
+		WHERE creation_build_id = $1::uuid
+		  AND template_id = $2 AND scope = $3 AND team_id = $4
+		  AND creation_state = 'creating'
+		  AND creation_stage = 'publishing'
+	`, buildID, templateID, scope, teamID, capturedAt,
+		source.StorageFormat, source.SnapshotID, source.GenerationID,
+		source.SourceOCIDigest, source.BaseArtifactDigest, source.FormatGeneration,
+		source.Platform.OS, source.Platform.Architecture, source.Platform.Variant)
+	if err != nil {
+		return fmt.Errorf("install published template RootFS: %w", err)
+	}
+	if err := requireBuildRow(result.RowsAffected()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w: commit published RootFS template build: %v",
+			template.ErrTemplateRootFSPublicationUncertain, err)
 	}
 	return nil
 }
@@ -827,29 +1047,59 @@ func (s *Store) CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var buildID *string
+	// Build workers lock their queue row before changing the visible template.
+	// Read the immutable build identity first, then preserve that same lock
+	// order so cancellation cannot deadlock publication.
+	var observedBuildID *string
 	err = tx.QueryRow(ctx, `
 		SELECT creation_build_id::text
 		FROM scheduler_templates
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-		FOR UPDATE
-	`, scope, teamID, templateID).Scan(&buildID)
+	`, scope, teamID, templateID).Scan(&observedBuildID)
 	if err == pgx.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("lock template for cancellation: %w", err)
+		return false, fmt.Errorf("read template build for cancellation: %w", err)
 	}
-	if buildID != nil {
-		if _, err := tx.Exec(ctx, `
+	if observedBuildID != nil {
+		var buildSnapshotID *string
+		err := tx.QueryRow(ctx, `
 			UPDATE scheduler_template_builds
 			SET status = 'cancelled',
 				cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
 				next_attempt_at = NOW()
 			WHERE build_id = $1::uuid
-		`, *buildID); err != nil {
+			RETURNING snapshot_id
+		`, *observedBuildID).Scan(&buildSnapshotID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("request template build cancellation: %w", err)
 		}
+		if err := enqueueTemplateRootFSDeletion(ctx, tx, stringValue(buildSnapshotID), teamID); err != nil {
+			return false, err
+		}
+	}
+	var buildID, templateSnapshotID *string
+	err = tx.QueryRow(ctx, `
+		SELECT creation_build_id::text, rootfs_snapshot_id
+		FROM scheduler_templates
+		WHERE scope = $1 AND team_id = $2 AND template_id = $3
+		FOR UPDATE
+	`, scope, teamID, templateID).Scan(&buildID, &templateSnapshotID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit absent template build cancellation: %w", err)
+		}
+		return observedBuildID != nil, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock template for cancellation: %w", err)
+	}
+	if stringValue(buildID) != stringValue(observedBuildID) {
+		return false, fmt.Errorf("template build identity changed during cancellation")
+	}
+	if err := enqueueTemplateRootFSDeletion(ctx, tx, stringValue(templateSnapshotID), teamID); err != nil {
+		return false, err
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM scheduler_templates
@@ -860,7 +1110,115 @@ func (s *Store) CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope,
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit template build cancellation: %w", err)
 	}
-	return buildID != nil, nil
+	return observedBuildID != nil, nil
+}
+
+func enqueueTemplateRootFSDeletion(ctx context.Context, tx pgx.Tx, snapshotID, teamID string) error {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if snapshotID == "" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO scheduler_template_rootfs_deletions (
+			snapshot_id, team_id, next_attempt_at, created_at, updated_at
+		) VALUES ($1, $2, NOW(), NOW(), NOW())
+		ON CONFLICT (snapshot_id) DO UPDATE SET
+			team_id = EXCLUDED.team_id,
+			next_attempt_at = LEAST(
+				scheduler_template_rootfs_deletions.next_attempt_at,
+				EXCLUDED.next_attempt_at
+			),
+			updated_at = NOW()
+	`, snapshotID, strings.TrimSpace(teamID)); err != nil {
+		return fmt.Errorf("enqueue template RootFS deletion: %w", err)
+	}
+	return nil
+}
+
+// ClaimTemplateRootFSDeletion leases one due snapshot cleanup tombstone.
+func (s *Store) ClaimTemplateRootFSDeletion(
+	ctx context.Context,
+	workerID string,
+	leaseDuration time.Duration,
+) (*template.TemplateRootFSDeletion, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, fmt.Errorf("template RootFS deletion worker_id is required")
+	}
+	if leaseDuration <= 0 {
+		leaseDuration = 2 * time.Minute
+	}
+	row := s.pool.QueryRow(ctx, `
+		WITH due AS (
+			SELECT snapshot_id
+			FROM scheduler_template_rootfs_deletions
+			WHERE next_attempt_at <= NOW()
+			  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+			  AND NOT EXISTS (
+				SELECT 1 FROM scheduler_template_builds b
+				WHERE b.snapshot_id = scheduler_template_rootfs_deletions.snapshot_id
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM scheduler_templates t
+				WHERE t.rootfs_snapshot_id = scheduler_template_rootfs_deletions.snapshot_id
+			  )
+			ORDER BY next_attempt_at ASC, created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE scheduler_template_rootfs_deletions d
+		SET lease_owner = $1,
+			lease_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'),
+			attempt_count = attempt_count + 1,
+			last_error = NULL
+		FROM due
+		WHERE d.snapshot_id = due.snapshot_id
+		RETURNING d.snapshot_id, d.team_id, d.attempt_count,
+			d.lease_owner, d.lease_expires_at
+	`, workerID, maxInt64(leaseDuration.Milliseconds(), 1))
+	var deletion template.TemplateRootFSDeletion
+	if err := row.Scan(&deletion.SnapshotID, &deletion.TeamID, &deletion.AttemptCount,
+		&deletion.LeaseOwner, &deletion.LeaseExpiresAt); errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("claim template RootFS deletion: %w", err)
+	}
+	return &deletion, nil
+}
+
+// FinishTemplateRootFSDeletion removes a cleanup tombstone after the regional
+// snapshot has been released.
+func (s *Store) FinishTemplateRootFSDeletion(ctx context.Context, snapshotID, workerID string) error {
+	result, err := s.pool.Exec(ctx, `
+		DELETE FROM scheduler_template_rootfs_deletions
+		WHERE snapshot_id = $1 AND lease_owner = $2
+	`, strings.TrimSpace(snapshotID), strings.TrimSpace(workerID))
+	if err != nil {
+		return fmt.Errorf("finish template RootFS deletion: %w", err)
+	}
+	return requireBuildRow(result.RowsAffected())
+}
+
+// ReleaseTemplateRootFSDeletion returns a failed cleanup to the durable queue.
+func (s *Store) ReleaseTemplateRootFSDeletion(
+	ctx context.Context,
+	snapshotID, workerID string,
+	retryAt time.Time,
+	lastError string,
+) error {
+	if retryAt.IsZero() {
+		retryAt = time.Now().UTC()
+	}
+	result, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_template_rootfs_deletions
+		SET next_attempt_at = $3, lease_owner = NULL, lease_expires_at = NULL,
+			last_error = $4
+		WHERE snapshot_id = $1 AND lease_owner = $2
+	`, strings.TrimSpace(snapshotID), strings.TrimSpace(workerID), retryAt, lastError)
+	if err != nil {
+		return fmt.Errorf("release template RootFS deletion: %w", err)
+	}
+	return requireBuildRow(result.RowsAffected())
 }
 
 // MarkTemplateCreationReady finalizes creation after a reconciler verifies

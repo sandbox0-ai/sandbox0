@@ -197,6 +197,29 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 	}
 }
 
+func TestDeleteTemplateBuildCaptureUsesFormatAwareRegionalCleanup(t *testing.T) {
+	t.Parallel()
+	base := &templateCaptureMemoryStore{memorySandboxStore: &memorySandboxStore{
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
+			"template-build-1": {ID: "template-build-1", TeamID: "team-1"},
+		},
+	}}
+	store := &recordingTemplateCaptureCleaner{templateCaptureMemoryStore: base}
+	service := &SandboxService{sandboxStore: store, clock: systemTime{}}
+
+	if err := service.DeleteTemplateBuildCapture(
+		context.Background(), "template-build-1", "team-1",
+	); err != nil {
+		t.Fatalf("DeleteTemplateBuildCapture() error = %v", err)
+	}
+	if store.snapshotID != "template-build-1" || store.teamID != "team-1" {
+		t.Fatalf("format-aware cleanup identities = %q/%q", store.snapshotID, store.teamID)
+	}
+	if base.rootFSSnapshots["template-build-1"] == nil {
+		t.Fatal("legacy fallback deleted the snapshot instead of using regional cleanup")
+	}
+}
+
 func TestRootFSPlatformForPodUsesActualNodeLabels(t *testing.T) {
 	t.Parallel()
 
@@ -228,6 +251,21 @@ func TestRootFSPlatformForPodUsesActualNodeLabels(t *testing.T) {
 type templateCaptureMemoryStore struct {
 	*memorySandboxStore
 	chains map[string][]*sandboxstore.SandboxRootFSLayer
+}
+
+type recordingTemplateCaptureCleaner struct {
+	*templateCaptureMemoryStore
+	snapshotID string
+	teamID     string
+}
+
+func (s *recordingTemplateCaptureCleaner) DeleteTemplateBuildRootFSCapture(
+	_ context.Context,
+	snapshotID, teamID string,
+) error {
+	s.snapshotID = snapshotID
+	s.teamID = teamID
+	return nil
 }
 
 func (s *templateCaptureMemoryStore) GetRootFSLayerChainByHead(_ context.Context, teamID, headLayerID string) ([]*sandboxstore.SandboxRootFSLayer, error) {

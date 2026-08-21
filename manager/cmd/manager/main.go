@@ -569,7 +569,24 @@ func main() {
 	var templateBuildWorker *templatebuild.TemplateBuildWorker
 	switch {
 	case !kubernetesSandboxRuntime:
-		logger.Warn("Template image build worker disabled; Nomad block-COW capture is not configured")
+		capturer, ok := sandboxBackend.(templatebuild.Capturer)
+		if !ok {
+			logger.Warn("Nomad block-COW template build worker disabled; sandbox backend cannot capture RootFS generations")
+			break
+		}
+		templateBuildWorker, err = templatebuild.NewBlockTemplateBuildWorker(
+			templateStore,
+			capturer,
+			templatebuild.TemplateBuildWorkerConfig{
+				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+			},
+			logger,
+		)
+		if err != nil {
+			logger.Warn("Nomad block-COW template build worker disabled", zap.Error(err))
+		} else {
+			logger.Info("Nomad block-COW template build worker configured")
+		}
 	case registryProvider == nil:
 		logger.Warn("Template image build worker disabled; registry provider is not configured")
 	case rootFSObjectStoreErr != nil:

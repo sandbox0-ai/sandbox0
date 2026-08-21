@@ -175,6 +175,9 @@ func TestTemplateBuildWorkerPublishesCapturedBuildClaimedByAnotherCluster(t *tes
 	if got := queue.claimClusterID; got != "recovery-cluster" {
 		t.Fatalf("claim cluster = %q, want recovery-cluster", got)
 	}
+	if got := queue.claimVersion; got != CaptureMetadataVersion {
+		t.Fatalf("claim capture version = %d, want %d", got, CaptureMetadataVersion)
+	}
 	if capturer.ensureCalls != 0 {
 		t.Fatalf("capture calls = %d, want 0 for durable captured metadata takeover", capturer.ensureCalls)
 	}
@@ -243,6 +246,75 @@ func TestTemplateBuildWorkerPublishingWithoutMetadataNeverRecapturesSource(t *te
 	}
 }
 
+func TestBlockTemplateBuildWorkerRetainsPublishedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	build := templateBuildWorkerTestBuild()
+	capture := templateBuildWorkerBlockCapture(build)
+	queue := &fakeTemplateBuildQueue{build: build}
+	capturer := &fakeTemplateBuildCapturer{capture: capture}
+	worker := newBlockTemplateBuildWorkerForTest(t, queue, capturer)
+
+	worked, err := worker.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("RunOnce() = worked %v, error %v", worked, err)
+	}
+	if queue.rootFSSource == nil || queue.rootFSSource.SnapshotID != build.SnapshotID ||
+		queue.rootFSSource.GenerationID != capture.HeadGenerationID {
+		t.Fatalf("published RootFS source = %#v", queue.rootFSSource)
+	}
+	if queue.claimVersion != BlockCaptureMetadataVersion {
+		t.Fatalf("claim capture version = %d, want %d", queue.claimVersion, BlockCaptureMetadataVersion)
+	}
+	if queue.finished || queue.released || queue.failed || len(capturer.deleted) != 0 {
+		t.Fatalf("retained capture was cleaned: finished=%v released=%v failed=%v deleted=%#v",
+			queue.finished, queue.released, queue.failed, capturer.deleted)
+	}
+	if queue.capturedMetadata == nil {
+		t.Fatal("block capture metadata was not persisted before publication")
+	}
+}
+
+func TestBlockTemplateBuildWorkerNeverCleansUncertainPublication(t *testing.T) {
+	t.Parallel()
+
+	build := templateBuildWorkerTestBuild()
+	queue := &fakeTemplateBuildQueue{
+		build: build, rootFSPublishErr: fmt.Errorf("%w: commit response lost", template.ErrTemplateRootFSPublicationUncertain),
+	}
+	capturer := &fakeTemplateBuildCapturer{capture: templateBuildWorkerBlockCapture(build)}
+	worker := newBlockTemplateBuildWorkerForTest(t, queue, capturer)
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || err == nil {
+		t.Fatalf("RunOnce() = worked %v, error %v; want uncertain publish error", worked, err)
+	}
+	if queue.finished || queue.released || queue.failed || len(capturer.deleted) != 0 {
+		t.Fatalf("uncertain publish was destructively handled: finished=%v released=%v failed=%v deleted=%#v",
+			queue.finished, queue.released, queue.failed, capturer.deleted)
+	}
+}
+
+func TestBlockTemplateBuildWorkerReleasesDefinitePublicationFailure(t *testing.T) {
+	t.Parallel()
+
+	build := templateBuildWorkerTestBuild()
+	queue := &fakeTemplateBuildQueue{
+		build: build, rootFSPublishErr: errors.New("publication rejected before commit"),
+	}
+	capturer := &fakeTemplateBuildCapturer{capture: templateBuildWorkerBlockCapture(build)}
+	worker := newBlockTemplateBuildWorkerForTest(t, queue, capturer)
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || err == nil {
+		t.Fatalf("RunOnce() = worked %v, error %v; want publication error", worked, err)
+	}
+	if !queue.released || queue.finished || queue.failed || len(capturer.deleted) != 0 {
+		t.Fatalf("definite publication failure state: released=%v finished=%v failed=%v deleted=%#v",
+			queue.released, queue.finished, queue.failed, capturer.deleted)
+	}
+}
+
 func newTemplateBuildWorkerForTest(
 	t *testing.T,
 	queue *fakeTemplateBuildQueue,
@@ -261,6 +333,22 @@ func newTemplateBuildWorkerForTest(
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewTemplateBuildWorker() error = %v", err)
+	}
+	return worker
+}
+
+func newBlockTemplateBuildWorkerForTest(
+	t *testing.T,
+	queue *fakeTemplateBuildQueue,
+	capturer *fakeTemplateBuildCapturer,
+) *TemplateBuildWorker {
+	t.Helper()
+	worker, err := NewBlockTemplateBuildWorker(queue, capturer, TemplateBuildWorkerConfig{
+		ClusterID: "cluster-1", WorkerID: "worker-1", PollInterval: time.Hour,
+		LeaseDuration: time.Hour, HeartbeatInterval: 30 * time.Minute, MaxAttempts: 3,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewBlockTemplateBuildWorker() error = %v", err)
 	}
 	return worker
 }
@@ -302,6 +390,17 @@ func templateBuildWorkerTestCapture(build *template.TemplateBuild) *TemplateBuil
 	}
 }
 
+func templateBuildWorkerBlockCapture(build *template.TemplateBuild) *TemplateBuildCaptureMetadata {
+	return &TemplateBuildCaptureMetadata{
+		Version:    BlockCaptureMetadataVersion,
+		SnapshotID: build.SnapshotID, StorageFormat: template.RootFSTemplateStorageFormatBlockCOWV1,
+		HeadGenerationID: "generation-1", SourceOCIDigest: digest.FromString("source").String(),
+		BaseArtifactDigest: digest.FromString("artifact").String(), FormatGeneration: 1,
+		Platform:   ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		CapturedAt: time.Unix(100, 0).UTC(),
+	}
+}
+
 type fakeTemplateBuildQueue struct {
 	mu                sync.Mutex
 	build             *template.TemplateBuild
@@ -316,9 +415,17 @@ type fakeTemplateBuildQueue struct {
 	failed            bool
 	renewed           int
 	claimClusterID    string
+	claimVersion      int
+	rootFSSource      *template.RootFSTemplateSource
+	rootFSPublishErr  error
 }
 
-func (q *fakeTemplateBuildQueue) ClaimTemplateBuild(_ context.Context, clusterID, _ string, _ time.Duration) (*template.TemplateBuild, error) {
+func (q *fakeTemplateBuildQueue) ClaimTemplateBuild(
+	_ context.Context,
+	clusterID, _ string,
+	captureVersion int,
+	_ time.Duration,
+) (*template.TemplateBuild, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.claimed {
@@ -326,6 +433,7 @@ func (q *fakeTemplateBuildQueue) ClaimTemplateBuild(_ context.Context, clusterID
 	}
 	q.claimed = true
 	q.claimClusterID = clusterID
+	q.claimVersion = captureVersion
 	copy := *q.build
 	copy.CaptureMetadata = append([]byte(nil), q.build.CaptureMetadata...)
 	return &copy, nil
@@ -351,6 +459,19 @@ func (q *fakeTemplateBuildQueue) PublishTemplateBuild(_ context.Context, _, _ st
 	q.publishedSpec = spec
 	q.outputImage = outputImage
 	return nil
+}
+
+func (q *fakeTemplateBuildQueue) PublishRootFSTemplateBuild(
+	_ context.Context,
+	_, _ string,
+	source template.RootFSTemplateSource,
+	_ time.Time,
+) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	copy := source
+	q.rootFSSource = &copy
+	return q.rootFSPublishErr
 }
 
 func (q *fakeTemplateBuildQueue) FailTemplateBuild(context.Context, string, string, string, string) error {

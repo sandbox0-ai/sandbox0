@@ -29,7 +29,7 @@ Sandbox0 supports three ways to reuse an environment:
 | A reusable template ID backed by the current root filesystem of an initialized sandbox | Create a custom template from a sandbox |
 | Fast reuse of initialized rootfs state with the same existing template | Rootfs snapshot and claim with `snapshot_id` |
 
-Creating a template from a sandbox captures its current writable root filesystem, publishes an OCI image to the registry configured for the team, and changes the template to use a digest-pinned image. This is useful when initialization is interactive or agent-driven and you want the result to become a normal template that can be listed, shared within the team, reconciled across clusters, and assigned its own warm pool.
+Creating a template from a sandbox captures its current writable root filesystem as an immutable regional block-COW generation. The template keeps the original digest-pinned base image as its runtime identity and restores the captured generation for each new sandbox. This is useful when initialization is interactive or agent-driven and you want the result to become a normal team template with its own warm-pool settings.
 
 You do not need a new template ID for every initialized environment. If the base image, default resources, network policy, and mount declarations already fit, create a rootfs snapshot and pass its `snapshot_id` when claiming future sandboxes:
 
@@ -159,7 +159,7 @@ s0 template create --id my-python-env --spec-file template.yaml`
 
 ## Create Template From A Sandbox
 
-Create a custom template from the current root filesystem of an existing sandbox. Sandbox0 captures and publishes the image asynchronously, so the endpoint returns `202 Accepted` with a template whose `status.creation.state` is `creating`.
+Create a custom template from the current root filesystem of an existing sandbox. Sandbox0 captures and publishes an immutable block-COW generation asynchronously, so the endpoint returns `202 Accepted` with a template whose `status.creation.state` is `creating`.
 
 <Endpoint method="POST">
 /api/v1/templates/from-sandbox
@@ -175,18 +175,14 @@ Create a custom template from the current root filesystem of an existing sandbox
 
 The new template inherits safe settings from the source sandbox's template. Sandbox0 does not copy sandbox identity, active processes, memory contents, sessions, claim-time environment or network overrides, services, or privileged pod and security fields. If `pool` is omitted, it defaults to `minIdle: 0` and `maxIdle: 0`.
 
-The source sandbox may be running or paused. Because capture is asynchronous, request acceptance is not the rootfs capture point. Keep the source sandbox available and avoid rootfs writes while the template is in the `capturing` stage. Sandbox0 briefly barriers and checkpoints a running source, then records the exact capture point in `status.creation.capturedAt`; after that, the source can continue changing or be deleted without changing the image build.
+The source sandbox may be running or paused. Because capture is asynchronous, request acceptance is not the rootfs capture point. Keep the source sandbox available while the template is in the `capturing` stage. Sandbox0 briefly barriers the exact writer of a running source and publishes an immutable checkpoint; concurrent writes continue after that short barrier. `status.creation.capturedAt` identifies the committed capture point. The source can then continue changing or be deleted without changing the template.
 
 <Callout variant="info">
-You do not provide an image repository or registry credentials. Sandbox0 publishes to the registry configured by the platform operator and stores a digest-pinned image reference in the completed template.
+You do not provide an image repository or registry credentials. Sandbox0 retains the immutable capture in the team's region-scoped RootFS store. Every cluster serving that region shares the PostgreSQL and object-store authority needed to claim it.
 </Callout>
 
 <Callout variant="warning">
-The configured registry pull address must be reachable by every sandbox node. For the built-in registry, operators should set `spec.registry.builtin.pushEndpoint` or Ingress to a node-reachable address. Sandbox0 uses the Kubernetes Service address only for manager's internal publication path.
-</Callout>
-
-<Callout variant="warning">
-The source template image must remain resolvable by digest from its original registry while the build is publishing. A node-local or preloaded image with no matching registry manifest cannot currently be used as the source; publish that base image to a registry and update the source template first.
+The source and target warm-slot profiles must use the same attested platform and RootFS format generation. Capture fails closed if the base artifact, source image digest, platform, writer grant, allocation, or node incarnation changes before publication.
 </Callout>
 
 The caller needs both `template:create` and `sandbox:read` permissions.
@@ -317,16 +313,16 @@ Creation progresses through these stages:
 | State | Stage | Meaning |
 |-------|-------|---------|
 | `creating` | `capturing` | Sandbox0 is taking a point-in-time rootfs snapshot |
-| `creating` | `publishing` | The OCI image is being assembled and pushed |
-| `creating` | `reconciling` | The digest-pinned template is being distributed to data-plane clusters |
-| `ready` | `reconciling` | The template is visible in a data-plane cluster and the claim API accepts it |
+| `creating` | `publishing` | The immutable RootFS capture is being bound to the template; image-publisher backends assemble and push OCI content during this stage |
+| `creating` | `reconciling` | The completed RootFS representation is being made claimable by data-plane clusters |
+| `ready` | `reconciling` | The claim API accepts the template; runtime-native captures retain this last stage as provenance |
 | `failed` | Last active stage | Creation stopped; inspect `reason` and `message` |
 
 `GET /api/v1/templates/{'{id}'}` and template list responses include templates in all three states. A traditional image-based template has no `status.creation` object and is ready immediately. While a template is creating or failed, it cannot be updated or used to claim a sandbox. It can still be deleted; deleting it also cancels any unfinished build work.
 
-With a zero-sized pool, `ready` does not mean the image has already been pulled into a sandbox node. The first claim still performs the normal image pull and sandbox startup.
+With a zero-sized pool, `ready` does not mean the image or captured RootFS is already resident on a sandbox node. The first claim still performs the normal RootFS attach and sandbox startup path.
 
-Deleting or cancelling a template releases Sandbox0's internal rootfs snapshot pin and build records. It does not synchronously delete OCI tags or blobs that may already have reached the configured registry. Operators should apply an appropriate retention or lifecycle policy to Sandbox0's team-scoped template repositories.
+Deleting or cancelling a template first records a durable cleanup tombstone, then releases Sandbox0's internal RootFS snapshot pin. Shared generation objects remain reachable while any sandbox created from the template still uses them and are reclaimed asynchronously after the last derived filesystem is gone.
 
 SDK wait helpers only stop client-side polling when their context, abort signal, timeout, or caller interruption ends. They do not cancel the server-side build.
 

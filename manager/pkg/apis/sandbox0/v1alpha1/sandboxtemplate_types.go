@@ -629,7 +629,7 @@ type SandboxTemplateStatus struct {
 	IdleCount   int32 `json:"idleCount"`
 	ActiveCount int32 `json:"activeCount"`
 
-	// Creation reports asynchronous image creation for templates created from a sandbox.
+	// Creation reports asynchronous RootFS creation for templates created from a sandbox.
 	Creation *TemplateCreationStatus `json:"creation,omitempty"`
 
 	// Conditions
@@ -639,7 +639,7 @@ type SandboxTemplateStatus struct {
 	LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
 }
 
-// TemplateCreationStatus reports asynchronous creation of a template image.
+// TemplateCreationStatus reports asynchronous creation of a template RootFS.
 type TemplateCreationStatus struct {
 	State TemplateCreationState `json:"state"`
 	Stage TemplateCreationStage `json:"stage"`
@@ -648,8 +648,8 @@ type TemplateCreationStatus struct {
 	CapturedAt  *metav1.Time `json:"capturedAt,omitempty"`
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 
-	// OutputImage is the immutable image produced by the original
-	// from-sandbox build. A later manual template update does not rewrite it.
+	// OutputImage is populated only by image-publisher backends. Runtime-native
+	// block-COW captures retain an internal generation and leave it empty.
 	OutputImage string `json:"outputImage,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	Message     string `json:"message,omitempty"`

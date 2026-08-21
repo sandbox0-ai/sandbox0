@@ -635,10 +635,14 @@ func main() {
 			sandboxService.SetTemplateImageBuildAvailable(true)
 		}
 	}
+	var templateReconcilerQuiescer templateReconcilerQuiescer
+	if templateReconciler != nil {
+		templateReconcilerQuiescer = templateReconciler
+	}
 	go serveTemplateReconcilerQuiesceSignals(
 		ctx,
 		templateReconcilerQuiesceSignals,
-		templateReconciler,
+		templateReconcilerQuiescer,
 		defaultTemplateReconcilerQuiesceSupportedMarkerPath,
 		defaultTemplateReconcilerQuiescedMarkerPath,
 		logger,

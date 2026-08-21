@@ -25,6 +25,20 @@ func TestManagerControllerSetNomadDoesNotStartKubernetesRuntimeControllers(t *te
 	})
 }
 
+func TestManagerControllerSetDoesNotStartAbsentTemplateReconciler(t *testing.T) {
+	controllers := &managerControllerSet{
+		cfg:    &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad},
+		logger: zap.NewNop(),
+	}
+	controllers.cfg.RootFSMaintenance.Disabled = true
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	requireReturnsWithin(t, time.Second, func() {
+		controllers.Start(ctx)
+	})
+}
+
 func TestManagerUsesKubernetesSandboxRuntimeOnlyForLegacyBackend(t *testing.T) {
 	tests := []struct {
 		name string

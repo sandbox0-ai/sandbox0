@@ -16,6 +16,7 @@ import (
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -42,7 +43,7 @@ type managerControllerSet struct {
 	sandboxTTLController             *service.SandboxTTLController
 	sandboxRootFSController          *service.SandboxRootFSController
 	sandboxNetworkMutationController *service.SandboxNetworkMutationController
-	templateReconciler               templateReconcilerRunner
+	templateReconciler               *templreconciler.SingleClusterReconciler
 	templateBuildWorker              *templatebuild.TemplateBuildWorker
 	sandboxLogWorker                 *managerobs.LogWorker
 	sandboxStore                     *sandboxstore.PGSandboxStore
@@ -50,10 +51,6 @@ type managerControllerSet struct {
 	rootFSObjectStoreErr             error
 	meteringRepo                     *meteringoutbox.Repository
 	managerMetrics                   *obsmetrics.ManagerMetrics
-}
-
-type templateReconcilerRunner interface {
-	Start(context.Context)
 }
 
 func (s *managerControllerSet) Start(ctx context.Context) {

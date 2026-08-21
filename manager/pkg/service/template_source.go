@@ -33,24 +33,10 @@ func (s *SandboxService) ResolveSandboxTemplateSource(ctx context.Context, sandb
 		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceUnavailable, err)
 	}
 	if err := validateRootFSSourceSandboxRecord(record, sandboxID, teamID, s.now()); err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			return nil, template.ErrTemplateSourceNotFound
-		case apierrors.IsForbidden(err):
-			return nil, template.ErrTemplateSourceForbidden
-		default:
-			return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceNotReady, err)
-		}
+		return nil, mapSandboxTemplateSourceValidationError(err)
 	}
 	if _, err := s.resolveRootFSSourceRuntimePod(ctx, record); err != nil {
 		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceNotReady, err)
 	}
-	return &template.SandboxTemplateSource{
-		SandboxID:  record.ID,
-		TeamID:     record.TeamID,
-		UserID:     record.UserID,
-		ClusterID:  record.ClusterID,
-		TemplateID: record.TemplateID,
-		Spec:       *record.TemplateSpec.DeepCopy(),
-	}, nil
+	return sandboxTemplateSourceFromRecord(record), nil
 }

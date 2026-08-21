@@ -51,6 +51,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
+	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
@@ -579,6 +580,17 @@ func main() {
 		zap.String("target", internalauth.ServiceManager),
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
+	var sandboxSourceResolver templatehttp.SandboxTemplateSourceResolver = sandboxService
+	if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
+		sandboxSourceResolver, err = service.NewNomadSandboxTemplateSourceResolver(
+			sandboxStore,
+			templateBuildWorker != nil,
+			clk.Now,
+		)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad sandbox template source resolver", zap.Error(err))
+		}
+	}
 
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
@@ -586,7 +598,7 @@ func main() {
 		SandboxUpdater:          sandboxUpdater,
 		SandboxNetworkPolicy:    sandboxService,
 		SandboxRootFS:           sandboxService,
-		SandboxSourceResolver:   sandboxService,
+		SandboxSourceResolver:   sandboxSourceResolver,
 		SandboxClaimer:          sandboxBackend,
 		SandboxTerminator:       sandboxBackend,
 		SandboxPauser:           sandboxBackend,

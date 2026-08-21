@@ -5,8 +5,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestLoadProfileCatalogResolvesExactResourceShape(t *testing.T) {
@@ -98,5 +101,37 @@ func TestLoadProfileCatalogRejectsAmbiguousOrLooseInput(t *testing.T) {
 	}
 	if _, err := LoadProfileCatalog("relative.json"); err == nil {
 		t.Fatal("relative profile catalog was accepted")
+	}
+}
+
+func TestProfileCatalogResolvesPersistedNomadMeteringResources(t *testing.T) {
+	catalog := &ProfileCatalog{profiles: []Profile{{
+		Name: "one", ClusterID: "cluster-1",
+		TemplateCPU: resource.MustParse("1"), TemplateMemory: resource.MustParse("1Gi"),
+	}}}
+	record := &sandboxstore.SandboxRecord{
+		RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		ClusterID:      "cluster-1",
+	}
+	record.TemplateSpec.MainContainer.Resources.CPU = resource.MustParse("1")
+	record.TemplateSpec.MainContainer.Resources.Memory = resource.MustParse("1Gi")
+
+	millicpu, memoryMiB, err := catalog.ResolvePersistedMeteringResources(
+		record,
+		templatepkg.NewResourcePolicy("1Gi", "8Gi"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if millicpu != 1000 || memoryMiB != 1024 {
+		t.Fatalf("metering resources = %dm/%dMiB", millicpu, memoryMiB)
+	}
+
+	record.ClusterID = "cluster-2"
+	if _, _, err := catalog.ResolvePersistedMeteringResources(
+		record,
+		templatepkg.NewResourcePolicy("1Gi", "8Gi"),
+	); err == nil {
+		t.Fatal("persisted cluster mismatch was accepted")
 	}
 }

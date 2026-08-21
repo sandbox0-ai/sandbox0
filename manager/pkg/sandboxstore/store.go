@@ -53,6 +53,10 @@ type SandboxRecord struct {
 	RuntimeGeneration   int64
 	LifecycleEpoch      int64
 	OwnerKind           string
+	// Resource fields are excluded from the legacy fork-record digest. Fork
+	// validation binds them explicitly while preserving rolling retries.
+	ResourceMillicpu    int64 `json:"-"`
+	ResourceMemoryMiB   int64 `json:"-"`
 	HotClaimCompletedAt time.Time
 	ClaimedAt           time.Time
 	ExpiresAt           time.Time
@@ -294,6 +298,8 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
 			owner_kind = EXCLUDED.owner_kind,
+			resource_millicpu = EXCLUDED.resource_millicpu,
+			resource_memory_mib = EXCLUDED.resource_memory_mib,
 			hot_claim_completed_at = COALESCE(EXCLUDED.hot_claim_completed_at, manager.sandboxes.hot_claim_completed_at),
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
@@ -301,7 +307,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($23, $24)
+			AND manager.sandboxes.desired_state NOT IN ($25, $26)
 	`, args...)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -314,10 +320,10 @@ const sandboxRecordInsertSQL = `
 		sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 		cluster_id, runtime_backend, desired_state, config, template_spec,
 		current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-		owner_kind, hot_claim_completed_at,
+		owner_kind, resource_millicpu, resource_memory_mib, hot_claim_completed_at,
 		claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), NOW())`
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, COALESCE($24, NOW()), NOW())`
 
 func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	if record == nil {
@@ -337,11 +343,15 @@ func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	if runtimeBackend != SandboxRuntimeBackendKubernetes && runtimeBackend != SandboxRuntimeBackendNomad {
 		return nil, fmt.Errorf("unsupported sandbox runtime backend %q", runtimeBackend)
 	}
+	if record.ResourceMillicpu < 0 || record.ResourceMemoryMiB < 0 {
+		return nil, fmt.Errorf("sandbox metering resources must be non-negative")
+	}
 	return []any{
 		record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, runtimeBackend, record.DesiredState, configJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
-		strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
+		strings.TrimSpace(record.OwnerKind), record.ResourceMillicpu, record.ResourceMemoryMiB,
+		nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt),
 		nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
 	}, nil
@@ -1368,7 +1378,7 @@ func sandboxRecordSelectSQL() string {
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, runtime_backend, desired_state, config, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			owner_kind, hot_claim_completed_at,
+			owner_kind, resource_millicpu, resource_memory_mib, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
@@ -1771,7 +1781,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.RuntimeBackend, &record.DesiredState, &configJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
-		&record.OwnerKind, &hotClaimCompletedAt,
+		&record.OwnerKind, &record.ResourceMillicpu, &record.ResourceMemoryMiB, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err

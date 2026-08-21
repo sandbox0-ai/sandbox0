@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -18,6 +20,7 @@ import (
 )
 
 type sandboxRuntimeBackendDependencies struct {
+	ctx             context.Context
 	kubernetes      service.SandboxRuntimeBackend
 	nodeAuthority   *nodeauthority.Component
 	store           nomadclaim.Store
@@ -31,6 +34,10 @@ type sandboxRuntimeBackendDependencies struct {
 	defaultTTL      time.Duration
 	now             func() time.Time
 	logger          *zap.Logger
+}
+
+type nomadMeteringResourceBackfiller interface {
+	BackfillNomadMeteringResources(context.Context, sandboxstore.NomadMeteringResourceResolver) (int64, error)
 }
 
 func buildSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntimeBackend, error) {
@@ -72,6 +79,24 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 	profiles, err := nomadclaim.LoadProfileCatalog(claim.ProfileCatalogFile)
 	if err != nil {
 		return nil, err
+	}
+	if backfiller, ok := deps.store.(nomadMeteringResourceBackfiller); ok {
+		backfillContext := deps.ctx
+		if backfillContext == nil {
+			backfillContext = context.Background()
+		}
+		updated, err := backfiller.BackfillNomadMeteringResources(
+			backfillContext,
+			func(record *sandboxstore.SandboxRecord) (int64, int64, error) {
+				return profiles.ResolvePersistedMeteringResources(record, deps.resourcePolicy)
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("backfill Nomad lifecycle metering resources: %w", err)
+		}
+		if updated > 0 && deps.logger != nil {
+			deps.logger.Info("Backfilled Nomad lifecycle metering resources", zap.Int64("sandboxes", updated))
+		}
 	}
 	writerTokenKey, err := loadWriterTokenKey(claim.WriterTokenKeyFile)
 	if err != nil {

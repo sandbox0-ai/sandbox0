@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -165,4 +166,32 @@ func (c *ProfileCatalog) Resolve(cpu, memory resource.Quantity) (Profile, bool) 
 		}
 	}
 	return Profile{}, false
+}
+
+// ResolvePersistedMeteringResources reconstructs the exact immutable profile
+// selected for a Nomad sandbox created before numeric metering fields existed.
+func (c *ProfileCatalog) ResolvePersistedMeteringResources(
+	record *sandboxstore.SandboxRecord,
+	resourcePolicy templatepkg.ResourcePolicy,
+) (int64, int64, error) {
+	if record == nil || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
+		return 0, 0, fmt.Errorf("persisted Nomad sandbox record is required")
+	}
+	quota, err := effectiveResources(resourcePolicy, record.TemplateSpec, &record.Config)
+	if err != nil {
+		return 0, 0, err
+	}
+	profile, ok := c.Resolve(quota.CPU, quota.Memory)
+	if !ok {
+		return 0, 0, fmt.Errorf("no Nomad profile matches persisted cpu=%s memory=%s", quota.CPU.String(), quota.Memory.String())
+	}
+	if profile.ClusterID != record.ClusterID {
+		return 0, 0, fmt.Errorf("persisted cluster %s does not match profile cluster %s", record.ClusterID, profile.ClusterID)
+	}
+	millicpu := profile.TemplateCPU.MilliValue()
+	memoryMiB := bytesToMiBRoundUp(profile.TemplateMemory.Value())
+	if millicpu <= 0 || memoryMiB <= 0 {
+		return 0, 0, fmt.Errorf("Nomad profile has invalid metering resources")
+	}
+	return millicpu, memoryMiB, nil
 }

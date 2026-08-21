@@ -811,7 +811,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	}
 
 	now := s.now().UTC()
-	record := s.claimRecord(tpl, &req, profile.ClusterID, now)
+	record := s.claimRecord(tpl, &req, profile, now)
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
 		return nil, err
 	}
@@ -858,16 +858,24 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 }
 
 func (s *Service) effectiveResources(spec v1alpha1.SandboxTemplateSpec, config *sandboxstore.SandboxConfig) (v1alpha1.ResourceQuota, error) {
+	return effectiveResources(s.resourcePolicy, spec, config)
+}
+
+func effectiveResources(
+	resourcePolicy templatepkg.ResourcePolicy,
+	spec v1alpha1.SandboxTemplateSpec,
+	config *sandboxstore.SandboxConfig,
+) (v1alpha1.ResourceQuota, error) {
 	quota := *spec.MainContainer.Resources.DeepCopy()
 	if config != nil && config.Resources != nil {
-		memory, err := s.resourcePolicy.ParseMemory(config.Resources.Memory, "config.resources.memory")
+		memory, err := resourcePolicy.ParseMemory(config.Resources.Memory, "config.resources.memory")
 		if err != nil {
 			return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
 		}
 		quota.Memory = memory
-		quota.CPU = templatepkg.CPUForMemory(memory, s.resourcePolicy.MemoryPerCPU())
+		quota.CPU = templatepkg.CPUForMemory(memory, resourcePolicy.MemoryPerCPU())
 	}
-	if err := s.resourcePolicy.ValidateMaxMemory(quota.Memory, "sandbox memory limit"); err != nil {
+	if err := resourcePolicy.ValidateMaxMemory(quota.Memory, "sandbox memory limit"); err != nil {
 		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
 	}
 	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
@@ -1043,7 +1051,7 @@ func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimReques
 	return err
 }
 
-func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimRequest, clusterID string, now time.Time) *sandboxstore.SandboxRecord {
+func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimRequest, profile Profile, now time.Time) *sandboxstore.SandboxRecord {
 	config := service.CloneSandboxConfig(req.Config)
 	if config == nil {
 		config = &sandboxstore.SandboxConfig{}
@@ -1055,10 +1063,15 @@ func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimReque
 	record := &sandboxstore.SandboxRecord{
 		ID: req.SandboxID, TeamID: req.TeamID, UserID: req.UserID,
 		TemplateID: tpl.TemplateID, TemplateName: tpl.TemplateID, TemplateNamespace: tpl.Scope,
-		ClusterID: clusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		ClusterID: profile.ClusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
 		DesiredState: sandboxstore.SandboxDesiredStateActive,
 		Config:       *config, TemplateSpec: tpl.Spec, RuntimeGeneration: req.RuntimeGeneration,
-		ClaimedAt: now, CreatedAt: now,
+		ResourceMillicpu:  profile.TemplateCPU.MilliValue(),
+		ResourceMemoryMiB: bytesToMiBRoundUp(profile.TemplateMemory.Value()),
+		ClaimedAt:         now, CreatedAt: now,
+	}
+	if req.Metadata != nil {
+		record.OwnerKind = strings.TrimSpace(req.Metadata.OwnerKind)
 	}
 	if config.TTL != nil && *config.TTL > 0 {
 		record.ExpiresAt = now.Add(time.Duration(*config.TTL) * time.Second)
@@ -1134,8 +1147,19 @@ func sameClaimRecord(actual, expected *sandboxstore.SandboxRecord) bool {
 		actual.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad &&
 		actual.DesiredState == sandboxstore.SandboxDesiredStateActive &&
 		actual.RuntimeGeneration == expected.RuntimeGeneration &&
+		actual.OwnerKind == expected.OwnerKind &&
+		actual.ResourceMillicpu == expected.ResourceMillicpu &&
+		actual.ResourceMemoryMiB == expected.ResourceMemoryMiB &&
 		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
 		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
+}
+
+func bytesToMiBRoundUp(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	const mib = int64(1024 * 1024)
+	return 1 + (value-1)/mib
 }
 
 func runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) runtimecontrol.Assignment {

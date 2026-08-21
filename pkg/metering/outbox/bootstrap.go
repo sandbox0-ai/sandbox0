@@ -53,6 +53,7 @@ func (r *Repository) BootstrapProjectionStates(ctx context.Context, source Proje
 					state.OwnerKind, state.ResourceMillicpu, state.ResourceMemoryMiB,
 					state.ClaimedAt, state.ActiveSince, state.Paused, state.PausedAt, state.TerminatedAt,
 					state.LastObservedAt.UTC(), state.LastResourceVer,
+					state.SourceRevision, state.SourceLifecycleEpoch,
 				)
 				if err != nil {
 					return fmt.Errorf("bootstrap sandbox projection state %q: %w", state.SandboxID, err)
@@ -118,12 +119,12 @@ const bootstrapSandboxStateSQL = `
 		sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
 		owner_kind, resource_millicpu, resource_memory_mib,
 		claimed_at, active_since, paused, paused_at, terminated_at,
-		last_observed_at, last_resource_version
+		last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch
 	) VALUES (
 		$1, $2, $3, $4, $5, $6,
 		$7, $8, $9,
 		$10, $11, $12, $13, $14,
-		$15, $16
+		$15, $16, $17, $18
 	)
 	ON CONFLICT (sandbox_id) DO UPDATE
 	SET namespace = EXCLUDED.namespace,
@@ -140,7 +141,9 @@ const bootstrapSandboxStateSQL = `
 		paused_at = EXCLUDED.paused_at,
 		terminated_at = EXCLUDED.terminated_at,
 		last_observed_at = EXCLUDED.last_observed_at,
-		last_resource_version = EXCLUDED.last_resource_version
+		last_resource_version = EXCLUDED.last_resource_version,
+		source_revision = EXCLUDED.source_revision,
+		source_lifecycle_epoch = EXCLUDED.source_lifecycle_epoch
 	WHERE metering.manager_sandbox_projection_state.last_observed_at < EXCLUDED.last_observed_at
 `
 

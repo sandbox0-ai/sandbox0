@@ -97,22 +97,24 @@ type Window struct {
 }
 
 type SandboxProjectionState struct {
-	SandboxID         string     `json:"sandbox_id"`
-	Namespace         string     `json:"namespace"`
-	TeamID            string     `json:"team_id,omitempty"`
-	UserID            string     `json:"user_id,omitempty"`
-	TemplateID        string     `json:"template_id,omitempty"`
-	ClusterID         string     `json:"cluster_id,omitempty"`
-	OwnerKind         string     `json:"owner_kind,omitempty"`
-	ResourceMillicpu  int64      `json:"resource_millicpu,omitempty"`
-	ResourceMemoryMiB int64      `json:"resource_memory_mib,omitempty"`
-	ClaimedAt         *time.Time `json:"claimed_at,omitempty"`
-	ActiveSince       *time.Time `json:"active_since,omitempty"`
-	Paused            bool       `json:"paused"`
-	PausedAt          *time.Time `json:"paused_at,omitempty"`
-	TerminatedAt      *time.Time `json:"terminated_at,omitempty"`
-	LastObservedAt    time.Time  `json:"last_observed_at"`
-	LastResourceVer   string     `json:"last_resource_version,omitempty"`
+	SandboxID            string     `json:"sandbox_id"`
+	Namespace            string     `json:"namespace"`
+	TeamID               string     `json:"team_id,omitempty"`
+	UserID               string     `json:"user_id,omitempty"`
+	TemplateID           string     `json:"template_id,omitempty"`
+	ClusterID            string     `json:"cluster_id,omitempty"`
+	OwnerKind            string     `json:"owner_kind,omitempty"`
+	ResourceMillicpu     int64      `json:"resource_millicpu,omitempty"`
+	ResourceMemoryMiB    int64      `json:"resource_memory_mib,omitempty"`
+	ClaimedAt            *time.Time `json:"claimed_at,omitempty"`
+	ActiveSince          *time.Time `json:"active_since,omitempty"`
+	Paused               bool       `json:"paused"`
+	PausedAt             *time.Time `json:"paused_at,omitempty"`
+	TerminatedAt         *time.Time `json:"terminated_at,omitempty"`
+	LastObservedAt       time.Time  `json:"last_observed_at"`
+	LastResourceVer      string     `json:"last_resource_version,omitempty"`
+	SourceRevision       int64      `json:"source_revision,omitempty"`
+	SourceLifecycleEpoch int64      `json:"source_lifecycle_epoch,omitempty"`
 }
 
 type StorageProjectionState struct {

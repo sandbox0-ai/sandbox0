@@ -98,7 +98,9 @@ func (s *Service) ForkSandbox(
 		RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
 		DesiredState:   sandboxstore.SandboxDesiredStatePaused,
 		Config:         *targetConfig, TemplateSpec: source.TemplateSpec, RuntimeGeneration: 0,
-		ClaimedAt: startedAt, ExpiresAt: expiresAt, HardExpiresAt: hardExpiresAt,
+		OwnerKind: source.OwnerKind, ResourceMillicpu: source.ResourceMillicpu,
+		ResourceMemoryMiB: source.ResourceMemoryMiB,
+		ClaimedAt:         startedAt, ExpiresAt: expiresAt, HardExpiresAt: hardExpiresAt,
 		CreatedAt: startedAt, UpdatedAt: startedAt,
 	}
 	existingTarget, err := s.store.GetSandbox(ctx, targetID)

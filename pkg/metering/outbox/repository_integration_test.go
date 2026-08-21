@@ -324,6 +324,7 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 6 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 7 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 8 AND is_applied`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 9 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type = 'rootfs'`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type IN ('volume', 'snapshot')`, 0)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'storage_state_delete'`, 2)

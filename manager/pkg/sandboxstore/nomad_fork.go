@@ -472,6 +472,9 @@ func nomadForkTargetMatches(actual, expected *SandboxRecord) bool {
 		actual.TemplateNamespace == expected.TemplateNamespace && actual.ClusterID == expected.ClusterID &&
 		actual.RuntimeBackend == SandboxRuntimeBackendNomad && actual.DesiredState == SandboxDesiredStatePaused &&
 		actual.RuntimeGeneration == 0 && actual.CurrentPodName == "" && actual.CurrentPodNamespace == "" &&
+		actual.OwnerKind == expected.OwnerKind &&
+		actual.ResourceMillicpu == expected.ResourceMillicpu &&
+		actual.ResourceMemoryMiB == expected.ResourceMemoryMiB &&
 		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
 		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec) &&
 		actual.ExpiresAt.Equal(expected.ExpiresAt) && actual.HardExpiresAt.Equal(expected.HardExpiresAt)
@@ -482,6 +485,9 @@ func nomadForkTargetDerivedFromSource(source, target *SandboxRecord) bool {
 		source.TemplateID != target.TemplateID || source.TemplateName != target.TemplateName ||
 		source.TemplateNamespace != target.TemplateNamespace || source.ClusterID != target.ClusterID ||
 		source.RuntimeBackend != SandboxRuntimeBackendNomad || target.RuntimeBackend != SandboxRuntimeBackendNomad ||
+		source.OwnerKind != target.OwnerKind ||
+		source.ResourceMillicpu != target.ResourceMillicpu ||
+		source.ResourceMemoryMiB != target.ResourceMemoryMiB ||
 		!apiequality.Semantic.DeepEqual(source.TemplateSpec, target.TemplateSpec) {
 		return false
 	}

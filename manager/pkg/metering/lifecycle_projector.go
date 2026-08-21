@@ -56,6 +56,7 @@ type repositoryTxStore struct {
 type repository interface {
 	InTx(ctx context.Context, fn func(tx pgx.Tx) error) error
 	GetSandboxProjectionState(ctx context.Context, sandboxID string) (*meteringpkg.SandboxProjectionState, error)
+	GetSandboxProjectionStateTx(ctx context.Context, tx pgx.Tx, sandboxID string) (*meteringpkg.SandboxProjectionState, error)
 	AppendEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error
 	AppendWindowTx(ctx context.Context, tx pgx.Tx, window *meteringpkg.Window) error
 	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error

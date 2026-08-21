@@ -450,6 +450,7 @@ func main() {
 	templateStore := templstorepg.NewStore(pool)
 	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
 	sandboxBackend, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{
+		ctx:        ctx,
 		kubernetes: sandboxService, nodeAuthority: managerNodeAuthority,
 		store: sandboxStore, quotaLimits: quotaRepo,
 		templates: templateStore, networkPolicies: networkPolicyService,
@@ -460,6 +461,25 @@ func main() {
 	})
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
+	}
+	if meteringRepo != nil && cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
+		lifecycleProjector, err := managermetering.NewNomadLifecycleProjector(
+			meteringRepo,
+			cfg.RegionID,
+			cfg.DefaultClusterId,
+			managermetering.NomadLifecycleProjectorConfig{},
+		)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad lifecycle metering", zap.Error(err))
+		}
+		lifecycleProjector.SetLogger(logger)
+		lifecycleProjector.SetMetrics(managerMetrics)
+		go func() {
+			if err := lifecycleProjector.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Nomad lifecycle metering projector stopped", zap.Error(err))
+			}
+		}()
+		logger.Info("Nomad lifecycle metering projector started")
 	}
 	var sandboxReader httpserver.SandboxReader
 	var sandboxUpdater httpserver.SandboxUpdater

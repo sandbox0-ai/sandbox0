@@ -296,7 +296,7 @@ func TestApplyProjectionBatchUsesBoundedMultiRowInsertsAndAdvancesWatermarksLast
 	if !strings.Contains(conn.queries[len(conn.queries)-1], "producer_watermarks") {
 		t.Fatalf("last INSERT does not advance watermarks: %s", conn.queries[len(conn.queries)-1])
 	}
-	wantArgCounts := []int{36, 42, 42, 48, 10}
+	wantArgCounts := []int{36, 42, 46, 48, 10}
 	for index, want := range wantArgCounts {
 		if got := len(conn.argsHistory[index]); got != want {
 			t.Fatalf("query %d argument count = %d, want %d", index, got, want)

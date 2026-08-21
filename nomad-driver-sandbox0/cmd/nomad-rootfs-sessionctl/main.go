@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/driver"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 func main() {
-	socket := flag.String("socket", "/run/sandbox0/rootfs-sessiond.sock", "root-owned session daemon socket")
+	socket := flag.String("socket", "/run/sandbox0/ctld-nomad-runtime.sock", "root-owned ctld Nomad runtime socket")
 	stageFile := flag.String("stage-file", "", "durable StageRequest JSON file")
 	operationID := flag.String("operation-id", "", "stable regional fork operation ID")
 	sourceSandboxID := flag.String("source-sandbox-id", "", "active source sandbox ID")
@@ -53,7 +53,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	result, err := driver.RequestRunningRootFSFork(ctx, *socket, stage, fork)
+	result, err := nomadruntime.RequestRunningRootFSFork(ctx, *socket, stage, fork)
 	if err != nil {
 		fatal("publish running fork: %v", err)
 	}

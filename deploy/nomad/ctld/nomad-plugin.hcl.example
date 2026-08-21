@@ -1,0 +1,24 @@
+plugin "sandbox0-gvisor" {
+  config {
+    runsc_path                    = "/usr/local/bin/runsc"
+    runsc_root                    = "/run/sandbox0/runsc"
+    control_dir                   = "/run/sandbox0/nomad-slots"
+    allowed_rootfs_dir            = "/var/lib/sandbox0/rootfs"
+    platform                      = "systrap"
+    overlay2                      = "none"
+    file_access                   = "shared"
+    directfs                      = true
+    network_policy_enabled        = true
+    rootfs_enabled                = true
+    rootfs_node_socket            = "/run/sandbox0/ctld-nomad-runtime.sock"
+    rootfs_mount_root             = "/run/sandbox0/rootfs"
+    rootfs_authority_url          = "https://replace-with-regional-authority:9443"
+    rootfs_authority_ca_file      = "/etc/sandbox0/pki/manager-ca.pem"
+    rootfs_authority_client_cert_file = "/etc/sandbox0/pki/ctld.pem"
+    rootfs_authority_client_key_file  = "/etc/sandbox0/pki/ctld-key.pem"
+    rootfs_authority_token_file       = "/etc/sandbox0/tokens/manager.token"
+    runtime_slot_enabled              = true
+    runtime_slot_cluster_id           = "replace-with-cluster-id"
+    runtime_slot_node_boot_id_file    = "/proc/sys/kernel/random/boot_id"
+  }
+}

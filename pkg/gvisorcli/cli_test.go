@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package gvisorcli
 
 import (
 	"context"
@@ -37,10 +37,11 @@ exit 0
 	if err := os.WriteFile(runscPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake runsc: %v", err)
 	}
-	config := defaultPluginConfig()
-	config.RunscPath = runscPath
-	config.RunscRoot = filepath.Join(tempDir, "root")
-	runner := NewCommandRunsc(*config)
+	config := Config{
+		Path: runscPath, Root: filepath.Join(tempDir, "root"),
+		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true,
+	}
+	runner := New(config)
 
 	done := make(chan error, 1)
 	go func() {

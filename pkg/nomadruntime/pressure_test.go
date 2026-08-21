@@ -1,18 +1,18 @@
-package driver
+package nomadruntime
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
-func TestSessionDaemonPlansPressuredWriterBeforeTerminalTrigger(t *testing.T) {
+func TestNodeRuntimePlansPressuredWriterBeforeTerminalTrigger(t *testing.T) {
 	pressure := rootfssession.DirtyTailPressureSession{
 		Stage: rootfshandoff.StageRequest{
 			Parent: "parent-1",
@@ -28,8 +28,8 @@ func TestSessionDaemonPlansPressuredWriterBeforeTerminalTrigger(t *testing.T) {
 		pressureSignal: make(chan struct{}, 1),
 		pressures:      []rootfssession.DirtyTailPressureSession{pressure},
 	}
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, logger: hclog.NewNullLogger(),
+	daemon := &nodeRuntime{
+		runtime: runtime, logger: newLogger(zap.NewNop()),
 		inflight: make(map[string]bool), trigger: make(chan string, 1),
 	}
 	daemon.scanDirtyTailPressures(context.Background())
@@ -47,7 +47,7 @@ func TestSessionDaemonPlansPressuredWriterBeforeTerminalTrigger(t *testing.T) {
 	daemon.wg.Wait()
 }
 
-func TestSessionDaemonNeverCrashAbandonsDurablePressurePendingWriter(t *testing.T) {
+func TestNodeRuntimeNeverCrashAbandonsDurablePressurePendingWriter(t *testing.T) {
 	stage := rootfshandoff.StageRequest{
 		Parent:   "parent-1",
 		Identity: rootfshandoff.Identity{WriterGrantID: "grant-1", WriterEpoch: 7},
@@ -58,8 +58,8 @@ func TestSessionDaemonNeverCrashAbandonsDurablePressurePendingWriter(t *testing.
 			stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
 		),
 	}}}
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, logger: hclog.NewNullLogger(),
+	daemon := &nodeRuntime{
+		runtime: runtime, logger: newLogger(zap.NewNop()),
 		inflight: make(map[string]bool), trigger: make(chan string, 1),
 	}
 	daemon.scan(context.Background(), stage.Parent)

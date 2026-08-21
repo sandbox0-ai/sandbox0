@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package hostmount
 
 import (
 	"errors"
@@ -23,13 +23,13 @@ import (
 
 func TestNormalizeUnmountErrorAcceptsAlreadyAbsentMount(t *testing.T) {
 	for _, err := range []error{nil, unix.EINVAL, unix.ENOENT} {
-		if got := normalizeUnmountError("/missing", err); got != nil {
-			t.Fatalf("normalizeUnmountError(%v) = %v, want nil", err, got)
+		if got := NormalizeUnmountError("/missing", err); got != nil {
+			t.Fatalf("NormalizeUnmountError(%v) = %v, want nil", err, got)
 		}
 	}
 
 	want := unix.EPERM
-	if got := normalizeUnmountError("/forbidden", want); !errors.Is(got, want) {
-		t.Fatalf("normalizeUnmountError(%v) = %v, want original error", want, got)
+	if got := NormalizeUnmountError("/forbidden", want); !errors.Is(got, want) {
+		t.Fatalf("NormalizeUnmountError(%v) = %v, want original error", want, got)
 	}
 }

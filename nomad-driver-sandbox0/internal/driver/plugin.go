@@ -58,11 +58,11 @@ var (
 		),
 		"runsc_root": hclspec.NewDefault(
 			hclspec.NewAttr("runsc_root", "string", false),
-			hclspec.NewLiteral(`"/var/run/sandbox0/runsc"`),
+			hclspec.NewLiteral(`"/run/sandbox0/runsc"`),
 		),
 		"control_dir": hclspec.NewDefault(
 			hclspec.NewAttr("control_dir", "string", false),
-			hclspec.NewLiteral(`"/var/run/sandbox0/nomad-slots"`),
+			hclspec.NewLiteral(`"/run/sandbox0/nomad-slots"`),
 		),
 		"allowed_rootfs_dir": hclspec.NewDefault(
 			hclspec.NewAttr("allowed_rootfs_dir", "string", false),
@@ -93,15 +93,11 @@ var (
 			hclspec.NewAttr("rootfs_enabled", "bool", false),
 			hclspec.NewLiteral(`false`),
 		),
-		"rootfs_sessiond_socket":     hclspec.NewAttr("rootfs_sessiond_socket", "string", false),
-		"rootfs_consumer_mount_root": hclspec.NewAttr("rootfs_consumer_mount_root", "string", false),
-		"rootfs_consumer_netns_root": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_consumer_netns_root", "string", false),
-			hclspec.NewLiteral(`"/var/run/netns"`),
+		"rootfs_node_socket": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_node_socket", "string", false),
+			hclspec.NewLiteral(`"/run/sandbox0/ctld-nomad-runtime.sock"`),
 		),
-		"rootfs_state_path":  hclspec.NewAttr("rootfs_state_path", "string", false),
-		"rootfs_branch_root": hclspec.NewAttr("rootfs_branch_root", "string", false),
-		"rootfs_mount_root":  hclspec.NewAttr("rootfs_mount_root", "string", false),
+		"rootfs_mount_root": hclspec.NewAttr("rootfs_mount_root", "string", false),
 		"rootfs_max_dirty_tail_bytes": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_max_dirty_tail_bytes", "number", false),
 			hclspec.NewLiteral(`10737418240`),
@@ -114,19 +110,6 @@ var (
 			hclspec.NewAttr("rootfs_dirty_tail_retirement_reserve_bytes", "number", false),
 			hclspec.NewLiteral(`67108864`),
 		),
-		"rootfs_nbd_devices": hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
-		"rootfs_object_type": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_object_type", "string", false),
-			hclspec.NewLiteral(`"s3"`),
-		),
-		"rootfs_object_bucket": hclspec.NewAttr("rootfs_object_bucket", "string", false),
-		"rootfs_object_region": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_object_region", "string", false),
-			hclspec.NewLiteral(`"us-east-1"`),
-		),
-		"rootfs_object_endpoint":            hclspec.NewAttr("rootfs_object_endpoint", "string", false),
-		"rootfs_object_access_key":          hclspec.NewAttr("rootfs_object_access_key", "string", false),
-		"rootfs_object_secret_key":          hclspec.NewAttr("rootfs_object_secret_key", "string", false),
 		"rootfs_authority_url":              hclspec.NewAttr("rootfs_authority_url", "string", false),
 		"rootfs_authority_ca_file":          hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
 		"rootfs_authority_client_cert_file": hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
@@ -178,33 +161,21 @@ type PluginConfig struct {
 	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
 	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
-	RootFSEnabled                         bool     `codec:"rootfs_enabled"`
-	RootFSSessiondSocket                  string   `codec:"rootfs_sessiond_socket"`
-	RootFSConsumerMountRoot               string   `codec:"rootfs_consumer_mount_root"`
-	RootFSConsumerNetNSRoot               string   `codec:"rootfs_consumer_netns_root"`
-	RootFSStatePath                       string   `codec:"rootfs_state_path"`
-	RootFSBranchRoot                      string   `codec:"rootfs_branch_root"`
-	RootFSMountRoot                       string   `codec:"rootfs_mount_root"`
-	RootFSMaxDirtyTailBytes               int64    `codec:"rootfs_max_dirty_tail_bytes"`
-	RootFSMaxNodeDirtyTailBytes           int64    `codec:"rootfs_max_node_dirty_tail_bytes"`
-	RootFSDirtyTailRetirementReserveBytes int64    `codec:"rootfs_dirty_tail_retirement_reserve_bytes"`
-	RootFSNBDDevices                      []string `codec:"rootfs_nbd_devices"`
-	RootFSObjectType                      string   `codec:"rootfs_object_type"`
-	RootFSObjectBucket                    string   `codec:"rootfs_object_bucket"`
-	RootFSObjectRegion                    string   `codec:"rootfs_object_region"`
-	RootFSObjectEndpoint                  string   `codec:"rootfs_object_endpoint"`
-	RootFSObjectAccessKey                 string   `codec:"rootfs_object_access_key"`
-	RootFSObjectSecretKey                 string   `codec:"rootfs_object_secret_key"`
-	RootFSAuthorityURL                    string   `codec:"rootfs_authority_url"`
-	RootFSAuthorityCAFile                 string   `codec:"rootfs_authority_ca_file"`
-	RootFSAuthorityClientCertFile         string   `codec:"rootfs_authority_client_cert_file"`
-	RootFSAuthorityClientKeyFile          string   `codec:"rootfs_authority_client_key_file"`
-	RootFSAuthorityTokenFile              string   `codec:"rootfs_authority_token_file"`
+	RootFSEnabled                         bool   `codec:"rootfs_enabled"`
+	RootFSNodeSocket                      string `codec:"rootfs_node_socket"`
+	RootFSMountRoot                       string `codec:"rootfs_mount_root"`
+	RootFSMaxDirtyTailBytes               int64  `codec:"rootfs_max_dirty_tail_bytes"`
+	RootFSMaxNodeDirtyTailBytes           int64  `codec:"rootfs_max_node_dirty_tail_bytes"`
+	RootFSDirtyTailRetirementReserveBytes int64  `codec:"rootfs_dirty_tail_retirement_reserve_bytes"`
+	RootFSAuthorityURL                    string `codec:"rootfs_authority_url"`
+	RootFSAuthorityCAFile                 string `codec:"rootfs_authority_ca_file"`
+	RootFSAuthorityClientCertFile         string `codec:"rootfs_authority_client_cert_file"`
+	RootFSAuthorityClientKeyFile          string `codec:"rootfs_authority_client_key_file"`
+	RootFSAuthorityTokenFile              string `codec:"rootfs_authority_token_file"`
 
 	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
 	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
 	RuntimeSlotNodeBootIDFile string `codec:"runtime_slot_node_boot_id_file"`
-	RuntimeSlotJournalPath    string `codec:"runtime_slot_journal_path"`
 }
 
 // TaskConfig is the per-allocation driver configuration.
@@ -262,8 +233,8 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
 		RunscPath:                             "/usr/local/bin/runsc",
-		RunscRoot:                             "/var/run/sandbox0/runsc",
-		ControlDir:                            "/var/run/sandbox0/nomad-slots",
+		RunscRoot:                             "/run/sandbox0/runsc",
+		ControlDir:                            "/run/sandbox0/nomad-slots",
 		AllowedRootfsDir:                      "/var/lib/sandbox0/rootfs",
 		Platform:                              "systrap",
 		Overlay2:                              "none",
@@ -273,7 +244,7 @@ func defaultPluginConfig() *PluginConfig {
 		RootFSMaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
 		RootFSMaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
 		RootFSDirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
-		RootFSConsumerNetNSRoot:               "/var/run/netns",
+		RootFSNodeSocket:                      "/run/sandbox0/ctld-nomad-runtime.sock",
 		RuntimeSlotNodeBootIDFile:             "/proc/sys/kernel/random/boot_id",
 	}
 }
@@ -318,14 +289,7 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if decoded.Overlay2 != "none" {
 		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
 	}
-	decoded.RootFSObjectType = strings.TrimSpace(decoded.RootFSObjectType)
-	decoded.RootFSSessiondSocket = strings.TrimSpace(decoded.RootFSSessiondSocket)
-	decoded.RootFSConsumerMountRoot = strings.TrimSpace(decoded.RootFSConsumerMountRoot)
-	decoded.RootFSConsumerNetNSRoot = strings.TrimSpace(decoded.RootFSConsumerNetNSRoot)
-	decoded.RootFSObjectBucket = strings.TrimSpace(decoded.RootFSObjectBucket)
-	decoded.RootFSObjectEndpoint = strings.TrimSpace(decoded.RootFSObjectEndpoint)
-	decoded.RootFSObjectAccessKey = strings.TrimSpace(decoded.RootFSObjectAccessKey)
-	decoded.RootFSObjectSecretKey = strings.TrimSpace(decoded.RootFSObjectSecretKey)
+	decoded.RootFSNodeSocket = strings.TrimSpace(decoded.RootFSNodeSocket)
 	decoded.RootFSAuthorityURL = strings.TrimSpace(decoded.RootFSAuthorityURL)
 	decoded.RootFSAuthorityCAFile = strings.TrimSpace(decoded.RootFSAuthorityCAFile)
 	decoded.RootFSAuthorityClientCertFile = strings.TrimSpace(decoded.RootFSAuthorityClientCertFile)
@@ -333,9 +297,6 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RootFSAuthorityTokenFile = strings.TrimSpace(decoded.RootFSAuthorityTokenFile)
 	decoded.RuntimeSlotClusterID = strings.TrimSpace(decoded.RuntimeSlotClusterID)
 	decoded.RuntimeSlotNodeBootIDFile = strings.TrimSpace(decoded.RuntimeSlotNodeBootIDFile)
-	if decoded.RootFSObjectType == "" {
-		decoded.RootFSObjectType = "s3"
-	}
 	if err := validateRootFSConfig(decoded); err != nil {
 		return err
 	}
@@ -346,9 +307,9 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	return nil
 }
 
-// rootfsRuntime lazily opens the singleton bbolt journal. Nomad probes plugin
-// configurations in short-lived loader processes, so doing this in SetConfig
-// can briefly create competing database lock holders.
+// rootfsRuntime lazily creates the client for the ctld-owned node runtime.
+// Nomad starts short-lived plugin loader processes, so SetConfig only validates
+// local configuration and never opens the privileged runtime socket.
 func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
 	p.rootfsOnce.Do(func() {
 		if p.config.RootFSEnabled {
@@ -416,8 +377,8 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 			HealthDescription: fmt.Sprintf("runsc not available at %s: %v", p.config.RunscPath, err),
 		}
 	}
-	if p.config.RootFSEnabled && p.config.RootFSSessiondSocket != "" {
-		client, err := newRootFSSessionClient(p.config.RootFSSessiondSocket)
+	if p.config.RootFSEnabled {
+		client, err := newNodeRuntimeClient(p.config.RootFSNodeSocket)
 		if err != nil {
 			return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
 		}
@@ -427,7 +388,7 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 		if err != nil {
 			return &drivers.Fingerprint{
 				Health:            drivers.HealthStateUndetected,
-				HealthDescription: fmt.Sprintf("RootFS session daemon unavailable at %s: %v", p.config.RootFSSessiondSocket, err),
+				HealthDescription: fmt.Sprintf("ctld Nomad runtime unavailable at %s: %v", p.config.RootFSNodeSocket, err),
 			}
 		}
 	}
@@ -435,11 +396,11 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 		Health:            drivers.HealthStateHealthy,
 		HealthDescription: drivers.DriverHealthy,
 		Attributes: map[string]*structs.Attribute{
-			"driver.sandbox0_gvisor":                 structs.NewBoolAttribute(true),
-			"driver.sandbox0_gvisor.version":         structs.NewStringAttribute(version),
-			"driver.sandbox0_gvisor.platform":        structs.NewStringAttribute(p.config.Platform),
-			"driver.sandbox0_gvisor.overlay2":        structs.NewStringAttribute(p.config.Overlay2),
-			"driver.sandbox0_gvisor.rootfs_sessiond": structs.NewBoolAttribute(p.config.RootFSSessiondSocket != ""),
+			"driver.sandbox0_gvisor":              structs.NewBoolAttribute(true),
+			"driver.sandbox0_gvisor.version":      structs.NewStringAttribute(version),
+			"driver.sandbox0_gvisor.platform":     structs.NewStringAttribute(p.config.Platform),
+			"driver.sandbox0_gvisor.overlay2":     structs.NewStringAttribute(p.config.Overlay2),
+			"driver.sandbox0_gvisor.ctld_runtime": structs.NewBoolAttribute(p.config.RootFSNodeSocket != ""),
 		},
 	}
 }

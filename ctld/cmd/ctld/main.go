@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,9 +67,18 @@ var (
 const (
 	httpShutdownTimeout           = 5 * time.Second
 	runtimeMetricsShutdownTimeout = 7 * time.Second
+	nomadRuntimeShutdownTimeout   = 10 * time.Second
 	shutdownGraceMargin           = 5 * time.Second
-	minimumTerminationGrace       = httpShutdownTimeout + runtimeMetricsShutdownTimeout + shutdownGraceMargin
+	minimumTerminationGrace       = httpShutdownTimeout + runtimeMetricsShutdownTimeout +
+		networkRuntimeShutdownTimeout + nomadRuntimeShutdownTimeout + shutdownGraceMargin
 )
+
+var errPrimaryShutdownIncomplete = errors.New("ctld primary service shutdown incomplete")
+
+var retainedPrimaryLeases struct {
+	sync.Mutex
+	leases []*ctldha.PrimaryLease
+}
 
 func main() {
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
@@ -116,9 +126,28 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
-	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr, runtimeWatchAddr)
+	ctldCfg, err := apiconfig.LoadCtldConfigStrict()
+	if err != nil {
+		return err
+	}
+	nomadHostMode := ctldCfg != nil && ctldCfg.NomadRuntime.Enabled
+	networkFactory, err := configuredNetworkRuntimeFactory(
+		networkRuntimeConfigPath, httpAddr, runtimeWatchAddr, nomadHostMode,
+	)
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
+	}
+	if nomadHostMode && networkFactory == nil {
+		return fmt.Errorf("ctld Nomad runtime requires ctld network policy enforcement")
+	}
+	nomadFactory, err := configuredNomadRuntimeFactory(ctldCfg, runtimeSlotNetworkSocket)
+	if err != nil {
+		return fmt.Errorf("validate ctld Nomad runtime config: %w", err)
+	}
+	primaryFn := func(ctx context.Context, options primaryRunOptions) error {
+		options.ctldConfig = ctldCfg
+		options.nomadRuntimeFactory = nomadFactory
+		return runPrimary(ctx, options)
 	}
 	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: stateRoot, Slot: haSlot})
 	if err != nil {
@@ -138,11 +167,11 @@ func run() error {
 	}
 	defer probeServer.Close()
 	if haMetricsServer == nil {
-		return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
+		return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn)
 	}
 	primaryErrors := make(chan error, 1)
 	go func() {
-		primaryErrors <- runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
+		primaryErrors <- runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn)
 	}()
 	select {
 	case err := <-primaryErrors:
@@ -169,16 +198,36 @@ func runHAPrimary(
 		}
 		return err
 	}
-	defer lease.Close()
-	return runPrimaryFn(ctx, primaryRunOptions{
+	runErr := runPrimaryFn(ctx, primaryRunOptions{
 		setReady:       setReady,
 		networkFactory: networkFactory,
 	})
+	// A timed-out privileged service may still own NBD, mount, Bolt, or network
+	// resources. Keep the flock file reachable and open until log.Fatalf
+	// terminates this process; unlocking first would allow the standby to overlap
+	// ownership, while dropping the last reference could let an os.File finalizer
+	// release the lock before process termination.
+	if errors.Is(runErr, errPrimaryShutdownIncomplete) {
+		retainPrimaryLeaseUntilExit(lease)
+		return runErr
+	}
+	return errors.Join(runErr, lease.Close())
+}
+
+func retainPrimaryLeaseUntilExit(lease *ctldha.PrimaryLease) {
+	if lease == nil {
+		return
+	}
+	retainedPrimaryLeases.Lock()
+	retainedPrimaryLeases.leases = append(retainedPrimaryLeases.leases, lease)
+	retainedPrimaryLeases.Unlock()
 }
 
 type primaryRunOptions struct {
-	setReady       func(bool)
-	networkFactory primaryServiceFactory
+	setReady            func(bool)
+	networkFactory      primaryServiceFactory
+	nomadRuntimeFactory nomadRuntimeFactory
+	ctldConfig          *apiconfig.CtldConfig
 }
 
 func runPrimary(parent context.Context, options primaryRunOptions) error {
@@ -204,14 +253,19 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		}
 	}
 
-	var k8sClient kubernetes.Interface
-	if client, err := k8s.NewClientWithObservability(kubeconfig, obsProvider); err != nil {
-		log.Printf("ctld kubernetes client disabled: %v", err)
-	} else {
-		k8sClient = client
+	ctldCfg := options.ctldConfig
+	if ctldCfg == nil {
+		return fmt.Errorf("ctld config is required for the HA primary")
 	}
-
-	ctldCfg := apiconfig.LoadCtldConfig()
+	nomadHostMode := ctldCfg != nil && ctldCfg.NomadRuntime.Enabled
+	var k8sClient kubernetes.Interface
+	if !nomadHostMode {
+		if client, err := k8s.NewClientWithObservability(kubeconfig, obsProvider); err != nil {
+			log.Printf("ctld kubernetes client disabled: %v", err)
+		} else {
+			k8sClient = client
+		}
+	}
 	var dbPool *pgxpool.Pool
 	if ctldCfg.DatabaseURL != "" {
 		dbPool, err = initCtldDatabase(ctx, ctldCfg, obsProvider)
@@ -236,19 +290,22 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 
 	serviceErrors := make(chan error, 2)
 	networkRequired := options.networkFactory != nil
+	nomadRuntimeRequired := options.nomadRuntimeFactory != nil
 	var networkHandle *primaryServiceHandle
+	var nomadRuntimeHandle *primaryServiceHandle
 	serviceHealthy := func() bool {
 		return ctx.Err() == nil
 	}
 	serviceReady := func() bool {
 		return serviceHealthy() &&
-			(!networkRequired || (networkHandle != nil && networkHandle.Ready()))
+			(!networkRequired || (networkHandle != nil && networkHandle.Ready())) &&
+			(!nomadRuntimeRequired || (nomadRuntimeHandle != nil && nomadRuntimeHandle.Ready()))
 	}
 
 	var runtimeWatchServer *ctldruntimewatch.Server
 	var runtimeWatchHTTPServer *http.Server
 	var runtimeWatchHandler cache.ResourceEventHandler
-	if k8sClient != nil {
+	if !nomadHostMode && k8sClient != nil {
 		runtimeHub := ctldruntimewatch.NewHub(ctldruntimewatch.NewPodStatusSink(k8sClient))
 		runtimeWatchServer = ctldruntimewatch.NewServer(runtimeHub)
 		runtimeWatchHTTPServer = &http.Server{
@@ -259,15 +316,24 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		runtimeWatchHandler = runtimeHub.PodEventHandler()
 		go runtimeHub.Run(ctx, 4)
 	}
-	podCache := buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
-	probeController := buildProbeController(k8sClient, obsProvider, podCache)
-	rootFSObserver := ctldrootfs.NewObserver(ctldMetricsRegistry, zapLogger)
-	containerdRuntime := buildContainerdRuntime(rootFSObserver)
-	defer containerdRuntime.Close()
-	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
+	var podCache *ctldpower.PodCache
+	probeController := ctldserver.Controller(ctldserver.NotImplementedController{})
+	var rootFSController rootFSHandler
+	var runtimeMetricsHandle *ctldRuntimeMetricsHandle
+	if !nomadHostMode {
+		podCache = buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
+		probeController = buildProbeController(k8sClient, obsProvider, podCache)
+		rootFSObserver := ctldrootfs.NewObserver(ctldMetricsRegistry, zapLogger)
+		containerdRuntime := buildContainerdRuntime(rootFSObserver)
+		defer containerdRuntime.Close()
+		runtimeMetricsHandle = startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
+		rootFSController = buildRootFSController(
+			ctx, &ctldCfg.RootFSObjectStorage, objectStoreRequestMeter, containerdRuntime, rootFSObserver,
+		)
+	}
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
-		RootFS:      buildRootFSController(ctx, &ctldCfg.RootFSObjectStorage, objectStoreRequestMeter, containerdRuntime, rootFSObserver),
+		RootFS:      rootFSController,
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -306,6 +372,50 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		networkHandle = startPrimaryService(ctx, networkService)
 		log.Printf("ctld primary started network runtime")
 	}
+	if options.nomadRuntimeFactory != nil {
+		nomadRuntime, err := options.nomadRuntimeFactory(zapLogger)
+		if err != nil {
+			_ = httpListener.Close()
+			if runtimeWatchListener != nil {
+				_ = runtimeWatchListener.Close()
+			}
+			cancel()
+			if networkHandle != nil {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
+				shutdownErr := networkHandle.Wait(shutdownCtx)
+				shutdownCancel()
+				if shutdownErr != nil {
+					err = errors.Join(err, fmt.Errorf("shutdown ctld network runtime: %w", shutdownErr))
+				}
+				if errors.Is(shutdownErr, context.DeadlineExceeded) {
+					err = errors.Join(err, errPrimaryShutdownIncomplete)
+				}
+			}
+			return fmt.Errorf("initialize ctld Nomad runtime: %w", err)
+		}
+		if nomadRuntime == nil {
+			_ = httpListener.Close()
+			if runtimeWatchListener != nil {
+				_ = runtimeWatchListener.Close()
+			}
+			cancel()
+			nilErr := fmt.Errorf("initialize ctld Nomad runtime: factory returned a nil service")
+			if networkHandle != nil {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
+				shutdownErr := networkHandle.Wait(shutdownCtx)
+				shutdownCancel()
+				if shutdownErr != nil {
+					nilErr = errors.Join(nilErr, fmt.Errorf("shutdown ctld network runtime: %w", shutdownErr))
+				}
+				if errors.Is(shutdownErr, context.DeadlineExceeded) {
+					nilErr = errors.Join(nilErr, errPrimaryShutdownIncomplete)
+				}
+			}
+			return nilErr
+		}
+		nomadRuntimeHandle = startPrimaryService(ctx, nomadRuntime)
+		log.Printf("ctld primary started Nomad runtime")
+	}
 	go func() {
 		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
 			serviceErrors <- fmt.Errorf("ctld HTTP server: %w", err)
@@ -339,8 +449,13 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	if networkHandle != nil {
 		networkErrors = networkHandle.Errors()
 	}
+	var nomadRuntimeErrors <-chan error
+	if nomadRuntimeHandle != nil {
+		nomadRuntimeErrors = nomadRuntimeHandle.Errors()
+	}
 	var runErr error
 	networkFailed := false
+	nomadRuntimeFailed := false
 	select {
 	case <-parent.Done():
 		log.Printf("ctld primary shutting down: %v", parent.Err())
@@ -352,6 +467,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		} else {
 			networkFailed = true
 			runErr = networkRunErr
+			log.Printf("ctld primary service failed: %v", runErr)
+		}
+	case err := <-nomadRuntimeErrors:
+		if runtimeErr, failed := primaryServiceExitError("Nomad runtime", parent.Err(), err); !failed {
+			log.Printf("ctld primary shutting down: %v", parent.Err())
+		} else {
+			nomadRuntimeFailed = true
+			runErr = runtimeErr
 			log.Printf("ctld primary service failed: %v", runErr)
 		}
 	}
@@ -378,10 +501,33 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	runtimeMetricsShutdownCancel()
 	if networkHandle != nil {
 		if err := networkHandle.Wait(networkShutdownCtx); err != nil && !networkFailed {
+			if errors.Is(err, context.DeadlineExceeded) {
+				runErr = errors.Join(runErr, errPrimaryShutdownIncomplete)
+			}
 			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld network runtime: %w", err))
 		}
 	}
+	if nomadRuntimeHandle != nil {
+		nomadShutdownCtx, nomadShutdownCancel := context.WithTimeout(context.Background(), nomadRuntimeShutdownTimeout)
+		if err := nomadRuntimeHandle.Wait(nomadShutdownCtx); err != nil && !nomadRuntimeFailed {
+			if errors.Is(err, context.DeadlineExceeded) {
+				runErr = errors.Join(runErr, errPrimaryShutdownIncomplete)
+			}
+			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld Nomad runtime: %w", err))
+		}
+		nomadShutdownCancel()
+	}
 	return runErr
+}
+
+func primaryServiceExitError(name string, parentErr, serviceErr error) (error, bool) {
+	if parentErr != nil && (serviceErr == nil || errors.Is(serviceErr, context.Canceled)) {
+		return nil, false
+	}
+	if serviceErr == nil {
+		serviceErr = fmt.Errorf("service stopped unexpectedly")
+	}
+	return fmt.Errorf("ctld %s: %w", name, serviceErr), true
 }
 
 func networkRuntimeExitError(parentErr, networkErr error) (error, bool) {

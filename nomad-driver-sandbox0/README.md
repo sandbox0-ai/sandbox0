@@ -1,7 +1,9 @@
 # Sandbox0 Nomad gVisor Driver (experimental)
 
-This task driver is part of an isolated Nomad + gVisor architecture PoC. It is
-not a replacement for the production Kubernetes runtime path.
+This task driver is the Nomad + gVisor runtime selected for the production
+cutover. The repository still retains the predecessor Kubernetes runtime until
+the remaining acceptance gates pass; there must be no dual runtime after the
+final deletion step.
 
 The driver creates a generic warm Nomad allocation without a gVisor container.
 After manager/ctld have attached a RootFS generation and applied network policy,
@@ -22,7 +24,7 @@ Implemented:
   compiled and redirected through the normal node TPROXY/ipset path
 - block-map RootFS attach through NBD, XFS, and host OverlayFS
 - PostgreSQL writer consume, renewal, planned seal, and terminal publication
-- node-scoped `nomad-rootfs-sessiond` ownership of writer renewals, NBD, XFS,
+- node-scoped `ctld` ownership of writer renewals, NBD, XFS,
   OverlayFS, and terminal reconciliation over a root-only Unix socket
 - tokenless durable Stage and exact runsc/stable-mount consumer journal
 - independent Nomad node-allocation catalog reconciliation, including purged
@@ -37,7 +39,7 @@ Implemented:
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
 - on-disk task state for driver crash recovery
-- fail-closed plugin/session-daemon crash cleanup, regional crash abandonment,
+- fail-closed plugin/ctld runtime crash cleanup, regional crash abandonment,
   and fallback to the last durable generation
 - unit tests with a fake runsc runtime
 - PostgreSQL-backed regional warm-slot authority and authenticated v1 node API
@@ -52,11 +54,11 @@ Implemented:
   published immutable generation, never the retiring node's local journal
 - synchronous task-driver registration only after the control socket, ctld
   warm-policy acknowledgement, root mount, runsc compatibility, and RootFS
-  session-daemon health proofs are ready
+  ctld runtime health proofs are ready
 - exact allocation/node-boot re-registration and bounded regional heartbeats
   after a task-driver restart; a warm slot is poisoned if its authority lease is
   lost, while an already claimed writer remains fenced by the independent
-  RootFS session daemon
+  ctld Nomad runtime
 - exact claim operation/claim ID persistence and an idempotent regional
   `starting` transition after RootFS writer consumption, network application,
   and root bind but before `runsc create`; the proof binds launch attempt,
@@ -66,11 +68,11 @@ Implemented:
   validates and hashes the complete probe proof before the idempotent regional
   `starting -> active` transition
 - a canonical claimed-slot cleanup request/proof contract, a manager-side
-  transport adapter, and root-owned session-daemon cleanup of the exact runsc
+  transport adapter, and root-owned ctld runtime cleanup of the exact runsc
   container, stable mount, RootFS writer, and network chain without invoking
   the task-driver plugin
-- durable separation between local crash fences completed by the session
-  daemon and externally managed fences completed by the regional reconciler;
+- durable separation between local crash fences completed by ctld and
+  externally managed fences completed by the regional reconciler;
   external retries retain their compact proof record while large branch and
   mount artifacts are reclaimed after regional retirement
 - symlink-resolved allow-listing of the persisted Nomad network namespace path
@@ -79,7 +81,7 @@ Implemented:
   network namespace incarnation, and network chain before regional readiness
 - plugin-independent cleanup of warm/grantless slots, with the exact cleanup
   request and absence proof persisted before destructive work and response
-  respectively; byte-stable proof replay survives a session-daemon restart
+  respectively; byte-stable proof replay survives a ctld runtime restart
 - bounded node cleanup-proof retention (24 hours) and delayed compact external
   RootFS-fence retention (48 hours); Bolt page-reuse tests cover two 10,000-slot
   proof churn cycles without proportional second-cycle file growth
@@ -104,20 +106,16 @@ Implemented:
   terminal transaction; each pass and delay are bounded and per-slot failures
   are reported without stopping later passes
 
-Not implemented:
+Remaining cutover gates:
 
-- PostgreSQL-terminal acknowledgement-driven cleanup-proof compaction and
-  reconciliation of active node journal registrations whose regional register
-  response was ambiguous; current compaction uses a bounded local TTL
-- production remote-block service and cross-node device ownership
-- guest stdout/stderr console forwarding
-- full cgroup and Nomad stats integration
-- production Nomad deployment and upgrade automation
-- privileged multi-node XFS/NBD/runsc validation
-- deployment wiring and privileged race validation for the direct Nomad
-  allocation controller, including Nomad server-GC concurrent with client GC
-- migration of the node channel's current sessiond local executor into the
-  final ctld-owned runtime
+- the public regional-gateway-to-procd serial and concurrency SLO reports
+- normal completion of the real-clock 10,000/24-hour PostgreSQL/RustFS and
+  Bolt journal soaks
+- final deletion of the superseded Kubernetes runtime, schema compatibility,
+  configuration, tests, documentation, and redundant dependencies
+
+Guest console forwarding and complete cgroup statistics remain separate
+product work; neither is allowed to create a second RootFS or lifecycle truth.
 
 ## Writer authority PoC
 
@@ -170,24 +168,25 @@ response with the same proof. Procd exposes
 `PUT /api/v1/runtime/command-ready-probe` behind its normal authentication,
 runtime-ready, and lifecycle-barrier middleware. Manager executes that command,
 submits the exact response and process identity over the node channel, and the
-driver reports regional active with a canonical digest. Migration of the
-remaining sessiond node executor into ctld is still required for final
-production deployment.
+driver reports regional active with a canonical digest. The root-owned
+executor now runs inside the elected ctld HA primary rather than the plugin.
 
 Ctld now owns runtime-slot warm default-deny, strict v1 policy validation,
 production L4/L7 compilation, TPROXY/ipset application, durable physical
 incarnation/epoch state, exact claim-token replay, and synchronized terminal
-absence. The remaining network gates are privileged multi-node validation and
-the final deletion of the non-runtime compatibility implementation.
+absence. Nomad host mode consumes only the durable runtime-slot registry; it
+does not initialize Kubernetes Pod, Service, Endpoint, CRI, or containerd
+sources.
 
 ## Build and test
 
 ```sh
 go test ./...
 go vet ./...
-go build -o nomad-driver-sandbox0 .
-go build -o nomad-rootfs-sessiond ./cmd/nomad-rootfs-sessiond
-go build -o nomad-rootfs-sessionctl ./cmd/nomad-rootfs-sessionctl
+go build -o ../bin/nomad-driver-sandbox0 .
+go build -o ../bin/nomad-rootfs-sessionctl ./cmd/nomad-rootfs-sessionctl
+cd ..
+go build -o bin/ctld ./ctld/cmd/ctld
 ```
 
 The module is intentionally separate from the repository root so the Nomad
@@ -330,8 +329,8 @@ SANDBOX0_RUN_PG_HA_TESTS=1 go test ./pkg/dbpool \
 plugin "sandbox0-gvisor" {
   config {
     runsc_path         = "/usr/local/bin/runsc"
-    runsc_root         = "/var/run/sandbox0/runsc"
-    control_dir        = "/var/run/sandbox0/nomad-slots"
+    runsc_root         = "/run/sandbox0/runsc"
+    control_dir        = "/run/sandbox0/nomad-slots"
     allowed_rootfs_dir = "/var/lib/sandbox0/rootfs"
     platform           = "systrap"
     overlay2           = "none"
@@ -339,10 +338,8 @@ plugin "sandbox0-gvisor" {
     directfs           = true
     network_policy_enabled = true
     rootfs_enabled             = true
-    rootfs_sessiond_socket     = "/run/sandbox0/rootfs-sessiond.sock"
+    rootfs_node_socket         = "/run/sandbox0/ctld-nomad-runtime.sock"
     rootfs_mount_root          = "/run/sandbox0/rootfs"
-    rootfs_consumer_mount_root = "/opt/nomad"
-    rootfs_consumer_netns_root = "/var/run/netns"
     rootfs_authority_url              = "https://regional-authority.internal:9443"
     rootfs_authority_ca_file          = "/etc/sandbox0/pki/ca.pem"
     rootfs_authority_client_cert_file = "/etc/sandbox0/pki/node.pem"
@@ -362,72 +359,56 @@ always waits for manager authorization.
 
 Regional runtime slots additionally require an argument-free `/procd` command,
 a task named `slot`, a Nomad bridge network with the `procd` allocation port
-fixed to `49983`, and the node-scoped RootFS session daemon.
+fixed to `49983`, and the node-scoped ctld Nomad runtime.
 The task driver reuses the writer-authority mTLS endpoint and credentials for the
 runtime-slot API; it never accepts a caller-selected heartbeat TTL or node UID.
 
-## Node boot prerequisites
+## Nomad node deployment
 
-The experimental RootFS runtime needs the NBD and bridge modules before Nomad
-starts. Persist both the module list and the NBD pool size instead of relying on
-one-time `modprobe` commands:
+Production nodes run ctld A/B as root systemd services directly in the host
+mount and network namespaces. Both instances share `/var/lib/sandbox0/ctld`,
+but only the flock-elected primary opens Bolt, NBD, RootFS, network, and Unix
+socket resources. Running ctld in a Kubernetes Pod or adding a systemd
+filesystem namespace is invalid because the RootFS bind mount must be visible
+in the exact mount namespace used by the Nomad task driver.
 
-```text
-# /etc/modules-load.d/sandbox0.conf
-nbd
-bridge
-br_netfilter
+Use `deploy/nomad/ctld/install-node.sh` and its pinned examples. The installer
+loads the NBD, XFS, OverlayFS, bridge, and TPROXY modules; configures a bounded
+NBD pool and required sysctls; installs ctld, runsc, and the driver; and adds a
+hard `sandbox0-ctld.target` dependency to Nomad. The B-then-A rollout script
+waits for role-aware HA readiness between restarts. PostgreSQL, object storage,
+manager mTLS authority, and the local Nomad HTTPS API must be reachable before
+the plugin can advertise a RootFS-capable warm slot.
 
-# /etc/modprobe.d/sandbox0-nbd.conf
-options nbd nbds_max=64 max_part=0
-```
+Ctld configuration owns object credentials, node-side writer/channel
+credentials, NBD paths, dirty-tail budgets, node identity, and Nomad catalog
+credentials. The plugin keeps the ctld node socket, stable-mount compatibility
+guard, storage-cap compatibility proof, and the regional slot lifecycle mTLS
+credentials used for registration and heartbeat. Its fingerprint remains
+unhealthy until the root-owned mode-`0600` ctld socket, durable journals,
+network registry, and Nomad allocation catalog are healthy.
 
-The Nomad unit must start after `systemd-modules-load.service`, and node
-readiness must verify every configured `rootfs_nbd_devices` path. PostgreSQL,
-the object store, and the mTLS writer authority must also be reachable before a
-RootFS claim is issued. A failed attach after grant consumption is
-crash-abandoned; it is never returned to the warm pool or published as a
-successful pause.
+Consumer registration resolves `/opt/nomad` and `/var/run/netns`, persists
+their canonical path and device/inode identity, and rejects a driver in a
+different mount namespace. Ctld passes only a validated path relative to the
+configured netns root to its network registry, which rechecks incarnation and
+derives the allocation IPv4 address from the namespace.
 
-Production RootFS mode runs `nomad-rootfs-sessiond` as a separate root system
-service before Nomad. Pass the regional data-plane cluster ID through
-`--cluster-id`, the full Nomad node UUID through `--nomad-node-id`, and a token
-with `node:read,namespace:read-job` through
-`--nomad-token-file`. Keep `--runtime-slot-journal` on node-local durable
-storage (the default is `/var/lib/sandbox0/runtime-slots.db`). The daemon reads
-object credentials from
-`SANDBOX0_ROOTFS_OBJECT_ACCESS_KEY` and
-`SANDBOX0_ROOTFS_OBJECT_SECRET_KEY`; do not place them in Nomad plugin HCL.
-The driver fingerprint remains unhealthy until the daemon socket, durable
-journal, and Nomad allocation catalog are all readable.
-
-Set `--consumer-netns-root` to Nomad's root-owned persistent namespace
-directory (`/var/run/netns` by default). Consumer registration resolves both
-the configured root and namespace path, persists only the canonical path, and
-binds its device/inode identity. Configure
-`--runtime-slot-ctld-network-socket` with the host-visible mode-`0600`,
-root-owned socket served by the elected ctld HA primary. Sessiond passes only
-the validated path relative to `--consumer-netns-root`; ctld resolves it below
-its read-only host-netns mount, rechecks the device/inode incarnation, and
-derives the allocation IPv4 address from that namespace.
-
-The daemon exposes private runtime-slot registration and
+The ctld node socket exposes private runtime-slot registration and
 `PUT /v1/runtime-slots/cleanup` only through its mode-`0600` Unix socket.
 Before regional readiness, the task driver registers the deterministic
-physical identities. Sessiond durably journals them, asks ctld to inspect the
-same namespace through its read-only host mount, and waits until the warm
-default-deny policy is present in the normal node redirect set. Regional
-readiness is not reported before that acknowledgement. Sessiond can therefore
-later clean a warm slot without the plugin or a RootFS writer session. Cleanup
-persists the exact request before touching runsc, mounts, or network state and
-persists its absence proof before replying.
+physical identities. Ctld durably journals them, inspects the same host
+namespace, and waits until the warm default-deny policy is present in the
+normal node redirect set. Regional readiness is not reported before that
+acknowledgement. Ctld can therefore clean a warm slot without the plugin or a
+RootFS writer session. Cleanup persists the exact request before touching
+runsc, mounts, or network state and persists its absence proof before replying.
 Completed proofs expire after 24 hours and compact external RootFS fences after
-48 hours. These TTLs bound local state but are not a PostgreSQL terminal
-acknowledgement protocol; unresolved active registrations are not yet compacted
-automatically.
+48 hours. These TTLs bound local state while PostgreSQL terminal state remains
+the authority for retries.
 
 The Unix API remains a node execution primitive and is never dialed directly
-by the region. With `--runtime-slot-node-channel`, sessiond resolves the
+by the region. When `nomad_runtime.enabled` is set, ctld resolves the
 authority hostname and establishes one outbound WebSocket over mTLS to every
 exact address in the current manager membership set. The original HTTPS host
 is retained for the HTTP authority and TLS DNS verification; resolved Pod IPs
@@ -444,18 +425,18 @@ when the ctld client is configured. Ctld requires the pre-existing exact warm
 registration, then durably transitions it to the region-authenticated claim
 operation and strict v1 policy. The journal binds namespace incarnation,
 allocation IP, monotonic network epoch, logical sandbox/team identity, and the
-deterministic physical token before merging the slot into the same policy
-compiler and node-level TPROXY/ipset reconciliation used by Kubernetes
-sandboxes. It replies only after a successful redirect sync; cleanup similarly
+deterministic physical token before merging the slot into the production
+policy compiler and node-level TPROXY/ipset reconciliation. It replies only
+after a successful redirect sync; cleanup similarly
 waits for synchronized absence. The shared host journal lets the standby ctld
 replay the same token and desired set after promotion, and retained terminal
 records are pruned periodically rather than only at process startup.
-It requires `--runtime-slot-node-uid`, an exact
-`--runtime-slot-channel-peer-uri-san`, and an allow-root supplied by
-`--runtime-slot-control-root`; ambient proxies are disabled and certificates,
+It requires `nomad_runtime.node_uid`, an exact
+`nomad_runtime.authority_peer_uri_san`, and a canonical
+`nomad_runtime.control_root`; ambient proxies are disabled and certificates,
 boot ID, and projected bearer token are reloaded on reconnect, with a bounded
 five-minute connection age so rotated credentials are eventually enforced.
-`--authority-url` must therefore use a resolvable headless-Service or private
+`nomad_runtime.authority_url` must therefore use a resolvable headless-Service or private
 DNS hostname whose complete answer is the reachable manager replica set, and
 the server certificate must contain that hostname as a DNS SAN. An IP literal
 is rejected. A ClusterIP or load-balancer DNS name violates the exact-membership
@@ -465,10 +446,9 @@ The authority's `--allowed-clients` entry for a channel identity must use
 `commonName:nodeUID:podUID:clusterID:nodeID`; legacy three-field entries remain
 valid for writer and slot APIs but cannot establish a node channel.
 The regional hub is transient by design: PostgreSQL owns retries and the node
-journal owns cleanup proof. Runtime-slot policy compilation and application
-are now ctld-owned; the outbound node agent and remaining runsc/mount cleanup
-executor still live in sessiond and must move into the final ctld-owned
-runtime before legacy removal. The task driver no longer installs its PoC
+journal owns cleanup proof. Runtime-slot policy compilation and application,
+the outbound node agent, runsc/mount cleanup, and RootFS physical ownership
+are ctld-owned. The task driver no longer installs its PoC
 namespace-local iptables policy for regional runtime slots. That legacy path
 remains only for non-runtime-slot compatibility and must be deleted at final
 cutover. The 10,000-slot Bolt test proves local page reuse only; it does not
@@ -508,20 +488,18 @@ The strict versioned catalog format is shown in
 `example/nomad-endpoints.example.json`. It has one server endpoint per cluster
 and one exact client endpoint per node. Catalog size, endpoint count, request
 timeout, JSON fields, duplicates, and orphan client entries are bounded or
-rejected at startup. Credential contents remain reloadable per request. This
-wiring is still deployment foundation: it does not replace privileged
-server-GC/client-destroy race validation or move the local executor into ctld.
+rejected at startup. Credential contents remain reloadable per request.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL
-until publication. A production session daemon does not send a normal-limit
+until publication. A production ctld runtime does not send a normal-limit
 failure through NBD: the first request that would cross the limit is left
-pending, and subsequent writes wait behind it. The daemon persists a
+pending, and subsequent writes wait behind it. The ctld runtime persists a
 deterministic pressure-pending marker in Bolt, asks the authenticated regional
 writer authority to create an exact automatic planned pause, and only then
 promotes the local marker to planned retirement. The node reconciler fences
 the allocation without depending on the task-driver process and unblocks the
-pending request as retirement I/O. A sessiond restart recovers the pending
+pending request as retirement I/O. A ctld primary restart recovers the pending
 marker and retries the same regional operation instead of crash-abandoning the
 dirty branch.
 
@@ -563,12 +541,12 @@ after Linux NBD has already surfaced a hard-cap response as `EIO`.
 
 ## Running fork control
 
-The root-owned node control utility exercises the complete
+The root-owned node control utility exercises the complete ctld
 freeze/checkpoint/thaw/object-publication/regional-transaction path:
 
 ```sh
 nomad-rootfs-sessionctl \
-  --socket /run/sandbox0/rootfs-sessiond.sock \
+  --socket /run/sandbox0/ctld-nomad-runtime.sock \
   --stage-file /run/sandbox0/handoffs/source.json \
   --operation-id fork-operation-1 \
   --source-sandbox-id source-sandbox \
@@ -577,9 +555,9 @@ nomad-rootfs-sessionctl \
 ```
 
 The Stage file may contain either a `StageRequest` or a `{"stage": ...}`
-envelope. The raw one-time writer token is stripped before RPC. The daemon
+envelope. The raw one-time writer token is stripped before RPC. Ctld
 keeps at most one unresolved running-fork checkpoint per source session; an
 exact retry reuses the same proof, including after regional response loss,
 while a different operation fails closed until the current operation succeeds
-or the source session terminates. This utility is an administrative PoC
-entrypoint, not the final manager/ctld control-plane API.
+or the source session terminates. This utility is an administrative diagnostic;
+normal fork requests use the manager/ctld control plane.

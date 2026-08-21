@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
 import (
 	"encoding/json"
@@ -29,16 +29,16 @@ import (
 )
 
 const (
-	runtimeSlotJournalVersion   = 1
+	RuntimeSlotJournalVersion   = 1
 	runtimeSlotProofRetention   = 24 * time.Hour
 	runtimeSlotJournalMaxIDSize = 512
 )
 
 var runtimeSlotJournalBucket = []byte("runtime-slots-v1")
 
-// runtimeSlotJournalRegistration is the durable node-local identity created
+// RuntimeSlotRegistration is the durable node-local identity created
 // before a warm slot is exposed as ready to the regional authority.
-type runtimeSlotJournalRegistration struct {
+type RuntimeSlotRegistration struct {
 	Version          int    `json:"version"`
 	SlotID           string `json:"slot_id"`
 	ClusterID        string `json:"cluster_id"`
@@ -54,8 +54,8 @@ type runtimeSlotJournalRegistration struct {
 	MountNamespaceID string `json:"mount_namespace_id"`
 }
 
-func (r runtimeSlotJournalRegistration) Validate() error {
-	if r.Version != runtimeSlotJournalVersion {
+func (r RuntimeSlotRegistration) Validate() error {
+	if r.Version != RuntimeSlotJournalVersion {
 		return fmt.Errorf("unsupported runtime slot journal version %d", r.Version)
 	}
 	for name, value := range map[string]string{
@@ -74,7 +74,7 @@ func (r runtimeSlotJournalRegistration) Validate() error {
 		}
 	}
 	if r.RunscContainerID != protocol.NomadRunscContainerID(r.SlotID) ||
-		r.NetworkChain != networkChainName(r.RunscContainerID) {
+		r.NetworkChain != protocol.NomadNetworkChainName(r.RunscContainerID) {
 		return fmt.Errorf("runtime slot runsc and network identities are not deterministic")
 	}
 	return nil
@@ -82,7 +82,7 @@ func (r runtimeSlotJournalRegistration) Validate() error {
 
 type runtimeSlotJournalRecord struct {
 	Version      int                                 `json:"version"`
-	Registration runtimeSlotJournalRegistration      `json:"registration"`
+	Registration RuntimeSlotRegistration             `json:"registration"`
 	Cleanup      *protocol.NodeCleanupControlRequest `json:"cleanup,omitempty"`
 	Proof        *protocol.NodeCleanupControlProof   `json:"proof,omitempty"`
 	CreatedAt    string                              `json:"created_at"`
@@ -150,7 +150,7 @@ func (j *runtimeSlotJournal) Ping() error {
 	})
 }
 
-func (j *runtimeSlotJournal) Register(registration runtimeSlotJournalRegistration) error {
+func (j *runtimeSlotJournal) Register(registration RuntimeSlotRegistration) error {
 	if j == nil || j.db == nil {
 		return fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
 	}
@@ -174,7 +174,7 @@ func (j *runtimeSlotJournal) Register(registration runtimeSlotJournalRegistratio
 			return nil
 		}
 		record := runtimeSlotJournalRecord{
-			Version: runtimeSlotJournalVersion, Registration: registration,
+			Version: RuntimeSlotJournalVersion, Registration: registration,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		return putRuntimeSlotJournalRecord(bucket, record)
@@ -340,7 +340,7 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("decode runtime slot journal record: %w", err)
 	}
-	if record.Version != runtimeSlotJournalVersion || record.Registration.Validate() != nil || record.CreatedAt == "" || record.UpdatedAt == "" {
+	if record.Version != RuntimeSlotJournalVersion || record.Registration.Validate() != nil || record.CreatedAt == "" || record.UpdatedAt == "" {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot journal record is invalid: %w", errdefs.ErrFailedPrecondition)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, record.CreatedAt); err != nil {

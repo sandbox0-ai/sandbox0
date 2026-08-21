@@ -1,0 +1,43 @@
+[Unit]
+Description=Sandbox0 ctld Nomad node runtime (%i)
+Documentation=https://github.com/sandbox0-ai/sandbox0
+After=network-online.target systemd-modules-load.service systemd-sysctl.service systemd-tmpfiles-setup.service
+Wants=network-online.target
+Before=nomad.service
+PartOf=sandbox0-ctld.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=CONFIG_PATH=/etc/sandbox0/ctld.yaml
+Environment=CTLD_NETWORK_CONFIG_PATH=/etc/sandbox0/ctld-networking.yaml
+Environment=SANDBOX0_CTLD_HTTP_ADDR=:8095
+Environment=SANDBOX0_CTLD_HA_METRICS_ADDR=
+EnvironmentFile=/etc/sandbox0/ctld.env
+EnvironmentFile=-/etc/sandbox0/ctld-%i.env
+ExecStartPre=/usr/local/libexec/sandbox0/ctld-host-check %i
+ExecStart=/usr/local/bin/ctld \
+  -http-addr=${SANDBOX0_CTLD_HTTP_ADDR} \
+  -node-name=${SANDBOX0_NODE_NAME} \
+  -ha-slot=%i \
+  -ha-probe-socket=/run/sandbox0/ctld-%i-ha.sock \
+  -ha-metrics-addr=${SANDBOX0_CTLD_HA_METRICS_ADDR} \
+  -state-root=/var/lib/sandbox0/ctld \
+  -ctld-networking-config-path=${CTLD_NETWORK_CONFIG_PATH} \
+  -runtime-slot-network-socket=/run/sandbox0/ctld-runtime-slot-network.sock \
+  -runtime-slot-netns-root=/var/run/netns
+Restart=always
+RestartSec=1s
+TimeoutStartSec=60s
+TimeoutStopSec=45s
+KillMode=mixed
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+TasksMax=infinity
+OOMScoreAdjust=-900
+PrivateMounts=false
+PrivateNetwork=false
+
+[Install]
+WantedBy=sandbox0-ctld.target

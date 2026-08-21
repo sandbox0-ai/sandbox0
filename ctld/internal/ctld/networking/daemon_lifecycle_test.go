@@ -92,11 +92,15 @@ func TestNewCopiesRuntimeSlotNetworkPaths(t *testing.T) {
 		RuntimeSlotStatePath:     "/var/lib/sandbox0/ctld/runtime-slot-network.db",
 		RuntimeSlotControlSocket: "/host-run/sandbox0/ctld-runtime-slot-network.sock",
 		RuntimeSlotNetNSRoot:     "/host-run/netns",
+		RuntimeSlotsOnly:         true,
 	})
 	if d.runtimeSlotStatePath != "/var/lib/sandbox0/ctld/runtime-slot-network.db" ||
 		d.runtimeSlotControlSocket != "/host-run/sandbox0/ctld-runtime-slot-network.sock" ||
 		d.runtimeSlotNetNSRoot != "/host-run/netns" {
 		t.Fatalf("runtime slot network paths = %q, %q, %q", d.runtimeSlotStatePath, d.runtimeSlotControlSocket, d.runtimeSlotNetNSRoot)
+	}
+	if d.kubernetesPolicySource {
+		t.Fatal("Nomad-only runtime unexpectedly enabled the Kubernetes policy source")
 	}
 }
 

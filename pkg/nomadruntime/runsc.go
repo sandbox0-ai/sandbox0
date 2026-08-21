@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
-import "github.com/sandbox0-ai/sandbox0/pkg/hostmount"
+import "github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 
-type Mounter = hostmount.Mounter
-type systemMounter = hostmount.System
+type Runsc = gvisorcli.Runsc
+type WaitResult = gvisorcli.WaitResult
+type RunscState = gvisorcli.RunscState
 
-func validateRootfsPath(source, allowedRoot string) (string, error) {
-	return hostmount.ValidateRootFSPath(source, allowedRoot)
-}
-
-func validateExistingPath(source, allowedRoot string) (string, error) {
-	return hostmount.ValidateExistingPath(source, allowedRoot)
-}
-
-func startsWithDotDot(path string) bool {
-	return hostmount.StartsWithDotDot(path)
+func newCommandRunsc(config Config) Runsc {
+	return gvisorcli.New(gvisorcli.Config{
+		Path:       config.RunscPath,
+		Root:       config.RunscRoot,
+		Platform:   config.Platform,
+		Overlay2:   config.Overlay2,
+		FileAccess: config.FileAccess,
+		DirectFS:   config.DirectFS,
+	})
 }

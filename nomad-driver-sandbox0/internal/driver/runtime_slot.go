@@ -91,7 +91,7 @@ type networkReadyProof struct {
 type storageReadyProof struct {
 	Version                         int    `json:"version"`
 	SlotID                          string `json:"slot_id"`
-	SessiondSocket                  string `json:"sessiond_socket"`
+	NodeRuntimeSocket               string `json:"node_runtime_socket"`
 	RootFSMountRoot                 string `json:"rootfs_mount_root"`
 	MaxDirtyTailBytes               int64  `json:"max_dirty_tail_bytes"`
 	MaxNodeDirtyTailBytes           int64  `json:"max_node_dirty_tail_bytes"`
@@ -141,8 +141,8 @@ func validateRuntimeSlotConfig(config *PluginConfig) error {
 	if strings.TrimSpace(config.RuntimeSlotClusterID) == "" || len(config.RuntimeSlotClusterID) > 512 {
 		return fmt.Errorf("runtime_slot_cluster_id is required and must not exceed 512 bytes")
 	}
-	if !config.RootFSEnabled || strings.TrimSpace(config.RootFSSessiondSocket) == "" {
-		return fmt.Errorf("runtime slots require the node-scoped RootFS session daemon")
+	if !config.RootFSEnabled || strings.TrimSpace(config.RootFSNodeSocket) == "" {
+		return fmt.Errorf("runtime slots require the ctld-owned Nomad runtime")
 	}
 	if !config.NetworkPolicyEnabled {
 		return fmt.Errorf("runtime slots require network_policy_enabled")
@@ -278,13 +278,13 @@ func newRuntimeSlotLifecycle(
 	}
 	storage, ok := rootfs.(runtimeSlotStorageHealth)
 	if !ok {
-		return nil, fmt.Errorf("RootFS runtime cannot prove session-daemon health")
+		return nil, fmt.Errorf("RootFS runtime cannot prove ctld Nomad runtime health")
 	}
 	healthCtx, cancelHealth := context.WithTimeout(ctx, 2*time.Second)
 	err = storage.Ping(healthCtx)
 	cancelHealth()
 	if err != nil {
-		return nil, fmt.Errorf("prove RootFS session-daemon health: %w", err)
+		return nil, fmt.Errorf("prove RootFS ctld Nomad runtime health: %w", err)
 	}
 	journal, ok := rootfs.(runtimeSlotNodeJournal)
 	if !ok {
@@ -320,7 +320,7 @@ func newRuntimeSlotLifecycle(
 	}
 	storageProof, err := proofDigest(storageReadyProof{
 		Version: runtimeSlotProofVersion, SlotID: task.ID,
-		SessiondSocket: config.RootFSSessiondSocket, RootFSMountRoot: config.RootFSMountRoot,
+		NodeRuntimeSocket: config.RootFSNodeSocket, RootFSMountRoot: config.RootFSMountRoot,
 		MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes, MaxNodeDirtyTailBytes: config.RootFSMaxNodeDirtyTailBytes,
 		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,
 	})

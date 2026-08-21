@@ -47,6 +47,7 @@ type Daemon struct {
 	runtimeSlotStatePath     string
 	runtimeSlotControlSocket string
 	runtimeSlotNetNSRoot     string
+	kubernetesPolicySource   bool
 	runtimeMu                sync.Mutex
 	conntrackCloser          runtimeResource
 	meteringCloser           runtimeResource
@@ -61,6 +62,10 @@ type Options struct {
 	RuntimeSlotStatePath     string
 	RuntimeSlotControlSocket string
 	RuntimeSlotNetNSRoot     string
+	// RuntimeSlotsOnly disables the Kubernetes Pod/Service/Endpoints watcher.
+	// Nomad host deployments set this because their complete desired state is
+	// supplied by the durable runtime-slot registry.
+	RuntimeSlotsOnly bool
 }
 
 type runtimeResource interface {
@@ -97,6 +102,7 @@ func New(cfg *config.NetworkRuntimeConfig, logger *zap.Logger, obsProvider *obse
 		runtimeSlotStatePath:     strings.TrimSpace(options.RuntimeSlotStatePath),
 		runtimeSlotControlSocket: strings.TrimSpace(options.RuntimeSlotControlSocket),
 		runtimeSlotNetNSRoot:     strings.TrimSpace(options.RuntimeSlotNetNSRoot),
+		kubernetesPolicySource:   !options.RuntimeSlotsOnly,
 	}
 }
 
@@ -162,20 +168,23 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 	if d.cfg.NodeName == "" {
 		return fmt.Errorf("node name is required")
 	}
-	k8sConfig, err := rest.InClusterConfig()
-	if err != nil {
-		return err
+	var client kubernetes.Interface
+	var networkWatcher *watcher.Watcher
+	if d.kubernetesPolicySource {
+		k8sConfig, err := rest.InClusterConfig()
+		if err != nil {
+			return fmt.Errorf("load Kubernetes policy source config: %w", err)
+		}
+		s0k8s.ApplyDefaultRateLimit(k8sConfig)
+		if d.obsProvider != nil {
+			d.obsProvider.K8s.WrapConfig(k8sConfig)
+		}
+		client, err = kubernetes.NewForConfig(k8sConfig)
+		if err != nil {
+			return fmt.Errorf("create Kubernetes policy source client: %w", err)
+		}
+		networkWatcher = watcher.NewWatcher(client, d.cfg.ResyncPeriod.Duration, d.logger)
 	}
-	s0k8s.ApplyDefaultRateLimit(k8sConfig)
-	if d.obsProvider != nil {
-		d.obsProvider.K8s.WrapConfig(k8sConfig)
-	}
-	client, err := kubernetes.NewForConfig(k8sConfig)
-	if err != nil {
-		return fmt.Errorf("create k8s client: %w", err)
-	}
-
-	networkWatcher := watcher.NewWatcher(client, d.cfg.ResyncPeriod.Duration, d.logger)
 	policyStore := policy.NewStore(d.logger)
 	platformState := newPlatformPolicyState(d.cfg, policyStore, d.logger)
 	conntrackManager, err := conntrack.NewManager(d.logger)
@@ -266,37 +275,39 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 		}()
 	}
 
-	networkWatcher.SetSandboxHandlers(func(info *watcher.SandboxInfo) {
-		if info == nil {
-			return
-		}
-		d.logger.Info("Sandbox policy change observed",
-			zap.String("sandbox", info.Namespace+"/"+info.Name),
-			zap.String("pod_ip", info.PodIP),
-			zap.String("policy_hash", info.NetworkPolicyHash),
-		)
-		triggerSync()
-	}, func(info *watcher.SandboxInfo) {
-		if info != nil {
-			d.logger.Info("Sandbox policy delete observed",
+	if networkWatcher != nil {
+		networkWatcher.SetSandboxHandlers(func(info *watcher.SandboxInfo) {
+			if info == nil {
+				return
+			}
+			d.logger.Info("Sandbox policy change observed",
 				zap.String("sandbox", info.Namespace+"/"+info.Name),
 				zap.String("pod_ip", info.PodIP),
+				zap.String("policy_hash", info.NetworkPolicyHash),
 			)
+			triggerSync()
+		}, func(info *watcher.SandboxInfo) {
+			if info != nil {
+				d.logger.Info("Sandbox policy delete observed",
+					zap.String("sandbox", info.Namespace+"/"+info.Name),
+					zap.String("pod_ip", info.PodIP),
+				)
+			}
+			triggerSync()
+		})
+		networkWatcher.SetServiceHandlers(func(*watcher.ServiceInfo) {
+			triggerSync()
+		}, func(*watcher.ServiceInfo) {
+			triggerSync()
+		})
+		networkWatcher.SetEndpointsHandlers(func(*watcher.EndpointsInfo) {
+			triggerSync()
+		}, func(*watcher.EndpointsInfo) {
+			triggerSync()
+		})
+		if err := networkWatcher.Start(ctx); err != nil {
+			return err
 		}
-		triggerSync()
-	})
-	networkWatcher.SetServiceHandlers(func(*watcher.ServiceInfo) {
-		triggerSync()
-	}, func(*watcher.ServiceInfo) {
-		triggerSync()
-	})
-	networkWatcher.SetEndpointsHandlers(func(*watcher.EndpointsInfo) {
-		triggerSync()
-	}, func(*watcher.EndpointsInfo) {
-		triggerSync()
-	})
-	if err := networkWatcher.Start(ctx); err != nil {
-		return err
 	}
 
 	proxyOpts := []proxy.ServerOption{}
@@ -362,7 +373,10 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 		ProxyHTTPSPort:       d.cfg.ProxyHTTPSPort,
 		RuntimeWatchTCPPorts: d.runtimeWatchTCPPorts,
 	}, d.logger)
-	patcher := apply.NewPatcher(client, d.logger)
+	var patcher *apply.Patcher
+	if client != nil {
+		patcher = apply.NewPatcher(client, d.logger)
+	}
 
 	syncOnce := make(chan struct{}, 1)
 	go func() {
@@ -679,16 +693,24 @@ func (d *Daemon) syncRedirect(
 		}
 		daemonMetrics.RecordRedirectSync(result, time.Since(started))
 	}()
-	if networkWatcher == nil || redirectManager == nil || patcher == nil {
-		return fmt.Errorf("missing watcher or redirect manager or patcher or policy store")
+	if redirectManager == nil || policyStore == nil {
+		return fmt.Errorf("missing redirect manager or policy store")
 	}
 	// Redirect rules only need local source pods, while platform peer deny must
 	// know every active sandbox so cross-node private traffic is still blocked.
 	stageStarted := time.Now()
-	kubernetesLocalSandboxes := networkWatcher.ListSandboxesByNode(d.cfg.NodeName)
-	kubernetesAllSandboxes := kubernetesLocalSandboxes
-	if d.cfg.NodeName != "" {
-		kubernetesAllSandboxes = networkWatcher.ListSandboxesByNode("")
+	var kubernetesLocalSandboxes []*watcher.SandboxInfo
+	var kubernetesAllSandboxes []*watcher.SandboxInfo
+	var services []*watcher.ServiceInfo
+	var endpoints []*watcher.EndpointsInfo
+	if networkWatcher != nil {
+		kubernetesLocalSandboxes = networkWatcher.ListSandboxesByNode(d.cfg.NodeName)
+		kubernetesAllSandboxes = kubernetesLocalSandboxes
+		if d.cfg.NodeName != "" {
+			kubernetesAllSandboxes = networkWatcher.ListSandboxesByNode("")
+		}
+		services = networkWatcher.ListServices()
+		endpoints = networkWatcher.ListEndpoints()
 	}
 	runtimeSlotSandboxes := []*watcher.SandboxInfo(nil)
 	runtimeSlotRevision := uint64(0)
@@ -716,8 +738,6 @@ func (d *Daemon) syncRedirect(
 	if err != nil {
 		return err
 	}
-	services := networkWatcher.ListServices()
-	endpoints := networkWatcher.ListEndpoints()
 	sandboxIPs := make([]string, 0, len(localSandboxes))
 	for _, sandbox := range localSandboxes {
 		if sandbox.PodIP == "" {
@@ -805,7 +825,9 @@ func (d *Daemon) syncRedirect(
 
 	patchedCount := 0
 	stageStarted = time.Now()
-	if err := patcher.SyncAppliedHashes(ctx, kubernetesLocalSandboxes); err != nil {
+	if patcher == nil {
+		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "disabled", time.Since(stageStarted))
+	} else if err := patcher.SyncAppliedHashes(ctx, kubernetesLocalSandboxes); err != nil {
 		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "error", time.Since(stageStarted))
 		d.logger.Warn("Failed to sync applied hashes", zap.Error(err))
 	} else {

@@ -699,7 +699,7 @@ func TestClaimCrashAbandonsConsumedWriterWhenRootFSAttachFails(t *testing.T) {
 	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
 	runtime := &fakeRootFSRuntime{
 		source:    source,
-		ensureErr: &consumedRootFSAttachError{err: errors.New("NBD device is unavailable")},
+		ensureErr: &consumedRootFSAttachError{Err: errors.New("NBD device is unavailable")},
 	}
 	fixture.handle.rootfs = runtime
 	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
@@ -1066,7 +1066,7 @@ func TestValidateRootfsPathRejectsTraversal(t *testing.T) {
 func TestCommandRunscUsesPersistentRootFlags(t *testing.T) {
 	config := defaultPluginConfig()
 	runner := NewCommandRunsc(*config).(*CommandRunsc)
-	flags := runner.globalArgs()
+	flags := runner.GlobalArgs()
 	for _, wanted := range []string{
 		"--platform=systrap",
 		"--overlay2=none",

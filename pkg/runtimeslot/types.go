@@ -47,7 +47,7 @@ const (
 )
 
 // NodeCleanupControlRequest identifies one plugin-independent terminal cleanup
-// against the root-owned node session daemon. WriterAuthorityDigest is exact
+// against the root-owned ctld Nomad runtime. WriterAuthorityDigest is exact
 // evidence from the regional authority; it is never accepted as a liveness
 // assertion without node-local absence checks.
 type NodeCleanupControlRequest struct {
@@ -359,6 +359,17 @@ func NomadProcdAddress(ip string) (string, error) {
 func NomadRunscContainerID(slotID string) string {
 	digest := sha256.Sum256([]byte(slotID))
 	return "s0-" + hex.EncodeToString(digest[:16])
+}
+
+// NomadNetworkChainName derives the stable historical chain identity recorded
+// with a Nomad runtime slot. Ctld owns policy application; the name remains in
+// cleanup proofs so node incarnations cannot be confused.
+func NomadNetworkChainName(containerID string) string {
+	value := strings.TrimPrefix(containerID, "s0-")
+	if len(value) > 12 {
+		value = value[:12]
+	}
+	return "S0-NET-" + value
 }
 
 // ValidateNomadProcdAddress requires the canonical allocation-local procd

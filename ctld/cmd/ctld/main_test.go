@@ -17,9 +17,9 @@ import (
 func TestCtldShutdownBudgetFitsDeploymentGracePeriod(t *testing.T) {
 	const deployedTerminationGrace = 45 * time.Second
 
-	shutdownBudget := httpShutdownTimeout + runtimeMetricsShutdownTimeout
+	shutdownBudget := httpShutdownTimeout + runtimeMetricsShutdownTimeout +
+		networkRuntimeShutdownTimeout + nomadRuntimeShutdownTimeout
 	assert.LessOrEqual(t, shutdownBudget+shutdownGraceMargin, deployedTerminationGrace)
-	assert.LessOrEqual(t, max(shutdownBudget, networkRuntimeShutdownTimeout)+shutdownGraceMargin, deployedTerminationGrace)
 	assert.Equal(t, minimumTerminationGrace, shutdownBudget+shutdownGraceMargin)
 }
 

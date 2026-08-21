@@ -111,12 +111,12 @@ func TestNetworkRuntimeExitErrorTreatsCanceledParentAsGraceful(t *testing.T) {
 }
 
 func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testing.T) {
-	factory, err := configuredNetworkRuntimeFactory("", ":8095", ":8096")
+	factory, err := configuredNetworkRuntimeFactory("", ":8095", ":8096", false)
 	if err != nil || factory != nil {
 		t.Fatalf("configuredNetworkRuntimeFactory(empty) = (%v, %v), want (nil, nil)", factory, err)
 	}
 
-	if _, err := configuredNetworkRuntimeFactory(t.TempDir()+"/missing.yaml", ":8095", ":8096"); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(t.TempDir()+"/missing.yaml", ":8095", ":8096", false); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory(missing) succeeded, want validation error")
 	}
 
@@ -124,19 +124,22 @@ func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testin
 	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8095\n"), 0o600); err != nil {
 		t.Fatalf("write network runtime config: %v", err)
 	}
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096"); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096", false); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory accepted a ctld port collision")
 	}
 
 	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8096\n"), 0o600); err != nil {
 		t.Fatalf("write network runtime config: %v", err)
 	}
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096"); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096", false); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory accepted a runtime watch port collision")
 	}
 
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8095"); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8095", false); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory accepted one port for control and runtime watch")
+	}
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8095", true); err != nil {
+		t.Fatalf("Nomad-only network runtime rejected disabled runtime-watch collision: %v", err)
 	}
 }
 
@@ -214,6 +217,51 @@ func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 		t.Fatalf("standby promotion error = %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("standby was not promoted after primary network runtime failure")
+	}
+}
+
+func TestRunHAPrimaryRetainsLeaseAfterIncompletePrivilegedShutdown(t *testing.T) {
+	root := t.TempDir()
+	primaryCoordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: root, Slot: "a"})
+	if err != nil {
+		t.Fatalf("NewCoordinator(primary) error = %v", err)
+	}
+	standbyCoordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: root, Slot: "b"})
+	if err != nil {
+		t.Fatalf("NewCoordinator(standby) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err = runHAPrimary(ctx, primaryCoordinator, nil, nil, func(_ context.Context, _ primaryRunOptions) error {
+		return errPrimaryShutdownIncomplete
+	})
+	if !errors.Is(err, errPrimaryShutdownIncomplete) {
+		t.Fatalf("runHAPrimary() error = %v, want %v", err, errPrimaryShutdownIncomplete)
+	}
+
+	promotion := make(chan error, 1)
+	go func() {
+		lease, waitErr := standbyCoordinator.WaitForPrimary(ctx)
+		if lease != nil {
+			_ = lease.Close()
+		}
+		promotion <- waitErr
+	}()
+	waitForCoordinatorRole(t, standbyCoordinator, ctldha.RoleStandby)
+	select {
+	case err := <-promotion:
+		t.Fatalf("standby unexpectedly promoted after incomplete shutdown: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-promotion:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WaitForPrimary() error = %v, want context cancellation", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("standby did not stop after context cancellation")
 	}
 }
 

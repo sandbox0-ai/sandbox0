@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
 import (
 	"bufio"
@@ -31,14 +31,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/errdefs"
-	"github.com/hashicorp/go-hclog"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"go.uber.org/zap"
 )
 
 const (
@@ -46,51 +47,143 @@ const (
 	rootFSSessionAttachGrace        = 2 * time.Minute
 	rootFSSessionReconcileTimeout   = 3 * time.Minute
 	nomadAllocationResponseMaxBytes = 64 << 20
+	nodeRuntimeStartupTimeout       = 30 * time.Second
+	nodeRuntimeHealthInterval       = time.Second
 )
 
-type rootFSSessionDaemon struct {
-	runtime rootFSSessionDaemonRuntime
+// Service is the HA-primary-scoped Nomad node runtime owned by ctld.
+type Service struct {
+	config      Config
+	nomadConfig NomadAllocationConfig
+	logger      *zap.Logger
+	ready       atomic.Bool
+}
+
+// NewService validates a ctld Nomad runtime without opening its exclusive
+// Bolt, NBD, mount, runsc, or Unix-socket resources.
+func NewService(config Config, nomadConfig NomadAllocationConfig, logger *zap.Logger) (*Service, error) {
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("validate ctld Nomad runtime config: %w", err)
+	}
+	if err := validateNomadAllocationConfig(nomadConfig); err != nil {
+		return nil, err
+	}
+	return &Service{config: config, nomadConfig: nomadConfig, logger: logger}, nil
+}
+
+// Ready reports whether the active ctld primary owns a healthy local runtime.
+func (s *Service) Ready() bool {
+	return s != nil && s.ready.Load()
+}
+
+// Run owns the complete privileged runtime until the ctld primary context is
+// canceled. RPC health controls readiness, but only confirmed runtime exit is
+// terminal; an unresponsive owner must not trigger overlapping HA promotion.
+func (s *Service) Run(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("ctld Nomad runtime service is nil")
+	}
+	serviceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.ready.Store(false)
+	defer s.ready.Store(false)
+
+	runErrors := make(chan error, 1)
+	go func() {
+		runErrors <- run(serviceCtx, s.config, s.nomadConfig, s.logger)
+	}()
+	client, err := NewClient(s.config.SocketPath)
+	if err != nil {
+		cancel()
+		return errors.Join(err, <-runErrors)
+	}
+	startupDeadline := time.NewTimer(nodeRuntimeStartupTimeout)
+	defer startupDeadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	started := false
+	for {
+		select {
+		case err := <-runErrors:
+			if ctx.Err() != nil && (err == nil || errors.Is(err, context.Canceled)) {
+				return nil
+			}
+			if err == nil {
+				err = fmt.Errorf("ctld Nomad runtime stopped unexpectedly")
+			}
+			return err
+		case <-ctx.Done():
+			cancel()
+			err := <-runErrors
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		case <-startupDeadline.C:
+			if !started {
+				cancel()
+				return errors.Join(fmt.Errorf("ctld Nomad runtime startup deadline exceeded"), <-runErrors)
+			}
+		case <-ticker.C:
+			healthCtx, healthCancel := context.WithTimeout(serviceCtx, 2*time.Second)
+			healthErr := client.Ping(healthCtx)
+			healthCancel()
+			if healthErr != nil {
+				s.ready.Store(false)
+				continue
+			}
+			s.ready.Store(true)
+			if !started {
+				started = true
+				s.ready.Store(true)
+				ticker.Reset(nodeRuntimeHealthInterval)
+			}
+		}
+	}
+}
+
+type nodeRuntime struct {
+	runtime nodeRuntimeBackend
 	runner  Runsc
 	mounter Mounter
-	config  PluginConfig
-	logger  hclog.Logger
+	config  Config
+	logger  logger
 
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
 	inflight           map[string]bool
 	trigger            chan string
 	allocations        nomadAllocationSource
-	network            NetworkRuntime
 	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
 	journal            *runtimeSlotJournal
 	clusterID          string
 	nodeID             string
 	nodeUID            string
-	requireCtldNetwork bool
 }
 
-type rootFSSessionDaemonRuntime interface {
-	RootFSRuntime
+type nodeRuntimeBackend interface {
+	Runtime
 	RecoverySessions() ([]rootfssession.RecoverySession, error)
-	FenceLocalRootFSWriter(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
+	FenceLocalRootFSWriter(context.Context, rootfshandoff.StageRequest, string, CrashTaskObservation) (rootfshandoff.CrashFenceProof, error)
 	ReclaimVerifiedTerminal(context.Context, rootfshandoff.StageRequest) error
 	ReclaimExternallyRetired(context.Context, rootfshandoff.StageRequest) (bool, error)
 }
 
-type pausedRebaseRootFSRuntime interface {
+type pausedRebaseRuntime interface {
 	ExecutePausedRebase(context.Context, rootfsrebase.WorkerRequest) (rootfsrebase.WorkerResult, error)
 	RejectPausedRebase(context.Context, rootfsrebase.WorkerRequest) (rootfsrebase.WorkerRejection, error)
 	AcknowledgePausedRebase(rootfsrebase.WorkerRequest, string) error
 }
 
-type dirtyTailPressureRootFSRuntime interface {
+type dirtyTailPressureRuntime interface {
 	DirtyTailPressureSignal() <-chan struct{}
 	DirtyTailPressureSessions() ([]rootfssession.DirtyTailPressureSession, error)
 	PlanDirtyTailPressure(context.Context, rootfssession.DirtyTailPressureSession) (string, error)
 }
 
 // RejectPausedRootFSRebase serializes termination with exact node execution.
-func (d *rootFSSessionDaemon) RejectPausedRootFSRebase(
+func (d *nodeRuntime) RejectPausedRootFSRebase(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -104,7 +197,7 @@ func (d *rootFSSessionDaemon) RejectPausedRootFSRebase(
 		return rootfsrebase.WorkerRejection{},
 			fmt.Errorf("paused RootFS rebase rejection target is invalid: %w", errdefs.ErrPermissionDenied)
 	}
-	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	runtime, ok := d.runtime.(pausedRebaseRuntime)
 	if !ok {
 		return rootfsrebase.WorkerRejection{},
 			fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
@@ -114,7 +207,7 @@ func (d *rootFSSessionDaemon) RejectPausedRootFSRebase(
 
 // AcknowledgePausedRootFSRebase releases one exact cached node result after a
 // permanent regional outcome.
-func (d *rootFSSessionDaemon) AcknowledgePausedRootFSRebase(
+func (d *nodeRuntime) AcknowledgePausedRootFSRebase(
 	_ context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -126,7 +219,7 @@ func (d *rootFSSessionDaemon) AcknowledgePausedRootFSRebase(
 		target.NodeUID != d.nodeUID || target.SlotID != "" || target.AllocationID != "" || target.ControlEndpoint != "" {
 		return fmt.Errorf("paused RootFS rebase acknowledgement target is invalid: %w", errdefs.ErrPermissionDenied)
 	}
-	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	runtime, ok := d.runtime.(pausedRebaseRuntime)
 	if !ok {
 		return fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -136,7 +229,7 @@ func (d *rootFSSessionDaemon) AcknowledgePausedRootFSRebase(
 // ExecutePausedRootFSRebase runs an offline worker without consulting a
 // runtime-slot journal. The command is already bound to this authenticated
 // node boot and carries a PostgreSQL-created immutable pre-operation.
-func (d *rootFSSessionDaemon) ExecutePausedRootFSRebase(
+func (d *nodeRuntime) ExecutePausedRootFSRebase(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -154,7 +247,7 @@ func (d *rootFSSessionDaemon) ExecutePausedRootFSRebase(
 		return rootfsrebase.WorkerResult{},
 			fmt.Errorf("paused RootFS rebase target does not match this daemon: %w", errdefs.ErrPermissionDenied)
 	}
-	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	runtime, ok := d.runtime.(pausedRebaseRuntime)
 	if !ok {
 		return rootfsrebase.WorkerResult{},
 			fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
@@ -183,28 +276,31 @@ type NomadAllocationConfig struct {
 	RuntimeSlotCtldNetworkSocket string
 }
 
-// RunRootFSSessionDaemon runs the node-scoped owner for writer leases,
+// RunNodeRuntime runs the node-scoped owner for writer leases,
 // NBD/XFS/Overlay sessions, and terminal reconciliation. The Nomad task-driver
 // process talks to it only over the root-owned Unix socket.
-func RunRootFSSessionDaemon(
+func run(
 	ctx context.Context,
-	config PluginConfig,
-	socketPath string,
+	config Config,
 	nomadConfig NomadAllocationConfig,
-	logger hclog.Logger,
+	zapLogger *zap.Logger,
 ) error {
-	config.RootFSSessiondSocket = ""
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return fmt.Errorf("validate ctld Nomad runtime config: %w", err)
+	}
+	logger := newLogger(zapLogger)
 	if strings.TrimSpace(config.RootFSConsumerMountRoot) == "" {
-		return fmt.Errorf("rootfs_consumer_mount_root is required for the session daemon")
+		return fmt.Errorf("rootfs_consumer_mount_root is required for the ctld Nomad runtime")
 	}
 	if strings.TrimSpace(config.RootFSConsumerNetNSRoot) == "" {
-		return fmt.Errorf("rootfs_consumer_netns_root is required for the session daemon")
+		return fmt.Errorf("rootfs_consumer_netns_root is required for the ctld Nomad runtime")
 	}
 	if strings.TrimSpace(config.RootFSAuthorityURL) == "" {
-		return fmt.Errorf("rootfs_authority_url is required for the session daemon")
+		return fmt.Errorf("rootfs_authority_url is required for the ctld Nomad runtime")
 	}
 	if strings.TrimSpace(nomadConfig.ClusterID) == "" {
-		return fmt.Errorf("cluster_id is required for the session daemon")
+		return fmt.Errorf("cluster_id is required for the ctld Nomad runtime")
 	}
 	if strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket) == "" {
 		return fmt.Errorf("runtime_slot_ctld_network_socket is required for warm-slot default deny")
@@ -245,7 +341,7 @@ func RunRootFSSessionDaemon(
 		return err
 	}
 	if allocations == nil {
-		return fmt.Errorf("Nomad allocation authority is required for the session daemon")
+		return fmt.Errorf("Nomad allocation authority is required for the ctld Nomad runtime")
 	}
 	journal, err := newRuntimeSlotJournal(config.RuntimeSlotJournalPath, runtimeSlotProofRetention)
 	if err != nil {
@@ -255,7 +351,7 @@ func RunRootFSSessionDaemon(
 	if _, err := journal.Prune(time.Now()); err != nil {
 		return fmt.Errorf("prune runtime slot journal: %w", err)
 	}
-	runtime, err := newEmbeddedRootFSRuntime(&config, logger.Named("runtime"))
+	runtime, err := newRuntime(ctx, &config, logger.Named("runtime"))
 	if err != nil {
 		return err
 	}
@@ -267,16 +363,16 @@ func RunRootFSSessionDaemon(
 			return fmt.Errorf("create ctld runtime slot network client: %w", err)
 		}
 	}
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: NewCommandRunsc(config), mounter: systemMounter{},
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: newCommandRunsc(config), mounter: systemMounter{},
 		config: config, logger: logger, inflight: make(map[string]bool), trigger: make(chan string, 128),
-		allocations: allocations, network: commandNetworkRuntime{}, runtimeSlotNetwork: runtimeSlotNetwork, journal: journal,
+		allocations: allocations, runtimeSlotNetwork: runtimeSlotNetwork, journal: journal,
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
-		nodeUID: strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID), requireCtldNetwork: true,
+		nodeUID: strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
-	nodeChannelAgent, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork)
+	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork)
 	if err != nil {
 		return err
 	}
@@ -297,7 +393,7 @@ func RunRootFSSessionDaemon(
 			}
 		}()
 	}
-	err = serveRootFSSessionRuntime(daemonCtx, socketPath, runtime, daemon.writerLeaseLost, daemon.health, daemon)
+	err = serveNodeRuntime(daemonCtx, config.SocketPath, runtime, daemon.writerLeaseLost, daemon.health, daemon)
 	cancelDaemon()
 	if nodeChannelErr != nil {
 		agentErr := <-nodeChannelErr
@@ -309,11 +405,55 @@ func RunRootFSSessionDaemon(
 	return err
 }
 
+func validateNomadAllocationConfig(config NomadAllocationConfig) error {
+	for name, value := range map[string]string{
+		"cluster_id":                       config.ClusterID,
+		"nomad_address":                    config.Address,
+		"nomad_node_id":                    config.NodeID,
+		"runtime_slot_node_uid":            config.RuntimeSlotNodeUID,
+		"runtime_slot_ctld_network_socket": config.RuntimeSlotCtldNetworkSocket,
+	} {
+		trimmed := strings.TrimSpace(value)
+		if value != trimmed || trimmed == "" || len(value) > 512 {
+			return fmt.Errorf("%s is required for the ctld Nomad runtime and must not exceed 512 bytes", name)
+		}
+	}
+	if !config.RuntimeSlotChannelEnabled {
+		return fmt.Errorf("runtime slot node channel is required for the ctld Nomad runtime")
+	}
+	if err := validateCanonicalHTTPSOrigin("nomad_address", config.Address); err != nil {
+		return err
+	}
+	for _, file := range []struct{ name, value string }{
+		{"nomad_token_file", config.TokenFile},
+		{"nomad_ca_file", config.CAFile},
+		{"nomad_cert_file", config.CertFile},
+		{"nomad_key_file", config.KeyFile},
+	} {
+		if err := validateCanonicalAbsolutePath(file.name, file.value); err != nil {
+			return err
+		}
+	}
+	if err := validateCanonicalAbsolutePath("runtime_slot_control_root", config.RuntimeSlotControlRoot); err != nil {
+		return err
+	}
+	if err := validateCanonicalAbsolutePath("runtime_slot_ctld_network_socket", config.RuntimeSlotCtldNetworkSocket); err != nil {
+		return err
+	}
+	peerURI, err := url.Parse(config.RuntimeSlotChannelPeerURISAN)
+	if err != nil || peerURI.Scheme != "spiffe" || peerURI.Host == "" || peerURI.User != nil ||
+		peerURI.RawQuery != "" || peerURI.Fragment != "" || peerURI.String() != config.RuntimeSlotChannelPeerURISAN ||
+		len(config.RuntimeSlotChannelPeerURISAN) > 2048 {
+		return fmt.Errorf("runtime_slot_channel_peer_uri_san must be canonical SPIFFE")
+	}
+	return nil
+}
+
 // RegisterRuntimeSlot records all physical warm-slot identities before the
 // regional authority is allowed to expose that slot as fast-path ready.
-func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
+func (d *nodeRuntime) RegisterRuntimeSlot(
 	ctx context.Context,
-	registration runtimeSlotJournalRegistration,
+	registration RuntimeSlotRegistration,
 ) error {
 	if err := registration.Validate(); err != nil {
 		return fmt.Errorf("validate runtime slot journal registration: %w: %w", err, errdefs.ErrInvalidArgument)
@@ -337,10 +477,10 @@ func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
 	}
 	mountNamespaceID, err := os.Readlink("/proc/self/ns/mnt")
 	if err != nil {
-		return fmt.Errorf("read session daemon mount namespace: %w", err)
+		return fmt.Errorf("read ctld Nomad runtime mount namespace: %w", err)
 	}
 	if mountNamespaceID != registration.MountNamespaceID {
-		return fmt.Errorf("runtime slot mount namespace differs from sessiond: %w", errdefs.ErrFailedPrecondition)
+		return fmt.Errorf("runtime slot mount namespace differs from ctld Nomad runtime: %w", errdefs.ErrFailedPrecondition)
 	}
 	netnsPath, err := validateExistingPath(registration.NetNSPath, d.config.RootFSConsumerNetNSRoot)
 	if err != nil {
@@ -359,10 +499,7 @@ func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
 		return err
 	}
 	if d.runtimeSlotNetwork == nil {
-		if d.requireCtldNetwork {
-			return fmt.Errorf("ctld runtime slot network control is unavailable: %w", errdefs.ErrUnavailable)
-		}
-		return nil
+		return fmt.Errorf("ctld runtime slot network control is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	local, err := d.runtimeSlotNetworkRegistrationRequest(registration)
 	if err != nil {
@@ -374,8 +511,8 @@ func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
 	return nil
 }
 
-func (d *rootFSSessionDaemon) runtimeSlotNetworkRegistrationRequest(
-	registration runtimeSlotJournalRegistration,
+func (d *nodeRuntime) runtimeSlotNetworkRegistrationRequest(
+	registration RuntimeSlotRegistration,
 ) (protocol.RuntimeSlotNetworkRegistrationRequest, error) {
 	if d == nil || d.clusterID == "" || d.nodeID == "" || d.nodeUID == "" {
 		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("runtime slot network daemon identity is unavailable: %w", errdefs.ErrUnavailable)
@@ -410,7 +547,7 @@ func (d *rootFSSessionDaemon) runtimeSlotNetworkRegistrationRequest(
 	return request, nil
 }
 
-func (d *rootFSSessionDaemon) runtimeSlotNetworkPrepareRequest(
+func (d *nodeRuntime) runtimeSlotNetworkPrepareRequest(
 	request protocol.NodeNetworkPrepareControlRequest,
 ) (protocol.RuntimeSlotNetworkPrepareRequest, error) {
 	if err := request.Validate(); err != nil {
@@ -446,7 +583,7 @@ func (d *rootFSSessionDaemon) runtimeSlotNetworkPrepareRequest(
 // CaptureRunningRootFSFork resolves the exact live writer from durable node
 // state, then lets the RootFS runtime freeze, checkpoint, and regionally
 // publish it. No task-driver plugin process participates in this path.
-func (d *rootFSSessionDaemon) CaptureRunningRootFSFork(
+func (d *nodeRuntime) CaptureRunningRootFSFork(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodeRunningForkControlRequest,
@@ -515,7 +652,7 @@ func (d *rootFSSessionDaemon) CaptureRunningRootFSFork(
 // driver or choosing a new regional writer outcome. It may replay the exact
 // already-authoritative planned operation. The proof is journaled before it is
 // returned, making a lost response byte-stable on retry.
-func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
+func (d *nodeRuntime) CleanupRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 ) (protocol.NodeCleanupControlProof, error) {
@@ -539,7 +676,7 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	} else if request.WriterGrantID == "" {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("grantless runtime cleanup requires the node slot journal: %w", errdefs.ErrFailedPrecondition)
 	}
-	if d.runner == nil || d.mounter == nil || (d.runtimeSlotNetwork == nil && d.network == nil) {
+	if d.runner == nil || d.mounter == nil || d.runtimeSlotNetwork == nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node runtime cleanup dependencies are unavailable: %w", errdefs.ErrUnavailable)
 	}
 	if request.WriterGrantID != "" && d.runtime == nil {
@@ -555,7 +692,7 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	return d.cleanupWriterRuntimeSlot(ctx, request, journalRecord)
 }
 
-func (d *rootFSSessionDaemon) cleanupWriterRuntimeSlot(
+func (d *nodeRuntime) cleanupWriterRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	journalRecord *runtimeSlotJournalRecord,
@@ -695,7 +832,7 @@ func validatePlannedCleanupResult(
 func validateCrashCleanupProof(
 	proof rootfshandoff.CrashFenceProof,
 	stage rootfshandoff.StageRequest,
-	observation crashTaskObservation,
+	observation CrashTaskObservation,
 	request protocol.NodeCleanupControlRequest,
 ) error {
 	if err := proof.Validate(); err != nil {
@@ -764,7 +901,7 @@ func matchRuntimeSlotCleanupSession(
 	return matched, nil
 }
 
-func (d *rootFSSessionDaemon) cleanupJournaledWriterRuntimeSlot(
+func (d *nodeRuntime) cleanupJournaledWriterRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
@@ -780,7 +917,7 @@ func (d *rootFSSessionDaemon) cleanupJournaledWriterRuntimeSlot(
 // immutable physical slot registration and terminal regional authority.
 func journaledRootFSAbsenceDigest(
 	request protocol.NodeCleanupControlRequest,
-	registration runtimeSlotJournalRegistration,
+	registration RuntimeSlotRegistration,
 ) (string, error) {
 	payload, err := json.Marshal(struct {
 		Version               int    `json:"version"`
@@ -826,7 +963,7 @@ func completedNodeCleanupProof(
 	}
 }
 
-func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
+func (d *nodeRuntime) cleanupGrantlessRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
@@ -834,7 +971,7 @@ func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
 	return d.cleanupJournaledRuntimeSlot(ctx, request, record, "")
 }
 
-func (d *rootFSSessionDaemon) cleanupJournaledRuntimeSlot(
+func (d *nodeRuntime) cleanupJournaledRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
@@ -885,8 +1022,8 @@ func (d *rootFSSessionDaemon) cleanupJournaledRuntimeSlot(
 	return proof, nil
 }
 
-func (d *rootFSSessionDaemon) runtimeSlotStableMountPath(
-	registration runtimeSlotJournalRegistration,
+func (d *nodeRuntime) runtimeSlotStableMountPath(
+	registration RuntimeSlotRegistration,
 ) (string, error) {
 	if _, err := os.Lstat(registration.StableMount); errors.Is(err, os.ErrNotExist) {
 		return "", nil
@@ -917,7 +1054,7 @@ func (d *rootFSSessionDaemon) runtimeSlotStableMountPath(
 	return resolved, nil
 }
 
-func (d *rootFSSessionDaemon) fenceJournalRunsc(ctx context.Context, containerID string) error {
+func (d *nodeRuntime) fenceJournalRunsc(ctx context.Context, containerID string) error {
 	_ = d.runner.Kill(ctx, containerID, "KILL")
 	if err := d.runner.Delete(ctx, containerID, true); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("delete journaled gVisor container: %w", err)
@@ -960,39 +1097,33 @@ func validateRuntimeSlotCleanupSession(
 	return nil
 }
 
-func (d *rootFSSessionDaemon) cleanupRuntimeSlotNetwork(
+func (d *nodeRuntime) cleanupRuntimeSlotNetwork(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	consumer *rootfssession.ConsumerRegistration,
 	expectedIdentity string,
 	validatedPath string,
 ) error {
-	if d.runtimeSlotNetwork != nil {
-		if err := d.runtimeSlotNetwork.Cleanup(ctx, request); err != nil {
-			return fmt.Errorf("remove ctld runtime slot network policy: %w", err)
-		}
-		return nil
+	if d.runtimeSlotNetwork == nil {
+		return fmt.Errorf("runtime slot network cleanup identity is unavailable: %w", errdefs.ErrFailedPrecondition)
 	}
-	if consumer == nil || consumer.NetNSPath == "" || consumer.NetNSIdentity != expectedIdentity || d.network == nil {
+	if consumer == nil || consumer.NetNSPath == "" || consumer.NetNSIdentity != expectedIdentity {
 		return fmt.Errorf("runtime slot network cleanup identity is unavailable: %w", errdefs.ErrFailedPrecondition)
 	}
 	currentPath, err := d.runtimeSlotNetworkPath(consumer, expectedIdentity)
 	if err != nil {
 		return err
 	}
-	if currentPath == "" {
-		return nil
-	}
 	if currentPath != validatedPath {
 		return fmt.Errorf("runtime slot network namespace path changed: %w", errdefs.ErrFailedPrecondition)
 	}
-	if err := d.network.Cleanup(ctx, currentPath, consumer.NetworkChain); err != nil {
-		return fmt.Errorf("cleanup runtime slot network policy: %w", err)
+	if err := d.runtimeSlotNetwork.Cleanup(ctx, request); err != nil {
+		return fmt.Errorf("remove ctld runtime slot network policy: %w", err)
 	}
 	return nil
 }
 
-func (d *rootFSSessionDaemon) runtimeSlotNetworkPath(
+func (d *nodeRuntime) runtimeSlotNetworkPath(
 	consumer *rootfssession.ConsumerRegistration,
 	expectedIdentity string,
 ) (string, error) {
@@ -1022,7 +1153,7 @@ func (d *rootFSSessionDaemon) runtimeSlotNetworkPath(
 	return resolvedPath, nil
 }
 
-func (d *rootFSSessionDaemon) health(ctx context.Context) error {
+func (d *nodeRuntime) health(ctx context.Context) error {
 	if _, err := d.runtime.RecoverySessions(); err != nil {
 		return fmt.Errorf("read durable RootFS recovery journal: %w: %w", err, errdefs.ErrUnavailable)
 	}
@@ -1045,7 +1176,7 @@ func (d *rootFSSessionDaemon) health(ctx context.Context) error {
 	return nil
 }
 
-func (d *rootFSSessionDaemon) writerLeaseLost(stage rootfshandoff.StageRequest, cause error) {
+func (d *nodeRuntime) writerLeaseLost(stage rootfshandoff.StageRequest, cause error) {
 	d.logger.Error("RootFS writer authority lease lost", "parent", stage.Parent, "error", cause)
 	select {
 	case d.trigger <- stage.Parent:
@@ -1054,11 +1185,11 @@ func (d *rootFSSessionDaemon) writerLeaseLost(stage rootfshandoff.StageRequest, 
 	}
 }
 
-func (d *rootFSSessionDaemon) reconcileLoop(ctx context.Context) {
+func (d *nodeRuntime) reconcileLoop(ctx context.Context) {
 	ticker := time.NewTicker(rootFSSessionReconcileInterval)
 	defer ticker.Stop()
 	var pressureSignal <-chan struct{}
-	if runtime, ok := d.runtime.(dirtyTailPressureRootFSRuntime); ok {
+	if runtime, ok := d.runtime.(dirtyTailPressureRuntime); ok {
 		pressureSignal = runtime.DirtyTailPressureSignal()
 	}
 	d.scanDirtyTailPressures(ctx)
@@ -1078,8 +1209,8 @@ func (d *rootFSSessionDaemon) reconcileLoop(ctx context.Context) {
 	}
 }
 
-func (d *rootFSSessionDaemon) scanDirtyTailPressures(ctx context.Context) {
-	runtime, ok := d.runtime.(dirtyTailPressureRootFSRuntime)
+func (d *nodeRuntime) scanDirtyTailPressures(ctx context.Context) {
+	runtime, ok := d.runtime.(dirtyTailPressureRuntime)
 	if !ok {
 		return
 	}
@@ -1118,7 +1249,7 @@ func (d *rootFSSessionDaemon) scanDirtyTailPressures(ctx context.Context) {
 	}
 }
 
-func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
+func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 	if d.journal != nil {
 		if _, err := d.journal.Prune(time.Now()); err != nil {
 			d.logger.Error("prune runtime slot cleanup proofs", "error", err)
@@ -1184,7 +1315,7 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 	}
 }
 
-func (d *rootFSSessionDaemon) beginReconciliation(parent string) bool {
+func (d *nodeRuntime) beginReconciliation(parent string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.inflight == nil {
@@ -1197,13 +1328,13 @@ func (d *rootFSSessionDaemon) beginReconciliation(parent string) bool {
 	return true
 }
 
-func (d *rootFSSessionDaemon) endReconciliation(parent string) {
+func (d *nodeRuntime) endReconciliation(parent string) {
 	d.mu.Lock()
 	delete(d.inflight, parent)
 	d.mu.Unlock()
 }
 
-func (d *rootFSSessionDaemon) reconciliationInFlight(key string) bool {
+func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.inflight[key]
@@ -1314,7 +1445,13 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 	return now.Sub(session.CreatedAt) >= rootFSSessionAttachGrace
 }
 
-func (d *rootFSSessionDaemon) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {
+func crashOperationID(stage rootfshandoff.StageRequest) string {
+	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
+	sum := sha256.Sum256([]byte(payload))
+	return "nomad-crash-" + hex.EncodeToString(sum[:16])
+}
+
+func (d *nodeRuntime) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {
 	if session.ExternalCrash {
 		_, err := d.runtime.ReclaimExternallyRetired(ctx, session.Stage)
 		return err
@@ -1335,56 +1472,56 @@ func (d *rootFSSessionDaemon) reconcile(ctx context.Context, session rootfssessi
 	return err
 }
 
-func (d *rootFSSessionDaemon) fenceHostRuntime(
+func (d *nodeRuntime) fenceHostRuntime(
 	ctx context.Context,
 	session rootfssession.RecoverySession,
-) (crashTaskObservation, error) {
+) (CrashTaskObservation, error) {
 	consumer := session.Consumer
 	if consumer == nil {
 		namespace, err := os.Readlink("/proc/self/ns/mnt")
 		if err != nil {
-			return crashTaskObservation{}, fmt.Errorf("read session daemon mount namespace: %w", err)
+			return CrashTaskObservation{}, fmt.Errorf("read ctld Nomad runtime mount namespace: %w", err)
 		}
-		return crashTaskObservation{
+		return CrashTaskObservation{
 			ActiveKey: session.Stage.Identity.ClaimID, HostMountNamespaceID: namespace,
 			ContainerAbsent: true, TaskAbsent: true, FrontendSnapshotAbsent: true, StableMountAbsent: true,
 		}, nil
 	}
 	namespace, err := os.Readlink("/proc/self/ns/mnt")
 	if err != nil {
-		return crashTaskObservation{}, fmt.Errorf("read session daemon mount namespace: %w", err)
+		return CrashTaskObservation{}, fmt.Errorf("read ctld Nomad runtime mount namespace: %w", err)
 	}
 	if namespace != consumer.HostMountNamespace {
-		return crashTaskObservation{}, fmt.Errorf(
-			"consumer mount namespace %s differs from session daemon %s: %w",
+		return CrashTaskObservation{}, fmt.Errorf(
+			"consumer mount namespace %s differs from ctld Nomad runtime %s: %w",
 			consumer.HostMountNamespace, namespace, errdefs.ErrFailedPrecondition,
 		)
 	}
 	if err := validateConsumerMountPath(consumer.StableMount, d.config.RootFSConsumerMountRoot); err != nil {
-		return crashTaskObservation{}, err
+		return CrashTaskObservation{}, err
 	}
 	// A naturally stopped container may reject kill. Forced delete plus the
 	// subsequent state lookup, not kill's exit status, is the absence proof.
 	_ = d.runner.Kill(ctx, consumer.ContainerID, "KILL")
 	if err := d.runner.Delete(ctx, consumer.ContainerID, true); err != nil && !errdefs.IsNotFound(err) {
-		return crashTaskObservation{}, fmt.Errorf("delete orphan gVisor container: %w", err)
+		return CrashTaskObservation{}, fmt.Errorf("delete orphan gVisor container: %w", err)
 	}
 	if _, err := d.runner.State(ctx, consumer.ContainerID); err == nil {
-		return crashTaskObservation{}, fmt.Errorf("gVisor container %s remains present: %w", consumer.ContainerID, errdefs.ErrFailedPrecondition)
+		return CrashTaskObservation{}, fmt.Errorf("gVisor container %s remains present: %w", consumer.ContainerID, errdefs.ErrFailedPrecondition)
 	} else if !errdefs.IsNotFound(err) {
-		return crashTaskObservation{}, fmt.Errorf("attest orphan gVisor container absence: %w", err)
+		return CrashTaskObservation{}, fmt.Errorf("attest orphan gVisor container absence: %w", err)
 	}
 	if err := d.mounter.Unmount(consumer.StableMount); err != nil {
-		return crashTaskObservation{}, err
+		return CrashTaskObservation{}, err
 	}
 	attached, err := hostMountAttached(consumer.StableMount)
 	if err != nil {
-		return crashTaskObservation{}, err
+		return CrashTaskObservation{}, err
 	}
 	if attached {
-		return crashTaskObservation{}, fmt.Errorf("stable task root %s remains mounted: %w", consumer.StableMount, errdefs.ErrFailedPrecondition)
+		return CrashTaskObservation{}, fmt.Errorf("stable task root %s remains mounted: %w", consumer.StableMount, errdefs.ErrFailedPrecondition)
 	}
-	return crashTaskObservation{
+	return CrashTaskObservation{
 		ActiveKey: consumer.ActiveKey, ContainerID: consumer.ContainerID,
 		HostMountNamespaceID: consumer.HostMountNamespace, ContainerAbsent: true, TaskAbsent: true,
 		FrontendSnapshotAbsent: true, StableMountAbsent: true,

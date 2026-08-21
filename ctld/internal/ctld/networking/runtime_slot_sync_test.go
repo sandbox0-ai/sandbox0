@@ -8,15 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/apply"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/conntrack"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/slotnetwork"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 type syncTestNamespaceInspector struct{}
@@ -78,14 +75,12 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	}()
 	waitForRuntimeSlotSnapshot(t, registry, 1)
 
-	client := fake.NewSimpleClientset()
-	networkWatcher := watcher.NewWatcher(client, time.Minute, zap.NewNop())
 	store := policy.NewStore(zap.NewNop())
 	redirect := &syncTestRedirect{}
 	daemon := &Daemon{cfg: &apiconfig.NetworkRuntimeConfig{NodeName: "node-1"}, logger: zap.NewNop()}
 	if err := daemon.syncRedirect(
-		t.Context(), networkWatcher, registry, store, nil, redirect,
-		apply.NewPatcher(client, zap.NewNop()), conntrack.NewTracker(), nil, nil, false,
+		t.Context(), nil, registry, store, nil, redirect,
+		nil, conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +99,8 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	}()
 	waitForRuntimeSlotClaimed(t, registry)
 	if err := daemon.syncRedirect(
-		t.Context(), networkWatcher, registry, store, nil, redirect,
-		apply.NewPatcher(client, zap.NewNop()), conntrack.NewTracker(), nil, nil, false,
+		t.Context(), nil, registry, store, nil, redirect,
+		nil, conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +121,8 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	go func() { cleanupResult <- registry.Cleanup(t.Context(), cleanup) }()
 	waitForRuntimeSlotSnapshot(t, registry, 0)
 	if err := daemon.syncRedirect(
-		t.Context(), networkWatcher, registry, store, nil, redirect,
-		apply.NewPatcher(client, zap.NewNop()), conntrack.NewTracker(), nil, nil, false,
+		t.Context(), nil, registry, store, nil, redirect,
+		nil, conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-package driver
+package nomadruntime
 
 import (
 	"bytes"
@@ -18,27 +18,25 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "sessiond.sock")
+func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "ctld Nomad runtime.sock")
 	runtime := &fakeRootFSRuntime{source: t.TempDir()}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	cleaner := &fakeRuntimeSlotCleaner{}
-	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil, cleaner) }()
+	go func() { done <- serveNodeRuntime(ctx, socket, runtime, nil, nil, cleaner) }()
 	require.Eventually(t, func() bool {
 		info, err := os.Stat(socket)
 		return err == nil && info.Mode().Perm() == 0o600
 	}, time.Second, 10*time.Millisecond)
 
-	clientRuntime, err := newRootFSSessionClient(socket)
+	clientRuntime, err := NewClient(socket)
 	require.NoError(t, err)
 	require.NoError(t, clientRuntime.Ping(t.Context()))
 	stage := rootfshandoff.StageRequest{Parent: "parent", Identity: rootfshandoff.Identity{
@@ -47,7 +45,7 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	mount, err := clientRuntime.Ensure(t.Context(), stage, nil)
 	require.NoError(t, err)
 	require.Equal(t, runtime.source, mount.Source)
-	lease, err := clientRuntime.RegisterConsumer(t.Context(), stage, RootFSConsumerRequest{
+	lease, err := clientRuntime.RegisterConsumer(t.Context(), stage, ConsumerRequest{
 		ActiveKey: "task", ContainerID: "container", StableMount: "/tmp/task/rootfs",
 		HostMountNamespace: "mnt:[1]",
 	})
@@ -63,7 +61,7 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	retired, err := clientRuntime.Retire(t.Context(), stage, "retire")
 	require.NoError(t, err)
 	require.Equal(t, "retire", retired.OperationID)
-	crashed, err := clientRuntime.CrashFence(t.Context(), stage, "crash", crashTaskObservation{})
+	crashed, err := clientRuntime.CrashFence(t.Context(), stage, "crash", CrashTaskObservation{})
 	require.NoError(t, err)
 	require.Equal(t, "crash", crashed.OperationID)
 	cleanupRequest := testNodeCleanupRequest()
@@ -81,7 +79,7 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 
 type fakeRuntimeSlotCleaner struct {
 	request      protocol.NodeCleanupControlRequest
-	registration runtimeSlotJournalRegistration
+	registration RuntimeSlotRegistration
 }
 
 func (c *fakeRuntimeSlotCleaner) runtimeSlotNetworkPrepareRequest(
@@ -92,7 +90,7 @@ func (c *fakeRuntimeSlotCleaner) runtimeSlotNetworkPrepareRequest(
 
 func (c *fakeRuntimeSlotCleaner) RegisterRuntimeSlot(
 	_ context.Context,
-	registration runtimeSlotJournalRegistration,
+	registration RuntimeSlotRegistration,
 ) error {
 	c.registration = registration
 	return nil
@@ -118,69 +116,39 @@ func (c *fakeRuntimeSlotCleaner) CleanupRuntimeSlot(
 	return proof, nil
 }
 
-func TestRootFSSessionDaemonClientModeNeedsNoStorageCredentialsInPlugin(t *testing.T) {
-	config := &PluginConfig{
-		RootFSEnabled: true, RootFSSessiondSocket: "/run/sandbox0/rootfs-sessiond.sock",
-		RootFSMountRoot: "/run/sandbox0/rootfs", RootFSConsumerMountRoot: "/opt/nomad",
-	}
-	require.NoError(t, validateRootFSConfig(config))
-	config.RootFSMaxDirtyTailBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_dirty_tail_bytes")
-	config.RootFSMaxDirtyTailBytes = 0
-	config.RootFSMaxNodeDirtyTailBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_node_dirty_tail_bytes")
-	config.RootFSMaxNodeDirtyTailBytes = 0
-	config.RootFSDirtyTailRetirementReserveBytes = -1
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_dirty_tail_retirement_reserve_bytes")
-	config.RootFSDirtyTailRetirementReserveBytes = 2
-	config.RootFSMaxNodeDirtyTailBytes = 1
-	require.ErrorContains(t, validateRootFSConfig(config), "must not exceed")
-	config.RootFSDirtyTailRetirementReserveBytes = 0
-	config.RootFSMaxNodeDirtyTailBytes = 0
-	config.RootFSConsumerNetNSRoot = "/"
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_netns_root")
-	config.RootFSConsumerNetNSRoot = "/var/run/netns"
-	config.RootFSConsumerMountRoot = ""
-	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_mount_root")
-}
-
-func TestPluginFingerprintRequiresHealthyRootFSSessionDaemon(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "sessiond.sock")
-	runtime := &fakeRootFSRuntime{source: t.TempDir()}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil, nil) }()
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(socket)
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
-
-	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
-	plugin.config.RootFSEnabled = true
-	plugin.config.RootFSSessiondSocket = socket
-	fingerprint := plugin.buildFingerprint()
-	require.Equal(t, drivers.HealthStateHealthy, fingerprint.Health)
-
-	cancel()
-	require.NoError(t, <-done)
-	fingerprint = plugin.buildFingerprint()
-	require.Equal(t, drivers.HealthStateUndetected, fingerprint.Health)
-}
-
-func TestRootFSSessionRPCPreservesErrorClass(t *testing.T) {
+func TestNodeRuntimeRPCPreservesErrorClass(t *testing.T) {
 	runtime := &fakeRootFSRuntime{
 		source: t.TempDir(), ensureErr: errors.Join(errors.New("binding mismatch"), errdefs.ErrFailedPrecondition),
 	}
-	server := rootFSSessionRPCHandler(runtime, nil, nil, nil)
-	request := rootFSSessionRPCRequest{Stage: rootfshandoff.StageRequest{Parent: "parent"}}
+	server := nodeRuntimeRPCHandler(runtime, nil, nil, nil)
+	request := nodeRuntimeRPCRequest{Stage: rootfshandoff.StageRequest{Parent: "parent"}}
 	payload, err := json.Marshal(request)
 	require.NoError(t, err)
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/v1/sessions/ensure", bytes.NewReader(payload)))
 	require.Equal(t, http.StatusPreconditionFailed, recorder.Code)
-	var response rootFSSessionRPCResponse
+	var response nodeRuntimeRPCResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 	require.ErrorIs(t, remoteRootFSError(response.Error, response.ErrorClass), errdefs.ErrFailedPrecondition)
+}
+
+func TestNodeRuntimeRPCPreservesConsumedWriterAttachFailure(t *testing.T) {
+	runtime := &fakeRootFSRuntime{
+		ensureErr: &ConsumedAttachError{Err: errors.New("NBD attach failed")},
+	}
+	server := httptest.NewServer(nodeRuntimeRPCHandler(runtime, nil, nil, nil))
+	defer server.Close()
+	client := &Client{http: server.Client()}
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", strings.TrimPrefix(server.URL, "http://"))
+	}
+	client.http = &http.Client{Transport: transport}
+
+	_, err := client.Ensure(t.Context(), rootfshandoff.StageRequest{Parent: "parent"}, nil)
+	var consumed *ConsumedAttachError
+	require.ErrorAs(t, err, &consumed)
+	require.ErrorContains(t, consumed, "NBD attach failed")
 }
 
 func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
@@ -207,7 +175,7 @@ func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
 	require.True(t, rootFSSessionNeedsReconciliation(base, now, false))
 }
 
-func TestRootFSSessionDaemonFencesRegisteredRunscAndStableMount(t *testing.T) {
+func TestNodeRuntimeFencesRegisteredRunscAndStableMount(t *testing.T) {
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	require.NoError(t, os.MkdirAll(stableMount, 0o755))
@@ -216,8 +184,8 @@ func TestRootFSSessionDaemonFencesRegisteredRunscAndStableMount(t *testing.T) {
 	mounter := &fakeMounter{}
 	hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
 	require.NoError(t, err)
-	daemon := &rootFSSessionDaemon{
-		runner: runner, mounter: mounter, config: PluginConfig{RootFSConsumerMountRoot: consumerRoot},
+	daemon := &nodeRuntime{
+		runner: runner, mounter: mounter, config: Config{RootFSConsumerMountRoot: consumerRoot},
 	}
 	observation, err := daemon.fenceHostRuntime(t.Context(), rootfssession.RecoverySession{
 		Stage: rootfshandoff.StageRequest{Identity: rootfshandoff.Identity{ClaimID: "claim"}},
@@ -234,15 +202,15 @@ func TestRootFSSessionDaemonFencesRegisteredRunscAndStableMount(t *testing.T) {
 	require.Equal(t, []string{stableMount}, mounter.unmounts)
 }
 
-func TestRootFSSessionDaemonCleansExactRuntimeSlotWithoutCompletingWriter(t *testing.T) {
-	testRootFSSessionDaemonCleansExactRuntimeSlot(t, false)
+func TestNodeRuntimeCleansExactRuntimeSlotWithoutCompletingWriter(t *testing.T) {
+	testNodeRuntimeCleansExactRuntimeSlot(t, false)
 }
 
-func TestRootFSSessionDaemonReclaimsMatchingInternalCrashTerminal(t *testing.T) {
-	testRootFSSessionDaemonCleansExactRuntimeSlot(t, true)
+func TestNodeRuntimeReclaimsMatchingInternalCrashTerminal(t *testing.T) {
+	testNodeRuntimeCleansExactRuntimeSlot(t, true)
 }
 
-func testRootFSSessionDaemonCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) {
+func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) {
 	t.Helper()
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
@@ -277,7 +245,7 @@ func testRootFSSessionDaemonCleansExactRuntimeSlot(t *testing.T, internalTermina
 		LeaseExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
 	}
 	localProof := testLocalCrashProof(t, stage, *consumer, request.WriterOperationID, hostMountNamespace)
-	observation := crashTaskObservation{
+	observation := CrashTaskObservation{
 		ActiveKey: consumer.ActiveKey, ContainerID: consumer.ContainerID,
 		HostMountNamespaceID: hostMountNamespace, ContainerAbsent: true, TaskAbsent: true,
 		FrontendSnapshotAbsent: true, StableMountAbsent: true,
@@ -298,19 +266,19 @@ func testRootFSSessionDaemonCleansExactRuntimeSlot(t *testing.T, internalTermina
 	}
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
-	network := &fakeNetworkRuntime{}
+	network := newFakeCtldNetwork(t)
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: network, journal: journal,
-		config: PluginConfig{
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		config: Config{
 			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
 		},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
-	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
+	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
 		AllocationID: request.AllocationID, NodeID: request.NodeID, NodeBootID: request.NodeBootID,
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity, NetworkChain: consumer.NetworkChain,
 		RunscContainerID: request.RunscContainerID, StableMount: stableMount, StableMountID: stableMountID,
@@ -333,7 +301,7 @@ func testRootFSSessionDaemonCleansExactRuntimeSlot(t *testing.T, internalTermina
 		require.Equal(t, 1, runtime.localCalls)
 		require.Zero(t, runtime.reclaimCalls)
 	}
-	_, cleanups := network.snapshot()
+	cleanups := network.cleanupCount()
 	require.Equal(t, 1, cleanups)
 
 	changed := request
@@ -342,7 +310,7 @@ func testRootFSSessionDaemonCleansExactRuntimeSlot(t *testing.T, internalTermina
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }
 
-func TestRootFSSessionDaemonCleansCanceledUnconsumedWriterFromJournal(t *testing.T) {
+func TestNodeRuntimeCleansCanceledUnconsumedWriterFromJournal(t *testing.T) {
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
@@ -382,19 +350,19 @@ func TestRootFSSessionDaemonCleansCanceledUnconsumedWriterFromJournal(t *testing
 	require.ErrorIs(t, validateRuntimeSlotCleanupSession(boundCanceled, request), errdefs.ErrFailedPrecondition)
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
-	network := &fakeNetworkRuntime{}
+	network := newFakeCtldNetwork(t)
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: network, journal: journal,
-		config: PluginConfig{
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		config: Config{
 			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
 		},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
-	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
+	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
 		AllocationID: request.AllocationID, NodeID: request.NodeID, NodeBootID: request.NodeBootID,
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity,
 		NetworkChain: networkChainName(request.RunscContainerID), RunscContainerID: request.RunscContainerID,
@@ -408,11 +376,11 @@ func TestRootFSSessionDaemonCleansCanceledUnconsumedWriterFromJournal(t *testing
 	require.Equal(t, request.WriterOperationID, proof.RootFSOperationID)
 	require.NotEqual(t, request.WriterAuthorityDigest, proof.RootFSProofDigest)
 	require.Equal(t, []string{"kill:KILL", "delete:force", "state"}, runner.callsSnapshot())
-	_, cleanups := network.snapshot()
+	cleanups := network.cleanupCount()
 	require.Equal(t, 1, cleanups)
 }
 
-func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *testing.T) {
+func TestNodeRuntimeCleansPlannedRetiredWriterAfterSessionForgotten(t *testing.T) {
 	consumerRoot := t.TempDir()
 	netnsRoot := filepath.Join(consumerRoot, "netns")
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
@@ -434,8 +402,8 @@ func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *t
 	request.WriterRetireKind = protocol.WriterRetireKindPlannedPublish
 	request.WriterAuthorityDigest = strings.Repeat("ef", sha256.Size)
 	request.NetNSIdentity = netnsIdentity
-	registration := runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
+	registration := RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
 		AllocationID: request.AllocationID, NodeID: request.NodeID, NodeBootID: request.NodeBootID,
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity,
 		NetworkChain: networkChainName(request.RunscContainerID), RunscContainerID: request.RunscContainerID,
@@ -443,12 +411,12 @@ func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *t
 	}
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
-	network := &fakeNetworkRuntime{}
+	network := newFakeCtldNetwork(t)
 	runtime := &cleanupRootFSRuntime{fakeRootFSRuntime: &fakeRootFSRuntime{}}
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: network, journal: journal,
-		config:    PluginConfig{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
 	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), registration))
 
@@ -459,7 +427,7 @@ func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *t
 	require.NotEmpty(t, first.RootFSProofDigest)
 	require.Zero(t, runtime.localCalls)
 	require.Equal(t, []string{"kill:KILL", "delete:force", "state"}, runner.callsSnapshot())
-	_, cleanups := network.snapshot()
+	cleanups := network.cleanupCount()
 	require.Equal(t, 1, cleanups)
 
 	// The journaled proof remains byte-stable after all destructive adapters and
@@ -467,7 +435,7 @@ func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *t
 	daemon.runtime = nil
 	daemon.runner = nil
 	daemon.mounter = nil
-	daemon.network = nil
+	daemon.runtimeSlotNetwork = nil
 	second, err := daemon.CleanupRuntimeSlot(t.Context(), request)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
@@ -478,7 +446,7 @@ func TestRootFSSessionDaemonCleansPlannedRetiredWriterAfterSessionForgotten(t *t
 	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
 }
 
-func TestRootFSSessionDaemonFinishesMatchingPlannedSessionBeforeProof(t *testing.T) {
+func TestNodeRuntimeFinishesMatchingPlannedSessionBeforeProof(t *testing.T) {
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
@@ -536,13 +504,13 @@ func TestRootFSSessionDaemonFinishesMatchingPlannedSessionBeforeProof(t *testing
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: &fakeNetworkRuntime{}, journal: journal,
-		config:    PluginConfig{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client, journal: journal,
+		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot},
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
-	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
+	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: request.SlotID, ClusterID: request.ClusterID,
 		AllocationID: request.AllocationID, NodeID: request.NodeID, NodeBootID: request.NodeBootID,
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity, NetworkChain: consumer.NetworkChain,
 		RunscContainerID: request.RunscContainerID, StableMount: stableMount, StableMountID: stableMountID,
@@ -557,7 +525,7 @@ func TestRootFSSessionDaemonFinishesMatchingPlannedSessionBeforeProof(t *testing
 	require.Zero(t, runtime.localCalls)
 }
 
-func TestRootFSSessionDaemonRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *testing.T) {
+func TestNodeRuntimeRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *testing.T) {
 	request := testNodeCleanupRequest()
 	request.WriterRetireKind = protocol.WriterRetireKindPlannedPublish
 	runtime := &cleanupRootFSRuntime{
@@ -570,9 +538,9 @@ func TestRootFSSessionDaemonRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *t
 		}},
 	}
 	runner := newFakeRunsc()
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: &fakeNetworkRuntime{},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client,
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
 
 	_, err := daemon.CleanupRuntimeSlot(t.Context(), request)
@@ -580,7 +548,7 @@ func TestRootFSSessionDaemonRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *t
 	require.Empty(t, runner.callsSnapshot())
 }
 
-func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T) {
+func TestNodeRuntimeCleansAndReplaysGrantlessJournaledSlot(t *testing.T) {
 	consumerRoot := t.TempDir()
 	netnsRoot := filepath.Join(consumerRoot, "netns")
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
@@ -598,8 +566,8 @@ func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	containerID := protocol.NomadRunscContainerID("slot-warm")
-	registration := runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: "slot-warm", ClusterID: "cluster-1",
+	registration := RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: "slot-warm", ClusterID: "cluster-1",
 		AllocationID: "allocation-warm", NodeID: "node-1", NodeBootID: "boot-1",
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity,
 		NetworkChain: networkChainName(containerID), RunscContainerID: containerID,
@@ -607,11 +575,11 @@ func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T)
 	}
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
-	network := &fakeNetworkRuntime{}
-	daemon := &rootFSSessionDaemon{
-		runtime: &fakeRootFSRuntime{}, runner: runner, mounter: &fakeMounter{}, network: network, journal: journal,
-		config:    PluginConfig{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
-		clusterID: registration.ClusterID, nodeID: registration.NodeID,
+	network := newFakeCtldNetwork(t)
+	daemon := &nodeRuntime{
+		runtime: &fakeRootFSRuntime{}, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
+		clusterID: registration.ClusterID, nodeID: registration.NodeID, nodeUID: "node-uid-1",
 	}
 	wrongMount := registration
 	wrongMount.StableMountID = "mount-v1:0:0"
@@ -632,19 +600,19 @@ func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T)
 	require.NoError(t, first.Validate())
 	require.Empty(t, first.RootFSOperationID)
 	require.Equal(t, []string{"kill:KILL", "delete:force", "state"}, runner.callsSnapshot())
-	_, cleanups := network.snapshot()
+	cleanups := network.cleanupCount()
 	require.Equal(t, 1, cleanups)
 
 	// A completed proof is durable data and remains replayable even when the
 	// destructive runtime adapters are temporarily unavailable.
 	daemon.runner = nil
 	daemon.mounter = nil
-	daemon.network = nil
+	daemon.runtimeSlotNetwork = nil
 	second, err := daemon.CleanupRuntimeSlot(t.Context(), request)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
 	require.Equal(t, []string{"kill:KILL", "delete:force", "state"}, runner.callsSnapshot())
-	_, cleanups = network.snapshot()
+	cleanups = network.cleanupCount()
 	require.Equal(t, 1, cleanups)
 
 	changed := request
@@ -653,7 +621,7 @@ func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T)
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }
 
-func TestRootFSSessionDaemonBuildsCtldPrepareFromDurableJournal(t *testing.T) {
+func TestNodeRuntimeBuildsCtldPrepareFromDurableJournal(t *testing.T) {
 	root := t.TempDir()
 	netnsRoot := filepath.Join(root, "netns")
 	stableMount := filepath.Join(root, "alloc", "rootfs")
@@ -693,16 +661,16 @@ func TestRootFSSessionDaemonBuildsCtldPrepareFromDurableJournal(t *testing.T) {
 	client, err := protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
 	require.NoError(t, err)
 	containerID := protocol.NomadRunscContainerID("slot-1")
-	registration := runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: "slot-1", ClusterID: "cluster-1",
+	registration := RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: "slot-1", ClusterID: "cluster-1",
 		AllocationID: "allocation-1", NodeID: "node-1", NodeBootID: "boot-1",
 		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity, NetworkChain: networkChainName(containerID),
 		RunscContainerID: containerID, StableMount: stableMount, StableMountID: stableMountID,
 		MountNamespaceID: mountNamespaceID,
 	}
-	daemon := &rootFSSessionDaemon{
+	daemon := &nodeRuntime{
 		journal: journal, runtimeSlotNetwork: client,
-		config: PluginConfig{
+		config: Config{
 			RootFSConsumerMountRoot: root, RootFSConsumerNetNSRoot: netnsRoot,
 		},
 		clusterID: registration.ClusterID, nodeID: registration.NodeID, nodeUID: "node-uid-1",
@@ -730,7 +698,7 @@ func TestRootFSSessionDaemonBuildsCtldPrepareFromDurableJournal(t *testing.T) {
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }
 
-func TestRootFSSessionDaemonDelegatesPolicyAbsenceToCtld(t *testing.T) {
+func TestNodeRuntimeDelegatesPolicyAbsenceToCtld(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root-owned Unix socket test requires root")
 	}
@@ -740,6 +708,11 @@ func TestRootFSSessionDaemonDelegatesPolicyAbsenceToCtld(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(socket, 0o600))
 	request := testNodeCleanupRequest()
+	netnsPath := filepath.Join(directory, "allocation.ns")
+	require.NoError(t, os.WriteFile(netnsPath, []byte("netns"), 0o600))
+	netnsIdentity, err := networkNamespaceIdentity(netnsPath)
+	require.NoError(t, err)
+	request.NetNSIdentity = netnsIdentity
 	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, httpRequest *http.Request) {
 		var received protocol.NodeCleanupControlRequest
 		if err := json.NewDecoder(httpRequest.Body).Decode(&received); err != nil || received != request {
@@ -752,11 +725,12 @@ func TestRootFSSessionDaemonDelegatesPolicyAbsenceToCtld(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	client, err := protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
 	require.NoError(t, err)
-	legacy := &fakeNetworkRuntime{}
-	daemon := &rootFSSessionDaemon{runtimeSlotNetwork: client, network: legacy}
-	require.NoError(t, daemon.cleanupRuntimeSlotNetwork(t.Context(), request, nil, request.NetNSIdentity, ""))
-	_, cleanups := legacy.snapshot()
-	require.Zero(t, cleanups)
+	daemon := &nodeRuntime{
+		runtimeSlotNetwork: client,
+		config:             Config{RootFSConsumerNetNSRoot: directory},
+	}
+	consumer := &rootfssession.ConsumerRegistration{NetNSPath: netnsPath, NetNSIdentity: request.NetNSIdentity}
+	require.NoError(t, daemon.cleanupRuntimeSlotNetwork(t.Context(), request, consumer, request.NetNSIdentity, netnsPath))
 }
 
 type cleanupRootFSRuntime struct {
@@ -789,7 +763,7 @@ func (r *cleanupRootFSRuntime) CaptureRunningFork(
 	return r.forkResult, r.forkErr
 }
 
-func TestRootFSSessionDaemonCapturesOnlyTheExactLiveRunningForkWriter(t *testing.T) {
+func TestNodeRuntimeCapturesOnlyTheExactLiveRunningForkWriter(t *testing.T) {
 	registration := testRuntimeSlotJournalRegistration(t, "slot-running-fork")
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
@@ -830,7 +804,7 @@ func TestRootFSSessionDaemonCapturesOnlyTheExactLiveRunningForkWriter(t *testing
 			Proof: rootfshandoff.RunningForkCheckpointProof{OperationID: request.Fork.OperationID},
 		},
 	}
-	daemon := &rootFSSessionDaemon{
+	daemon := &nodeRuntime{
 		runtime: runtime, journal: journal, clusterID: registration.ClusterID,
 		nodeID: registration.NodeID, nodeUID: target.NodeUID,
 	}
@@ -888,7 +862,7 @@ func (r *cleanupRootFSRuntime) FenceLocalRootFSWriter(
 	_ context.Context,
 	_ rootfshandoff.StageRequest,
 	operationID string,
-	_ crashTaskObservation,
+	_ CrashTaskObservation,
 ) (rootfshandoff.CrashFenceProof, error) {
 	r.localCalls++
 	for index := range r.recovery {
@@ -903,7 +877,7 @@ func (r *cleanupRootFSRuntime) FenceLocalRootFSWriter(
 	return proof, nil
 }
 
-func TestRootFSSessionDaemonRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t *testing.T) {
+func TestNodeRuntimeRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t *testing.T) {
 	consumerRoot := t.TempDir()
 	netnsRoot := filepath.Join(consumerRoot, "netns")
 	outsideRoot := t.TempDir()
@@ -935,10 +909,10 @@ func TestRootFSSessionDaemonRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t 
 		}},
 	}
 	runner := newFakeRunsc()
-	daemon := &rootFSSessionDaemon{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: &fakeNetworkRuntime{},
-		config:    PluginConfig{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
-		clusterID: request.ClusterID, nodeID: request.NodeID,
+	daemon := &nodeRuntime{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client,
+		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
+		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
 
 	_, err = daemon.CleanupRuntimeSlot(t.Context(), request)
@@ -1024,9 +998,9 @@ func testUnboundLocalCrashProof(
 	}
 }
 
-func TestRootFSSessionDaemonConvergesDurablePlannedAndCrashIntents(t *testing.T) {
+func TestNodeRuntimeConvergesDurablePlannedAndCrashIntents(t *testing.T) {
 	runtime := &fakeRootFSRuntime{}
-	daemon := &rootFSSessionDaemon{runtime: runtime}
+	daemon := &nodeRuntime{runtime: runtime}
 	stage := rootfshandoff.StageRequest{
 		Parent: "parent", Identity: rootfshandoff.Identity{
 			ClaimID: "claim", WriterGrantID: "grant", WriterEpoch: 7,
@@ -1057,11 +1031,6 @@ func TestRootFSSessionDaemonConvergesDurablePlannedAndCrashIntents(t *testing.T)
 	require.Equal(t, 1, runtime.crashCalls)
 	require.Equal(t, 1, runtime.externalReclaims)
 	runtime.mu.Unlock()
-}
-
-func TestClassifyRunscNotFound(t *testing.T) {
-	err := classifyRunscError("state", errors.New("exit status 1"), "container does not exist")
-	require.ErrorIs(t, err, errdefs.ErrNotFound)
 }
 
 func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {

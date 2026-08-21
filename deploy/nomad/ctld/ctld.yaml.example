@@ -1,0 +1,46 @@
+database_url: ${SANDBOX0_DATABASE_URL}
+region_id: ${SANDBOX0_REGION_ID}
+default_cluster_id: ${SANDBOX0_CLUSTER_ID}
+
+rootfs_object_storage:
+  type: s3
+  bucket: ${SANDBOX0_ROOTFS_BUCKET}
+  region: ${SANDBOX0_ROOTFS_REGION}
+  endpoint: ${SANDBOX0_ROOTFS_ENDPOINT}
+  access_key: ${SANDBOX0_ROOTFS_ACCESS_KEY}
+  secret_key: ${SANDBOX0_ROOTFS_SECRET_KEY}
+
+nomad_runtime:
+  enabled: true
+  socket_path: /run/sandbox0/ctld-nomad-runtime.sock
+  runsc_path: /usr/local/bin/runsc
+  runsc_root: /run/sandbox0/runsc
+  platform: systrap
+  overlay2: none
+  file_access: shared
+  directfs: true
+  state_path: /var/lib/sandbox0/ctld/nomad/rootfs-sessions.db
+  branch_root: /var/lib/sandbox0/ctld/nomad/rootfs-branches
+  mount_root: /run/sandbox0/rootfs
+  consumer_mount_root: /opt/nomad
+  consumer_netns_root: /var/run/netns
+  max_dirty_tail_bytes: 10737418240
+  max_node_dirty_tail_bytes: 42949672960
+  dirty_tail_retirement_reserve_bytes: 67108864
+  nbd_devices: [${SANDBOX0_ROOTFS_NBD_DEVICES}]
+  runtime_slot_journal_path: /var/lib/sandbox0/ctld/nomad/runtime-slots.db
+  node_boot_id_file: /proc/sys/kernel/random/boot_id
+  authority_url: ${SANDBOX0_MANAGER_AUTHORITY_URL}
+  authority_ca_file: /etc/sandbox0/pki/manager-ca.pem
+  authority_client_cert_file: /etc/sandbox0/pki/ctld.pem
+  authority_client_key_file: /etc/sandbox0/pki/ctld-key.pem
+  authority_token_file: /etc/sandbox0/tokens/manager.token
+  authority_peer_uri_san: ${SANDBOX0_MANAGER_AUTHORITY_URI_SAN}
+  nomad_address: ${SANDBOX0_NOMAD_ADDRESS}
+  nomad_node_id: ${SANDBOX0_NOMAD_NODE_ID}
+  nomad_token_file: /etc/sandbox0/tokens/nomad.token
+  nomad_ca_file: /etc/sandbox0/pki/nomad-ca.pem
+  nomad_cert_file: /etc/sandbox0/pki/nomad.pem
+  nomad_key_file: /etc/sandbox0/pki/nomad-key.pem
+  node_uid: ${SANDBOX0_NODE_UID}
+  control_root: /run/sandbox0/nomad-slots

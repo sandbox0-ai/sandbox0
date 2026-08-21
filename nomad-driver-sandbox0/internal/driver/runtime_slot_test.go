@@ -283,8 +283,7 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	config.AllowedRootfsDir = filepath.Join(tempDir, "development-rootfs")
 	config.NetworkPolicyEnabled = true
 	config.RootFSEnabled = true
-	config.RootFSSessiondSocket = filepath.Join(tempDir, "sessiond.sock")
-	config.RootFSConsumerMountRoot = filepath.Join(tempDir, "consumer-mounts")
+	config.RootFSNodeSocket = filepath.Join(tempDir, "ctld-runtime.sock")
 	config.RootFSMountRoot = filepath.Join(tempDir, "rootfs-mounts")
 	config.RootFSAuthorityURL = "https://regional.example.test"
 	config.RootFSAuthorityCAFile = filepath.Join(tempDir, "ca.pem")
@@ -1165,7 +1164,7 @@ func TestValidateRuntimeSlotConfigRequiresProductionDependencies(t *testing.T) {
 		match  string
 	}{
 		{name: "cluster", mutate: func(config *PluginConfig) { config.RuntimeSlotClusterID = "" }, match: "cluster_id"},
-		{name: "session daemon", mutate: func(config *PluginConfig) { config.RootFSEnabled = false }, match: "session daemon"},
+		{name: "ctld runtime", mutate: func(config *PluginConfig) { config.RootFSEnabled = false }, match: "ctld-owned Nomad runtime"},
 		{name: "network", mutate: func(config *PluginConfig) { config.NetworkPolicyEnabled = false }, match: "network_policy_enabled"},
 		{name: "authority", mutate: func(config *PluginConfig) { config.RootFSAuthorityURL = "" }, match: "authority_url"},
 		{name: "boot identity", mutate: func(config *PluginConfig) { config.RuntimeSlotNodeBootIDFile = "relative" }, match: "node_boot_id_file"},

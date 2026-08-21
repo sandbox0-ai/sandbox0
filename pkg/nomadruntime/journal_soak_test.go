@@ -1,4 +1,4 @@
-package driver
+package nomadruntime
 
 import (
 	"encoding/json"
@@ -209,8 +209,8 @@ func putRuntimeSlotSoakProofs(
 		for _, item := range items {
 			slotID := fmt.Sprintf("soak-slot-%05d", item.index)
 			containerID := protocol.NomadRunscContainerID(slotID)
-			registration := runtimeSlotJournalRegistration{
-				Version: runtimeSlotJournalVersion, SlotID: slotID, ClusterID: "soak-cluster",
+			registration := RuntimeSlotRegistration{
+				Version: RuntimeSlotJournalVersion, SlotID: slotID, ClusterID: "soak-cluster",
 				AllocationID: "allocation-" + slotID, NodeID: "soak-node", NodeBootID: "soak-boot",
 				NetNSPath: "/var/run/netns/" + slotID, NetNSIdentity: "netns-" + slotID,
 				NetworkChain: networkChainName(containerID), RunscContainerID: containerID,
@@ -220,7 +220,7 @@ func putRuntimeSlotSoakProofs(
 			request := runtimeSlotSoakCleanup(registration)
 			proof := testRuntimeSlotJournalProofWithoutTesting(request)
 			record := runtimeSlotJournalRecord{
-				Version: runtimeSlotJournalVersion, Registration: registration,
+				Version: RuntimeSlotJournalVersion, Registration: registration,
 				Cleanup: &request, Proof: &proof, CreatedAt: completedAt,
 				UpdatedAt: completedAt, CompletedAt: completedAt,
 			}
@@ -232,7 +232,7 @@ func putRuntimeSlotSoakProofs(
 	})
 }
 
-func runtimeSlotSoakCleanup(registration runtimeSlotJournalRegistration) protocol.NodeCleanupControlRequest {
+func runtimeSlotSoakCleanup(registration RuntimeSlotRegistration) protocol.NodeCleanupControlRequest {
 	return protocol.NodeCleanupControlRequest{
 		OperationID: "cleanup-" + registration.SlotID, SlotID: registration.SlotID,
 		ClusterID: registration.ClusterID, AllocationID: registration.AllocationID,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
 import (
 	"context"
@@ -80,12 +80,12 @@ func (s *fakeRuntimeSlotNetworkSource) runtimeSlotNetworkPrepareRequest(
 	return result, nil
 }
 
-func TestRootFSSessionNodeChannelIsExplicitAndFailClosed(t *testing.T) {
-	if agent, err := newRootFSSessionNodeChannelAgent(PluginConfig{}, NomadAllocationConfig{}, nil, nil); err != nil || agent != nil {
+func TestNomadRuntimeNodeChannelIsExplicitAndFailClosed(t *testing.T) {
+	if agent, err := newNodeRuntimeChannelAgent(Config{}, NomadAllocationConfig{}, nil, nil); err != nil || agent != nil {
 		t.Fatalf("disabled agent = %v, %v", agent, err)
 	}
 	directory := t.TempDir()
-	config := PluginConfig{
+	config := Config{
 		RootFSAuthorityURL:            "https://region.internal:8421",
 		RootFSAuthorityCAFile:         filepath.Join(directory, "ca.pem"),
 		RootFSAuthorityClientCertFile: filepath.Join(directory, "client.pem"),
@@ -103,19 +103,19 @@ func TestRootFSSessionNodeChannelIsExplicitAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, &fakeRuntimeSlotCleaner{}, network)
+	agent, err := newNodeRuntimeChannelAgent(config, nomadConfig, &fakeRuntimeSlotCleaner{}, network)
 	if err != nil || agent == nil {
 		t.Fatalf("enabled agent = %v, %v", agent, err)
 	}
 	nomadConfig.RuntimeSlotNodeUID = ""
-	if _, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, &fakeRuntimeSlotCleaner{}, network); !errdefs.IsInvalidArgument(err) {
+	if _, err := newNodeRuntimeChannelAgent(config, nomadConfig, &fakeRuntimeSlotCleaner{}, network); !errdefs.IsInvalidArgument(err) {
 		t.Fatalf("missing node UID error = %v", err)
 	}
 }
 
-func TestRootFSSessionNodeChannelExecutorChecksLocalNodeBeforeCleanup(t *testing.T) {
+func TestNomadRuntimeNodeChannelExecutorChecksLocalNodeBeforeCleanup(t *testing.T) {
 	cleaner := &fakeRuntimeSlotCleaner{}
-	executor := &rootFSSessionNodeChannelExecutor{
+	executor := &nodeRuntimeChannelExecutor{
 		clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1", cleaner: cleaner,
 	}
 	request := testNodeCleanupRequest()
@@ -133,9 +133,9 @@ func TestRootFSSessionNodeChannelExecutorChecksLocalNodeBeforeCleanup(t *testing
 	}
 }
 
-func TestRootFSSessionNodeChannelExecutorDelegatesPausedRebaseToDaemon(t *testing.T) {
+func TestNomadRuntimeNodeChannelExecutorDelegatesPausedRebase(t *testing.T) {
 	rebaser := &fakeRuntimeSlotRebaser{result: rootfsrebase.WorkerResult{ProofDigest: "proof-1"}}
-	executor := &rootFSSessionNodeChannelExecutor{
+	executor := &nodeRuntimeChannelExecutor{
 		clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1", rebaser: rebaser,
 	}
 	target := protocol.NodeChannelTarget{
@@ -160,7 +160,7 @@ func TestRootFSSessionNodeChannelExecutorDelegatesPausedRebaseToDaemon(t *testin
 	}
 }
 
-func TestRootFSSessionNodeChannelExecutorDelegatesNetworkToCtld(t *testing.T) {
+func TestNomadRuntimeNodeChannelExecutorDelegatesNetworkToCtld(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root-owned Unix socket test requires root")
 	}
@@ -199,7 +199,7 @@ func TestRootFSSessionNodeChannelExecutorDelegatesNetworkToCtld(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := &fakeRuntimeSlotNetworkSource{request: protocol.RuntimeSlotNetworkPrepareRequest{NetNSRelativePath: "allocation-1"}}
-	executor := &rootFSSessionNodeChannelExecutor{
+	executor := &nodeRuntimeChannelExecutor{
 		clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1",
 		network: client, networkSource: source,
 	}

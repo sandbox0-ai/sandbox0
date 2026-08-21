@@ -79,3 +79,38 @@ rootfs_object_storage:
 	assert.Equal(t, "us-east-1", ctldCfg.RootFSObjectStorage.Region)
 	assert.Equal(t, "https://s3.example.com", ctldCfg.RootFSObjectStorage.Endpoint)
 }
+
+func TestLoadCtldConfigLoadsNomadRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ctld.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+nomad_runtime:
+  enabled: true
+  socket_path: /run/sandbox0/ctld-nomad-runtime.sock
+  directfs: false
+  nbd_devices: [/dev/nbd0, /dev/nbd1]
+  max_node_dirty_tail_bytes: 42949672960
+  authority_url: https://manager.internal:9444
+  nomad_address: https://nomad.internal:4646
+  nomad_node_id: node-1
+  node_uid: node-uid-1
+`), 0o600))
+
+	cfg, err := loadCtldConfig(path)
+	require.NoError(t, err)
+	require.True(t, cfg.NomadRuntime.Enabled)
+	require.NotNil(t, cfg.NomadRuntime.DirectFS)
+	assert.False(t, *cfg.NomadRuntime.DirectFS)
+	assert.Equal(t, []string{"/dev/nbd0", "/dev/nbd1"}, cfg.NomadRuntime.NBDDevices)
+	assert.Equal(t, int64(40<<30), cfg.NomadRuntime.MaxNodeDirtyTailBytes)
+	assert.Equal(t, "node-1", cfg.NomadRuntime.NomadNodeID)
+	assert.Equal(t, "node-uid-1", cfg.NomadRuntime.NodeUID)
+}
+
+func TestLoadCtldConfigStrictDoesNotFallBackToAnotherRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ctld.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("nomad_runtime: [invalid\n"), 0o600))
+	t.Setenv("CONFIG_PATH", path)
+	config, err := LoadCtldConfigStrict()
+	require.Error(t, err)
+	require.Nil(t, config)
+}

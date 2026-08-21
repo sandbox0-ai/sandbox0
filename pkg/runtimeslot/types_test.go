@@ -83,6 +83,13 @@ func TestNomadRunscContainerIDIsStableAndBounded(t *testing.T) {
 	require.Len(t, NomadRunscContainerID(strings.Repeat("slot", 1_000)), 35)
 }
 
+func TestNomadNetworkChainNameIsStableAndBounded(t *testing.T) {
+	containerID := NomadRunscContainerID(strings.Repeat("slot", 1_000))
+	require.Equal(t, NomadNetworkChainName(containerID), NomadNetworkChainName(containerID))
+	require.Equal(t, "S0-NET-"+strings.TrimPrefix(containerID, "s0-")[:12], NomadNetworkChainName(containerID))
+	require.Len(t, NomadNetworkChainName(containerID), len("S0-NET-")+12)
+}
+
 func TestRequestsDoNotCarryAuthenticatedNodeUID(t *testing.T) {
 	payload, err := json.Marshal(testRegistrationRequest())
 	require.NoError(t, err)

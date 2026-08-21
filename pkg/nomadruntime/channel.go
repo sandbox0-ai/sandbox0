@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
 import (
 	"context"
@@ -27,7 +27,7 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
-type rootFSSessionNodeChannelExecutor struct {
+type nodeRuntimeChannelExecutor struct {
 	clusterID     string
 	nodeID        string
 	nodeUID       string
@@ -39,10 +39,10 @@ type rootFSSessionNodeChannelExecutor struct {
 	networkSource runtimeSlotNetworkPrepareSource
 }
 
-var _ protocol.NodeChannelExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
-var _ protocol.NodeChannelRunningForkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
-var _ protocol.NodeChannelPausedRebaseExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
-var _ protocol.NodeChannelNetworkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
+var _ protocol.NodeChannelExecutor = (*nodeRuntimeChannelExecutor)(nil)
+var _ protocol.NodeChannelRunningForkExecutor = (*nodeRuntimeChannelExecutor)(nil)
+var _ protocol.NodeChannelPausedRebaseExecutor = (*nodeRuntimeChannelExecutor)(nil)
+var _ protocol.NodeChannelNetworkExecutor = (*nodeRuntimeChannelExecutor)(nil)
 
 type runtimeSlotNetworkPrepareSource interface {
 	runtimeSlotNetworkPrepareRequest(protocol.NodeNetworkPrepareControlRequest) (protocol.RuntimeSlotNetworkPrepareRequest, error)
@@ -74,8 +74,8 @@ type runtimeSlotPausedRebaser interface {
 	) error
 }
 
-func newRootFSSessionNodeChannelAgent(
-	config PluginConfig,
+func newNodeRuntimeChannelAgent(
+	config Config,
 	nomadConfig NomadAllocationConfig,
 	cleaner runtimeSlotCleaner,
 	network *protocol.RuntimeSlotNetworkClient,
@@ -98,7 +98,7 @@ func newRootFSSessionNodeChannelAgent(
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot local control client: %w", err)
 	}
-	executor := &rootFSSessionNodeChannelExecutor{
+	executor := &nodeRuntimeChannelExecutor{
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID),
 		nodeID:    strings.TrimSpace(nomadConfig.NodeID),
 		nodeUID:   strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
@@ -149,7 +149,7 @@ func newRootFSSessionNodeChannelAgent(
 	return agent, nil
 }
 
-func (e *rootFSSessionNodeChannelExecutor) PrepareNetwork(
+func (e *nodeRuntimeChannelExecutor) PrepareNetwork(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodeNetworkPrepareControlRequest,
@@ -167,7 +167,7 @@ func (e *rootFSSessionNodeChannelExecutor) PrepareNetwork(
 	return e.network.Prepare(ctx, local)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) Claim(
+func (e *nodeRuntimeChannelExecutor) Claim(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodeClaimControlRequest,
@@ -181,7 +181,7 @@ func (e *rootFSSessionNodeChannelExecutor) Claim(
 	return e.control.Claim(ctx, target.ControlEndpoint, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) CommandReady(
+func (e *nodeRuntimeChannelExecutor) CommandReady(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.CommandReadyControlRequest,
@@ -195,7 +195,7 @@ func (e *rootFSSessionNodeChannelExecutor) CommandReady(
 	return e.control.CommandReady(ctx, target.ControlEndpoint, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) RunningFork(
+func (e *nodeRuntimeChannelExecutor) RunningFork(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodeRunningForkControlRequest,
@@ -210,7 +210,7 @@ func (e *rootFSSessionNodeChannelExecutor) RunningFork(
 	return e.forker.CaptureRunningRootFSFork(ctx, target, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) PausedRebase(
+func (e *nodeRuntimeChannelExecutor) PausedRebase(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -225,7 +225,7 @@ func (e *rootFSSessionNodeChannelExecutor) PausedRebase(
 	return e.rebaser.ExecutePausedRootFSRebase(ctx, target, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) RejectPausedRebase(
+func (e *nodeRuntimeChannelExecutor) RejectPausedRebase(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -240,7 +240,7 @@ func (e *rootFSSessionNodeChannelExecutor) RejectPausedRebase(
 	return e.rebaser.RejectPausedRootFSRebase(ctx, target, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) AcknowledgePausedRebase(
+func (e *nodeRuntimeChannelExecutor) AcknowledgePausedRebase(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodePausedRebaseControlRequest,
@@ -254,7 +254,7 @@ func (e *rootFSSessionNodeChannelExecutor) AcknowledgePausedRebase(
 	return e.rebaser.AcknowledgePausedRootFSRebase(ctx, target, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) Cleanup(
+func (e *nodeRuntimeChannelExecutor) Cleanup(
 	ctx context.Context,
 	target protocol.NodeChannelTarget,
 	request protocol.NodeCleanupControlRequest,
@@ -268,7 +268,7 @@ func (e *rootFSSessionNodeChannelExecutor) Cleanup(
 	return e.cleaner.CleanupRuntimeSlot(ctx, request)
 }
 
-func (e *rootFSSessionNodeChannelExecutor) validateTarget(target protocol.NodeChannelTarget) error {
+func (e *nodeRuntimeChannelExecutor) validateTarget(target protocol.NodeChannelTarget) error {
 	if e == nil || target.ClusterID != e.clusterID || target.NodeID != e.nodeID || target.NodeUID != e.nodeUID {
 		return fmt.Errorf("runtime slot node channel target does not match this node: %w", errdefs.ErrPermissionDenied)
 	}

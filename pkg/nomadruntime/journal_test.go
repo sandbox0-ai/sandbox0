@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package driver
+package nomadruntime
 
 import (
 	"crypto/sha256"
@@ -74,7 +74,7 @@ func TestRuntimeSlotJournalPrunesOnlyExpiredCompletedProofs(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	completed := testRuntimeSlotJournalRegistration(t, "completed")
 	active := testRuntimeSlotJournalRegistration(t, "active")
-	for _, registration := range []runtimeSlotJournalRegistration{completed, active} {
+	for _, registration := range []RuntimeSlotRegistration{completed, active} {
 		require.NoError(t, journal.Register(registration))
 	}
 	request := testRuntimeSlotJournalCleanup(completed)
@@ -127,8 +127,8 @@ func TestRuntimeSlotJournalReusesBoltPagesAcrossTenThousandProofs(t *testing.T) 
 			for index := range 10_000 {
 				slotID := fmt.Sprintf("slot-%d-%05d", cycle, index)
 				containerID := protocol.NomadRunscContainerID(slotID)
-				registration := runtimeSlotJournalRegistration{
-					Version: runtimeSlotJournalVersion, SlotID: slotID, ClusterID: "cluster-1",
+				registration := RuntimeSlotRegistration{
+					Version: RuntimeSlotJournalVersion, SlotID: slotID, ClusterID: "cluster-1",
 					AllocationID: "allocation-" + slotID, NodeID: "node-1", NodeBootID: "boot-1",
 					NetNSPath: "/var/run/netns/" + slotID, NetNSIdentity: "netns-" + slotID,
 					NetworkChain: networkChainName(containerID), RunscContainerID: containerID,
@@ -138,7 +138,7 @@ func TestRuntimeSlotJournalReusesBoltPagesAcrossTenThousandProofs(t *testing.T) 
 				request := testRuntimeSlotJournalCleanup(registration)
 				proof := testRuntimeSlotJournalProof(t, request)
 				record := runtimeSlotJournalRecord{
-					Version: runtimeSlotJournalVersion, Registration: registration,
+					Version: RuntimeSlotJournalVersion, Registration: registration,
 					Cleanup: &request, Proof: &proof, CreatedAt: completedAt,
 					UpdatedAt: completedAt, CompletedAt: completedAt,
 				}
@@ -167,7 +167,7 @@ func TestRuntimeSlotJournalReusesBoltPagesAcrossTenThousandProofs(t *testing.T) 
 	require.LessOrEqual(t, final.Size(), warm.Size()+int64(os.Getpagesize()), "journal churn must reuse free Bolt pages")
 }
 
-func testRuntimeSlotJournalRegistration(t *testing.T, slotID string) runtimeSlotJournalRegistration {
+func testRuntimeSlotJournalRegistration(t *testing.T, slotID string) RuntimeSlotRegistration {
 	t.Helper()
 	root := t.TempDir()
 	netnsPath := filepath.Join(root, "network.ns")
@@ -179,8 +179,8 @@ func testRuntimeSlotJournalRegistration(t *testing.T, slotID string) runtimeSlot
 	mountNamespaceID, err := os.Readlink("/proc/self/ns/mnt")
 	require.NoError(t, err)
 	containerID := protocol.NomadRunscContainerID(slotID)
-	return runtimeSlotJournalRegistration{
-		Version: runtimeSlotJournalVersion, SlotID: slotID, ClusterID: "cluster-1",
+	return RuntimeSlotRegistration{
+		Version: RuntimeSlotJournalVersion, SlotID: slotID, ClusterID: "cluster-1",
 		AllocationID: "allocation-" + slotID, NodeID: "node-1", NodeBootID: "boot-1",
 		NetNSPath: netnsPath, NetNSIdentity: "netns-v1:1:2", NetworkChain: networkChainName(containerID),
 		RunscContainerID: containerID, StableMount: stableMount, StableMountID: stableMountID,
@@ -188,7 +188,7 @@ func testRuntimeSlotJournalRegistration(t *testing.T, slotID string) runtimeSlot
 	}
 }
 
-func testRuntimeSlotJournalCleanup(registration runtimeSlotJournalRegistration) protocol.NodeCleanupControlRequest {
+func testRuntimeSlotJournalCleanup(registration RuntimeSlotRegistration) protocol.NodeCleanupControlRequest {
 	return protocol.NodeCleanupControlRequest{
 		OperationID: "cleanup-" + registration.SlotID, SlotID: registration.SlotID,
 		ClusterID: registration.ClusterID, AllocationID: registration.AllocationID,

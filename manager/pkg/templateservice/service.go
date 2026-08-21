@@ -84,9 +84,18 @@ func (s *TemplateService) SetNamespacePolicyReconciler(reconciler namespacepolic
 
 // RegistryHosts returns registry hosts reserved for platform-scoped private images.
 func (s *TemplateService) RegistryHosts() []string {
+	if s == nil {
+		return nil
+	}
+	return RegistryHosts(s.registry)
+}
+
+// RegistryHosts returns the canonical private registry hosts from manager
+// configuration without requiring the Kubernetes template service.
+func RegistryHosts(registry config.RegistryConfig) []string {
 	hosts := make([]string, 0, 3)
 	seen := make(map[string]struct{}, 3)
-	for _, value := range []string{s.registry.PushRegistry, s.registry.PullRegistry, s.registry.InternalRegistry} {
+	for _, value := range []string{registry.PushRegistry, registry.PullRegistry, registry.InternalRegistry} {
 		host := strings.TrimSpace(value)
 		if host == "" {
 			continue

@@ -72,12 +72,15 @@ func buildManagerKubernetesClients(
 			return nil, fmt.Errorf("create hot claim Kubernetes client: %w", err)
 		}
 	}
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		return nil, fmt.Errorf("add SandboxTemplate to scheme: %w", err)
-	}
-	crdClient, err := clientset.NewForConfig(k8sConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create CRD clientset: %w", err)
+	var crdClient clientset.Interface
+	if managerUsesKubernetesSandboxRuntime(cfg) {
+		if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+			return nil, fmt.Errorf("add SandboxTemplate to scheme: %w", err)
+		}
+		crdClient, err = clientset.NewForConfig(k8sConfig)
+		if err != nil {
+			return nil, fmt.Errorf("create CRD clientset: %w", err)
+		}
 	}
 	return &managerKubernetesClients{
 		client:         k8sClient,
@@ -109,6 +112,7 @@ type managerInformerRuntime struct {
 	sandboxIndex             *sandboxindex.SandboxIndex
 	teardownCoordinator      *controller.PodTeardownCoordinator
 	autoscalerAnnotationKeys []string
+	syncs                    []cache.InformerSynced
 }
 
 func buildManagerInformerRuntime(
@@ -120,6 +124,15 @@ func buildManagerInformerRuntime(
 	logger *zap.Logger,
 ) (*managerInformerRuntime, error) {
 	factory := informers.NewSharedInformerFactory(clients.client, cfg.ResyncPeriod.Duration)
+	if !managerUsesKubernetesSandboxRuntime(cfg) {
+		secretInformer := factory.Core().V1().Secrets().Informer()
+		return &managerInformerRuntime{
+			factory:        factory,
+			secretInformer: secretInformer,
+			secretLister:   factory.Core().V1().Secrets().Lister(),
+			syncs:          []cache.InformerSynced{secretInformer.HasSynced},
+		}, nil
+	}
 	podInformer := factory.Core().V1().Pods()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	secretInformer := factory.Core().V1().Secrets().Informer()
@@ -207,18 +220,22 @@ func buildManagerInformerRuntime(
 		sandboxIndex:             index,
 		teardownCoordinator:      teardownCoordinator,
 		autoscalerAnnotationKeys: autoscalerKeys,
+		syncs: []cache.InformerSynced{
+			podInformer.Informer().HasSynced,
+			nodeInformer.HasSynced,
+			secretInformer.HasSynced,
+			namespaceInformer.HasSynced,
+			serviceAccountInformer.HasSynced,
+			replicaSetInformer.HasSynced,
+			networkPolicyInformer.HasSynced,
+			templateInformer.HasSynced,
+		},
 	}, nil
 }
 
 func (r *managerInformerRuntime) cacheSyncs() []cache.InformerSynced {
-	return []cache.InformerSynced{
-		r.podInformer.Informer().HasSynced,
-		r.nodeInformer.HasSynced,
-		r.secretInformer.HasSynced,
-		r.namespaceInformer.HasSynced,
-		r.serviceAccountInformer.HasSynced,
-		r.replicaSetInformer.HasSynced,
-		r.networkPolicyInformer.HasSynced,
-		r.templateInformer.HasSynced,
+	if r == nil {
+		return nil
 	}
+	return append([]cache.InformerSynced(nil), r.syncs...)
 }

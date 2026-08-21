@@ -129,6 +129,40 @@ func TestRequireTemplateStoreCapability(t *testing.T) {
 	}
 }
 
+func TestRequireLegacyKubernetesTemplateAndClusterCapabilities(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		middleware func(*Server) gin.HandlerFunc
+	}{
+		{name: "template", path: "/internal/v1/templates", middleware: (*Server).requireLegacyTemplateServiceCapability},
+		{name: "cluster", path: "/internal/v1/cluster/summary", middleware: (*Server).requireClusterServiceCapability},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &Server{}
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			called := false
+			engine := gin.New()
+			engine.Use(test.middleware(server))
+			engine.GET(test.path, func(c *gin.Context) {
+				called = true
+				c.Status(http.StatusOK)
+			})
+
+			engine.ServeHTTP(recorder, req)
+
+			if called {
+				t.Fatal("handler should not be called without the legacy capability")
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
 func TestRequireRegistryCapability(t *testing.T) {
 	server := &Server{}
 	recorder := httptest.NewRecorder()

@@ -28,11 +28,12 @@ func TestBuildManagerInformerRuntimeDoesNotConstructKubernetesSandboxOperatorFor
 		runtime.teardownCoordinator != nil || len(runtime.autoscalerAnnotationKeys) != 0 {
 		t.Fatalf("Nomad informer runtime retained Kubernetes sandbox owners: %+v", runtime)
 	}
-	if runtime.templateLister == nil {
-		t.Fatal("Nomad informer runtime has no read-only template lister")
+	if runtime.secretLister == nil || runtime.secretInformer == nil {
+		t.Fatal("Nomad informer runtime has no registry Secret cache")
 	}
-	templates, err := runtime.templateLister.List()
-	if err != nil || len(templates) != 0 {
-		t.Fatalf("template lister returned templates=%v error=%v", templates, err)
+	if runtime.podInformer != nil || runtime.nodeInformer != nil || runtime.replicaSetInformer != nil ||
+		runtime.networkPolicyInformer != nil || runtime.templateInformer != nil || runtime.crdFactory != nil ||
+		runtime.templateLister != nil || len(runtime.cacheSyncs()) != 1 {
+		t.Fatalf("Nomad informer runtime retained Pod or CRD caches: %+v", runtime)
 	}
 }

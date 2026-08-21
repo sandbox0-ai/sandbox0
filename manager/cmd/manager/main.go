@@ -424,20 +424,21 @@ func main() {
 	}, credentialStore, logger)
 	credentialSourceService := credentialsource.NewCredentialSourceService(credentialStore, logger)
 
-	templateService := templateservice.New(templateservice.Dependencies{
-		KubernetesClient: k8sClient,
-		CRDClient:        crdClient,
-		Templates:        templateLister,
-		Namespaces:       namespaceLister,
-		Pods:             podLister,
-		Secrets:          secretLister,
-		ServiceAccounts:  serviceAccountLister,
-		Network:          networkProvider,
-		Registry:         cfg.Registry,
-		Logger:           logger,
-	})
-	templateService.SetNamespacePolicyReconciler(templateNamespacePolicy)
-	if operator != nil {
+	var templateService *templateservice.TemplateService
+	if kubernetesSandboxRuntime {
+		templateService = templateservice.New(templateservice.Dependencies{
+			KubernetesClient: k8sClient,
+			CRDClient:        crdClient,
+			Templates:        templateLister,
+			Namespaces:       namespaceLister,
+			Pods:             podLister,
+			Secrets:          secretLister,
+			ServiceAccounts:  serviceAccountLister,
+			Network:          networkProvider,
+			Registry:         cfg.Registry,
+			Logger:           logger,
+		})
+		templateService.SetNamespacePolicyReconciler(templateNamespacePolicy)
 		operator.SetNamespacePolicyReconciler(templateNamespacePolicy)
 	}
 
@@ -535,7 +536,7 @@ func main() {
 		)
 	}
 	var templateReconciler *templreconciler.SingleClusterReconciler
-	if cfg.TemplateStoreEnabled {
+	if cfg.TemplateStoreEnabled && kubernetesSandboxRuntime {
 		templateApplier := templateservice.NewTemplateApplier(templateService)
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
@@ -549,8 +550,10 @@ func main() {
 			clk,
 			logger,
 		)
-	} else {
+	} else if !cfg.TemplateStoreEnabled {
 		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
+	} else {
+		logger.Info("Kubernetes template projection disabled for Nomad runtime")
 	}
 	var templateBuildWorker *templatebuild.TemplateBuildWorker
 	switch {
@@ -594,13 +597,16 @@ func main() {
 	)
 
 	// Create cluster service (for scheduler)
-	clusterService := clusterservice.NewClusterService(
-		k8sClient,
-		podLister,
-		nodeLister,
-		templateLister,
-		logger,
-	)
+	var clusterService *clusterservice.ClusterService
+	if kubernetesSandboxRuntime {
+		clusterService = clusterservice.NewClusterService(
+			k8sClient,
+			podLister,
+			nodeLister,
+			templateLister,
+			logger,
+		)
+	}
 	var cleanupController *controller.CleanupController
 	if kubernetesSandboxRuntime {
 		cleanupController = controller.NewCleanupController(
@@ -665,6 +671,7 @@ func main() {
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
 		TemplateService:         templateService,
+		PrivateRegistryHosts:    templateservice.RegistryHosts(cfg.Registry),
 		RegistryService:         registryService,
 		TemplateStore:           templateStore,
 		TemplateReconciler:      templateReconciler,

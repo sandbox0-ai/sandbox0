@@ -56,19 +56,29 @@ func (a *managerApp) Run() {
 		a.logger.Info("Active-active abandoned sandbox claim reconciler started")
 	}
 
-	a.logger.Info("Starting informers")
-	a.informerFactory.Start(a.ctx.Done())
-	a.crdInformerFactory.Start(a.ctx.Done())
-
-	a.logger.Info("Waiting for informer caches to sync")
-	if !cache.WaitForCacheSync(a.ctx.Done(), a.cacheSyncs...) {
-		a.logger.Fatal("Failed to sync informer caches")
+	if a.informerFactory != nil || a.crdInformerFactory != nil {
+		a.logger.Info("Starting informers")
 	}
-	for typ, synced := range a.crdInformerFactory.WaitForCacheSync(a.ctx.Done()) {
-		if !synced {
-			a.logger.Warn("CRD informer cache not synced", zap.String("type", typ.String()))
-		} else {
-			a.logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
+	if a.informerFactory != nil {
+		a.informerFactory.Start(a.ctx.Done())
+	}
+	if a.crdInformerFactory != nil {
+		a.crdInformerFactory.Start(a.ctx.Done())
+	}
+
+	if len(a.cacheSyncs) > 0 {
+		a.logger.Info("Waiting for informer caches to sync")
+		if !cache.WaitForCacheSync(a.ctx.Done(), a.cacheSyncs...) {
+			a.logger.Fatal("Failed to sync informer caches")
+		}
+	}
+	if a.crdInformerFactory != nil {
+		for typ, synced := range a.crdInformerFactory.WaitForCacheSync(a.ctx.Done()) {
+			if !synced {
+				a.logger.Warn("CRD informer cache not synced", zap.String("type", typ.String()))
+			} else {
+				a.logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
+			}
 		}
 	}
 

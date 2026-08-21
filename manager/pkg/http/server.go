@@ -134,6 +134,7 @@ type ServerDependencies struct {
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
 	TemplateService         *templateservice.TemplateService
+	PrivateRegistryHosts    []string
 	RegistryService         *registryservice.RegistryService
 	TemplateStore           store.TemplateStore
 	TemplateReconciler      TemplateReconciler
@@ -207,8 +208,8 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		readinessProbe:          deps.ReadinessProbe,
 	}
 	if deps.TemplateStoreEnabled {
-		registryHosts := []string(nil)
-		if deps.TemplateService != nil {
+		registryHosts := append([]string(nil), deps.PrivateRegistryHosts...)
+		if len(registryHosts) == 0 && deps.TemplateService != nil {
 			registryHosts = deps.TemplateService.RegistryHosts()
 		}
 		buildStore, _ := deps.TemplateStore.(store.TemplateBuildStore)
@@ -312,6 +313,7 @@ func (s *Server) setupRoutes() {
 
 		// Template management (scheduler sync)
 		internalTemplates := internal.Group("/templates")
+		internalTemplates.Use(s.requireLegacyTemplateServiceCapability())
 		{
 			internalTemplates.GET("", s.listTemplatesLegacy)
 			internalTemplates.GET("/stats", s.getTemplateStats)
@@ -323,6 +325,7 @@ func (s *Server) setupRoutes() {
 
 		// Cluster management
 		internalCluster := internal.Group("/cluster")
+		internalCluster.Use(s.requireClusterServiceCapability())
 		{
 			internalCluster.GET("/summary", s.getClusterSummary)
 		}
@@ -506,6 +509,18 @@ func (s *Server) requireTemplateStoreCapability() gin.HandlerFunc {
 	return s.requireCapability(func() bool {
 		return s.templateHandler != nil
 	}, "template store is disabled")
+}
+
+func (s *Server) requireLegacyTemplateServiceCapability() gin.HandlerFunc {
+	return s.requireCapability(func() bool {
+		return s.templateService != nil
+	}, "legacy template projection is unavailable in this deployment")
+}
+
+func (s *Server) requireClusterServiceCapability() gin.HandlerFunc {
+	return s.requireCapability(func() bool {
+		return s.clusterService != nil
+	}, "legacy cluster summary is unavailable in this deployment")
 }
 
 func (s *Server) requireRegistryCapability() gin.HandlerFunc {

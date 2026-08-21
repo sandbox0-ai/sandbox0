@@ -152,7 +152,8 @@ type nodeRuntime struct {
 
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
-	inflight           map[string]bool
+	inflight           map[string]*reconciliationState
+	preempting         map[string]bool
 	trigger            chan string
 	allocations        nomadAllocationSource
 	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
@@ -160,6 +161,11 @@ type nodeRuntime struct {
 	clusterID          string
 	nodeID             string
 	nodeUID            string
+}
+
+type reconciliationState struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type nodeRuntimeBackend interface {
@@ -365,7 +371,7 @@ func run(
 	}
 	daemon := &nodeRuntime{
 		runtime: runtime, runner: newCommandRunsc(config), mounter: systemMounter{},
-		config: config, logger: logger, inflight: make(map[string]bool), trigger: make(chan string, 128),
+		config: config, logger: logger, inflight: make(map[string]*reconciliationState), trigger: make(chan string, 128),
 		allocations: allocations, runtimeSlotNetwork: runtimeSlotNetwork, journal: journal,
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
 		nodeUID: strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
@@ -682,8 +688,8 @@ func (d *nodeRuntime) CleanupRuntimeSlot(
 	if request.WriterGrantID != "" && d.runtime == nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS runtime cleanup dependency is unavailable: %w", errdefs.ErrUnavailable)
 	}
-	if !d.beginReconciliation(request.SlotID) {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("runtime slot cleanup is already in progress: %w", errdefs.ErrUnavailable)
+	if err := d.beginExternalReconciliation(ctx, request.SlotID); err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("runtime slot cleanup is already in progress: %w", err)
 	}
 	defer d.endReconciliation(request.SlotID)
 	if request.WriterGrantID == "" {
@@ -1222,16 +1228,17 @@ func (d *nodeRuntime) scanDirtyTailPressures(ctx context.Context) {
 	for _, pressure := range pressures {
 		parent := pressure.Stage.Parent
 		inflightKey := "pressure:" + parent
-		if !d.beginReconciliation(inflightKey) {
+		pressureCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
+		if !d.beginReconciliation(inflightKey, cancel) {
+			cancel()
 			continue
 		}
 		d.mu.Lock()
 		d.wg.Add(1)
 		d.mu.Unlock()
 		go func(pressure rootfssession.DirtyTailPressureSession, inflightKey string) {
-			pressureCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
+			defer cancel()
 			_, planErr := runtime.PlanDirtyTailPressure(pressureCtx, pressure)
-			cancel()
 			d.endReconciliation(inflightKey)
 			d.wg.Done()
 			if planErr != nil {
@@ -1295,19 +1302,23 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		if inflightKey == "" {
 			inflightKey = session.Stage.Parent
 		}
-		if !d.beginReconciliation(inflightKey) {
+		if d.runtimeSlotCleanupPending(inflightKey) {
+			continue
+		}
+		reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
+		if !d.beginReconciliation(inflightKey, cancel) {
+			cancel()
 			continue
 		}
 		d.mu.Lock()
 		d.wg.Add(1)
 		d.mu.Unlock()
 		go func(session rootfssession.RecoverySession, inflightKey string) {
+			defer cancel()
 			defer func() {
 				d.endReconciliation(inflightKey)
 				d.wg.Done()
 			}()
-			reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
-			defer cancel()
 			if err := d.reconcile(reconcileCtx, session); err != nil && !errors.Is(err, context.Canceled) {
 				d.logger.Error("reconcile orphan RootFS writer", "parent", session.Stage.Parent, "error", err)
 			}
@@ -1315,29 +1326,86 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 	}
 }
 
-func (d *nodeRuntime) beginReconciliation(parent string) bool {
+func (d *nodeRuntime) runtimeSlotCleanupPending(slotID string) bool {
+	if d.journal == nil {
+		return false
+	}
+	record, err := d.journal.Get(slotID)
+	if err != nil {
+		if !errdefs.IsNotFound(err) {
+			d.logger.Error("inspect pending runtime slot cleanup", "slot_id", slotID, "error", err)
+			return true
+		}
+		return false
+	}
+	return record.Cleanup != nil && record.Proof == nil
+}
+
+func (d *nodeRuntime) beginReconciliation(key string, cancel context.CancelFunc) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.inflight == nil {
-		d.inflight = make(map[string]bool)
+		d.inflight = make(map[string]*reconciliationState)
 	}
-	if d.inflight[parent] {
+	if d.inflight[key] != nil || d.preempting[key] {
 		return false
 	}
-	d.inflight[parent] = true
+	d.inflight[key] = &reconciliationState{cancel: cancel, done: make(chan struct{})}
 	return true
 }
 
-func (d *nodeRuntime) endReconciliation(parent string) {
+// beginExternalReconciliation gives a durable regional cleanup priority over
+// a speculative node-local recovery. Canceling the local attempt prevents an
+// old planned marker from occupying the slot for the full recovery timeout
+// after the regional authority has selected crash abandonment.
+func (d *nodeRuntime) beginExternalReconciliation(ctx context.Context, key string) error {
+	for {
+		d.mu.Lock()
+		if d.inflight == nil {
+			d.inflight = make(map[string]*reconciliationState)
+		}
+		current := d.inflight[key]
+		if current == nil {
+			d.inflight[key] = &reconciliationState{done: make(chan struct{})}
+			delete(d.preempting, key)
+			d.mu.Unlock()
+			return nil
+		}
+		if current.cancel == nil {
+			d.mu.Unlock()
+			return errdefs.ErrUnavailable
+		}
+		if d.preempting == nil {
+			d.preempting = make(map[string]bool)
+		}
+		d.preempting[key] = true
+		cancel := current.cancel
+		done := current.done
+		d.mu.Unlock()
+
+		cancel()
+		select {
+		case <-ctx.Done():
+			return errors.Join(ctx.Err(), errdefs.ErrUnavailable)
+		case <-done:
+		}
+	}
+}
+
+func (d *nodeRuntime) endReconciliation(key string) {
 	d.mu.Lock()
-	delete(d.inflight, parent)
+	current := d.inflight[key]
+	delete(d.inflight, key)
+	if current != nil {
+		close(current.done)
+	}
 	d.mu.Unlock()
 }
 
 func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.inflight[key]
+	return d.inflight[key] != nil
 }
 
 type httpNomadAllocationSource struct {

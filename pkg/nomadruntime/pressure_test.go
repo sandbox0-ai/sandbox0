@@ -30,7 +30,7 @@ func TestNodeRuntimePlansPressuredWriterBeforeTerminalTrigger(t *testing.T) {
 	}
 	daemon := &nodeRuntime{
 		runtime: runtime, logger: newLogger(zap.NewNop()),
-		inflight: make(map[string]bool), trigger: make(chan string, 1),
+		inflight: make(map[string]*reconciliationState), trigger: make(chan string, 1),
 	}
 	daemon.scanDirtyTailPressures(context.Background())
 	require.Eventually(t, func() bool {
@@ -60,7 +60,7 @@ func TestNodeRuntimeNeverCrashAbandonsDurablePressurePendingWriter(t *testing.T)
 	}}}
 	daemon := &nodeRuntime{
 		runtime: runtime, logger: newLogger(zap.NewNop()),
-		inflight: make(map[string]bool), trigger: make(chan string, 1),
+		inflight: make(map[string]*reconciliationState), trigger: make(chan string, 1),
 	}
 	daemon.scan(context.Background(), stage.Parent)
 	daemon.wg.Wait()

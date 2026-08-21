@@ -210,6 +210,61 @@ func TestNodeRuntimeCleansExactRuntimeSlotWithoutCompletingWriter(t *testing.T) 
 	testNodeRuntimeCleansExactRuntimeSlot(t, false)
 }
 
+func TestNodeRuntimeExternalCleanupPreemptsLocalReconciliation(t *testing.T) {
+	daemon := &nodeRuntime{}
+	localContext, localCancel := context.WithCancel(context.Background())
+	require.True(t, daemon.beginReconciliation("slot-preempt", localCancel))
+	localExited := make(chan struct{})
+	go func() {
+		<-localContext.Done()
+		daemon.endReconciliation("slot-preempt")
+		close(localExited)
+	}()
+
+	cleanupContext, cleanupCancel := context.WithTimeout(t.Context(), time.Second)
+	defer cleanupCancel()
+	require.NoError(t, daemon.beginExternalReconciliation(cleanupContext, "slot-preempt"))
+	select {
+	case <-localExited:
+	case <-time.After(time.Second):
+		t.Fatal("local reconciliation was not canceled")
+	}
+	require.True(t, daemon.reconciliationInFlight("slot-preempt"))
+	require.False(t, daemon.beginReconciliation("slot-preempt", func() {}))
+	daemon.endReconciliation("slot-preempt")
+	require.False(t, daemon.reconciliationInFlight("slot-preempt"))
+}
+
+func TestNodeRuntimeScanYieldsToDurableRegionalCleanup(t *testing.T) {
+	registration := testRuntimeSlotJournalRegistration(t, "slot-regional-cleanup")
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	require.NoError(t, journal.Register(registration))
+	cleanup := testRuntimeSlotJournalCleanup(registration)
+	cleanup.WriterOperationID = "regional-crash-operation"
+	cleanup.WriterRetireKind = protocol.WriterRetireKindCrashAbandon
+	cleanup.WriterGrantID = "grant-regional-cleanup"
+	cleanup.WriterAuthorityDigest = strings.Repeat("ab", sha256.Size)
+	_, err = journal.BeginCleanup(cleanup)
+	require.NoError(t, err)
+
+	stage := rootfshandoff.StageRequest{
+		Parent: "parent-regional-cleanup",
+		Identity: rootfshandoff.Identity{
+			SlotNonce: registration.SlotID, WriterGrantID: cleanup.WriterGrantID, WriterEpoch: 7,
+		},
+	}
+	runtime := &fakeRootFSRuntime{recoverySessions: []rootfssession.RecoverySession{{
+		Stage: stage, Kind: rootfssession.RecoveryPlannedRetire, RetireOperationID: "old-local-planned-operation",
+	}}}
+	daemon := &nodeRuntime{runtime: runtime, journal: journal}
+	daemon.scan(t.Context(), stage.Parent)
+	daemon.wg.Wait()
+	_, retireCalls, _, _ := runtime.snapshot()
+	require.Zero(t, retireCalls)
+}
+
 func TestNodeRuntimeReclaimsMatchingInternalCrashTerminal(t *testing.T) {
 	testNodeRuntimeCleansExactRuntimeSlot(t, true)
 }

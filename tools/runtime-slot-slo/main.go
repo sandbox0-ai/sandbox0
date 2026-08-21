@@ -84,6 +84,7 @@ type report struct {
 	Cleanup        distribution  `json:"cleanup"`
 	Errors         int           `json:"errors"`
 	SLOMisses      int           `json:"slo_misses"`
+	WallMisses     int           `json:"wall_misses"`
 	CleanupErrors  int           `json:"cleanup_errors"`
 	Passed         bool          `json:"passed"`
 	Samples        []sample      `json:"samples"`
@@ -185,7 +186,7 @@ func run(ctx context.Context, cfg config) (report, error) {
 		return report{}, errors.New("HTTP client is required")
 	}
 	result := report{
-		Version: 2, Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
+		Version: 3, Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
 		Batches: cfg.batches, Concurrency: cfg.concurrency, HardLimit: cfg.hardLimit,
 		P50Target: cfg.p50Target, CleanupTimeout: cfg.cleanupTimeout,
 		Samples: make([]sample, cfg.batches*cfg.concurrency),
@@ -251,19 +252,24 @@ func run(ctx context.Context, cfg config) (report, error) {
 		if !current.WithinSLO || current.CommandDuration > cfg.hardLimit {
 			result.SLOMisses++
 		}
+		if current.WallDuration > cfg.hardLimit {
+			result.WallMisses++
+		}
 	}
 	result.CommandReady = summarize(commandDurations)
 	result.Wall = summarize(wallDurations)
 	result.Cleanup = summarize(cleanupDurations)
-	result.Passed = result.Errors == 0 && result.SLOMisses == 0 && result.CleanupErrors == 0 &&
+	result.Passed = result.Errors == 0 && result.SLOMisses == 0 && result.WallMisses == 0 && result.CleanupErrors == 0 &&
 		result.CommandReady.Count == len(result.Samples) && result.CommandReady.P50 <= cfg.p50Target &&
 		result.CommandReady.P99 <= cfg.hardLimit && result.CommandReady.Max <= cfg.hardLimit &&
+		result.Wall.Count == len(result.Samples) && result.Wall.P99 <= cfg.hardLimit && result.Wall.Max <= cfg.hardLimit &&
 		(!cfg.cleanup || result.Cleanup.Count == len(result.Samples))
 	if !result.Passed {
 		return result, fmt.Errorf(
-			"SLO acceptance failed: samples=%d errors=%d misses=%d cleanup_errors=%d p50=%s p99=%s max=%s",
-			len(result.Samples), result.Errors, result.SLOMisses, result.CleanupErrors,
+			"SLO acceptance failed: samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s",
+			len(result.Samples), result.Errors, result.SLOMisses, result.WallMisses, result.CleanupErrors,
 			result.CommandReady.P50, result.CommandReady.P99, result.CommandReady.Max,
+			result.Wall.P99, result.Wall.Max,
 		)
 	}
 	return result, nil

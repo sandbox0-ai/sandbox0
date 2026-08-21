@@ -67,7 +67,7 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 	if claims.Load() != 4 || deletes.Load() != 4 {
 		t.Fatalf("claims=%d deletes=%d", claims.Load(), deletes.Load())
 	}
-	if result.Version != 2 || result.Cleanup.Count != 4 {
+	if result.Version != 3 || result.Cleanup.Count != 4 {
 		t.Fatalf("cleanup convergence report = %+v", result)
 	}
 }
@@ -186,6 +186,26 @@ func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 	}
 	result, err := run(context.Background(), cfg)
 	if err == nil || result.Passed || result.SLOMisses != 1 {
+		t.Fatalf("report=%+v error=%v", result, err)
+	}
+}
+
+func TestRunRejectsSlowPublicRoundTripDespiteFastReportedCommandReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1")
+		writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+		_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-underreported"})
+	}))
+	defer server.Close()
+	cfg := config{
+		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
+		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: 50 * time.Millisecond,
+		p50Target: 25 * time.Millisecond, client: server.Client(),
+	}
+	result, err := run(context.Background(), cfg)
+	if err == nil || result.Passed || result.SLOMisses != 0 || result.WallMisses != 1 ||
+		result.Wall.Count != 1 || result.Wall.Max <= cfg.hardLimit {
 		t.Fatalf("report=%+v error=%v", result, err)
 	}
 }

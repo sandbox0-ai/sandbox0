@@ -23,7 +23,7 @@ nomad_runtime:
   branch_root: /var/lib/sandbox0/ctld/nomad/rootfs-branches
   mount_root: /run/sandbox0/rootfs
   consumer_mount_root: /opt/nomad
-  consumer_netns_root: /var/run/netns
+  consumer_netns_root: /run/netns
   max_dirty_tail_bytes: 10737418240
   max_node_dirty_tail_bytes: 42949672960
   dirty_tail_retirement_reserve_bytes: 67108864

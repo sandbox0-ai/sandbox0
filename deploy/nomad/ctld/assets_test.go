@@ -38,7 +38,7 @@ func TestSystemdUnitPreservesHostNamespacesAndABIsolation(t *testing.T) {
 		"-node-name=${SANDBOX0_NODE_NAME}",
 		"ctld-%i-ha.sock",
 		"/run/sandbox0/ctld-runtime-slot-network.sock",
-		"-runtime-slot-netns-root=/var/run/netns",
+		"-runtime-slot-netns-root=/run/netns",
 		"TimeoutStopSec=45s",
 		"KillMode=mixed",
 	} {
@@ -89,7 +89,7 @@ func TestExampleConfigsDecodeAfterEnvironmentExpansion(t *testing.T) {
 	}
 	if !ctldConfig.NomadRuntime.Enabled || len(ctldConfig.NomadRuntime.NBDDevices) != 2 ||
 		ctldConfig.NomadRuntime.ConsumerMountRoot != "/opt/nomad" ||
-		ctldConfig.NomadRuntime.ConsumerNetNSRoot != "/var/run/netns" {
+		ctldConfig.NomadRuntime.ConsumerNetNSRoot != "/run/netns" {
 		t.Fatalf("decoded ctld Nomad runtime = %+v", ctldConfig.NomadRuntime)
 	}
 	networkPath := filepath.Join(t.TempDir(), "network.yaml")

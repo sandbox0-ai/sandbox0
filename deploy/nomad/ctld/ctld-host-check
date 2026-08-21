@@ -65,7 +65,7 @@ require_canonical_directory /var/lib/sandbox0/ctld
 require_canonical_directory /run/sandbox0
 require_canonical_directory /run/sandbox0/nomad-slots
 require_canonical_directory /opt/nomad
-require_canonical_directory /var/run/netns
+require_canonical_directory /run/netns
 
 [ -n "${SANDBOX0_NODE_NAME:-}" ] || { echo "SANDBOX0_NODE_NAME is required" >&2; exit 1; }
 

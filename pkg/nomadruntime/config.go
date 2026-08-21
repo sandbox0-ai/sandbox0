@@ -107,7 +107,7 @@ func (c *Config) ApplyDefaults() {
 		c.RootFSConsumerMountRoot = "/opt/nomad"
 	}
 	if strings.TrimSpace(c.RootFSConsumerNetNSRoot) == "" {
-		c.RootFSConsumerNetNSRoot = "/var/run/netns"
+		c.RootFSConsumerNetNSRoot = "/run/netns"
 	}
 	if c.RootFSMaxDirtyTailBytes == 0 {
 		c.RootFSMaxDirtyTailBytes = rootfssession.DefaultMaxDirtyTailBytes

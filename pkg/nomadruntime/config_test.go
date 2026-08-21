@@ -51,6 +51,14 @@ func validNomadAllocationConfig() NomadAllocationConfig {
 	}
 }
 
+func TestConfigDefaultsUseCanonicalNetNSRoot(t *testing.T) {
+	var config Config
+	config.ApplyDefaults()
+	if config.RootFSConsumerNetNSRoot != "/run/netns" {
+		t.Fatalf("consumer network namespace root = %q", config.RootFSConsumerNetNSRoot)
+	}
+}
+
 func TestConfigValidateRejectsUnsafeProductionInputs(t *testing.T) {
 	tests := []struct {
 		name   string

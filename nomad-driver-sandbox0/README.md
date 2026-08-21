@@ -455,7 +455,7 @@ fingerprint remains unhealthy until the root-owned mode-`0600` ctld socket,
 runtime metadata, durable journals, network registry, and Nomad allocation
 catalog are healthy.
 
-Consumer registration resolves `/opt/nomad` and `/var/run/netns`, persists
+Consumer registration resolves `/opt/nomad` and `/run/netns`, persists
 their canonical path and device/inode identity, and rejects a driver in a
 different mount namespace. Ctld passes only a validated path relative to the
 configured netns root to its network registry, which rechecks incarnation and

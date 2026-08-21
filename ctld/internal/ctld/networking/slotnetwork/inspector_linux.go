@@ -71,11 +71,18 @@ func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, err
 			addresses[value.IP.String()] = struct{}{}
 		}
 	}
+	return selectRoutableIPv4(addresses)
+}
+
+func selectRoutableIPv4(addresses map[string]struct{}) (string, error) {
 	values := make([]string, 0, len(addresses))
 	for value := range addresses {
 		values = append(values, value)
 	}
 	sort.Strings(values)
+	if len(values) == 0 {
+		return "", fmt.Errorf("network namespace does not have a routable IPv4 address yet: %w", errdefs.ErrUnavailable)
+	}
 	if len(values) != 1 {
 		return "", fmt.Errorf("network namespace must have exactly one routable IPv4 address, got %v: %w", values, errdefs.ErrFailedPrecondition)
 	}

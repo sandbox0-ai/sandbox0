@@ -305,7 +305,7 @@ func (r *Registry) Register(
 		}
 		return r.waitForRegistration(ctx, request, revision)
 	}
-	podIP, err := r.inspectRegistration(request)
+	podIP, err := r.waitForRegistrationAddress(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -364,6 +364,38 @@ func (r *Registry) Register(
 		notify()
 	}
 	return r.waitForRegistration(ctx, request, revision)
+}
+
+func (r *Registry) waitForRegistrationAddress(
+	ctx context.Context,
+	request protocol.RuntimeSlotNetworkRegistrationRequest,
+) (string, error) {
+	backoff := 10 * time.Millisecond
+	var lastErr error
+	for {
+		podIP, err := r.inspectRegistration(request)
+		if err == nil {
+			return podIP, nil
+		}
+		if !errdefs.IsUnavailable(err) {
+			return "", err
+		}
+		lastErr = err
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf(
+				"wait for runtime slot network address: %w",
+				errors.Join(lastErr, ctx.Err(), errdefs.ErrUnavailable),
+			)
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > 250*time.Millisecond {
+			backoff = 250 * time.Millisecond
+		}
+	}
 }
 
 func (r *Registry) existingRegistration(

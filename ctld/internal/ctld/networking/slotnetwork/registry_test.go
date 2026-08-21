@@ -3,6 +3,7 @@ package slotnetwork
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,6 +20,7 @@ type fakeNamespaceInspector struct {
 	identity []string
 	podIP    string
 	err      error
+	errors   []error
 }
 
 func (i *fakeNamespaceInspector) Inspect(path, identity string) (string, error) {
@@ -26,7 +28,59 @@ func (i *fakeNamespaceInspector) Inspect(path, identity string) (string, error) 
 	defer i.mu.Unlock()
 	i.paths = append(i.paths, path)
 	i.identity = append(i.identity, identity)
+	if len(i.errors) != 0 {
+		err := i.errors[0]
+		i.errors = i.errors[1:]
+		if err != nil {
+			return "", err
+		}
+	}
 	return i.podIP, i.err
+}
+
+func TestRegistryWaitsForNomadNetworkAddress(t *testing.T) {
+	directory := t.TempDir()
+	netnsRoot := filepath.Join(directory, "netns")
+	if err := ensureDirectory(netnsRoot); err != nil {
+		t.Fatal(err)
+	}
+	pending := fmt.Errorf("address pending: %w", errdefs.ErrUnavailable)
+	inspector := &fakeNamespaceInspector{
+		podIP:  "192.0.2.8",
+		errors: []error{pending, pending},
+	}
+	registry := newTestRegistry(t, filepath.Join(directory, "network.db"), netnsRoot, inspector, time.Hour)
+	defer registry.Close()
+	autoAcknowledge(registry)
+	if err := registry.Register(t.Context(), testRegistrationRequest()); err != nil {
+		t.Fatal(err)
+	}
+	inspector.mu.Lock()
+	defer inspector.mu.Unlock()
+	if len(inspector.paths) != 3 {
+		t.Fatalf("namespace inspections = %d, want 3", len(inspector.paths))
+	}
+}
+
+func TestRegistryDoesNotPersistRegistrationWithoutNetworkAddress(t *testing.T) {
+	directory := t.TempDir()
+	netnsRoot := filepath.Join(directory, "netns")
+	if err := ensureDirectory(netnsRoot); err != nil {
+		t.Fatal(err)
+	}
+	registry := newTestRegistry(t, filepath.Join(directory, "network.db"), netnsRoot,
+		&fakeNamespaceInspector{err: fmt.Errorf("address pending: %w", errdefs.ErrUnavailable)}, time.Hour)
+	defer registry.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancel()
+	err := registry.Register(ctx, testRegistrationRequest())
+	if !errors.Is(err, context.DeadlineExceeded) || !errdefs.IsUnavailable(err) {
+		t.Fatalf("registration error = %v", err)
+	}
+	sandboxes, _, snapshotErr := registry.Snapshot()
+	if snapshotErr != nil || len(sandboxes) != 0 {
+		t.Fatalf("pending registration snapshot = %+v, %v", sandboxes, snapshotErr)
+	}
 }
 
 func TestRegistryPersistsExactPrepareAndCleanupAcrossHAReopen(t *testing.T) {

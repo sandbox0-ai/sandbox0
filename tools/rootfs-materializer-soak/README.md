@@ -93,3 +93,34 @@ discard at most the fixed five-second checkpoint interval in either gate. After 
 `--mode auto` resumes from the last fsynced event. Only a hash-valid `final`
 event with `passed=true` from each run satisfies the combined 10,000/24-hour
 gate; an older log that merely stops at a sample is incomplete evidence.
+
+After both writers have exited with a `final` event, audit the immutable logs
+with the independent verifier. Build the verifier once and record its hash,
+then pass the previously recorded hash of each gate executable (not the hash of
+the verifier):
+
+```sh
+go build -buildvcs=false -trimpath \
+    -o /usr/local/libexec/soak-evidence-verify \
+    ./tools/soak-evidence-verify
+sha256sum /usr/local/libexec/soak-evidence-verify
+
+/usr/local/libexec/soak-evidence-verify \
+    --kind materializer \
+    --path /var/lib/sandbox0-soak/materializer/evidence.jsonl \
+    --expected-executable-sha256 "$MATERIALIZER_GATE_SHA256" \
+    --output /var/lib/sandbox0-soak/materializer/verification.json
+
+/usr/local/libexec/soak-evidence-verify \
+    --kind bolt \
+    --path /var/lib/sandbox0-soak/bolt/evidence.jsonl \
+    --expected-executable-sha256 "$BOLT_GATE_SHA256" \
+    --output /var/lib/sandbox0-soak/bolt/verification.json
+```
+
+When a configuration digest was fixed in the supervisor manifest, also pass it
+with `--expected-config-sha256`. The verifier refuses an active writer, a
+partial tail, a broken identity or hash chain, a non-final log, less than 24
+hours of active time, or final state outside the exact production contract.
+The generated report is an audit artifact; it does not replace either gate's
+hash-bound `final` event.

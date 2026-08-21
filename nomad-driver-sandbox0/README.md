@@ -541,7 +541,11 @@ reboot-resumable PostgreSQL/RustFS `tools/rootfs-materializer-soak` gate;
 neither short smoke mode nor the accelerated 10,000-record unit test may be
 reported as 24-hour evidence. Use the durable state paths and fixed-binary
 invocations in that tool's README, including a per-process
-`-test.timeout 30h`.
+`-test.timeout 30h`. After both writers exit, use the independent
+`tools/soak-evidence-verify` command documented there to verify the immutable
+hash chains, fixed gate executable digests, exact configurations, final
+checkpoints, and active-time bounds. The verifier deliberately refuses to
+audit a log while its gate still holds the writer lock.
 
 The regional terminal controller also needs trusted HTTPS endpoints for each
 Nomad server cluster and exact client node. Its ACL policy must permit

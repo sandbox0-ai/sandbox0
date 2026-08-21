@@ -500,6 +500,9 @@ func newHTTPClient(concurrency int, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: min(timeout, 5*time.Second), KeepAlive: 30 * time.Second}
 	return &http.Client{
 		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			Proxy: nil, DialContext: dialer.DialContext, ForceAttemptHTTP2: true,
 			MaxIdleConns: max(32, concurrency*2), MaxIdleConnsPerHost: max(16, concurrency*2),

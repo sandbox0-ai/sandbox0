@@ -210,6 +210,30 @@ func TestRunRejectsSlowPublicRoundTripDespiteFastReportedCommandReadiness(t *tes
 	}
 }
 
+func TestAcceptanceClientDoesNotFollowClaimRedirects(t *testing.T) {
+	var redirectedRequests atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1")
+		writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+		_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-redirected"})
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL+"/api/v1/sandboxes", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	cfg := config{
+		endpoint: redirect.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
+		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: time.Second,
+		p50Target: 500 * time.Millisecond, client: newHTTPClient(1, time.Second),
+	}
+	result, err := run(context.Background(), cfg)
+	if err == nil || result.Passed || result.Errors != 1 || redirectedRequests.Load() != 0 {
+		t.Fatalf("report=%+v error=%v redirected_requests=%d", result, err, redirectedRequests.Load())
+	}
+}
+
 func TestCommandReadyDurationRequiresExactMetric(t *testing.T) {
 	duration, err := commandReadyDuration("other;dur=1.2, sandbox0-command-ready;desc=ready;dur=499.125")
 	if err != nil || duration != 499125*time.Microsecond {

@@ -291,8 +291,9 @@ SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
 ```
 
 The harness performs no hidden claim retries, requires the trusted timing and
-SLO headers on every `201`, and disables ambient HTTP proxies. Outside each
-measured interval it sends public DELETE and polls public GET until `404`;
+SLO headers on every `201`, disables ambient HTTP proxies, and rejects HTTP
+redirects instead of moving the bearer token or sample to another route.
+Outside each measured interval it sends public DELETE and polls public GET until `404`;
 the `404` must also contain the canonical public `not_found` envelope, so a
 proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
 therefore requires the asynchronous terminal worker and physical slot cleanup

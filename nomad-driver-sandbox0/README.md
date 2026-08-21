@@ -271,6 +271,8 @@ SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
   --concurrency 1 \
   --p50-target 500ms \
   --hard-limit 1s \
+  --cleanup-timeout 2m \
+  --cleanup-poll 100ms \
   --output serial-1000.json
 ```
 
@@ -283,16 +285,22 @@ SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
   --batches 100 \
   --concurrency 8 \
   --batch-settle 5s \
+  --cleanup-timeout 2m \
+  --cleanup-poll 100ms \
   --output concurrency-8.json
 ```
 
 The harness performs no hidden claim retries, requires the trusted timing and
-SLO headers on every `201`, deletes successful Sandboxes outside the measured
-interval, disables ambient HTTP proxies, and fails on any request, cleanup, or
-successful command-ready sample above one second. It also requires p50 at or
-below 500 ms and p99 at or below one second. Cold S3, unclean replay, Nomad
-refill, full-cold-node, and 1/8/32 concurrency results must be recorded as
-separate labeled reports rather than mixed into the hot distribution.
+SLO headers on every `201`, and disables ambient HTTP proxies. Outside each
+measured interval it sends public DELETE and polls public GET until `404`;
+acceptance therefore requires the asynchronous terminal worker and physical
+slot cleanup to converge within the configured timeout rather than merely
+accepting deletion intent. Report version 2 records the cleanup distribution
+separately. Any claim, cleanup-convergence, or successful command-ready sample
+above one second fails the gate. The command-ready p50 must be at or below 500
+ms and p99 at or below one second. Cold S3, unclean replay, Nomad refill,
+full-cold-node, and 1/8/32 concurrency results must be recorded as separate
+labeled reports rather than mixed into the hot distribution.
 
 ## PostgreSQL high availability
 

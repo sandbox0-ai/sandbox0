@@ -36,6 +36,8 @@ type config struct {
 	batches        int
 	concurrency    int
 	requestTimeout time.Duration
+	cleanupTimeout time.Duration
+	cleanupPoll    time.Duration
 	settle         time.Duration
 	hardLimit      time.Duration
 	p50Target      time.Duration
@@ -54,6 +56,7 @@ type sample struct {
 	WithinSLO       bool          `json:"within_slo"`
 	Error           string        `json:"error,omitempty"`
 	CleanupError    string        `json:"cleanup_error,omitempty"`
+	CleanupDuration time.Duration `json:"cleanup_duration_ns,omitempty"`
 }
 
 type distribution struct {
@@ -66,22 +69,24 @@ type distribution struct {
 }
 
 type report struct {
-	Version       int           `json:"version"`
-	Label         string        `json:"label,omitempty"`
-	StartedAt     time.Time     `json:"started_at"`
-	CompletedAt   time.Time     `json:"completed_at"`
-	Endpoint      string        `json:"endpoint"`
-	Batches       int           `json:"batches"`
-	Concurrency   int           `json:"concurrency"`
-	HardLimit     time.Duration `json:"hard_limit_ns"`
-	P50Target     time.Duration `json:"p50_target_ns"`
-	CommandReady  distribution  `json:"command_ready"`
-	Wall          distribution  `json:"wall"`
-	Errors        int           `json:"errors"`
-	SLOMisses     int           `json:"slo_misses"`
-	CleanupErrors int           `json:"cleanup_errors"`
-	Passed        bool          `json:"passed"`
-	Samples       []sample      `json:"samples"`
+	Version        int           `json:"version"`
+	Label          string        `json:"label,omitempty"`
+	StartedAt      time.Time     `json:"started_at"`
+	CompletedAt    time.Time     `json:"completed_at"`
+	Endpoint       string        `json:"endpoint"`
+	Batches        int           `json:"batches"`
+	Concurrency    int           `json:"concurrency"`
+	HardLimit      time.Duration `json:"hard_limit_ns"`
+	P50Target      time.Duration `json:"p50_target_ns"`
+	CleanupTimeout time.Duration `json:"cleanup_timeout_ns"`
+	CommandReady   distribution  `json:"command_ready"`
+	Wall           distribution  `json:"wall"`
+	Cleanup        distribution  `json:"cleanup"`
+	Errors         int           `json:"errors"`
+	SLOMisses      int           `json:"slo_misses"`
+	CleanupErrors  int           `json:"cleanup_errors"`
+	Passed         bool          `json:"passed"`
+	Samples        []sample      `json:"samples"`
 }
 
 type claimResponse struct {
@@ -90,19 +95,21 @@ type claimResponse struct {
 
 func main() {
 	var (
-		endpoint   = flag.String("url", "", "full regional POST /api/v1/sandboxes URL")
-		tokenFile  = flag.String("token-file", "", "file containing the public API bearer token")
-		templateID = flag.String("template", "default", "sandbox template ID")
-		bodyFile   = flag.String("body-file", "", "optional complete claim JSON body")
-		batches    = flag.Int("batches", 1000, "number of synchronized request batches")
-		concurrent = flag.Int("concurrency", 1, "requests in each synchronized batch")
-		timeout    = flag.Duration("request-timeout", 15*time.Second, "per-request timeout")
-		settle     = flag.Duration("batch-settle", 0, "delay after cleanup before the next batch")
-		hardLimit  = flag.Duration("hard-limit", time.Second, "maximum successful command-ready sample")
-		p50Target  = flag.Duration("p50-target", 500*time.Millisecond, "engineering p50 target")
-		cleanup    = flag.Bool("cleanup", true, "DELETE every successfully claimed sandbox outside the timed sample")
-		output     = flag.String("output", "", "optional JSON report path; stdout is always written")
-		label      = flag.String("label", "", "optional environment label included in the report")
+		endpoint       = flag.String("url", "", "full regional POST /api/v1/sandboxes URL")
+		tokenFile      = flag.String("token-file", "", "file containing the public API bearer token")
+		templateID     = flag.String("template", "default", "sandbox template ID")
+		bodyFile       = flag.String("body-file", "", "optional complete claim JSON body")
+		batches        = flag.Int("batches", 1000, "number of synchronized request batches")
+		concurrent     = flag.Int("concurrency", 1, "requests in each synchronized batch")
+		timeout        = flag.Duration("request-timeout", 15*time.Second, "per-request timeout")
+		cleanupTimeout = flag.Duration("cleanup-timeout", 2*time.Minute, "maximum time for each DELETE to converge to public absence")
+		cleanupPoll    = flag.Duration("cleanup-poll", 100*time.Millisecond, "public GET interval while waiting for cleanup convergence")
+		settle         = flag.Duration("batch-settle", 0, "delay after cleanup before the next batch")
+		hardLimit      = flag.Duration("hard-limit", time.Second, "maximum successful command-ready sample")
+		p50Target      = flag.Duration("p50-target", 500*time.Millisecond, "engineering p50 target")
+		cleanup        = flag.Bool("cleanup", true, "DELETE every successfully claimed sandbox outside the timed sample")
+		output         = flag.String("output", "", "optional JSON report path; stdout is always written")
+		label          = flag.String("label", "", "optional environment label included in the report")
 	)
 	flag.Parse()
 
@@ -116,7 +123,8 @@ func main() {
 	}
 	cfg := config{
 		endpoint: *endpoint, token: token, body: body, batches: *batches, concurrency: *concurrent,
-		requestTimeout: *timeout, settle: *settle, hardLimit: *hardLimit, p50Target: *p50Target,
+		requestTimeout: *timeout, cleanupTimeout: *cleanupTimeout, cleanupPoll: *cleanupPoll,
+		settle: *settle, hardLimit: *hardLimit, p50Target: *p50Target,
 		cleanup: *cleanup, label: strings.TrimSpace(*label),
 	}
 	if err := cfg.validate(); err != nil {
@@ -162,6 +170,10 @@ func (c config) validate() error {
 	if c.requestTimeout <= 0 || c.requestTimeout > time.Minute || c.settle < 0 || c.settle > time.Minute {
 		return errors.New("request timeout or batch settle duration is outside its supported range")
 	}
+	if c.cleanupTimeout < time.Second || c.cleanupTimeout > 10*time.Minute ||
+		c.cleanupPoll < 10*time.Millisecond || c.cleanupPoll > 5*time.Second || c.cleanupPoll > c.cleanupTimeout {
+		return errors.New("cleanup timeout or poll interval is outside its supported range")
+	}
 	if c.hardLimit <= 0 || c.p50Target <= 0 || c.p50Target > c.hardLimit {
 		return errors.New("p50 target must be positive and no greater than the hard limit")
 	}
@@ -173,9 +185,10 @@ func run(ctx context.Context, cfg config) (report, error) {
 		return report{}, errors.New("HTTP client is required")
 	}
 	result := report{
-		Version: 1, Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
+		Version: 2, Label: cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
 		Batches: cfg.batches, Concurrency: cfg.concurrency, HardLimit: cfg.hardLimit,
-		P50Target: cfg.p50Target, Samples: make([]sample, cfg.batches*cfg.concurrency),
+		P50Target: cfg.p50Target, CleanupTimeout: cfg.cleanupTimeout,
+		Samples: make([]sample, cfg.batches*cfg.concurrency),
 	}
 	var cleanupErrors atomic.Int64
 	for batch := range cfg.batches {
@@ -202,10 +215,12 @@ func run(ctx context.Context, cfg config) (report, error) {
 				index := batch*cfg.concurrency + lane
 				go func(sandboxID string, index int) {
 					defer wait.Done()
+					started := time.Now()
 					if err := cleanupSandbox(ctx, cfg, sandboxID); err != nil {
 						cleanupErrors.Add(1)
 						result.Samples[index].CleanupError = err.Error()
 					}
+					result.Samples[index].CleanupDuration = time.Since(started)
 				}(current.SandboxID, index)
 			}
 			wait.Wait()
@@ -222,7 +237,11 @@ func run(ctx context.Context, cfg config) (report, error) {
 	result.CleanupErrors = int(cleanupErrors.Load())
 	commandDurations := make([]time.Duration, 0, len(result.Samples))
 	wallDurations := make([]time.Duration, 0, len(result.Samples))
+	cleanupDurations := make([]time.Duration, 0, len(result.Samples))
 	for _, current := range result.Samples {
+		if cfg.cleanup && current.CleanupError == "" && current.SandboxID != "" {
+			cleanupDurations = append(cleanupDurations, current.CleanupDuration)
+		}
 		if current.Error != "" {
 			result.Errors++
 			continue
@@ -235,9 +254,11 @@ func run(ctx context.Context, cfg config) (report, error) {
 	}
 	result.CommandReady = summarize(commandDurations)
 	result.Wall = summarize(wallDurations)
+	result.Cleanup = summarize(cleanupDurations)
 	result.Passed = result.Errors == 0 && result.SLOMisses == 0 && result.CleanupErrors == 0 &&
 		result.CommandReady.Count == len(result.Samples) && result.CommandReady.P50 <= cfg.p50Target &&
-		result.CommandReady.P99 <= cfg.hardLimit && result.CommandReady.Max <= cfg.hardLimit
+		result.CommandReady.P99 <= cfg.hardLimit && result.CommandReady.Max <= cfg.hardLimit &&
+		(!cfg.cleanup || result.Cleanup.Count == len(result.Samples))
 	if !result.Passed {
 		return result, fmt.Errorf(
 			"SLO acceptance failed: samples=%d errors=%d misses=%d cleanup_errors=%d p50=%s p99=%s max=%s",
@@ -309,23 +330,61 @@ func cleanupSandbox(ctx context.Context, cfg config, sandboxID string) error {
 	if err != nil {
 		return err
 	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, cfg.cleanupTimeout)
+	defer cleanupCancel()
+	status, payload, err := sandboxRequest(cleanupCtx, cfg, http.MethodDelete, endpoint)
+	if err != nil {
+		return fmt.Errorf("request sandbox %s deletion: %w", sandboxID, err)
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("delete sandbox %s returned status %d: %s", sandboxID, status, truncate(string(payload), 512))
+	}
+	for {
+		status, payload, err = sandboxRequest(cleanupCtx, cfg, http.MethodGet, endpoint)
+		if err != nil {
+			if cleanupCtx.Err() != nil {
+				return fmt.Errorf("sandbox %s cleanup did not converge: %w", sandboxID, cleanupCtx.Err())
+			}
+			return fmt.Errorf("observe sandbox %s cleanup: %w", sandboxID, err)
+		}
+		switch status {
+		case http.StatusNotFound:
+			return nil
+		case http.StatusOK:
+		default:
+			return fmt.Errorf("observe sandbox %s cleanup returned status %d: %s", sandboxID, status, truncate(string(payload), 512))
+		}
+		timer := time.NewTimer(cfg.cleanupPoll)
+		select {
+		case <-cleanupCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("sandbox %s cleanup did not converge: %w", sandboxID, cleanupCtx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func sandboxRequest(ctx context.Context, cfg config, method, endpoint string) (int, []byte, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, cfg.requestTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodDelete, endpoint, nil)
+	request, err := http.NewRequestWithContext(requestCtx, method, endpoint, nil)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.token)
 	response, err := cfg.client.Do(request)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("delete sandbox %s returned %s", sandboxID, response.Status)
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return 0, nil, err
 	}
-	return nil
+	if len(payload) > 1<<20 {
+		return 0, nil, errors.New("sandbox response exceeds 1 MiB")
+	}
+	return response.StatusCode, payload, nil
 }
 
 func commandReadyDuration(value string) (time.Duration, error) {

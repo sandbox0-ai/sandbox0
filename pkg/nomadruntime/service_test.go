@@ -419,6 +419,15 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 }
 
 func TestNodeRuntimeCleansCanceledUnconsumedWriterFromJournal(t *testing.T) {
+	testNodeRuntimeCleansUnconsumedWriterFromJournal(t, protocol.WriterRetireKindCanceled)
+}
+
+func TestNodeRuntimeCleansCrashAbandonedUnconsumedWriterFromJournal(t *testing.T) {
+	testNodeRuntimeCleansUnconsumedWriterFromJournal(t, protocol.WriterRetireKindCrashAbandon)
+}
+
+func testNodeRuntimeCleansUnconsumedWriterFromJournal(t *testing.T, retireKind string) {
+	t.Helper()
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
@@ -431,7 +440,7 @@ func TestNodeRuntimeCleansCanceledUnconsumedWriterFromJournal(t *testing.T) {
 	stableMountID, err := stableMountIdentity(stableMount)
 	require.NoError(t, err)
 	request := testNodeCleanupRequest()
-	request.WriterRetireKind = protocol.WriterRetireKindCanceled
+	request.WriterRetireKind = retireKind
 	request.NetNSIdentity = netnsIdentity
 	stage := rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion, Parent: "parent-unconsumed",
@@ -453,9 +462,10 @@ func TestNodeRuntimeCleansCanceledUnconsumedWriterFromJournal(t *testing.T) {
 		}},
 		proof: localProof,
 	}
-	boundCanceled := runtime.recovery[0]
-	boundCanceled.Consumer = &rootfssession.ConsumerRegistration{}
-	require.ErrorIs(t, validateRuntimeSlotCleanupSession(boundCanceled, request), errdefs.ErrFailedPrecondition)
+	require.NoError(t, validateRuntimeSlotCleanupSession(runtime.recovery[0], request))
+	boundSession := runtime.recovery[0]
+	boundSession.Consumer = &rootfssession.ConsumerRegistration{}
+	require.ErrorIs(t, validateRuntimeSlotCleanupSession(boundSession, request), errdefs.ErrFailedPrecondition)
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
 	network := newFakeCtldNetwork(t)

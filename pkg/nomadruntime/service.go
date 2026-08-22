@@ -1095,6 +1095,10 @@ func validateRuntimeSlotCleanupSession(
 		return nil
 	}
 	if consumer == nil {
+		if request.WriterRetireKind == protocol.WriterRetireKindCrashAbandon &&
+			session.Kind == rootfssession.RecoveryCrashAbandon {
+			return nil
+		}
 		return fmt.Errorf("non-canceled writer lacks its RootFS consumer: %w", errdefs.ErrFailedPrecondition)
 	}
 	if consumer.ActiveKey != request.SlotID || consumer.ContainerID != request.RunscContainerID ||

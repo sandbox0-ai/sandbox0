@@ -52,7 +52,7 @@ func TestKernelNBDCapacityErrorDoesNotPoisonRetirement(t *testing.T) {
 	require.ErrorIs(t, device.requestErr, syscall.EIO)
 }
 
-func TestKernelNBDWaitBlocksGoPreemptionSignal(t *testing.T) {
+func TestKernelNBDWaitBlocksAsynchronousSignals(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	var before unix.Sigset_t
@@ -62,7 +62,11 @@ func TestKernelNBDWaitBlocksGoPreemptionSignal(t *testing.T) {
 	err := withKernelNBDSignalMask(func() error {
 		var current unix.Sigset_t
 		require.NoError(t, unix.PthreadSigmask(unix.SIG_BLOCK, nil, &current))
-		require.True(t, signalMaskContains(&current, unix.SIGURG))
+		for _, signal := range []unix.Signal{unix.SIGHUP, unix.SIGUSR1, unix.SIGCHLD, unix.SIGURG, unix.SIGTERM} {
+			require.True(t, signalMaskContains(&current, signal), "signal %d remains unblocked", signal)
+		}
+		require.False(t, signalMaskContains(&current, unix.SIGKILL))
+		require.False(t, signalMaskContains(&current, unix.SIGSTOP))
 		return sentinel
 	})
 	require.ErrorIs(t, err, sentinel)

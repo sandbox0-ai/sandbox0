@@ -214,10 +214,11 @@ func StartKernelNBD(lifetime, readyContext context.Context, backend WritableBloc
 	return device, nil
 }
 
-// runKernelNBD prevents Go's asynchronous SIGURG preemption from interrupting
-// NBD_DO_IT. The kernel treats any signal that interrupts this ioctl as a
-// request to tear down every NBD socket, so the wait must own one OS thread and
-// mask the preemption signal for its entire lifetime.
+// runKernelNBD prevents asynchronous signals from interrupting NBD_DO_IT. The
+// kernel treats any signal interruption as a request to tear down every NBD
+// socket, so the wait must own one OS thread and mask signals for its entire
+// lifetime. Process-directed shutdown signals remain deliverable to the other
+// Go runtime threads, which cancel the NBD lifetime through the normal path.
 func runKernelNBD(file *os.File) error {
 	return withKernelNBDSignalMask(func() error { return ioctlSetInt(file, nbdDoIt, 0) })
 }
@@ -227,7 +228,7 @@ func withKernelNBDSignalMask(operation func() error) (result error) {
 	defer runtime.UnlockOSThread()
 
 	mask := unix.Sigset_t{}
-	setSignalMaskBit(&mask, unix.SIGURG)
+	fillKernelNBDSignalMask(&mask)
 	var oldMask unix.Sigset_t
 	if err := unix.PthreadSigmask(unix.SIG_BLOCK, &mask, &oldMask); err != nil {
 		return fmt.Errorf("block NBD interrupt signal: %w", err)
@@ -238,6 +239,12 @@ func withKernelNBDSignalMask(operation func() error) (result error) {
 		}
 	}()
 	return operation()
+}
+
+func fillKernelNBDSignalMask(mask *unix.Sigset_t) {
+	for signal := unix.Signal(1); signal <= 64; signal++ {
+		setSignalMaskBit(mask, signal)
+	}
 }
 
 func setSignalMaskBit(mask *unix.Sigset_t, signal unix.Signal) {

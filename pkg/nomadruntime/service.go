@@ -46,6 +46,7 @@ const (
 	rootFSSessionReconcileInterval  = time.Second
 	rootFSSessionAttachGrace        = 2 * time.Minute
 	rootFSSessionReconcileTimeout   = 3 * time.Minute
+	runtimeSlotJournalPruneInterval = time.Minute
 	nomadAllocationResponseMaxBytes = 64 << 20
 	nodeRuntimeStartupTimeout       = 30 * time.Second
 	nodeRuntimeHealthInterval       = time.Second
@@ -158,6 +159,7 @@ type nodeRuntime struct {
 	allocations        nomadAllocationSource
 	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
 	journal            *runtimeSlotJournal
+	lastJournalPrune   time.Time
 	clusterID          string
 	nodeID             string
 	nodeUID            string
@@ -1257,9 +1259,12 @@ func (d *nodeRuntime) scanDirtyTailPressures(ctx context.Context) {
 }
 
 func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
-	if d.journal != nil {
-		if _, err := d.journal.Prune(time.Now()); err != nil {
+	now := time.Now()
+	if d.journal != nil && (d.lastJournalPrune.IsZero() || now.Sub(d.lastJournalPrune) >= runtimeSlotJournalPruneInterval) {
+		if _, err := d.journal.Prune(now); err != nil {
 			d.logger.Error("prune runtime slot cleanup proofs", "error", err)
+		} else {
+			d.lastJournalPrune = now
 		}
 	}
 	sessions, err := d.runtime.RecoverySessions()
@@ -1267,7 +1272,7 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		d.logger.Error("list durable RootFS recovery sessions", "error", err)
 		return
 	}
-	now := time.Now()
+	now = time.Now()
 	var activeAllocations map[string]bool
 	if d.allocations != nil {
 		activeAllocations, err = d.allocations.ActiveAllocations(ctx)
@@ -1509,7 +1514,7 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 		// but do not poll the authority once per second for every retained
 		// terminal session. Reconcile once more at expiry to verify and forget
 		// the proof.
-		return !now.Before(session.CrashRequestedAt.Add(2 * runtimeSlotProofRetention))
+		return !now.Before(session.CrashRequestedAt.Add(rootfssession.ExternalTerminalProofRetention))
 	}
 	if forced || session.Kind == rootfssession.RecoveryPlannedRetire {
 		return true

@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,19 +36,23 @@ const (
 	DefaultDirtyTailRetirementReserveBytes = int64(64 << 20)
 	sessionJournalMaxBatchSize             = 64
 	sessionJournalMaxBatchDelay            = time.Millisecond
-	legacySessionSchemaVersion             = 2
-	allocationSessionSchemaVersion         = 3
-	durableBindingSchemaVersion            = 4
-	sessionSchemaVersion                   = 7
-	stateReserved                          = "reserved"
-	stateDeviceReserved                    = "device_reserved"
-	stateDeviceReady                       = "device_ready"
-	stateXFSMounted                        = "xfs_mounted"
-	stateReady                             = "ready"
-	stateRetireRequested                   = "retire_requested"
-	stateReleasing                         = "releasing"
-	stateTombstoned                        = "tombstoned"
-	stateFailed                            = "failed"
+	// ExternalTerminalProofRetention keeps the compact node proof longer than
+	// the runtime-slot response replay window without putting terminal history
+	// on the one-second physical recovery scan.
+	ExternalTerminalProofRetention = 48 * time.Hour
+	legacySessionSchemaVersion     = 2
+	allocationSessionSchemaVersion = 3
+	durableBindingSchemaVersion    = 4
+	sessionSchemaVersion           = 7
+	stateReserved                  = "reserved"
+	stateDeviceReserved            = "device_reserved"
+	stateDeviceReady               = "device_ready"
+	stateXFSMounted                = "xfs_mounted"
+	stateReady                     = "ready"
+	stateRetireRequested           = "retire_requested"
+	stateReleasing                 = "releasing"
+	stateTombstoned                = "tombstoned"
+	stateFailed                    = "failed"
 )
 
 var (
@@ -282,6 +287,9 @@ type Manager struct {
 	rebaseAdmission   chan struct{}
 	rebaseWG          sync.WaitGroup
 	pressureSignal    chan struct{}
+	recoveryMu        sync.RWMutex
+	recoveryParents   map[string]struct{}
+	quietExternal     map[string]time.Time
 	closing           bool
 }
 
@@ -364,7 +372,7 @@ func New(config Config) (*Manager, error) {
 	if rebaseEngine == nil {
 		rebaseEngine = filesystemRebaseEngine{}
 	}
-	return &Manager{
+	manager := &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, readCache: readCache,
 		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
@@ -372,8 +380,14 @@ func New(config Config) (*Manager, error) {
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
-		pressureSignal: make(chan struct{}, 1),
-	}, nil
+		pressureSignal:  make(chan struct{}, 1),
+		recoveryParents: make(map[string]struct{}), quietExternal: make(map[string]time.Time),
+	}
+	if err := manager.rebuildRecoveryIndex(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("index RootFS recovery sessions: %w", err)
+	}
+	return manager, nil
 }
 
 // ReconcileReleases completes every physical cleanup whose durable intent was
@@ -849,10 +863,11 @@ func buildBranchCheckpoint(
 	return sealed, payload, durability, nil
 }
 
-// RecoverySessions enumerates every durable session needed by an independent
-// node reconciler. Older records remain visible as RecoveryUnavailable and
-// must be fenced by their legacy owner; they are never guessed from partial
-// identities.
+// RecoverySessions enumerates every durable session currently needing an
+// independent node reconciler. A completed external proof stays queryable by
+// exact parent but leaves the hot recovery index until its bounded retention
+// expires. Older records remain visible as RecoveryUnavailable and must be
+// fenced by their legacy owner; they are never guessed from partial identities.
 func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 	m.mu.Lock()
 	live := make(map[string]bool, len(m.live))
@@ -861,90 +876,113 @@ func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 	}
 	m.mu.Unlock()
 
-	result := make([]RecoverySession, 0)
+	m.recoveryMu.RLock()
+	parents := make([]string, 0, len(m.recoveryParents))
+	for parent := range m.recoveryParents {
+		parents = append(parents, parent)
+	}
+	now := time.Now()
+	for parent, quietUntil := range m.quietExternal {
+		if !now.Before(quietUntil) {
+			parents = append(parents, parent)
+		}
+	}
+	m.recoveryMu.RUnlock()
+	sort.Strings(parents)
+	result := make([]RecoverySession, 0, len(parents))
 	err := m.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(sessionBucket).ForEach(func(key, payload []byte) error {
+		bucket := tx.Bucket(sessionBucket)
+		for _, parent := range parents {
+			payload := bucket.Get([]byte(parent))
 			if payload == nil {
-				return nil
+				// A terminal forget may commit between the in-memory snapshot and
+				// this read. The forget updates the index before it returns.
+				continue
 			}
 			var current record
 			if err := json.Unmarshal(payload, &current); err != nil {
-				return fmt.Errorf("decode RootFS session %q: %w", key, err)
+				return fmt.Errorf("decode RootFS session %q: %w", parent, err)
 			}
-			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
-				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
-			}
-			if current.Version >= durableBindingSchemaVersion && current.Stage == nil {
-				return fmt.Errorf("RootFS recovery record %q lacks its durable Stage binding", key)
-			}
-			recovery := RecoverySession{
-				Kind: RecoveryUnavailable, State: current.State,
-				RetireOperationID: current.RetireOperationID, BranchRemoved: current.BranchRemoved,
-				Live: live[current.Parent],
-			}
-			if current.DirtyTailPressure != nil {
-				pressure := rootfsblock.DirtyTailPressure{
-					Scope: current.DirtyTailPressure.Scope, UsedBytes: current.DirtyTailPressure.UsedBytes,
-					RequestedBytes: current.DirtyTailPressure.RequestedBytes,
-					LimitBytes:     current.DirtyTailPressure.LimitBytes,
-				}
-				expected := rootfshandoff.PlannedRetireOperationID(
-					current.Parent, current.Stage.Identity.WriterGrantID, current.Stage.Identity.WriterEpoch,
-				)
-				if current.State != stateReady || current.RetireOperationID != "" ||
-					current.DirtyTailPressure.OperationID != expected || !validDirtyTailPressure(pressure) {
-					return fmt.Errorf("RootFS recovery record %q has an invalid dirty-tail pressure intent", key)
-				}
-				recovery.PressureOperationID = current.DirtyTailPressure.OperationID
-			}
-			createdAt, err := time.Parse(time.RFC3339Nano, current.CreatedAt)
+			recovery, err := recoverySessionFromRecord(parent, current, live[current.Parent])
 			if err != nil {
-				return fmt.Errorf("parse RootFS recovery creation time %q: %w", key, err)
-			}
-			recovery.CreatedAt = createdAt
-			if current.CrashFence != nil {
-				recovery.CrashOperationID = current.CrashFence.OperationID
-				recovery.ExternalCrash = current.CrashFence.External
-				requestedAt, err := time.Parse(time.RFC3339Nano, current.CrashFence.RequestedAt)
-				if err != nil {
-					return fmt.Errorf("parse RootFS crash request time %q: %w", key, err)
-				}
-				recovery.CrashRequestedAt = requestedAt
-			}
-			if current.Consumer != nil {
-				consumer := *current.Consumer
-				if _, err := consumer.Validate(); err != nil {
-					return fmt.Errorf("validate RootFS consumer %q: %w", key, err)
-				}
-				recovery.Consumer = &consumer
-			}
-			if current.Stage != nil {
-				stage := cloneDurableStage(*current.Stage)
-				if stage.Identity.WriterGrantToken != "" {
-					return fmt.Errorf("RootFS recovery record %q contains a raw writer token", key)
-				}
-				if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
-					return fmt.Errorf("validate RootFS recovery binding %q: %v", key, err)
-				}
-				binding, err := stage.BindingDigest()
-				if err != nil || !sameBinding(current, stage, hex.EncodeToString(binding[:])) {
-					return fmt.Errorf("RootFS recovery binding %q does not match its physical session", key)
-				}
-				recovery.Stage = stage
-				if current.RetireOperationID != "" {
-					recovery.Kind = RecoveryPlannedRetire
-				} else {
-					recovery.Kind = RecoveryCrashAbandon
-				}
+				return err
 			}
 			result = append(result, recovery)
-			return nil
-		})
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func recoverySessionFromRecord(key string, current record, live bool) (RecoverySession, error) {
+	if current.Parent != key || !supportedSessionVersion(current.Version) {
+		return RecoverySession{}, fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
+	}
+	if current.Version >= durableBindingSchemaVersion && current.Stage == nil {
+		return RecoverySession{}, fmt.Errorf("RootFS recovery record %q lacks its durable Stage binding", key)
+	}
+	recovery := RecoverySession{
+		Kind: RecoveryUnavailable, State: current.State,
+		RetireOperationID: current.RetireOperationID, BranchRemoved: current.BranchRemoved, Live: live,
+	}
+	if current.DirtyTailPressure != nil {
+		pressure := rootfsblock.DirtyTailPressure{
+			Scope: current.DirtyTailPressure.Scope, UsedBytes: current.DirtyTailPressure.UsedBytes,
+			RequestedBytes: current.DirtyTailPressure.RequestedBytes, LimitBytes: current.DirtyTailPressure.LimitBytes,
+		}
+		expected := rootfshandoff.PlannedRetireOperationID(
+			current.Parent, current.Stage.Identity.WriterGrantID, current.Stage.Identity.WriterEpoch,
+		)
+		if current.State != stateReady || current.RetireOperationID != "" ||
+			current.DirtyTailPressure.OperationID != expected || !validDirtyTailPressure(pressure) {
+			return RecoverySession{}, fmt.Errorf("RootFS recovery record %q has an invalid dirty-tail pressure intent", key)
+		}
+		recovery.PressureOperationID = current.DirtyTailPressure.OperationID
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, current.CreatedAt)
+	if err != nil {
+		return RecoverySession{}, fmt.Errorf("parse RootFS recovery creation time %q: %w", key, err)
+	}
+	recovery.CreatedAt = createdAt
+	if current.CrashFence != nil {
+		recovery.CrashOperationID = current.CrashFence.OperationID
+		recovery.ExternalCrash = current.CrashFence.External
+		requestedAt, err := time.Parse(time.RFC3339Nano, current.CrashFence.RequestedAt)
+		if err != nil {
+			return RecoverySession{}, fmt.Errorf("parse RootFS crash request time %q: %w", key, err)
+		}
+		recovery.CrashRequestedAt = requestedAt
+	}
+	if current.Consumer != nil {
+		consumer := *current.Consumer
+		if _, err := consumer.Validate(); err != nil {
+			return RecoverySession{}, fmt.Errorf("validate RootFS consumer %q: %w", key, err)
+		}
+		recovery.Consumer = &consumer
+	}
+	if current.Stage != nil {
+		stage := cloneDurableStage(*current.Stage)
+		if stage.Identity.WriterGrantToken != "" {
+			return RecoverySession{}, fmt.Errorf("RootFS recovery record %q contains a raw writer token", key)
+		}
+		if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+			return RecoverySession{}, fmt.Errorf("validate RootFS recovery binding %q: %v", key, err)
+		}
+		binding, err := stage.BindingDigest()
+		if err != nil || !sameBinding(current, stage, hex.EncodeToString(binding[:])) {
+			return RecoverySession{}, fmt.Errorf("RootFS recovery binding %q does not match its physical session", key)
+		}
+		recovery.Stage = stage
+		if current.RetireOperationID != "" {
+			recovery.Kind = RecoveryPlannedRetire
+		} else {
+			recovery.Kind = RecoveryCrashAbandon
+		}
+	}
+	return recovery, nil
 }
 
 // Validate checks a durable consumer record and returns its wall-clock lease
@@ -1503,7 +1541,7 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 			return fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
 		}
 	}
-	return m.db.Update(func(tx *bolt.Tx) error {
+	err = m.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		identityBucket := tx.Bucket(sessionIdentityBucket)
 		payload := bucket.Get([]byte(parent))
@@ -1527,6 +1565,13 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 		}
 		return bucket.Delete([]byte(parent))
 	})
+	if err == nil {
+		m.recoveryMu.Lock()
+		delete(m.recoveryParents, parent)
+		delete(m.quietExternal, parent)
+		m.recoveryMu.Unlock()
+	}
+	return err
 }
 
 // CrashFence durably proves that a non-cooperatively stopped session has no
@@ -2024,6 +2069,13 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 	}
 	m.mu.Unlock()
 
+	m.recoveryMu.RLock()
+	parents := make([]string, 0, len(m.recoveryParents))
+	for parent := range m.recoveryParents {
+		parents = append(parents, parent)
+	}
+	m.recoveryMu.RUnlock()
+	sort.Strings(parents)
 	pressures := make([]DirtyTailPressureSession, 0)
 	err := m.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
@@ -2032,9 +2084,11 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 			payload []byte
 		}
 		updates := make([]pressureUpdate, 0)
-		if err := bucket.ForEach(func(key, payload []byte) error {
+		for _, parent := range parents {
+			key := []byte(parent)
+			payload := bucket.Get(key)
 			if payload == nil {
-				return nil
+				continue
 			}
 			var current record
 			if err := json.Unmarshal(payload, &current); err != nil {
@@ -2042,7 +2096,7 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 			}
 			if current.Parent != string(key) || current.State != stateReady ||
 				current.RetireOperationID != "" || current.Stage == nil {
-				return nil
+				continue
 			}
 			stage := cloneDurableStage(*current.Stage)
 			if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
@@ -2064,11 +2118,11 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 			} else {
 				branch := live[string(key)]
 				if branch == nil {
-					return nil
+					continue
 				}
 				observed := branch.DirtyTailPressure()
 				if observed == nil {
-					return nil
+					continue
 				}
 				pressure = *observed
 				if !validDirtyTailPressure(pressure) {
@@ -2092,9 +2146,6 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 				})
 			}
 			pressures = append(pressures, DirtyTailPressureSession{Stage: stage, Pressure: pressure})
-			return nil
-		}); err != nil {
-			return err
 		}
 		for _, update := range updates {
 			if err := bucket.Put(update.key, update.payload); err != nil {
@@ -2278,7 +2329,11 @@ func (m *Manager) load(parent string) (record, error) {
 }
 
 func (m *Manager) saveNew(value record) error {
-	return m.db.Batch(func(tx *bolt.Tx) error {
+	quietUntil, quiet, err := externalProofQuietUntil(value)
+	if err != nil {
+		return err
+	}
+	err = m.db.Batch(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		if bucket.Get([]byte(value.Parent)) != nil {
 			return errdefs.ErrAlreadyExists
@@ -2293,11 +2348,83 @@ func (m *Manager) saveNew(value record) error {
 		}
 		return identityBucket.Put(identityKey, []byte(value.Parent))
 	})
+	if err == nil {
+		m.setRecoveryIndex(value.Parent, quietUntil, quiet)
+	}
+	return err
 }
 
 func (m *Manager) save(value record) error {
 	value.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	return m.db.Batch(func(tx *bolt.Tx) error { return putRecord(tx.Bucket(sessionBucket), value) })
+	quietUntil, quiet, err := externalProofQuietUntil(value)
+	if err != nil {
+		return err
+	}
+	err = m.db.Batch(func(tx *bolt.Tx) error { return putRecord(tx.Bucket(sessionBucket), value) })
+	if err == nil {
+		m.setRecoveryIndex(value.Parent, quietUntil, quiet)
+	}
+	return err
+}
+
+func (m *Manager) rebuildRecoveryIndex() error {
+	return m.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(sessionBucket).ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current record
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode RootFS session %q: %w", key, err)
+			}
+			if _, err := recoverySessionFromRecord(string(key), current, false); err != nil {
+				return err
+			}
+			return m.indexRecoveryRecord(current)
+		})
+	})
+}
+
+// indexRecoveryRecord indexes only work the periodic reconciler can currently
+// act on; compact external proofs re-enter at their exact expiry.
+func (m *Manager) indexRecoveryRecord(current record) error {
+	quietUntil, quiet, err := externalProofQuietUntil(current)
+	if err != nil {
+		return err
+	}
+	m.setRecoveryIndex(current.Parent, quietUntil, quiet)
+	return nil
+}
+
+func (m *Manager) setRecoveryIndex(parent string, quietUntil time.Time, quiet bool) {
+	m.recoveryMu.Lock()
+	defer m.recoveryMu.Unlock()
+	delete(m.recoveryParents, parent)
+	delete(m.quietExternal, parent)
+	if quiet {
+		m.quietExternal[parent] = quietUntil
+	} else {
+		m.recoveryParents[parent] = struct{}{}
+	}
+}
+
+func externalProofQuietUntil(current record) (time.Time, bool, error) {
+	if current.CrashFence == nil || !current.CrashFence.External ||
+		current.CrashFence.Result == nil || !current.BranchRemoved {
+		return time.Time{}, false, nil
+	}
+	terminal, err := terminalDeviceProof(current)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if current.State != stateTombstoned || !terminal {
+		return time.Time{}, false, fmt.Errorf("external RootFS proof is not physically terminal: %w", errdefs.ErrFailedPrecondition)
+	}
+	requestedAt, err := time.Parse(time.RFC3339Nano, current.CrashFence.RequestedAt)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse external RootFS proof request time: %w", err)
+	}
+	return requestedAt.Add(ExternalTerminalProofRetention), true, nil
 }
 
 func putRecord(bucket *bolt.Bucket, value record) error {

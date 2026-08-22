@@ -22,6 +22,7 @@ import (
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
@@ -184,9 +185,47 @@ func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
 	}
 	require.False(t, rootFSSessionNeedsReconciliation(terminal, now, true),
 		"a purged allocation must not hot-poll a retained terminal proof")
-	terminal.CrashRequestedAt = now.Add(-2 * runtimeSlotProofRetention)
+	terminal.CrashRequestedAt = now.Add(-rootfssession.ExternalTerminalProofRetention)
 	require.True(t, rootFSSessionNeedsReconciliation(terminal, now, false),
 		"an expired terminal proof must be verified and forgotten")
+}
+
+func TestNodeRuntimeThrottlesCompletedProofPruning(t *testing.T) {
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	putExpired := func(slotID string) RuntimeSlotRegistration {
+		registration := testRuntimeSlotJournalRegistration(t, slotID)
+		require.NoError(t, journal.Register(registration))
+		request := testRuntimeSlotJournalCleanup(registration)
+		_, err := journal.BeginCleanup(request)
+		require.NoError(t, err)
+		require.NoError(t, journal.CompleteCleanup(request, testRuntimeSlotJournalProof(t, request)))
+		record, err := journal.Get(slotID)
+		require.NoError(t, err)
+		record.CompletedAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+		record.UpdatedAt = record.CompletedAt
+		require.NoError(t, journal.db.Update(func(tx *bolt.Tx) error {
+			return putRuntimeSlotJournalRecord(tx.Bucket(runtimeSlotJournalBucket), record)
+		}))
+		return registration
+	}
+
+	first := putExpired("slot-prune-first")
+	daemon := &nodeRuntime{runtime: &fakeRootFSRuntime{}, journal: journal}
+	daemon.scan(t.Context(), "")
+	_, err = journal.Get(first.SlotID)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+
+	second := putExpired("slot-prune-second")
+	daemon.scan(t.Context(), "")
+	_, err = journal.Get(second.SlotID)
+	require.NoError(t, err, "a hot reconciliation trigger must not rescan terminal history")
+
+	daemon.lastJournalPrune = time.Now().Add(-runtimeSlotJournalPruneInterval)
+	daemon.scan(t.Context(), "")
+	_, err = journal.Get(second.SlotID)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
 }
 
 func TestNodeRuntimeFencesRegisteredRunscAndStableMount(t *testing.T) {

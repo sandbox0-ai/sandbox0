@@ -25,13 +25,14 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 )
 
 func TestRegionalTerminalProofOutlivesExternalCrashProofWindow(t *testing.T) {
-	require.Greater(t, sandboxstore.RootFSWriterTerminalProofRetention, 2*runtimeSlotProofRetention)
+	require.Greater(t, sandboxstore.RootFSWriterTerminalProofRetention, rootfssession.ExternalTerminalProofRetention)
 }
 
 func TestRuntimeSlotJournalPersistsExactCleanupProof(t *testing.T) {

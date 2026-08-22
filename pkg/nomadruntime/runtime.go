@@ -778,7 +778,7 @@ func (r *rootfsRuntime) ReclaimExternallyRetired(
 		return false, fmt.Errorf("reclaim externally retired RootFS artifacts: %w", err)
 	}
 	if matched != nil && !matched.CrashRequestedAt.IsZero() &&
-		!time.Now().Before(matched.CrashRequestedAt.Add(2*runtimeSlotProofRetention)) {
+		!time.Now().Before(matched.CrashRequestedAt.Add(rootfssession.ExternalTerminalProofRetention)) {
 		if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
 			return false, fmt.Errorf("forget expired external RootFS proof: %w", err)
 		}

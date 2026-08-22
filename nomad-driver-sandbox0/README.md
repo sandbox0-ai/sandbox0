@@ -490,7 +490,10 @@ RootFS writer session. Cleanup persists the exact request before touching
 runsc, mounts, or network state and persists its absence proof before replying.
 Completed proofs expire after 24 hours and compact external RootFS fences after
 48 hours. These TTLs bound local state while PostgreSQL terminal state remains
-the authority for retries.
+the authority for retries. Ctld rebuilds a derived active/expiry index from
+Bolt at startup, so its one-second recovery and pressure scans decode only
+actionable or newly expired RootFS sessions; the remaining cleanup-proof
+expiry scan runs at most once per minute instead of once per recovery trigger.
 
 The Unix API remains a node execution primitive and is never dialed directly
 by the region. When `nomad_runtime.enabled` is set, ctld resolves the

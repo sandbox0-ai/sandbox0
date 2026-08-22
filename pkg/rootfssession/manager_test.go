@@ -434,9 +434,29 @@ func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.
 
 	recovery, err := manager.RecoverySessions()
 	require.NoError(t, err)
-	require.Len(t, recovery, 1)
+	require.Empty(t, recovery, "retained external proof must leave the hot recovery scan")
+
+	stored.CrashFence.RequestedAt = time.Now().Add(-ExternalTerminalProofRetention - time.Minute).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.save(stored))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1, "expired external proof must re-enter recovery for final verification")
 	require.True(t, recovery[0].ExternalCrash)
 	require.Equal(t, "regional-crash-operation", recovery[0].CrashOperationID)
+
+	config := Config{
+		StatePath: manager.db.Path(), BranchRoot: manager.branchRoot, MountRoot: manager.mountRoot,
+		Source: manager.source, Publisher: manager.publisher, Runtime: manager.runtime,
+		MaxDirtyTailBytes: manager.maxDirty, MaxNodeDirtyTailBytes: manager.nodeDirty.Usage().MaxBytes,
+		DirtyTailRetirementReserveBytes: manager.retirementReserve,
+	}
+	require.NoError(t, manager.Close())
+	restarted, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restarted.Close()) })
+	recovery, err = restarted.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1, "restart must rebuild the due-proof recovery index")
 }
 
 func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {

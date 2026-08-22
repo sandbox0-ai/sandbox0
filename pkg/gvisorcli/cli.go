@@ -28,6 +28,11 @@ import (
 	"github.com/containerd/errdefs"
 )
 
+const (
+	maxRunscOutputBytes = 2 << 20
+	maxRunscStderrBytes = 64 << 10
+)
+
 // Runsc is the subset of the stock gVisor CLI used by the driver.
 type Runsc interface {
 	Create(ctx context.Context, bundleDir, containerID string) error
@@ -36,6 +41,7 @@ type Runsc interface {
 	Kill(ctx context.Context, containerID, signal string) error
 	Delete(ctx context.Context, containerID string, force bool) error
 	State(ctx context.Context, containerID string) (RunscState, error)
+	Stats(ctx context.Context, containerID string) (RunscStats, error)
 	Version(ctx context.Context) (string, error)
 }
 
@@ -120,6 +126,27 @@ func (r *Command) State(ctx context.Context, containerID string) (RunscState, er
 	return state, nil
 }
 
+// Stats returns one identity-checked stock `runsc events --stats` sample.
+func (r *Command) Stats(ctx context.Context, containerID string) (RunscStats, error) {
+	var result RunscStats
+	output, err := r.output(ctx, "events", "--stats", containerID)
+	if err != nil {
+		return result, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return RunscStats{}, fmt.Errorf("decode runsc stats: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return RunscStats{}, fmt.Errorf("decode runsc stats: output must contain exactly one JSON value")
+	}
+	if err := result.Validate(containerID); err != nil {
+		return RunscStats{}, fmt.Errorf("validate runsc stats: %w", err)
+	}
+	return result, nil
+}
+
 func (r *Command) Version(ctx context.Context) (string, error) {
 	output, err := r.output(ctx, "--version")
 	if err != nil {
@@ -173,8 +200,11 @@ func (r *Command) run(ctx context.Context, args ...string) error {
 		}
 		return err
 	}
-	stderr, readErr := io.ReadAll(temp)
+	stderr, readErr := io.ReadAll(io.LimitReader(temp, maxRunscStderrBytes+1))
 	_ = temp.Close()
+	if len(stderr) > maxRunscStderrBytes {
+		return fmt.Errorf("runsc %s stderr exceeds %d bytes", args[0], maxRunscStderrBytes)
+	}
 	if err != nil {
 		return classifyRunscError(args[0], err, string(stderr))
 	}
@@ -186,14 +216,50 @@ func (r *Command) run(ctx context.Context, args ...string) error {
 
 func (r *Command) output(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := r.command(ctx, args...)
-	var stderr bytes.Buffer
+	stdout := boundedBuffer{limit: maxRunscOutputBytes}
+	stderr := boundedBuffer{limit: maxRunscStderrBytes}
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	err := cmd.Run()
+	if stdout.exceeded {
+		return nil, fmt.Errorf("runsc %s stdout exceeds %d bytes", args[0], maxRunscOutputBytes)
+	}
+	if stderr.exceeded {
+		return nil, fmt.Errorf("runsc %s stderr exceeds %d bytes", args[0], maxRunscStderrBytes)
+	}
 	if err != nil {
 		return nil, classifyRunscError(args[0], err, stderr.String())
 	}
-	return output, nil
+	return append([]byte(nil), stdout.Bytes()...), nil
 }
+
+type boundedBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (b *boundedBuffer) Write(payload []byte) (int, error) {
+	if b.limit < 0 {
+		b.limit = 0
+	}
+	remaining := b.limit - b.buffer.Len()
+	if remaining > 0 {
+		written := len(payload)
+		if written > remaining {
+			written = remaining
+		}
+		_, _ = b.buffer.Write(payload[:written])
+	}
+	if len(payload) > remaining {
+		b.exceeded = true
+	}
+	return len(payload), nil
+}
+
+func (b *boundedBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *boundedBuffer) String() string { return b.buffer.String() }
+func (b *boundedBuffer) Len() int       { return b.buffer.Len() }
 
 func classifyRunscError(operation string, commandErr error, stderr string) error {
 	message := strings.TrimSpace(stderr)

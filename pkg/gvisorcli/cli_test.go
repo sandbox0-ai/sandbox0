@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,5 +55,17 @@ exit 0
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Create() waited for a long-lived child that inherited stderr")
+	}
+}
+
+func TestCommandRunBoundsInheritedStderr(t *testing.T) {
+	runner := newOutputRunsc(t, `
+dd if=/dev/zero bs=65537 count=1 1>&2 2>/dev/null
+exit 1
+`)
+
+	err := runner.Create(context.Background(), t.TempDir(), "container")
+	if err == nil || !strings.Contains(err.Error(), "stderr exceeds 65536 bytes") {
+		t.Fatalf("Create() error = %v", err)
 	}
 }

@@ -150,6 +150,11 @@ func (r *fakeRunsc) State(context.Context, string) (RunscState, error) {
 	return RunscState{ID: "fake", Status: r.state}, nil
 }
 
+func (r *fakeRunsc) Stats(context.Context, string) (RunscStats, error) {
+	r.record("stats")
+	return RunscStats{Type: "stats", ID: "fake"}, nil
+}
+
 func (r *fakeRunsc) Version(context.Context) (string, error) {
 	return "runsc version fake", nil
 }

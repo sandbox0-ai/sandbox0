@@ -19,6 +19,7 @@ import "github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 type Runsc = gvisorcli.Runsc
 type WaitResult = gvisorcli.WaitResult
 type RunscState = gvisorcli.RunscState
+type RunscStats = gvisorcli.RunscStats
 
 func newCommandRunsc(config Config) Runsc {
 	return gvisorcli.New(gvisorcli.Config{

@@ -8,14 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
@@ -923,21 +921,7 @@ func normalizeRootFSMaterializationObjectReferences(
 }
 
 func validateRootFSMaterializationObjectReference(reference rootfsblock.ObjectReference) error {
-	if reference.Key == "" || strings.TrimSpace(reference.Key) != reference.Key ||
-		len(reference.Key) > rootfsblock.MaxObjectKeyBytes || strings.HasPrefix(reference.Key, "/") ||
-		strings.Contains(reference.Key, "\\") || path.Clean(reference.Key) != reference.Key ||
-		reference.Key == "." || strings.HasPrefix(reference.Key, "../") ||
-		reference.Size <= 0 || reference.Size > rootfsblock.DefaultPackBytes {
-		return fmt.Errorf("rootfs materialization object identity is invalid")
-	}
-	if reference.Kind != rootfsblock.ObjectKindDataPack && reference.Kind != rootfsblock.ObjectKindMappingPage {
-		return fmt.Errorf("rootfs materialization object kind is invalid")
-	}
-	parsed, err := digest.Parse(reference.Checksum)
-	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != reference.Checksum {
-		return fmt.Errorf("rootfs materialization object checksum must be canonical sha256")
-	}
-	return nil
+	return rootfsblock.ValidateObjectReference(reference)
 }
 
 func loadRootFSMaterializationBatch(

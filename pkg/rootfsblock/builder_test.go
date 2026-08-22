@@ -81,6 +81,35 @@ func TestBuildMaterializedGenerationRejectsShortInputAndConflictingObject(t *tes
 	require.ErrorContains(t, err, "immutable object conflict")
 }
 
+func TestNormalizeBuildOptionsRejectsUnboundedPack(t *testing.T) {
+	_, err := NormalizeBuildOptions(BuildOptions{
+		DataRangeBytes: MaxDataRangeBytes,
+		PackBytes:      DefaultPackBytes + MaxDataRangeBytes,
+	})
+	require.ErrorContains(t, err, "no greater than")
+}
+
+func TestValidateObjectReference(t *testing.T) {
+	payload := []byte("immutable-object")
+	reference := ObjectReference{
+		Key:  "rootfs/team/packs/sha256/" + digest.FromBytes(payload).Encoded(),
+		Kind: ObjectKindDataPack, Size: int64(len(payload)), Checksum: digest.FromBytes(payload).String(),
+	}
+	require.NoError(t, ValidateObjectReference(reference))
+	for name, mutate := range map[string]func(*ObjectReference){
+		"traversal": func(value *ObjectReference) { value.Key = "../object" },
+		"oversize":  func(value *ObjectReference) { value.Size = DefaultPackBytes + 1 },
+		"kind":      func(value *ObjectReference) { value.Kind = "unknown" },
+		"checksum":  func(value *ObjectReference) { value.Checksum = "sha256:ABC" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := reference
+			mutate(&candidate)
+			require.Error(t, ValidateObjectReference(candidate))
+		})
+	}
+}
+
 type buildTestStore struct {
 	mu       sync.Mutex
 	objects  map[string][]byte

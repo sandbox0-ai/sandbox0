@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path"
 	"strings"
 
 	"github.com/opencontainers/go-digest"
@@ -49,6 +50,26 @@ type ObjectReference struct {
 	Kind     string
 	Size     int64
 	Checksum string
+}
+
+// ValidateObjectReference rejects unbounded or non-canonical immutable object
+// identities before they enter a durable publication journal.
+func ValidateObjectReference(reference ObjectReference) error {
+	if reference.Key == "" || strings.TrimSpace(reference.Key) != reference.Key ||
+		len(reference.Key) > MaxObjectKeyBytes || strings.HasPrefix(reference.Key, "/") ||
+		strings.Contains(reference.Key, "\\") || path.Clean(reference.Key) != reference.Key ||
+		reference.Key == "." || strings.HasPrefix(reference.Key, "../") ||
+		reference.Size <= 0 || reference.Size > DefaultPackBytes {
+		return fmt.Errorf("rootfs immutable object identity is invalid")
+	}
+	if reference.Kind != ObjectKindDataPack && reference.Kind != ObjectKindMappingPage {
+		return fmt.Errorf("rootfs immutable object kind is invalid")
+	}
+	parsed, err := digest.Parse(reference.Checksum)
+	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != reference.Checksum {
+		return fmt.Errorf("rootfs immutable object checksum must be canonical sha256")
+	}
+	return nil
 }
 
 const (
@@ -309,8 +330,9 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 	if options.DataRangeBytes <= 0 || options.DataRangeBytes > MaxDataRangeBytes || options.DataRangeBytes%LogicalBlockSize != 0 {
 		return BuildOptions{}, fmt.Errorf("data range must be a positive block-aligned value no greater than %d", MaxDataRangeBytes)
 	}
-	if options.PackBytes < options.DataRangeBytes || options.PackBytes%options.DataRangeBytes != 0 {
-		return BuildOptions{}, fmt.Errorf("pack size must be a positive multiple of the data range")
+	if options.PackBytes < options.DataRangeBytes || options.PackBytes > DefaultPackBytes ||
+		options.PackBytes%options.DataRangeBytes != 0 {
+		return BuildOptions{}, fmt.Errorf("pack size must be a positive multiple of the data range and no greater than %d", DefaultPackBytes)
 	}
 	if options.PageEntries < 2 || options.PageEntries > MaxMappingPageEntries {
 		return BuildOptions{}, fmt.Errorf("mapping page entry limit is invalid")

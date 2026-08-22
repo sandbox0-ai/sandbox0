@@ -64,6 +64,25 @@ func TestBlockBuilderPublishesAttestedArtifactAndCleansLocalStaging(t *testing.T
 	require.NoFileExists(t, fixture.unpacker.lastRoot+".xfs")
 }
 
+func TestBlockBuilderJournalsEveryObjectBeforeReturningArtifact(t *testing.T) {
+	fixture := newOCIBlockBuildFixture(t)
+	journal := newRecordingPublicationJournal()
+	objects := &recordingImmutablePublisher{objects: make(map[string][]byte), events: &journal.events}
+	result, err := (BlockBuilder{
+		Unpacker: fixture.unpacker, Filesystem: fixture.filesystem,
+		Publisher: JournaledPublisher{
+			OperationID: "rootfs-import-block-build", Journal: journal, Publisher: objects,
+		},
+	}).Build(t.Context(), fixture.request)
+	require.NoError(t, err)
+	require.Len(t, journal.prepared, len(result.References))
+	for _, reference := range result.References {
+		require.Equal(t, reference, journal.prepared[reference.Key])
+		require.Equal(t, "published", journal.states[reference.Key])
+		require.Equal(t, 1, journal.prepareCalls[reference.Key])
+	}
+}
+
 func TestBlockBuilderRejectsEvidenceMismatchBeforeFilesystemBuild(t *testing.T) {
 	fixture := newOCIBlockBuildFixture(t)
 	fixture.unpacker.mutate = func(result *ocirootfs.Result) {

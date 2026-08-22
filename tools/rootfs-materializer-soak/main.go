@@ -97,8 +97,13 @@ type fixtureCheckpoint struct {
 type counters struct {
 	Generated            int `json:"generated"`
 	Materialized         int `json:"materialized"`
-	Batches              int `json:"batches"`
+	RetainedBatches      int `json:"retained_batches"`
 	ExpectedWorkerErrors int `json:"expected_worker_errors"`
+}
+
+type acceptanceBounds struct {
+	MaxBatches int   `json:"max_batches"`
+	MaxObjects int64 `json:"max_objects"`
 }
 
 type databaseSnapshot struct {
@@ -488,6 +493,7 @@ func run() error {
 	final := map[string]any{
 		"passed": len(violations) == 0, "violations": violations,
 		"counters": finalCounters, "database": finalDB, "objects": finalObjects,
+		"bounds":   materializerAcceptanceBounds(opts),
 		"physical": finalPhysical, "peaks": state.Peaks, "proxy": proxy.Snapshot(),
 		"database_growth_bytes": finalDB.DatabaseBytes - state.DatabaseBaseline.DatabaseBytes,
 		"physical_growth_files": differenceIfKnown(finalPhysical.Files, state.PhysicalBaseline.Files),
@@ -981,9 +987,14 @@ func materializerCounters(state soakCheckpoint, database databaseSnapshot) count
 	materialized := max(int(database.MaterializedGenerations)-1, 0)
 	return counters{
 		Generated: state.NextGeneration, Materialized: materialized,
-		Batches:              int(database.UploadingBatches + database.PublishedBatches + database.AbandonedBatches),
+		RetainedBatches:      int(database.UploadingBatches + database.PublishedBatches + database.AbandonedBatches),
 		ExpectedWorkerErrors: state.ExpectedWorkerErrors,
 	}
+}
+
+func materializerAcceptanceBounds(opts options) acceptanceBounds {
+	maxBatches := int(opts.duration/opts.maxDelay) + 3
+	return acceptanceBounds{MaxBatches: maxBatches, MaxObjects: int64(2 + 2*maxBatches)}
 }
 
 func materializerSoakCheckpointInterval(duration time.Duration) time.Duration {
@@ -1302,14 +1313,17 @@ func evaluateFinalBounds(
 		result = append(result, fmt.Sprintf("catalog/RustFS objects=%d/%d do not differ by the Base and run identity objects",
 			finalDB.CatalogObjects, finalObjects.Objects))
 	}
-	if finalObjects.Objects > int64(2+2*state.Batches) {
-		result = append(result, fmt.Sprintf("RustFS object count=%d exceeds batch bound=%d",
-			finalObjects.Objects, 2+2*state.Batches))
+	bounds := materializerAcceptanceBounds(opts)
+	if state.RetainedBatches <= 0 {
+		result = append(result, "no retained materialization batches were observed")
 	}
-	batchBound := int(opts.duration/opts.maxDelay) + 3
-	if state.Batches > batchBound {
-		result = append(result, fmt.Sprintf("materialization batches=%d exceed forced-flush bound=%d",
-			state.Batches, batchBound))
+	if finalObjects.Objects > bounds.MaxObjects {
+		result = append(result, fmt.Sprintf("RustFS object count=%d exceeds batch bound=%d",
+			finalObjects.Objects, bounds.MaxObjects))
+	}
+	if state.RetainedBatches > bounds.MaxBatches {
+		result = append(result, fmt.Sprintf("retained materialization batches=%d exceed forced-flush bound=%d",
+			state.RetainedBatches, bounds.MaxBatches))
 	}
 	if growth := finalDB.DatabaseBytes - baselineDB.DatabaseBytes; growth > opts.databaseGrowthLimit {
 		result = append(result, fmt.Sprintf("PostgreSQL growth=%d exceeds %d", growth, opts.databaseGrowthLimit))

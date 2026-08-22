@@ -53,8 +53,12 @@ SANDBOX0_RUSTFS_DATA_DIR='/var/lib/rustfs-soak' \
 
 The final event fails the process unless all 10,000 generations are byte-safe
 and materialized, no upload or deletion work remains, object count is bounded
-by shared-pack batches, PostgreSQL growth stays within 512 MiB, and measured
-RustFS growth stays within 4,096 files and 512 MiB. The default invocation is
+by the configured forced-flush maximum, PostgreSQL growth stays within 512
+MiB, and measured RustFS growth stays within 4,096 files and 512 MiB. The
+object bound does not use the number of terminal batch rows still retained at
+the end: production garbage collection may delete those journal rows at the
+24-hour retention boundary while generation-referenced content objects remain
+valid. The default invocation is
 the acceptance gate; shorter duration, lower generation count, and reduced
 maximum delay are only smoke-test controls and must not be reported as 24-hour
 evidence.

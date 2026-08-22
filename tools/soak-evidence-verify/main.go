@@ -71,15 +71,24 @@ type materializerFinal struct {
 	Counters   struct {
 		Generated            int `json:"generated"`
 		Materialized         int `json:"materialized"`
-		Batches              int `json:"batches"`
+		RetainedBatches      int `json:"retained_batches"`
 		ExpectedWorkerErrors int `json:"expected_worker_errors"`
 	} `json:"counters"`
 	Database struct {
-		CompositeGenerations int64 `json:"composite_generations"`
-		UploadingBatches     int64 `json:"uploading_batches"`
-		AbandonedBatches     int64 `json:"abandoned_batches"`
-		DeletionQueue        int64 `json:"deletion_queue"`
+		CompositeGenerations    int64 `json:"composite_generations"`
+		MaterializedGenerations int64 `json:"materialized_generations"`
+		UploadingBatches        int64 `json:"uploading_batches"`
+		AbandonedBatches        int64 `json:"abandoned_batches"`
+		CatalogObjects          int64 `json:"catalog_objects"`
+		DeletionQueue           int64 `json:"deletion_queue"`
 	} `json:"database"`
+	Objects struct {
+		Objects int64 `json:"objects"`
+	} `json:"objects"`
+	Bounds struct {
+		MaxBatches int   `json:"max_batches"`
+		MaxObjects int64 `json:"max_objects"`
+	} `json:"bounds"`
 	DatabaseGrowthBytes int64 `json:"database_growth_bytes"`
 	PhysicalGrowthFiles int64 `json:"physical_growth_files"`
 	PhysicalGrowthBytes int64 `json:"physical_growth_bytes"`
@@ -226,11 +235,22 @@ func validateMaterializer(verified soakstate.Verification, duration time.Duratio
 	if err := json.Unmarshal(verified.LastData, &final); err != nil {
 		return nil, fmt.Errorf("decode materializer final data: %w", err)
 	}
+	maxDelay, err := time.ParseDuration(config.MaxDelay)
+	if err != nil || maxDelay <= 0 {
+		return nil, fmt.Errorf("materializer maximum delay is invalid")
+	}
+	maxBatches := int(duration/maxDelay) + 3
+	maxObjects := int64(2 + 2*maxBatches)
 	if final.Passed == nil || !*final.Passed || len(final.Violations) != 0 ||
 		final.Counters.Generated != requiredItems || final.Counters.Materialized != requiredItems ||
-		final.Counters.Batches <= 0 || final.Counters.ExpectedWorkerErrors != 2 ||
+		final.Counters.RetainedBatches <= 0 || final.Counters.RetainedBatches > maxBatches ||
+		final.Counters.ExpectedWorkerErrors != 2 ||
 		final.Database.CompositeGenerations != 0 || final.Database.UploadingBatches != 0 ||
 		final.Database.AbandonedBatches != 0 || final.Database.DeletionQueue != 0 ||
+		final.Database.MaterializedGenerations != requiredItems+1 ||
+		final.Database.CatalogObjects != final.Objects.Objects-2 ||
+		final.Objects.Objects <= 2 || final.Objects.Objects > maxObjects ||
+		final.Bounds.MaxBatches != maxBatches || final.Bounds.MaxObjects != maxObjects ||
 		final.DatabaseGrowthBytes < 0 || final.DatabaseGrowthBytes > 512<<20 ||
 		final.PhysicalGrowthFiles < 0 || final.PhysicalGrowthFiles > 4096 ||
 		final.PhysicalGrowthBytes < 0 || final.PhysicalGrowthBytes > 512<<20 {

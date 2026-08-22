@@ -27,6 +27,13 @@ func TestValidateMaterializerRequiresExactProductionContract(t *testing.T) {
 	verified.LastData = mustJSON(t, final)
 	_, err = validateMaterializer(verified, 24*time.Hour)
 	require.ErrorContains(t, err, "final data")
+
+	final = validMaterializerFinal()
+	final.Objects.Objects = final.Bounds.MaxObjects + 1
+	final.Database.CatalogObjects = final.Objects.Objects - 2
+	verified.LastData = mustJSON(t, final)
+	_, err = validateMaterializer(verified, 24*time.Hour)
+	require.ErrorContains(t, err, "final data")
 }
 
 func TestVerifyAuditsCompletedHashChainedEvidence(t *testing.T) {
@@ -157,8 +164,13 @@ func validMaterializerFinal() materializerFinal {
 	final := materializerFinal{Passed: &passed}
 	final.Counters.Generated = 10_000
 	final.Counters.Materialized = 10_000
-	final.Counters.Batches = 288
+	final.Counters.RetainedBatches = 254
 	final.Counters.ExpectedWorkerErrors = 2
+	final.Database.MaterializedGenerations = 10_001
+	final.Database.CatalogObjects = 514
+	final.Objects.Objects = 516
+	final.Bounds.MaxBatches = 291
+	final.Bounds.MaxObjects = 584
 	final.DatabaseGrowthBytes = 1
 	final.PhysicalGrowthFiles = 1
 	final.PhysicalGrowthBytes = 1

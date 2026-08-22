@@ -135,8 +135,33 @@ func TestEvaluateFinalBoundsAcceptsBoundedRun(t *testing.T) {
 		MaterializedGenerations: 11, CatalogObjects: 4, DatabaseBytes: 200,
 	}
 	violations := evaluateFinalBounds(opts, time.Minute,
-		counters{Generated: 10, Materialized: 10, Batches: 2, ExpectedWorkerErrors: 2}, true,
+		counters{Generated: 10, Materialized: 10, RetainedBatches: 2, ExpectedWorkerErrors: 2}, true,
 		baselineDB, directorySnapshot{Files: 1, Bytes: 1}, finalDB,
 		objectSnapshot{Objects: 6}, directorySnapshot{Files: 5, Bytes: 500})
 	require.Empty(t, violations)
+}
+
+func TestEvaluateFinalBoundsUsesForcedFlushBoundAfterTerminalBatchPurge(t *testing.T) {
+	opts := options{
+		duration: 24 * time.Hour, generations: 10_000, maxDelay: 5 * time.Minute,
+		physicalByteLimit: 512 << 20, physicalFileLimit: 4_096, databaseGrowthLimit: 512 << 20,
+	}
+	baselineDB := databaseSnapshot{DatabaseBytes: 10_255_719}
+	finalDB := databaseSnapshot{
+		MaterializedGenerations: 10_001, CatalogObjects: 514, DatabaseBytes: 93_461_863,
+	}
+	state := counters{
+		Generated: 10_000, Materialized: 10_000, RetainedBatches: 254, ExpectedWorkerErrors: 2,
+	}
+	violations := evaluateFinalBounds(opts, 24*time.Hour, state, true,
+		baselineDB, directorySnapshot{Files: 14, Bytes: 13_837}, finalDB,
+		objectSnapshot{Objects: 516}, directorySnapshot{Files: 550, Bytes: 42_503_320})
+	require.Empty(t, violations)
+
+	tooManyObjects := objectSnapshot{Objects: materializerAcceptanceBounds(opts).MaxObjects + 1}
+	finalDB.CatalogObjects = tooManyObjects.Objects - 2
+	violations = evaluateFinalBounds(opts, 24*time.Hour, state, true,
+		baselineDB, directorySnapshot{Files: 14, Bytes: 13_837}, finalDB,
+		tooManyObjects, directorySnapshot{Files: 550, Bytes: 42_503_320})
+	require.Contains(t, violations, "RustFS object count=585 exceeds batch bound=584")
 }

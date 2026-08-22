@@ -21,9 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -143,6 +147,80 @@ func TestBlockBuilderRetainsImageWhenFilesystemReportsMounted(t *testing.T) {
 	require.Empty(t, fixture.publisher.objects)
 }
 
+func TestPrivilegedBlockBuilderPublishesMountableXFSArtifact(t *testing.T) {
+	if os.Getenv("SANDBOX0_PRIVILEGED_ROOTFS_IMPORTER") != "1" {
+		t.Skip("set SANDBOX0_PRIVILEGED_ROOTFS_IMPORTER=1 on an isolated Linux host")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("privileged RootFS importer test requires root")
+	}
+	for _, command := range []string{"mkfs.xfs", "mount", "cp", "umount", "xfs_repair"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Fatalf("required command %s: %v", command, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	fixture := newOCIBlockBuildFixture(t)
+	const marker = "sandbox0-rootfs-block-roundtrip\n"
+	fixture.unpacker.populate = func(root string) error {
+		if err := os.Mkdir(filepath.Join(root, "etc"), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, "etc", "marker"), []byte(marker), 0o640)
+	}
+	result, err := (BlockBuilder{
+		Unpacker: fixture.unpacker, Filesystem: rootfsartifact.XFSBuilder{}, Publisher: fixture.publisher,
+	}).Build(ctx, fixture.request)
+	require.NoError(t, err)
+	require.NoDirExists(t, fixture.unpacker.lastRoot)
+	require.NoFileExists(t, fixture.unpacker.lastRoot+".xfs")
+
+	reader, err := rootfsblock.NewReader(fixture.publisher, result.Descriptor, 64<<20)
+	require.NoError(t, err)
+	reconstructed := filepath.Join(fixture.request.Image.WorkRoot, "reconstructed.xfs")
+	image, err := os.OpenFile(reconstructed, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	require.NoError(t, image.Truncate(result.LogicalSizeBytes))
+	const chunkBytes = 8 << 20
+	for offset := int64(0); offset < result.LogicalSizeBytes; offset += chunkBytes {
+		payload := make([]byte, min(int64(chunkBytes), result.LogicalSizeBytes-offset))
+		n, readErr := reader.ReadAt(payload, offset)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			t.Fatalf("read reconstructed image at %d: %v", offset, readErr)
+		}
+		if n != len(payload) {
+			t.Fatalf("read reconstructed image at %d = %d, want %d", offset, n, len(payload))
+		}
+		if len(bytes.Trim(payload, "\x00")) != 0 {
+			written, writeErr := image.WriteAt(payload, offset)
+			if writeErr != nil || written != len(payload) {
+				t.Fatalf("write reconstructed image at %d = %d, %v", offset, written, writeErr)
+			}
+		}
+	}
+	require.NoError(t, image.Sync())
+	require.NoError(t, image.Close())
+	mountRoot := filepath.Join(fixture.request.Image.WorkRoot, "verify")
+	require.NoError(t, os.Mkdir(mountRoot, 0o700))
+	require.NoError(t, runRootFSImporterCommand(ctx, "mount", "-t", "xfs", "-o", "loop,ro,nouuid,noatime", reconstructed, mountRoot))
+	mounted := true
+	defer func() {
+		if mounted {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			if err := runRootFSImporterCommand(cleanupCtx, "umount", mountRoot); err != nil {
+				t.Errorf("unmount reconstructed RootFS: %v", err)
+			}
+		}
+	}()
+	payload, err := os.ReadFile(filepath.Join(mountRoot, "lower", "etc", "marker"))
+	require.NoError(t, err)
+	require.Equal(t, marker, string(payload))
+	require.NoError(t, runRootFSImporterCommand(ctx, "umount", mountRoot))
+	mounted = false
+}
+
 type ociBlockBuildFixture struct {
 	request      BuildRequest
 	sourceDigest digest.Digest
@@ -189,6 +267,7 @@ type fakeOCIUnpacker struct {
 	lastRoot       string
 	rootOverride   string
 	precreateImage bool
+	populate       func(string) error
 	mutate         func(*ocirootfs.Result)
 }
 
@@ -203,6 +282,11 @@ func (f *fakeOCIUnpacker) Import(_ context.Context, request ocirootfs.Request) (
 	}
 	if f.precreateImage {
 		if err := os.WriteFile(root+".xfs", []byte("not-owned"), 0o600); err != nil {
+			return ocirootfs.Result{}, err
+		}
+	}
+	if f.populate != nil {
+		if err := f.populate(root); err != nil {
 			return ocirootfs.Result{}, err
 		}
 	}
@@ -263,5 +347,22 @@ func (p *fakeImmutablePublisher) PutImmutable(_ context.Context, key string, pay
 		return fmt.Errorf("immutable object conflict")
 	}
 	p.objects[key] = append([]byte(nil), payload...)
+	return nil
+}
+
+func (p *fakeImmutablePublisher) Get(key string, offset, length int64) (io.ReadCloser, error) {
+	payload, found := p.objects[key]
+	if !found || offset < 0 || length < 0 || offset > int64(len(payload))-length {
+		return nil, fmt.Errorf("object range not found")
+	}
+	return io.NopCloser(bytes.NewReader(payload[offset : offset+length])), nil
+}
+
+func runRootFSImporterCommand(ctx context.Context, name string, args ...string) error {
+	command := exec.CommandContext(ctx, name, args...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s: %w", name, strings.TrimSpace(string(output)), err)
+	}
 	return nil
 }

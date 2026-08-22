@@ -1836,6 +1836,11 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 		} else {
 			branch, releaseErr = m.reopenBranch(current)
 			closeBranch = branch != nil
+			if releaseErr == nil {
+				if err := branch.BeginRetirement(); err != nil {
+					releaseErr = fmt.Errorf("open RootFS retirement dirty tail reserve: %w", err)
+				}
+			}
 		}
 		if releaseErr == nil {
 			checkpoint, releaseErr = branch.Checkpoint()
@@ -1872,6 +1877,17 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 		if err := live.branch.Close(); err != nil {
 			releaseErr = errors.Join(releaseErr, fmt.Errorf("close branch: %w", err))
 		}
+		// Device.Close is a terminal operation even when it reports a transport
+		// or backend error: its contract guarantees that the kernel can no
+		// longer issue requests before it returns. The branch is terminal after
+		// Close as well. Drop both closed handles so the next durable reconcile
+		// can reopen the WAL, verify orphan-device absence, and finish instead
+		// of retrying unusable in-memory objects.
+		m.mu.Lock()
+		if m.live[parent] == live {
+			delete(m.live, parent)
+		}
+		m.mu.Unlock()
 	}
 	if releaseErr == nil && live == nil && current.DevicePath != "" {
 		if err := m.runtime.RecoverOrphanDevice(ctx, current.DevicePath, current.DeviceAllocationID); err != nil {

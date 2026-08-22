@@ -424,7 +424,10 @@ plugin "sandbox0-gvisor" {
 See `example/warm-slot.nomad` for a warm allocation. A development smoke task
 may set `wait_for_claim = false` and provide an allowed RootFS directory only
 when the client explicitly sets `dev_smoke_enabled = true`; the production path
-always waits for manager authorization.
+always waits for manager authorization. Production warm groups must also set
+`restart.attempts = 0`: a consumed task has already revoked its network
+namespace and runtime-slot journal, so only Nomad rescheduling to a fresh
+allocation may replace it.
 
 Regional runtime slots additionally require an argument-free `/procd` command,
 a task named `slot`, a Nomad bridge network with the `procd` allocation port

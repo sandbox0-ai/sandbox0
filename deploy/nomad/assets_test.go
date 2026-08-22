@@ -43,6 +43,11 @@ func TestAcceptanceExamplesReserveEnoughWarmSlotsAndNBDDevices(t *testing.T) {
 	if regexp.MustCompile(`(?m)^\s*cpu\s*=`).MatchString(warmJob) {
 		t.Fatal("warm-slot example must not use host-frequency-dependent Nomad CPU compute")
 	}
+	restartBlock := regexp.MustCompile(`(?s)restart\s*\{.*?\}`).FindString(warmJob)
+	if restartBlock == "" || !regexp.MustCompile(`(?m)^\s*attempts\s*=\s*0\s*$`).MatchString(restartBlock) ||
+		!regexp.MustCompile(`(?m)^\s*mode\s*=\s*"fail"\s*$`).MatchString(restartBlock) {
+		t.Fatal("one-shot warm-slot allocations must disable same-allocation task restarts")
+	}
 
 	environment := readAsset(t, "ctld/ctld.env.example")
 	var devices []string

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,6 +47,36 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerReleaseRecoversAfterTerminalDeviceCloseError(t *testing.T) {
+	manager, runtime, first := newTestManager(t, "terminal-close-error")
+	runtime.deviceCloseErr = syscall.EBUSY
+	_, err := manager.Ensure(t.Context(), first)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, "retire-terminal-close-error"))
+
+	err = manager.Release(t.Context(), first.Identity)
+	require.ErrorIs(t, err, syscall.EBUSY)
+	manager.mu.Lock()
+	_, live := manager.live[first.Parent]
+	manager.mu.Unlock()
+	require.False(t, live, "a terminal Device.Close result must not retain closed handles")
+
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	_, err = manager.RetireResult(first.Parent, first.Identity, "retire-terminal-close-error")
+	require.NoError(t, err)
+	require.Equal(t, 1, runtime.orphanRecoveries)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
+
+	// Reopening the first WAL must rejoin its retirement group. Reclaiming it
+	// then releases the node-wide reserve for an unrelated writer.
+	runtime.deviceCloseErr = nil
+	second := testStageRequest(t, runtime.source, "after-terminal-close-error")
+	_, err = manager.Ensure(t.Context(), second)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(second.Parent, second.Identity, "retire-after-terminal-close-error"))
+	require.NoError(t, manager.Release(t.Context(), second.Identity))
 }
 
 func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T) {

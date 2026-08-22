@@ -107,7 +107,10 @@ private and mutually authenticated.
    host, ctld, runsc, and replacement overhead. Never falsify
    `cpu_total_compute` or oversubscribe memory for an SLO report. A smaller
    dedicated acceptance profile is valid only when the public template
-   declares that exact resource shape and the report label identifies it.
+   declares that exact resource shape and the report label identifies it. Keep
+   the supplied `restart { attempts = 0 }` policy: one-shot slot termination
+   must create a fresh allocation and network namespace, never restart the
+   driver inside the consumed allocation.
 5. Confirm PostgreSQL shows healthy exact-profile slots, every node channel is
    connected, warm default-deny is applied, and Nomad replacement allocations
    reach ready after one batch is deleted.

@@ -19,8 +19,8 @@ type cpuUsageBaseline struct {
 	usageCoreNanoSeconds uint64
 }
 
-// cpuUsageTracker derives instantaneous core usage from CRI cumulative CPU
-// time while keeping reset boundaries isolated per runtime series.
+// cpuUsageTracker derives instantaneous core usage from cumulative CPU time
+// while keeping reset boundaries isolated per runtime series.
 type cpuUsageTracker struct {
 	mu        sync.Mutex
 	baselines map[cpuSeriesKey]cpuUsageBaseline
@@ -40,10 +40,16 @@ func (t *cpuUsageTracker) observe(key cpuSeriesKey, usage *runtimeapi.CpuUsage) 
 	if t == nil || usage == nil || usage.Timestamp <= 0 || usage.UsageCoreNanoSeconds == nil {
 		return nil
 	}
+	return t.observeCumulative(key, usage.Timestamp, usage.UsageCoreNanoSeconds.Value)
+}
 
+func (t *cpuUsageTracker) observeCumulative(key cpuSeriesKey, timestamp int64, cumulativeCPUTime uint64) *float64 {
+	if t == nil || timestamp <= 0 {
+		return nil
+	}
 	current := cpuUsageBaseline{
-		timestamp:            usage.Timestamp,
-		usageCoreNanoSeconds: usage.UsageCoreNanoSeconds.Value,
+		timestamp:            timestamp,
+		usageCoreNanoSeconds: cumulativeCPUTime,
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -36,9 +36,9 @@ type BuildResult struct {
 	Payload    []byte
 	Objects    int
 	Bytes      int64
-	// References contains every object published by a batch build and
-	// reachable from this generation. Single-generation builders leave it
-	// empty until their publication path needs durable object inventory.
+	// References contains every immutable object published by this build and
+	// reachable from the resulting generation. The list is deduplicated and sorted so a
+	// caller can durably inventory an exact retry before publishing metadata.
 	References []ObjectReference
 }
 
@@ -81,7 +81,10 @@ func BuildMaterializedGeneration(
 	if err != nil {
 		return BuildResult{}, err
 	}
-	state := generationBuilder{ctx: ctx, publisher: publisher, options: options}
+	state := generationBuilder{
+		ctx: ctx, publisher: publisher, options: options,
+		references: make(map[string]ObjectReference),
+	}
 	entries := make([]MappingEntry, 0)
 	pack := make([]pendingDataEntry, 0, options.PackBytes/options.DataRangeBytes)
 	packBytes := 0
@@ -142,15 +145,20 @@ func BuildMaterializedGeneration(
 	if err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{Descriptor: descriptor, Payload: descriptorPayload, Objects: state.objects, Bytes: state.bytes}, nil
+	return BuildResult{
+		Descriptor: descriptor, Payload: descriptorPayload,
+		Objects: state.objects, Bytes: state.bytes,
+		References: sortedBatchObjectReferences(state.references),
+	}, nil
 }
 
 type generationBuilder struct {
-	ctx       context.Context
-	publisher ImmutableObjectPublisher
-	options   BuildOptions
-	objects   int
-	bytes     int64
+	ctx        context.Context
+	publisher  ImmutableObjectPublisher
+	options    BuildOptions
+	objects    int
+	bytes      int64
+	references map[string]ObjectReference
 }
 
 func (b *generationBuilder) publishPack(pending []pendingDataEntry) ([]MappingEntry, error) {
@@ -257,6 +265,15 @@ func (b *generationBuilder) publishPage(page MappingPage) (publishedPage, error)
 }
 
 func (b *generationBuilder) publish(kind string, payload []byte) (string, error) {
+	var objectKind string
+	switch kind {
+	case "packs":
+		objectKind = ObjectKindDataPack
+	case "maps":
+		objectKind = ObjectKindMappingPage
+	default:
+		return "", fmt.Errorf("unsupported immutable object kind %q", kind)
+	}
 	value := digest.FromBytes(payload)
 	key := fmt.Sprintf("%s/%s/sha256/%s", b.options.ObjectPrefix, kind, value.Encoded())
 	if err := b.publisher.PutImmutable(b.ctx, key, payload); err != nil {
@@ -264,6 +281,12 @@ func (b *generationBuilder) publish(kind string, payload []byte) (string, error)
 	}
 	b.objects++
 	b.bytes += int64(len(payload))
+	if b.references == nil {
+		b.references = make(map[string]ObjectReference)
+	}
+	b.references[key] = ObjectReference{
+		Key: key, Kind: objectKind, Size: int64(len(payload)), Checksum: value.String(),
+	}
 	return key, nil
 }
 

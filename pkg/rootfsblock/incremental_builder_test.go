@@ -30,6 +30,13 @@ func TestBuildIncrementalGenerationReusesUnchangedRanges(t *testing.T) {
 	}, objects, BuildOptions{DataRangeBytes: 4 * LogicalBlockSize, PackBytes: 8 * LogicalBlockSize, PageEntries: 4, ObjectPrefix: "test"})
 	require.NoError(t, err)
 	require.Less(t, objects.publishedBytes, int64(len(basePayload)))
+	require.NotEmpty(t, next.References)
+	for _, reference := range next.References {
+		payload, found := objects.values[reference.Key]
+		require.True(t, found)
+		require.Equal(t, int64(len(payload)), reference.Size)
+		require.Equal(t, digest.FromBytes(payload).String(), reference.Checksum)
+	}
 
 	reader, err := NewReader(objects, next.Descriptor, 1<<20)
 	require.NoError(t, err)

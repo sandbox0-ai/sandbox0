@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +25,23 @@ func TestBuildMaterializedGenerationRoundTripAndSkipsZeroRanges(t *testing.T) {
 	require.NoError(t, result.Descriptor.Validate())
 	require.NotEmpty(t, result.Payload)
 	require.Equal(t, 3, result.Objects)
+	require.Len(t, result.References, 3)
+	require.True(t, sort.StringsAreSorted([]string{
+		result.References[0].Key,
+		result.References[1].Key,
+		result.References[2].Key,
+	}))
+	for _, reference := range result.References {
+		payload, found := store.payload(reference.Key)
+		require.True(t, found)
+		require.Equal(t, int64(len(payload)), reference.Size)
+		require.Equal(t, digest.FromBytes(payload).String(), reference.Checksum)
+		if strings.Contains(reference.Key, "/packs/") {
+			require.Equal(t, ObjectKindDataPack, reference.Kind)
+		} else {
+			require.Equal(t, ObjectKindMappingPage, reference.Kind)
+		}
+	}
 
 	reader, err := NewReader(store, result.Descriptor, DefaultReadCacheBytes)
 	require.NoError(t, err)
@@ -103,4 +122,11 @@ func (s *buildTestStore) packObjects() int {
 		}
 	}
 	return count
+}
+
+func (s *buildTestStore) payload(key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payload, found := s.objects[key]
+	return append([]byte(nil), payload...), found
 }

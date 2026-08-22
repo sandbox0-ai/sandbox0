@@ -107,7 +107,10 @@ func buildIncrementalGeneration(
 	if err != nil {
 		return BuildResult{}, err
 	}
-	state := generationBuilder{ctx: ctx, publisher: publisher, options: options}
+	state := generationBuilder{
+		ctx: ctx, publisher: publisher, options: options,
+		references: make(map[string]ObjectReference),
+	}
 	unchanged, err := splitUnchangedEntries(reader, baseEntries, blocks)
 	if err != nil {
 		return BuildResult{}, err
@@ -135,7 +138,11 @@ func buildIncrementalGeneration(
 	if err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{Descriptor: descriptor, Payload: payload, Objects: state.objects, Bytes: state.bytes}, nil
+	return BuildResult{
+		Descriptor: descriptor, Payload: payload,
+		Objects: state.objects, Bytes: state.bytes,
+		References: sortedBatchObjectReferences(state.references),
+	}, nil
 }
 
 type sliceBlockUpdateReader struct {

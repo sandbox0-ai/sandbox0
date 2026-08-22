@@ -77,7 +77,7 @@ func buildIncrementalGeneration(
 	if source == nil || publisher == nil {
 		return BuildResult{}, fmt.Errorf("range source and publisher are required")
 	}
-	options, err := normalizeBuildOptions(options)
+	options, err := NormalizeBuildOptions(options)
 	if err != nil {
 		return BuildResult{}, err
 	}

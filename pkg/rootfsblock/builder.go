@@ -77,7 +77,7 @@ func BuildMaterializedGeneration(
 	if logicalSize <= 0 || logicalSize%LogicalBlockSize != 0 {
 		return BuildResult{}, fmt.Errorf("logical size must be a positive multiple of %d", LogicalBlockSize)
 	}
-	options, err := normalizeBuildOptions(options)
+	options, err := NormalizeBuildOptions(options)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -290,7 +290,9 @@ func (b *generationBuilder) publish(kind string, payload []byte) (string, error)
 	return key, nil
 }
 
-func normalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
+// NormalizeBuildOptions applies production defaults and validates immutable
+// block publication bounds.
+func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 	if options.DataRangeBytes == 0 {
 		options.DataRangeBytes = DefaultDataRangeBytes
 	}

@@ -73,7 +73,7 @@ func BuildIncrementalGenerationsBatch(
 	if len(inputs) == 0 {
 		return BatchBuildResult{}, fmt.Errorf("at least one incremental generation is required")
 	}
-	options, err := normalizeBuildOptions(options)
+	options, err := NormalizeBuildOptions(options)
 	if err != nil {
 		return BatchBuildResult{}, err
 	}

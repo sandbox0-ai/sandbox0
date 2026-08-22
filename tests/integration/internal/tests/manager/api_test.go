@@ -301,7 +301,16 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	port := reserveManagerTestPort(t)
 
 	server := managerhttp.NewServerWithDependencies(managerhttp.ServerDependencies{
-		SandboxService:        sandboxService,
+		SandboxReader:         sandboxService,
+		SandboxUpdater:        sandboxService,
+		SandboxNetworkPolicy:  sandboxService,
+		SandboxRootFS:         sandboxService,
+		SandboxSourceResolver: sandboxService,
+		SandboxClaimer:        sandboxService,
+		SandboxTerminator:     sandboxService,
+		SandboxPauser:         sandboxService,
+		SandboxResumer:        sandboxService,
+		SandboxForker:         sandboxService,
 		TemplateService:       templateService,
 		RegistryService:       registryService,
 		ClusterService:        clusterService,

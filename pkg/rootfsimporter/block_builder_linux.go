@@ -17,7 +17,6 @@
 package rootfsimporter
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -131,7 +130,7 @@ func (b BlockBuilder) Build(
 		Objects: built.Objects, Bytes: built.Bytes,
 		References: append([]rootfsblock.ObjectReference(nil), built.References...),
 	}
-	if err := validateBlockBuildResult(result); err != nil {
+	if err := result.Validate(); err != nil {
 		return BuildResult{}, err
 	}
 	return result, nil
@@ -212,21 +211,6 @@ func validateImportedEvidence(request ocirootfs.Request, result ocirootfs.Result
 	return nil
 }
 
-func pinnedSourceDigest(reference string) (digest.Digest, error) {
-	separator := strings.LastIndexByte(reference, '@')
-	if separator < 1 || separator == len(reference)-1 {
-		return "", fmt.Errorf("OCI image reference must be digest-pinned")
-	}
-	value, err := digest.Parse(reference[separator+1:])
-	if err != nil {
-		return "", fmt.Errorf("parse OCI image digest: %w", err)
-	}
-	if err := validateArtifactSHA256Digest(value); err != nil {
-		return "", fmt.Errorf("OCI image digest: %w", err)
-	}
-	return value, nil
-}
-
 func openVerifiedFilesystemImage(path string, logicalSize int64) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -274,56 +258,6 @@ func validateArtifactObjectPrefix(value string) error {
 			}
 			return fmt.Errorf("RootFS artifact object prefix contains an invalid character")
 		}
-	}
-	return nil
-}
-
-func validateBlockBuildResult(result BuildResult) error {
-	if err := result.Descriptor.Validate(); err != nil {
-		return fmt.Errorf("generated RootFS descriptor: %w", err)
-	}
-	encoded, err := rootfsblock.EncodeDescriptor(result.Descriptor)
-	if err != nil || !bytes.Equal(encoded, result.DescriptorBytes) {
-		return fmt.Errorf("generated RootFS descriptor bytes do not match the build result")
-	}
-	if result.DescriptorDigest != digest.FromBytes(result.DescriptorBytes) ||
-		result.BaseBlockRoot.String() != result.Descriptor.MappingRoot.RootDigest ||
-		result.LogicalSizeBytes != result.Descriptor.LogicalSizeBytes {
-		return fmt.Errorf("generated RootFS artifact digests do not match the descriptor")
-	}
-	if result.Objects <= 0 || result.Bytes <= 0 || len(result.References) == 0 {
-		return fmt.Errorf("generated RootFS artifact has no immutable object inventory")
-	}
-	previous := ""
-	for _, reference := range result.References {
-		if reference.Key == "" || reference.Key <= previous || reference.Size <= 0 {
-			return fmt.Errorf("generated RootFS object inventory is not canonical")
-		}
-		checksum, err := digest.Parse(reference.Checksum)
-		if err != nil || validateArtifactSHA256Digest(checksum) != nil {
-			return fmt.Errorf("generated RootFS object %q has an invalid checksum", reference.Key)
-		}
-		if reference.Kind != rootfsblock.ObjectKindDataPack && reference.Kind != rootfsblock.ObjectKindMappingPage {
-			return fmt.Errorf("generated RootFS object %q has an invalid kind", reference.Key)
-		}
-		pathKind := "maps"
-		if reference.Kind == rootfsblock.ObjectKindDataPack {
-			pathKind = "packs"
-		}
-		if !strings.HasSuffix(reference.Key, "/"+pathKind+"/sha256/"+checksum.Encoded()) {
-			return fmt.Errorf("generated RootFS object %q does not bind its kind and checksum", reference.Key)
-		}
-		previous = reference.Key
-	}
-	return nil
-}
-
-func validateArtifactSHA256Digest(value digest.Digest) error {
-	if err := value.Validate(); err != nil {
-		return err
-	}
-	if value.Algorithm() != digest.SHA256 || len(value.Encoded()) != 64 || strings.ToLower(value.String()) != value.String() {
-		return fmt.Errorf("digest must be canonical SHA-256")
 	}
 	return nil
 }

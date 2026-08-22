@@ -20,14 +20,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	RuntimeMetricTargetVersion = 1
+	RuntimeMetricMaxTargets    = 512
 	maxRuntimeMetricIDBytes    = 512
 	maxRuntimeMetricCPUMilli   = 1_000_000
 	maxRuntimeMetricMemoryMiB  = 1 << 30
 )
+
+const runtimeMetricSampleVersion = 1
 
 // RuntimeMetricTarget is the non-secret logical and runtime identity returned
 // by the root-owned node runtime. It deliberately contains no journal path,
@@ -45,6 +49,32 @@ type RuntimeMetricTarget struct {
 	RunscContainerID  string `json:"runsc_container_id"`
 	BindingDigest     string `json:"binding_digest"`
 	SeriesEpoch       string `json:"series_epoch"`
+}
+
+// RuntimeMetricSample is one stock-runsc observation made only after the node
+// runtime has revalidated the target against its current durable binding.
+type RuntimeMetricSample struct {
+	Version    int        `json:"version"`
+	ObservedAt time.Time  `json:"observed_at"`
+	Stats      RunscStats `json:"stats"`
+}
+
+// Validate checks the sample against the exact target requested by the
+// collector. Unsupported gVisor fields remain absent from RunscStats.
+func (s RuntimeMetricSample) Validate(target RuntimeMetricTarget) error {
+	if s.Version != runtimeMetricSampleVersion {
+		return fmt.Errorf("unsupported runtime metric sample version %d", s.Version)
+	}
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("target: %w", err)
+	}
+	if s.ObservedAt.IsZero() || s.ObservedAt.UnixNano() <= 0 {
+		return fmt.Errorf("observed_at must be after the Unix epoch")
+	}
+	if err := s.Stats.Validate(target.RunscContainerID); err != nil {
+		return fmt.Errorf("runsc stats: %w", err)
+	}
+	return nil
 }
 
 // Validate rejects ambiguous, unbounded, or self-inconsistent metric targets.

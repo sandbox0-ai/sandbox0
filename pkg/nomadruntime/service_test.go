@@ -31,6 +31,12 @@ func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	cleaner := &fakeRuntimeSlotCleaner{}
+	metricTarget := testRuntimeMetricTarget()
+	cleaner.metricTargets = []RuntimeMetricTarget{metricTarget}
+	cleaner.metricSample = RuntimeMetricSample{
+		Version: runtimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
+		Stats: RunscStats{Type: "stats", ID: metricTarget.RunscContainerID},
+	}
 	go func() { done <- serveNodeRuntime(ctx, socket, runtime, nil, nil, cleaner) }()
 	require.Eventually(t, func() bool {
 		info, err := os.Stat(socket)
@@ -77,14 +83,36 @@ func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	registration := testRuntimeSlotJournalRegistration(t, "slot-rpc")
 	require.NoError(t, clientRuntime.RegisterRuntimeSlot(t.Context(), registration))
 	require.Equal(t, registration, cleaner.registration)
+	metricTargets, err := clientRuntime.ListRuntimeMetricTargets(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []RuntimeMetricTarget{metricTarget}, metricTargets)
+	metricSample, err := clientRuntime.RuntimeMetricStats(t.Context(), metricTarget)
+	require.NoError(t, err)
+	require.Equal(t, cleaner.metricSample, metricSample)
+	require.Equal(t, metricTarget, cleaner.metricTarget)
 
 	cancel()
 	require.NoError(t, <-done)
 }
 
 type fakeRuntimeSlotCleaner struct {
-	request      protocol.NodeCleanupControlRequest
-	registration RuntimeSlotRegistration
+	request       protocol.NodeCleanupControlRequest
+	registration  RuntimeSlotRegistration
+	metricTargets []RuntimeMetricTarget
+	metricTarget  RuntimeMetricTarget
+	metricSample  RuntimeMetricSample
+}
+
+func (c *fakeRuntimeSlotCleaner) ListRuntimeMetricTargets(context.Context) ([]RuntimeMetricTarget, error) {
+	return append([]RuntimeMetricTarget(nil), c.metricTargets...), nil
+}
+
+func (c *fakeRuntimeSlotCleaner) RuntimeMetricStats(
+	_ context.Context,
+	target RuntimeMetricTarget,
+) (RuntimeMetricSample, error) {
+	c.metricTarget = target
+	return c.metricSample, nil
 }
 
 func (c *fakeRuntimeSlotCleaner) runtimeSlotNetworkPrepareRequest(
@@ -154,6 +182,33 @@ func TestNodeRuntimeRPCPreservesConsumedWriterAttachFailure(t *testing.T) {
 	var consumed *ConsumedAttachError
 	require.ErrorAs(t, err, &consumed)
 	require.ErrorContains(t, consumed, "NBD attach failed")
+}
+
+func TestNodeRuntimeRPCClientRejectsUnboundedOrUnknownResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		wanted string
+	}{
+		{name: "unknown field", body: `{"future":true}`, wanted: "unknown field"},
+		{name: "oversized", body: strings.Repeat(" ", nodeRuntimeRPCMaxBytes+1), wanted: "exceeds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", strings.TrimPrefix(server.URL, "http://"))
+			}
+			client := &Client{http: &http.Client{Transport: transport}}
+			if err := client.Ping(t.Context()); err == nil || !strings.Contains(err.Error(), test.wanted) {
+				t.Fatalf("Ping() error = %v, want substring %q", err, test.wanted)
+			}
+		})
+	}
 }
 
 func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {

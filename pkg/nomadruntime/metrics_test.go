@@ -17,6 +17,7 @@ package nomadruntime
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRuntimeMetricTargetValidate(t *testing.T) {
@@ -46,6 +47,49 @@ func TestRuntimeMetricTargetValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeMetricSampleValidate(t *testing.T) {
+	target := testRuntimeMetricTarget()
+	sample := RuntimeMetricSample{
+		Version: runtimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
+		Stats: RunscStats{Type: "stats", ID: target.RunscContainerID},
+	}
+	if err := sample.Validate(target); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	sample.Stats.ID = "another-container"
+	if err := sample.Validate(target); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestNormalizeRuntimeMetricTargetsSortsAndRejectsAmbiguity(t *testing.T) {
+	first := testRuntimeMetricTarget()
+	second := first
+	second.AllocationID = "allocation-b"
+	second.RunscContainerID = "runsc-b"
+	second.BindingDigest = strings.Repeat("b", 64)
+	second.SeriesEpoch = RuntimeMetricSeriesEpoch(
+		second.AllocationID, second.NodeBootID, second.LaunchAttempt, second.RunscContainerID,
+	)
+	normalized, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{second, first})
+	if err != nil || len(normalized) != 2 || normalized[0] != first || normalized[1] != second {
+		t.Fatalf("normalizeRuntimeMetricTargets() = %+v, %v", normalized, err)
+	}
+
+	duplicateBinding := second
+	duplicateBinding.BindingDigest = first.BindingDigest
+	if _, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateBinding}); err == nil ||
+		!strings.Contains(err.Error(), "binding") {
+		t.Fatalf("duplicate binding error = %v", err)
+	}
+	duplicateSeries := first
+	duplicateSeries.BindingDigest = second.BindingDigest
+	if _, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateSeries}); err == nil ||
+		!strings.Contains(err.Error(), "metric series") {
+		t.Fatalf("duplicate series error = %v", err)
 	}
 }
 

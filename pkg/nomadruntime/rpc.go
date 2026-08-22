@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,8 @@ import (
 const (
 	nodeRuntimeRPCMaxBytes         = 2 << 20
 	runtimeSlotJournalRegisterPath = "/v1/runtime-slots/register"
+	runtimeMetricTargetsPath       = "/v1/runtime-metrics/targets"
+	runtimeMetricStatsPath         = "/v1/runtime-metrics/stats"
 )
 
 type nodeRuntimeRPCRequest struct {
@@ -48,18 +51,21 @@ type nodeRuntimeRPCRequest struct {
 	Observation  CrashTaskObservation                       `json:"observation,omitempty"`
 	SlotRegister RuntimeSlotRegistration                    `json:"slot_register,omitempty"`
 	SlotCleanup  protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
+	MetricTarget RuntimeMetricTarget                        `json:"metric_target,omitempty"`
 }
 
 type nodeRuntimeRPCResponse struct {
-	Info        *RuntimeInfo                              `json:"info,omitempty"`
-	Mount       rootfssession.Mount                       `json:"mount,omitempty"`
-	Lease       ConsumerLease                             `json:"lease,omitempty"`
-	Retire      rootfssession.RetireResult                `json:"retire,omitempty"`
-	Crash       rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
-	Checkpoint  rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
-	SlotCleanup protocol.NodeCleanupControlProof          `json:"slot_cleanup,omitempty"`
-	Error       string                                    `json:"error,omitempty"`
-	ErrorClass  string                                    `json:"error_class,omitempty"`
+	Info          *RuntimeInfo                              `json:"info,omitempty"`
+	Mount         rootfssession.Mount                       `json:"mount,omitempty"`
+	Lease         ConsumerLease                             `json:"lease,omitempty"`
+	Retire        rootfssession.RetireResult                `json:"retire,omitempty"`
+	Crash         rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
+	Checkpoint    rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
+	SlotCleanup   protocol.NodeCleanupControlProof          `json:"slot_cleanup,omitempty"`
+	MetricTargets []RuntimeMetricTarget                     `json:"metric_targets,omitempty"`
+	MetricSample  *RuntimeMetricSample                      `json:"metric_sample,omitempty"`
+	Error         string                                    `json:"error,omitempty"`
+	ErrorClass    string                                    `json:"error_class,omitempty"`
 }
 
 type Client struct {
@@ -73,6 +79,11 @@ type runtimeSlotCleaner interface {
 
 type runtimeInfoProvider interface {
 	RuntimeInfo() (RuntimeInfo, error)
+}
+
+type runtimeMetricProvider interface {
+	ListRuntimeMetricTargets(context.Context) ([]RuntimeMetricTarget, error)
+	RuntimeMetricStats(context.Context, RuntimeMetricTarget) (RuntimeMetricSample, error)
 }
 
 func (c *Client) Ping(ctx context.Context) error {
@@ -229,6 +240,38 @@ func (c *Client) RegisterRuntimeSlot(
 	return c.call(ctx, runtimeSlotJournalRegisterPath, nodeRuntimeRPCRequest{SlotRegister: registration}, &response)
 }
 
+// ListRuntimeMetricTargets returns current tokenless targets from the
+// root-owned node runtime. The Unix socket is the authorization boundary.
+func (c *Client) ListRuntimeMetricTargets(ctx context.Context) ([]RuntimeMetricTarget, error) {
+	var response nodeRuntimeRPCResponse
+	if err := c.call(ctx, runtimeMetricTargetsPath, nodeRuntimeRPCRequest{}, &response); err != nil {
+		return nil, err
+	}
+	return normalizeRuntimeMetricTargets(response.MetricTargets)
+}
+
+// RuntimeMetricStats revalidates one previously listed target and samples it
+// through stock runsc without exposing the node journal to the caller.
+func (c *Client) RuntimeMetricStats(
+	ctx context.Context,
+	target RuntimeMetricTarget,
+) (RuntimeMetricSample, error) {
+	if err := target.Validate(); err != nil {
+		return RuntimeMetricSample{}, fmt.Errorf("validate runtime metric target: %w", err)
+	}
+	var response nodeRuntimeRPCResponse
+	if err := c.call(ctx, runtimeMetricStatsPath, nodeRuntimeRPCRequest{MetricTarget: target}, &response); err != nil {
+		return RuntimeMetricSample{}, err
+	}
+	if response.MetricSample == nil {
+		return RuntimeMetricSample{}, fmt.Errorf("ctld Nomad runtime metric response lacks a sample: %w", errdefs.ErrUnavailable)
+	}
+	if err := response.MetricSample.Validate(target); err != nil {
+		return RuntimeMetricSample{}, fmt.Errorf("validate ctld Nomad runtime metric sample: %w", err)
+	}
+	return *response.MetricSample, nil
+}
+
 func (c *Client) call(
 	ctx context.Context,
 	path string,
@@ -249,9 +292,20 @@ func (c *Client) call(
 		return fmt.Errorf("call ctld Nomad runtime: %w", err)
 	}
 	defer httpResponse.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(httpResponse.Body, nodeRuntimeRPCMaxBytes))
+	payload, err = io.ReadAll(io.LimitReader(httpResponse.Body, nodeRuntimeRPCMaxBytes+1))
+	if err != nil {
+		return fmt.Errorf("read ctld Nomad runtime response: %w", err)
+	}
+	if len(payload) > nodeRuntimeRPCMaxBytes {
+		return fmt.Errorf("ctld Nomad runtime response exceeds %d bytes", nodeRuntimeRPCMaxBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(response); err != nil {
 		return fmt.Errorf("decode ctld Nomad runtime response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("ctld Nomad runtime response must contain exactly one JSON value")
 	}
 	if httpResponse.StatusCode/100 != 2 {
 		return remoteRootFSError(response.Error, response.ErrorClass)
@@ -404,7 +458,62 @@ func nodeRuntimeRPCHandler(
 		}
 		return nodeRuntimeRPCResponse{}, cleaner.RegisterRuntimeSlot(ctx, request.SlotRegister)
 	})
+	handle(runtimeMetricTargetsPath, func(ctx context.Context, _ nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		provider, ok := cleaner.(runtimeMetricProvider)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, fmt.Errorf("runtime metric target provider is unavailable: %w", errdefs.ErrUnavailable)
+		}
+		targets, err := provider.ListRuntimeMetricTargets(ctx)
+		if err != nil {
+			return nodeRuntimeRPCResponse{}, err
+		}
+		targets, err = normalizeRuntimeMetricTargets(targets)
+		return nodeRuntimeRPCResponse{MetricTargets: targets}, err
+	})
+	handle(runtimeMetricStatsPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		provider, ok := cleaner.(runtimeMetricProvider)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, fmt.Errorf("runtime metric stats provider is unavailable: %w", errdefs.ErrUnavailable)
+		}
+		if err := request.MetricTarget.Validate(); err != nil {
+			return nodeRuntimeRPCResponse{}, fmt.Errorf("validate runtime metric target: %w: %w", err, errdefs.ErrInvalidArgument)
+		}
+		sample, err := provider.RuntimeMetricStats(ctx, request.MetricTarget)
+		if err != nil {
+			return nodeRuntimeRPCResponse{}, err
+		}
+		if err := sample.Validate(request.MetricTarget); err != nil {
+			return nodeRuntimeRPCResponse{}, fmt.Errorf("validate runtime metric sample: %w", err)
+		}
+		return nodeRuntimeRPCResponse{MetricSample: &sample}, nil
+	})
 	return mux
+}
+
+func normalizeRuntimeMetricTargets(targets []RuntimeMetricTarget) ([]RuntimeMetricTarget, error) {
+	if len(targets) > RuntimeMetricMaxTargets {
+		return nil, fmt.Errorf("runtime metric target count %d exceeds %d", len(targets), RuntimeMetricMaxTargets)
+	}
+	result := append([]RuntimeMetricTarget(nil), targets...)
+	slices.SortFunc(result, func(left, right RuntimeMetricTarget) int {
+		return strings.Compare(left.BindingDigest, right.BindingDigest)
+	})
+	bindings := make(map[string]struct{}, len(result))
+	series := make(map[string]struct{}, len(result))
+	for index, target := range result {
+		if err := target.Validate(); err != nil {
+			return nil, fmt.Errorf("runtime metric target %d: %w", index, err)
+		}
+		if _, found := bindings[target.BindingDigest]; found {
+			return nil, fmt.Errorf("runtime metric binding %q is duplicated", target.BindingDigest)
+		}
+		if _, found := series[target.SeriesEpoch]; found {
+			return nil, fmt.Errorf("runtime metric series %q is duplicated", target.SeriesEpoch)
+		}
+		bindings[target.BindingDigest] = struct{}{}
+		series[target.SeriesEpoch] = struct{}{}
+	}
+	return result, nil
 }
 
 func writeNodeRuntimeRPCResponse(writer http.ResponseWriter, response nodeRuntimeRPCResponse, err error) {

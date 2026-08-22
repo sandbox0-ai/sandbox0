@@ -51,12 +51,15 @@ func TestNormalizeOperationSpecRejectsMutableOrUnboundedInputs(t *testing.T) {
 		BlockOptions:     rootfsblock.BuildOptions{ObjectPrefix: "rootfs/import/operation"},
 	}
 	for name, mutate := range map[string]func(*OperationSpec){
-		"mutable source":   func(value *OperationSpec) { value.SourceOCIRef = "registry.example/sandbox:latest" },
-		"platform":         func(value *OperationSpec) { value.Platform.Architecture = "AMD64" },
-		"format":           func(value *OperationSpec) { value.FormatGeneration = 0 },
-		"protocol":         func(value *OperationSpec) { value.ProcdProtocol = "sandbox0 procd" },
-		"procd":            func(value *OperationSpec) { value.ProcdDigest = "sha256:ABC" },
-		"logical size":     func(value *OperationSpec) { value.LogicalSizeBytes-- },
+		"mutable source": func(value *OperationSpec) { value.SourceOCIRef = "registry.example/sandbox:latest" },
+		"platform":       func(value *OperationSpec) { value.Platform.Architecture = "AMD64" },
+		"format":         func(value *OperationSpec) { value.FormatGeneration = 0 },
+		"protocol":       func(value *OperationSpec) { value.ProcdProtocol = "sandbox0 procd" },
+		"procd":          func(value *OperationSpec) { value.ProcdDigest = "sha256:ABC" },
+		"logical size":   func(value *OperationSpec) { value.LogicalSizeBytes-- },
+		"unbounded size": func(value *OperationSpec) {
+			value.LogicalSizeBytes = rootfsartifact.MaximumLogicalSizeBytes + rootfsblock.LogicalBlockSize
+		},
 		"object prefix":    func(value *OperationSpec) { value.BlockOptions.ObjectPrefix = "../tenant" },
 		"unbounded pack":   func(value *OperationSpec) { value.BlockOptions.PackBytes = rootfsblock.DefaultPackBytes * 2 },
 		"unbounded prefix": func(value *OperationSpec) { value.BlockOptions.ObjectPrefix = strings.Repeat("a", 513) },

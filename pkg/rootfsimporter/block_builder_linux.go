@@ -46,10 +46,12 @@ func (b BlockBuilder) Build(
 		return BuildResult{}, fmt.Errorf("OCI unpacker, filesystem builder, and immutable publisher are required")
 	}
 	if request.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
+		request.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
 		request.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
 		return BuildResult{}, fmt.Errorf(
-			"logical size must be at least %d and aligned to %d bytes",
-			rootfsartifact.MinimumLogicalSizeBytes, rootfsblock.LogicalBlockSize,
+			"logical size must be between %d and %d and aligned to %d bytes",
+			rootfsartifact.MinimumLogicalSizeBytes, rootfsartifact.MaximumLogicalSizeBytes,
+			rootfsblock.LogicalBlockSize,
 		)
 	}
 	blockOptions, err := rootfsblock.NormalizeBuildOptions(request.BlockOptions)

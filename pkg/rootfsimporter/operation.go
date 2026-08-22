@@ -60,10 +60,12 @@ func NormalizeOperationSpec(input OperationSpec) (OperationSpec, error) {
 		return OperationSpec{}, fmt.Errorf("procd digest must be canonical SHA-256")
 	}
 	if input.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
+		input.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
 		input.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
 		return OperationSpec{}, fmt.Errorf(
-			"logical size must be at least %d and aligned to %d bytes",
-			rootfsartifact.MinimumLogicalSizeBytes, rootfsblock.LogicalBlockSize,
+			"logical size must be between %d and %d and aligned to %d bytes",
+			rootfsartifact.MinimumLogicalSizeBytes, rootfsartifact.MaximumLogicalSizeBytes,
+			rootfsblock.LogicalBlockSize,
 		)
 	}
 	normalized.BlockOptions, err = rootfsblock.NormalizeBuildOptions(input.BlockOptions)

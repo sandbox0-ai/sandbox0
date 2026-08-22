@@ -34,9 +34,8 @@ import (
 )
 
 const (
-	MinimumLogicalSizeBytes = 300 << 20
-	maxCommandOutputBytes   = 1 << 20
-	xfsCleanupTimeout       = 30 * time.Second
+	maxCommandOutputBytes = 1 << 20
+	xfsCleanupTimeout     = 30 * time.Second
 )
 
 // ErrXFSImageStillMounted means cleanup could not detach a build mount. The
@@ -61,8 +60,12 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 	if filepath.Clean(sourceRoot) == "/" {
 		return fmt.Errorf("source root and destination must be safe absolute paths")
 	}
-	if logicalSize < MinimumLogicalSizeBytes || logicalSize%rootfsblock.LogicalBlockSize != 0 {
-		return fmt.Errorf("logical size must be at least %d and aligned to %d bytes", MinimumLogicalSizeBytes, rootfsblock.LogicalBlockSize)
+	if logicalSize < MinimumLogicalSizeBytes || logicalSize > MaximumLogicalSizeBytes ||
+		logicalSize%rootfsblock.LogicalBlockSize != 0 {
+		return fmt.Errorf(
+			"logical size must be between %d and %d and aligned to %d bytes",
+			MinimumLogicalSizeBytes, MaximumLogicalSizeBytes, rootfsblock.LogicalBlockSize,
+		)
 	}
 	runner := b.Runner
 	if runner == nil {

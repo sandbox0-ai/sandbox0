@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -49,14 +50,71 @@ func TestXFSBuilderUsesReflinkLayoutAndCleanUnmount(t *testing.T) {
 
 func TestXFSBuilderUnmountsAfterCopyFailure(t *testing.T) {
 	runner := &recordingRunner{failName: "cp"}
+	destination := filepath.Join(t.TempDir(), "base.xfs")
 	err := (XFSBuilder{Runner: runner}).Build(
-		context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "base.xfs"), MinimumLogicalSizeBytes,
+		context.Background(), t.TempDir(), destination, MinimumLogicalSizeBytes,
 	)
 	if err == nil || !errors.Is(err, errCommandFailure) {
 		t.Fatalf("Build() error = %v, want command failure", err)
 	}
 	if got, want := runner.names(), []string{"mkfs.xfs", "mount", "cp", "umount"}; !slices.Equal(got, want) {
 		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	if _, statErr := os.Stat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial image stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestXFSBuilderRetainsImageWhenUnmountCannotBeRecovered(t *testing.T) {
+	runner := &recordingRunner{failName: "umount"}
+	destination := filepath.Join(t.TempDir(), "base.xfs")
+	err := (XFSBuilder{Runner: runner}).Build(
+		context.Background(), t.TempDir(), destination, MinimumLogicalSizeBytes,
+	)
+	if !errors.Is(err, ErrXFSImageStillMounted) {
+		t.Fatalf("Build() error = %v, want ErrXFSImageStillMounted", err)
+	}
+	if _, statErr := os.Stat(destination); statErr != nil {
+		t.Fatalf("retained image stat: %v", statErr)
+	}
+	if got, want := runner.names(), []string{"mkfs.xfs", "mount", "cp", "umount", "umount", "umount"}; !slices.Equal(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	if got := runner.calls[len(runner.calls)-1].args; !slices.Equal(got, []string{"-l", runner.calls[1].args[5]}) {
+		t.Fatalf("lazy umount args = %v", got)
+	}
+}
+
+func TestXFSBuilderRejectsSymlinkedSourceBeforeCreatingImage(t *testing.T) {
+	realSource := t.TempDir()
+	symlink := filepath.Join(t.TempDir(), "source")
+	if err := os.Symlink(realSource, symlink); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "base.xfs")
+	runner := &recordingRunner{}
+	err := (XFSBuilder{Runner: runner}).Build(context.Background(), symlink, destination, MinimumLogicalSizeBytes)
+	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
+		t.Fatalf("Build() error = %v, want symlink rejection", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("commands = %v, want none", runner.names())
+	}
+	if _, statErr := os.Stat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestBoundedCommandOutputKeepsPrefix(t *testing.T) {
+	output := &boundedCommandOutput{limit: 4}
+	if n, err := output.Write([]byte("abcdef")); err != nil || n != 6 {
+		t.Fatalf("first Write() = %d, %v", n, err)
+	}
+	if n, err := output.Write([]byte("gh")); err != nil || n != 2 {
+		t.Fatalf("second Write() = %d, %v", n, err)
+	}
+	if got, want := output.String(), "abcd\n[output truncated]"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
 	}
 }
 

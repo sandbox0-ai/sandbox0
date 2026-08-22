@@ -133,6 +133,16 @@ func TestBlockBuilderDoesNotDeletePreexistingImagePath(t *testing.T) {
 	require.Empty(t, fixture.publisher.objects)
 }
 
+func TestBlockBuilderRetainsImageWhenFilesystemReportsMounted(t *testing.T) {
+	fixture := newOCIBlockBuildFixture(t)
+	fixture.filesystem.err = rootfsartifact.ErrXFSImageStillMounted
+	_, err := fixture.builder().Build(t.Context(), fixture.request)
+	require.ErrorIs(t, err, rootfsartifact.ErrXFSImageStillMounted)
+	require.NoDirExists(t, fixture.unpacker.lastRoot)
+	require.FileExists(t, fixture.unpacker.lastRoot+".xfs")
+	require.Empty(t, fixture.publisher.objects)
+}
+
 type ociBlockBuildFixture struct {
 	request      BuildRequest
 	sourceDigest digest.Digest
@@ -215,6 +225,7 @@ func (f *fakeOCIUnpacker) Import(_ context.Context, request ocirootfs.Request) (
 type fakeFilesystemImageBuilder struct {
 	calls int
 	mode  os.FileMode
+	err   error
 }
 
 func (f *fakeFilesystemImageBuilder) Build(
@@ -236,7 +247,7 @@ func (f *fakeFilesystemImageBuilder) Build(
 		return err
 	}
 	_, writeErr := file.WriteAt(bytes.Repeat([]byte{0x5a}, rootfsblock.LogicalBlockSize), 0)
-	return errors.Join(writeErr, file.Close())
+	return errors.Join(writeErr, file.Close(), f.err)
 }
 
 type fakeImmutablePublisher struct {

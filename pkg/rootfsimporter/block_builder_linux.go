@@ -91,6 +91,9 @@ func (b BlockBuilder) Build(
 	}
 	imageOwned = true
 	if err := b.Filesystem.Build(ctx, rootPath, imagePath, request.LogicalSizeBytes); err != nil {
+		if errors.Is(err, rootfsartifact.ErrXFSImageStillMounted) {
+			imageOwned = false
+		}
 		return BuildResult{}, fmt.Errorf("build XFS base image: %w", err)
 	}
 	image, err := openVerifiedFilesystemImage(imagePath, request.LogicalSizeBytes)

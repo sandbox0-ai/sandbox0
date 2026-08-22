@@ -17,6 +17,7 @@
 package rootfsartifact
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,13 +25,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
-const MinimumLogicalSizeBytes = 300 << 20
+const (
+	MinimumLogicalSizeBytes = 300 << 20
+	maxCommandOutputBytes   = 1 << 20
+	xfsCleanupTimeout       = 30 * time.Second
+)
+
+// ErrXFSImageStillMounted means cleanup could not detach a build mount. The
+// image path is intentionally retained and must not be deleted by the caller.
+var ErrXFSImageStillMounted = errors.New("XFS build image is still mounted")
 
 // CommandRunner externalizes privileged filesystem commands for tests.
 type CommandRunner interface {
@@ -43,8 +54,11 @@ type XFSBuilder struct {
 }
 
 // Build writes a sparse, reflink-capable XFS image containing sourceRoot under lower/.
-func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, logicalSize int64) error {
-	if !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(destination) || filepath.Clean(sourceRoot) == "/" {
+func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, logicalSize int64) (resultErr error) {
+	if err := validateXFSBuildPaths(sourceRoot, destination); err != nil {
+		return err
+	}
+	if filepath.Clean(sourceRoot) == "/" {
 		return fmt.Errorf("source root and destination must be safe absolute paths")
 	}
 	if logicalSize < MinimumLogicalSizeBytes || logicalSize%rootfsblock.LogicalBlockSize != 0 {
@@ -58,9 +72,37 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 	if err != nil {
 		return fmt.Errorf("create XFS image: %w", err)
 	}
+	mountRoot := ""
+	mounted := false
+	defer func() {
+		var cleanupErr error
+		if mounted {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), xfsCleanupTimeout)
+			unmountErr := runner.Run(cleanupCtx, "umount", mountRoot)
+			if unmountErr != nil {
+				unmountErr = errors.Join(unmountErr, runner.Run(cleanupCtx, "umount", "-l", mountRoot))
+			}
+			cancel()
+			if unmountErr != nil {
+				cleanupErr = errors.Join(cleanupErr, ErrXFSImageStillMounted, fmt.Errorf("detach XFS build mount %s: %w", mountRoot, unmountErr))
+			} else {
+				mounted = false
+			}
+		}
+		if !mounted && mountRoot != "" {
+			cleanupErr = errors.Join(cleanupErr, os.RemoveAll(mountRoot))
+		}
+		resultErr = errors.Join(resultErr, cleanupErr)
+		if resultErr != nil && !mounted {
+			removeErr := os.Remove(destination)
+			if errors.Is(removeErr, os.ErrNotExist) {
+				removeErr = nil
+			}
+			resultErr = errors.Join(resultErr, removeErr)
+		}
+	}()
 	if err := file.Truncate(logicalSize); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("size XFS image: %w", err)
+		return fmt.Errorf("size XFS image: %w", errors.Join(err, file.Close()))
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close sized XFS image: %w", err)
@@ -68,20 +110,14 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 	if err := runner.Run(ctx, "mkfs.xfs", "-f", "-m", "crc=1,reflink=1", "-n", "ftype=1", "-L", "s0-base-v1", destination); err != nil {
 		return fmt.Errorf("format XFS image: %w", err)
 	}
-	mountRoot, err := os.MkdirTemp(filepath.Dir(destination), "xfs-mount-*")
+	mountRoot, err = os.MkdirTemp(filepath.Dir(destination), "xfs-mount-*")
 	if err != nil {
 		return fmt.Errorf("create XFS mount directory: %w", err)
 	}
-	defer os.RemoveAll(mountRoot)
 	if err := runner.Run(ctx, "mount", "-t", "xfs", "-o", "loop,nouuid,noatime", destination, mountRoot); err != nil {
 		return fmt.Errorf("mount XFS image: %w", err)
 	}
-	mounted := true
-	defer func() {
-		if mounted {
-			_ = runner.Run(context.Background(), "umount", mountRoot)
-		}
-	}()
+	mounted = true
 	lower := filepath.Join(mountRoot, "lower")
 	for _, path := range []string{lower, filepath.Join(mountRoot, "upper"), filepath.Join(mountRoot, "work")} {
 		if err := os.Mkdir(path, 0o755); err != nil {
@@ -113,17 +149,85 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 	return nil
 }
 
+func validateXFSBuildPaths(sourceRoot, destination string) error {
+	if err := validateCanonicalXFSPath("source root", sourceRoot); err != nil {
+		return err
+	}
+	if err := validateCanonicalXFSPath("destination", destination); err != nil {
+		return err
+	}
+	resolvedSource, err := filepath.EvalSymlinks(sourceRoot)
+	if err != nil || resolvedSource != sourceRoot {
+		return fmt.Errorf("source root must not traverse symlinks")
+	}
+	sourceInfo, err := os.Lstat(sourceRoot)
+	if err != nil || !sourceInfo.IsDir() || sourceInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("source root must be a directory without symlinks")
+	}
+	destinationParent := filepath.Dir(destination)
+	resolvedParent, err := filepath.EvalSymlinks(destinationParent)
+	if err != nil || resolvedParent != destinationParent {
+		return fmt.Errorf("destination parent must not traverse symlinks")
+	}
+	parentInfo, err := os.Lstat(destinationParent)
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("destination parent must be a directory without symlinks")
+	}
+	return nil
+}
+
+func validateCanonicalXFSPath(name, value string) error {
+	if value == "" || value != strings.TrimSpace(value) || value != filepath.Clean(value) ||
+		!filepath.IsAbs(value) || value == string(filepath.Separator) {
+		return fmt.Errorf("%s must be a canonical non-root absolute path", name)
+	}
+	return nil
+}
+
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
-	output, err := command.CombinedOutput()
+	output := &boundedCommandOutput{limit: maxCommandOutputBytes}
+	command.Stdout = output
+	command.Stderr = output
+	err := command.Run()
 	if err != nil {
-		message := strings.TrimSpace(string(output))
+		message := strings.TrimSpace(output.String())
 		if message == "" {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		return fmt.Errorf("%s: %s: %w", name, message, err)
 	}
 	return nil
+}
+
+type boundedCommandOutput struct {
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (o *boundedCommandOutput) Write(payload []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	remaining := o.limit - o.buffer.Len()
+	if remaining > 0 {
+		_, _ = o.buffer.Write(payload[:min(len(payload), remaining)])
+	}
+	if len(payload) > remaining {
+		o.truncated = true
+	}
+	return len(payload), nil
+}
+
+func (o *boundedCommandOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	value := o.buffer.String()
+	if o.truncated {
+		value += "\n[output truncated]"
+	}
+	return value
 }

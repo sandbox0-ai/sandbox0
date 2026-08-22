@@ -100,6 +100,83 @@ func TestNodeChannelIdentityMustMatchAuthenticatedRoute(t *testing.T) {
 	}
 }
 
+func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
+	hub, err := NewChannelHub(channelTestVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	target := runtimeslotclaim.NodeTarget{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
+	}
+	type outcome struct {
+		response protocol.NodeControlResponse
+		err      error
+	}
+	result := make(chan outcome, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	go func() {
+		response, err := hub.Claim(ctx, target, testChannelClaimRequest())
+		result <- outcome{response: response, err: err}
+	}()
+	select {
+	case early := <-result:
+		t.Fatalf("claim returned before reconnect: %+v", early)
+	case <-time.After(20 * time.Millisecond):
+	}
+	executor := &channelTestExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token,
+		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		AgentInstanceID: "agent-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentCtx, cancelAgent := context.WithCancel(t.Context())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.Run(agentCtx) }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-1")
+	select {
+	case completed := <-result:
+		if completed.err != nil || completed.response.Phase != string(protocol.StateActive) {
+			t.Fatalf("claim after reconnect = %+v, %v", completed.response, completed.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claim did not resume after reconnect")
+	}
+	cancelAgent()
+	if err := <-agentDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("agent stop = %v", err)
+	}
+}
+
+func TestNodeChannelHubReconnectWaitHonorsContext(t *testing.T) {
+	hub, err := NewChannelHub(channelTestVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	_, err = hub.Claim(ctx, runtimeslotclaim.NodeTarget{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
+	}, testChannelClaimRequest())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("claim error = %v, want deadline exceeded", err)
+	}
+}
+
 func (e *channelTestExecutor) Claim(
 	_ context.Context,
 	_ protocol.NodeChannelTarget,

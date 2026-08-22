@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	nodeChannelHelloTimeout = 5 * time.Second
-	maxNodeChannelPending   = 1024
+	nodeChannelHelloTimeout   = 5 * time.Second
+	maxNodeChannelPending     = 1024
+	nodeChannelReconnectGrace = 750 * time.Millisecond
 )
 
 // ChannelHub accepts mutually authenticated node-initiated streams and routes
@@ -36,9 +37,10 @@ const (
 type ChannelHub struct {
 	verifier nodeauth.Verifier
 
-	mu     sync.Mutex
-	routes map[nodeChannelKey]*nodeChannelRoute
-	closed bool
+	mu      sync.Mutex
+	routes  map[nodeChannelKey]*nodeChannelRoute
+	changed chan struct{}
+	closed  bool
 }
 
 type nodeChannelKey struct {
@@ -89,7 +91,11 @@ func NewChannelHub(verifier nodeauth.Verifier) (*ChannelHub, error) {
 	if verifier == nil {
 		return nil, errors.New("runtime slot node channel verifier is required")
 	}
-	return &ChannelHub{verifier: verifier, routes: make(map[nodeChannelKey]*nodeChannelRoute)}, nil
+	return &ChannelHub{
+		verifier: verifier,
+		routes:   make(map[nodeChannelKey]*nodeChannelRoute),
+		changed:  make(chan struct{}),
+	}, nil
 }
 
 // Prepare applies one exact network policy through a node channel that
@@ -237,6 +243,7 @@ func (h *ChannelHub) register(connection *nodeChannelConnection) error {
 	}
 	route.conn = connection
 	route.mu.Unlock()
+	h.signalChangedLocked()
 	if previous != nil {
 		previous.close(fmt.Errorf("runtime slot node channel was superseded: %w", errdefs.ErrUnavailable))
 	}
@@ -258,8 +265,14 @@ func (h *ChannelHub) unregister(connection *nodeChannelConnection) {
 	if route.conn == connection {
 		route.conn = nil
 		delete(h.routes, key)
+		h.signalChangedLocked()
 	}
 	route.mu.Unlock()
+}
+
+func (h *ChannelHub) signalChangedLocked() {
+	close(h.changed)
+	h.changed = make(chan struct{})
 }
 
 // Connected reports whether the exact authenticated node boot has a live
@@ -372,6 +385,8 @@ func (h *ChannelHub) Close() error {
 		routes = append(routes, route)
 	}
 	h.routes = make(map[nodeChannelKey]*nodeChannelRoute)
+	close(h.changed)
+	h.changed = nil
 	h.mu.Unlock()
 	for _, route := range routes {
 		route.mu.Lock()
@@ -545,33 +560,82 @@ func (h *ChannelHub) dispatch(
 		clusterID: command.Target.ClusterID, nodeID: command.Target.NodeID,
 		nodeUID: command.Target.NodeUID, nodeBootID: command.Target.NodeBootID,
 	}
-	h.mu.Lock()
-	if h.closed {
-		h.mu.Unlock()
-		return protocol.NodeChannelResult{}, fmt.Errorf("runtime slot node channel hub is closed: %w", errdefs.ErrUnavailable)
+	// Agents rotate authenticated streams at a bounded maximum age. Preserve
+	// the exact request across that transport-only gap; a remote executor error
+	// is still returned immediately and is never hidden by this retry.
+	var reconnectDeadline time.Time
+	var lastTransportErr error
+	for {
+		connection, changed, closed := h.connection(key)
+		if closed {
+			return protocol.NodeChannelResult{}, fmt.Errorf("runtime slot node channel hub is closed: %w", errdefs.ErrUnavailable)
+		}
+		if connection != nil && !connection.isClosed() {
+			if !connection.hello.Supports(command.Kind) {
+				return protocol.NodeChannelResult{}, fmt.Errorf("node channel does not support %s: %w", command.Kind, errdefs.ErrFailedPrecondition)
+			}
+			result, err := connection.request(ctx, command)
+			if err == nil {
+				if result.Error != "" {
+					return protocol.NodeChannelResult{}, nodeChannelRemoteError(result.Error, result.ErrorClass)
+				}
+				return result, nil
+			}
+			if !errdefs.IsUnavailable(err) {
+				return protocol.NodeChannelResult{}, err
+			}
+			lastTransportErr = err
+		}
+		if reconnectDeadline.IsZero() {
+			reconnectDeadline = time.Now().Add(nodeChannelReconnectGrace)
+		}
+		if err := waitForNodeChannelChange(ctx, changed, reconnectDeadline); err != nil {
+			if ctx.Err() != nil {
+				return protocol.NodeChannelResult{}, ctx.Err()
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				return protocol.NodeChannelResult{}, err
+			}
+			if lastTransportErr != nil {
+				return protocol.NodeChannelResult{}, fmt.Errorf("exact node boot channel did not reconnect: %w", lastTransportErr)
+			}
+			return protocol.NodeChannelResult{}, fmt.Errorf("exact node boot has no authenticated channel: %w", errdefs.ErrUnavailable)
+		}
 	}
+}
+
+func (h *ChannelHub) connection(key nodeChannelKey) (*nodeChannelConnection, <-chan struct{}, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, nil, true
+	}
+	changed := h.changed
 	route := h.routes[key]
-	h.mu.Unlock()
 	if route == nil {
-		return protocol.NodeChannelResult{}, fmt.Errorf("exact node boot has no authenticated channel: %w", errdefs.ErrUnavailable)
+		return nil, changed, false
 	}
 	route.mu.Lock()
 	connection := route.conn
 	route.mu.Unlock()
-	if connection == nil || connection.isClosed() {
-		return protocol.NodeChannelResult{}, fmt.Errorf("exact node boot channel is disconnected: %w", errdefs.ErrUnavailable)
+	return connection, changed, false
+}
+
+func waitForNodeChannelChange(ctx context.Context, changed <-chan struct{}, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.DeadlineExceeded
 	}
-	if !connection.hello.Supports(command.Kind) {
-		return protocol.NodeChannelResult{}, fmt.Errorf("node channel does not support %s: %w", command.Kind, errdefs.ErrFailedPrecondition)
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-changed:
+		return nil
+	case <-timer.C:
+		return context.DeadlineExceeded
 	}
-	result, err := connection.request(ctx, command)
-	if err != nil {
-		return protocol.NodeChannelResult{}, err
-	}
-	if result.Error != "" {
-		return protocol.NodeChannelResult{}, nodeChannelRemoteError(result.Error, result.ErrorClass)
-	}
-	return result, nil
 }
 
 func (c *nodeChannelConnection) request(

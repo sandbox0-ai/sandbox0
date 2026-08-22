@@ -323,9 +323,11 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 	if options.PageEntries == 0 {
 		options.PageEntries = DefaultPageEntries
 	}
-	options.ObjectPrefix = strings.Trim(strings.TrimSpace(options.ObjectPrefix), "/")
 	if options.ObjectPrefix == "" {
 		options.ObjectPrefix = "rootfs/v1"
+	}
+	if err := ValidateObjectPrefix(options.ObjectPrefix); err != nil {
+		return BuildOptions{}, err
 	}
 	if options.DataRangeBytes <= 0 || options.DataRangeBytes > MaxDataRangeBytes || options.DataRangeBytes%LogicalBlockSize != 0 {
 		return BuildOptions{}, fmt.Errorf("data range must be a positive block-aligned value no greater than %d", MaxDataRangeBytes)
@@ -338,6 +340,29 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 		return BuildOptions{}, fmt.Errorf("mapping page entry limit is invalid")
 	}
 	return options, nil
+}
+
+// ValidateObjectPrefix rejects paths that could escape or alias a caller's
+// immutable object namespace. Prefixes are accepted only in their canonical
+// form because silently trimming a durable operation input would make retries
+// ambiguous.
+func ValidateObjectPrefix(value string) error {
+	if value == "" || value != strings.TrimSpace(value) || value != strings.Trim(value, "/") || len(value) > 512 {
+		return fmt.Errorf("rootfs object prefix must be a canonical non-empty path within 512 bytes")
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." || len(segment) > 128 {
+			return fmt.Errorf("rootfs object prefix contains an invalid path segment")
+		}
+		for _, character := range segment {
+			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || strings.ContainsRune("._:-", character) {
+				continue
+			}
+			return fmt.Errorf("rootfs object prefix contains an invalid character")
+		}
+	}
+	return nil
 }
 
 func allZero(payload []byte) bool {

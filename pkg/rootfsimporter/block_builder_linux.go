@@ -52,9 +52,6 @@ func (b BlockBuilder) Build(
 			rootfsartifact.MinimumLogicalSizeBytes, rootfsblock.LogicalBlockSize,
 		)
 	}
-	if err := validateArtifactObjectPrefix(request.BlockOptions.ObjectPrefix); err != nil {
-		return BuildResult{}, err
-	}
 	blockOptions, err := rootfsblock.NormalizeBuildOptions(request.BlockOptions)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("RootFS block build options: %w", err)
@@ -241,23 +238,4 @@ func removeOwnedImage(path string) error {
 		return nil
 	}
 	return err
-}
-
-func validateArtifactObjectPrefix(value string) error {
-	if value == "" || value != strings.TrimSpace(value) || value != strings.Trim(value, "/") || len(value) > 512 {
-		return fmt.Errorf("RootFS artifact object prefix must be a canonical non-empty path within 512 bytes")
-	}
-	for _, segment := range strings.Split(value, "/") {
-		if segment == "" || segment == "." || segment == ".." || len(segment) > 128 {
-			return fmt.Errorf("RootFS artifact object prefix contains an invalid path segment")
-		}
-		for _, character := range segment {
-			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-				character >= '0' && character <= '9' || strings.ContainsRune("._:-", character) {
-				continue
-			}
-			return fmt.Errorf("RootFS artifact object prefix contains an invalid character")
-		}
-	}
-	return nil
 }

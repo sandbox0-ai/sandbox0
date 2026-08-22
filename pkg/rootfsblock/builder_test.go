@@ -89,6 +89,18 @@ func TestNormalizeBuildOptionsRejectsUnboundedPack(t *testing.T) {
 	require.ErrorContains(t, err, "no greater than")
 }
 
+func TestNormalizeBuildOptionsRejectsUnsafeObjectPrefixes(t *testing.T) {
+	for _, prefix := range []string{
+		"/rootfs/team", "rootfs/team/", " rootfs/team", "rootfs//team",
+		"rootfs/../team", "rootfs/team name", strings.Repeat("a", 513),
+	} {
+		t.Run(prefix, func(t *testing.T) {
+			_, err := NormalizeBuildOptions(BuildOptions{ObjectPrefix: prefix})
+			require.ErrorContains(t, err, "object prefix")
+		})
+	}
+}
+
 func TestValidateObjectReference(t *testing.T) {
 	payload := []byte("immutable-object")
 	reference := ObjectReference{

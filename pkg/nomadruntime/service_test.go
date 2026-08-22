@@ -34,7 +34,7 @@ func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	metricTarget := testRuntimeMetricTarget()
 	cleaner.metricTargets = []RuntimeMetricTarget{metricTarget}
 	cleaner.metricSample = RuntimeMetricSample{
-		Version: runtimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
+		Version: RuntimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
 		Stats: RunscStats{Type: "stats", ID: metricTarget.RunscContainerID},
 	}
 	go func() { done <- serveNodeRuntime(ctx, socket, runtime, nil, nil, cleaner) }()

@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +26,12 @@ import (
 
 const (
 	RuntimeMetricTargetVersion = 1
+	RuntimeMetricSampleVersion = 1
 	RuntimeMetricMaxTargets    = 512
 	maxRuntimeMetricIDBytes    = 512
 	maxRuntimeMetricCPUMilli   = 1_000_000
 	maxRuntimeMetricMemoryMiB  = 1 << 30
 )
-
-const runtimeMetricSampleVersion = 1
 
 // RuntimeMetricTarget is the non-secret logical and runtime identity returned
 // by the root-owned node runtime. It deliberately contains no journal path,
@@ -62,7 +62,7 @@ type RuntimeMetricSample struct {
 // Validate checks the sample against the exact target requested by the
 // collector. Unsupported gVisor fields remain absent from RunscStats.
 func (s RuntimeMetricSample) Validate(target RuntimeMetricTarget) error {
-	if s.Version != runtimeMetricSampleVersion {
+	if s.Version != RuntimeMetricSampleVersion {
 		return fmt.Errorf("unsupported runtime metric sample version %d", s.Version)
 	}
 	if err := target.Validate(); err != nil {
@@ -108,6 +108,34 @@ func (t RuntimeMetricTarget) Validate() error {
 		return fmt.Errorf("series_epoch does not match the runtime incarnation")
 	}
 	return nil
+}
+
+// NormalizeRuntimeMetricTargets validates, canonically orders, and rejects
+// ambiguous target sets before a caller uses them for privileged stats RPCs.
+func NormalizeRuntimeMetricTargets(targets []RuntimeMetricTarget) ([]RuntimeMetricTarget, error) {
+	if len(targets) > RuntimeMetricMaxTargets {
+		return nil, fmt.Errorf("runtime metric target count %d exceeds %d", len(targets), RuntimeMetricMaxTargets)
+	}
+	result := append([]RuntimeMetricTarget(nil), targets...)
+	slices.SortFunc(result, func(left, right RuntimeMetricTarget) int {
+		return strings.Compare(left.BindingDigest, right.BindingDigest)
+	})
+	bindings := make(map[string]struct{}, len(result))
+	series := make(map[string]struct{}, len(result))
+	for index, target := range result {
+		if err := target.Validate(); err != nil {
+			return nil, fmt.Errorf("runtime metric target %d: %w", index, err)
+		}
+		if _, found := bindings[target.BindingDigest]; found {
+			return nil, fmt.Errorf("runtime metric binding %q is duplicated", target.BindingDigest)
+		}
+		if _, found := series[target.SeriesEpoch]; found {
+			return nil, fmt.Errorf("runtime metric series %q is duplicated", target.SeriesEpoch)
+		}
+		bindings[target.BindingDigest] = struct{}{}
+		series[target.SeriesEpoch] = struct{}{}
+	}
+	return result, nil
 }
 
 // RuntimeMetricSeriesEpoch derives the public counter-reset boundary from the

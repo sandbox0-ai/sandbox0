@@ -53,7 +53,7 @@ func TestRuntimeMetricTargetValidate(t *testing.T) {
 func TestRuntimeMetricSampleValidate(t *testing.T) {
 	target := testRuntimeMetricTarget()
 	sample := RuntimeMetricSample{
-		Version: runtimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
+		Version: RuntimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
 		Stats: RunscStats{Type: "stats", ID: target.RunscContainerID},
 	}
 	if err := sample.Validate(target); err != nil {
@@ -74,20 +74,20 @@ func TestNormalizeRuntimeMetricTargetsSortsAndRejectsAmbiguity(t *testing.T) {
 	second.SeriesEpoch = RuntimeMetricSeriesEpoch(
 		second.AllocationID, second.NodeBootID, second.LaunchAttempt, second.RunscContainerID,
 	)
-	normalized, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{second, first})
+	normalized, err := NormalizeRuntimeMetricTargets([]RuntimeMetricTarget{second, first})
 	if err != nil || len(normalized) != 2 || normalized[0] != first || normalized[1] != second {
-		t.Fatalf("normalizeRuntimeMetricTargets() = %+v, %v", normalized, err)
+		t.Fatalf("NormalizeRuntimeMetricTargets() = %+v, %v", normalized, err)
 	}
 
 	duplicateBinding := second
 	duplicateBinding.BindingDigest = first.BindingDigest
-	if _, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateBinding}); err == nil ||
+	if _, err := NormalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateBinding}); err == nil ||
 		!strings.Contains(err.Error(), "binding") {
 		t.Fatalf("duplicate binding error = %v", err)
 	}
 	duplicateSeries := first
 	duplicateSeries.BindingDigest = second.BindingDigest
-	if _, err := normalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateSeries}); err == nil ||
+	if _, err := NormalizeRuntimeMetricTargets([]RuntimeMetricTarget{first, duplicateSeries}); err == nil ||
 		!strings.Contains(err.Error(), "metric series") {
 		t.Fatalf("duplicate series error = %v", err)
 	}

@@ -41,11 +41,13 @@ func projectGVisorRuntimeSample(
 		RuntimeGeneration: target.RuntimeGeneration, SeriesEpoch: target.SeriesEpoch,
 		ObservedAt: observedAt,
 	}
-	projectGVisorCPU(&sample, target, stats.Data.CPU.Usage, observedAt, tracker)
-	projectGVisorMemory(&sample, target, stats.Data.Memory)
 	if !projectGVisorNetwork(&sample, stats.Data.NetworkInterfaces) {
 		return sandboxobservability.RuntimeSample{}, false
 	}
+	// Validate every fallible counter aggregation before advancing the CPU
+	// baseline. Rejected samples must not affect the next derived CPU value.
+	projectGVisorCPU(&sample, target, stats.Data.CPU.Usage, observedAt, tracker)
+	projectGVisorMemory(&sample, target, stats.Data.Memory)
 	processCount := stats.Data.Pids.Current
 	sample.Process = &sandboxobservability.RuntimeProcessValues{Count: &processCount}
 	sample.RootFSWritable = &sandboxobservability.RuntimeRootFSWritableValues{}

@@ -112,10 +112,17 @@ func TestProjectGVisorRuntimeSampleResetsCPUOnSeriesRotation(t *testing.T) {
 func TestProjectGVisorRuntimeSampleRejectsCounterOverflowAndIdentityMismatch(t *testing.T) {
 	target := validGVisorMetricTarget()
 	stats := validGVisorStats(target.RunscContainerID)
+	tracker := &cpuUsageTracker{}
 	stats.Data.NetworkInterfaces = append(stats.Data.NetworkInterfaces,
 		&gvisorcli.RunscNetworkInterface{Name: "eth1", RxBytes: math.MaxUint64})
-	if _, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Now(), &cpuUsageTracker{}); ok {
+	if _, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Unix(100, 0), tracker); ok {
 		t.Fatal("projection accepted overflowing network counters")
+	}
+	stats = validGVisorStats(target.RunscContainerID)
+	stats.Data.CPU.Usage.Total += uint64(time.Second)
+	firstAccepted, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Unix(101, 0), tracker)
+	if !ok || firstAccepted.CPU.Usage != nil {
+		t.Fatalf("rejected sample advanced CPU baseline: %+v, ok=%t", firstAccepted.CPU, ok)
 	}
 
 	stats = validGVisorStats("another-runsc")

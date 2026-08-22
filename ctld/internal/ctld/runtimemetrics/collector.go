@@ -83,7 +83,8 @@ const (
 )
 
 type collectionTarget struct {
-	id string
+	id    string
+	stats *runtimeapi.PodSandboxStats
 }
 
 // NewCollector creates a node-local, bounded CRI runtime metric collector.
@@ -260,42 +261,20 @@ func (c *Collector) collectTargets(ctx context.Context, identities identityIndex
 		return result, nil
 	}
 
-	type targetResult struct {
-		stats *runtimeapi.PodSandboxStats
-		err   error
-	}
-	results := make([]targetResult, len(targets))
-	semaphore := make(chan struct{}, c.maxConcurrency)
-	var wg sync.WaitGroup
-	dispatched := 0
-dispatch:
-	for i := range targets {
-		if budgetCtx.Err() != nil {
-			break
-		}
-		select {
-		case semaphore <- struct{}{}:
-			if budgetCtx.Err() != nil {
-				<-semaphore
-				break dispatch
+	results, dispatched := runBoundedCollection(
+		budgetCtx,
+		targets,
+		c.maxConcurrency,
+		c.requestTimeout,
+		func(requestCtx context.Context, target collectionTarget) (collectionTarget, error) {
+			stats, err := c.statsClient.PodSandboxStats(requestCtx, target.id)
+			if stats == nil && err == nil {
+				err = fmt.Errorf("empty CRI pod sandbox stats")
 			}
-		case <-budgetCtx.Done():
-			break dispatch
-		}
-		dispatched++
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			defer func() { <-semaphore }()
-			requestCtx, requestCancel := context.WithTimeout(budgetCtx, c.requestTimeout)
-			results[index].stats, results[index].err = c.statsClient.PodSandboxStats(requestCtx, targets[index].id)
-			requestCancel()
-			if results[index].stats == nil && results[index].err == nil {
-				results[index].err = fmt.Errorf("empty CRI pod sandbox stats")
-			}
-		}(i)
-	}
-	wg.Wait()
+			target.stats = stats
+			return target, err
+		},
+	)
 	c.advanceTargetCursor(len(targets), start, dispatched)
 
 	stats := make([]*runtimeapi.PodSandboxStats, 0, dispatched)
@@ -306,7 +285,7 @@ dispatch:
 			collectionErr = errors.Join(collectionErr, fmt.Errorf("collect CRI pod sandbox %s stats: %w", targets[i].id, results[i].err))
 			continue
 		}
-		stats = append(stats, results[i].stats)
+		stats = append(stats, results[i].value.stats)
 	}
 	if deferred := len(targets) - dispatched; deferred > 0 {
 		collectionErr = errors.Join(collectionErr, fmt.Errorf(
@@ -349,41 +328,16 @@ func collectionTargets(identities identityIndex, sandboxes []*runtimeapi.PodSand
 }
 
 func (c *Collector) orderedCollectionTargets(targets []collectionTarget) ([]collectionTarget, int) {
-	if len(targets) == 0 {
-		return nil, 0
-	}
-	start := c.targetCursor % len(targets)
-	if start == 0 {
-		return targets, start
-	}
-	ordered := make([]collectionTarget, 0, len(targets))
-	ordered = append(ordered, targets[start:]...)
-	ordered = append(ordered, targets[:start]...)
-	return ordered, start
+	return rotateCollectionTargets(targets, c.targetCursor)
 }
 
 func (c *Collector) advanceTargetCursor(targetCount, start, dispatched int) {
-	if targetCount == 0 || dispatched >= targetCount {
-		c.targetCursor = 0
-		return
-	}
-	c.targetCursor = (start + dispatched) % targetCount
+	c.targetCursor = nextCollectionTargetCursor(targetCount, start, dispatched)
 }
 
 func (c *Collector) nextDelay() time.Duration {
 	if c == nil {
 		return 0
 	}
-	if c.jitter <= 0 {
-		return c.interval
-	}
-	random := c.random()
-	if random < 0 {
-		random = 0
-	}
-	if random > 1 {
-		random = 1
-	}
-	offset := time.Duration((random*2 - 1) * float64(c.jitter))
-	return c.interval + offset
+	return boundedJitterDelay(c.interval, c.jitter, c.random)
 }

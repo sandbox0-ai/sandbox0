@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -247,7 +246,7 @@ func (c *Client) ListRuntimeMetricTargets(ctx context.Context) ([]RuntimeMetricT
 	if err := c.call(ctx, runtimeMetricTargetsPath, nodeRuntimeRPCRequest{}, &response); err != nil {
 		return nil, err
 	}
-	return normalizeRuntimeMetricTargets(response.MetricTargets)
+	return NormalizeRuntimeMetricTargets(response.MetricTargets)
 }
 
 // RuntimeMetricStats revalidates one previously listed target and samples it
@@ -467,7 +466,7 @@ func nodeRuntimeRPCHandler(
 		if err != nil {
 			return nodeRuntimeRPCResponse{}, err
 		}
-		targets, err = normalizeRuntimeMetricTargets(targets)
+		targets, err = NormalizeRuntimeMetricTargets(targets)
 		return nodeRuntimeRPCResponse{MetricTargets: targets}, err
 	})
 	handle(runtimeMetricStatsPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
@@ -488,32 +487,6 @@ func nodeRuntimeRPCHandler(
 		return nodeRuntimeRPCResponse{MetricSample: &sample}, nil
 	})
 	return mux
-}
-
-func normalizeRuntimeMetricTargets(targets []RuntimeMetricTarget) ([]RuntimeMetricTarget, error) {
-	if len(targets) > RuntimeMetricMaxTargets {
-		return nil, fmt.Errorf("runtime metric target count %d exceeds %d", len(targets), RuntimeMetricMaxTargets)
-	}
-	result := append([]RuntimeMetricTarget(nil), targets...)
-	slices.SortFunc(result, func(left, right RuntimeMetricTarget) int {
-		return strings.Compare(left.BindingDigest, right.BindingDigest)
-	})
-	bindings := make(map[string]struct{}, len(result))
-	series := make(map[string]struct{}, len(result))
-	for index, target := range result {
-		if err := target.Validate(); err != nil {
-			return nil, fmt.Errorf("runtime metric target %d: %w", index, err)
-		}
-		if _, found := bindings[target.BindingDigest]; found {
-			return nil, fmt.Errorf("runtime metric binding %q is duplicated", target.BindingDigest)
-		}
-		if _, found := series[target.SeriesEpoch]; found {
-			return nil, fmt.Errorf("runtime metric series %q is duplicated", target.SeriesEpoch)
-		}
-		bindings[target.BindingDigest] = struct{}{}
-		series[target.SeriesEpoch] = struct{}{}
-	}
-	return result, nil
 }
 
 func writeNodeRuntimeRPCResponse(writer http.ResponseWriter, response nodeRuntimeRPCResponse, err error) {

@@ -33,6 +33,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ocirootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
@@ -194,10 +195,97 @@ func TestPrivilegedBlockBuilderPublishesMountableXFSArtifact(t *testing.T) {
 	require.NoError(t, err)
 	require.NoDirExists(t, fixture.unpacker.lastRoot)
 	require.NoFileExists(t, fixture.unpacker.lastRoot+".xfs")
+	assertMountableBlockResult(t, ctx, fixture.request.Image.WorkRoot, fixture.publisher, result, marker)
+}
 
-	reader, err := rootfsblock.NewReader(fixture.publisher, result.Descriptor, 64<<20)
+// TestPrivilegedBlockBuilderPublishesMountableRustFSArtifact verifies the
+// complete pre-PUT journal, immutable S3 publication, and descriptor-only read
+// path against a real RustFS endpoint. The recording journal proves call
+// ordering only; the production journal must persist the same contract.
+func TestPrivilegedBlockBuilderPublishesMountableRustFSArtifact(t *testing.T) {
+	if os.Getenv("SANDBOX0_PRIVILEGED_ROOTFS_IMPORTER") != "1" {
+		t.Skip("set SANDBOX0_PRIVILEGED_ROOTFS_IMPORTER=1 on an isolated Linux host")
+	}
+	endpoint := strings.TrimSpace(os.Getenv("SANDBOX0_RUSTFS_ENDPOINT"))
+	if endpoint == "" {
+		t.Skip("set SANDBOX0_RUSTFS_ENDPOINT to a real RustFS endpoint")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("privileged RootFS importer test requires root")
+	}
+	for _, command := range []string{"mkfs.xfs", "mount", "cp", "umount", "xfs_repair"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Fatalf("required command %s: %v", command, err)
+		}
+	}
+	bucket := strings.TrimSpace(os.Getenv("SANDBOX0_RUSTFS_BUCKET"))
+	if bucket == "" {
+		bucket = "sandbox0-rootfs-importer-test"
+	}
+	store, err := objectstore.Create(objectstore.Config{
+		Type: objectstore.TypeS3, Bucket: bucket, Region: "us-east-1", Endpoint: endpoint,
+		AccessKey: os.Getenv("SANDBOX0_RUSTFS_ACCESS_KEY"),
+		SecretKey: os.Getenv("SANDBOX0_RUSTFS_SECRET_KEY"),
+	})
 	require.NoError(t, err)
-	reconstructed := filepath.Join(fixture.request.Image.WorkRoot, "reconstructed.xfs")
+	require.True(t, objectstore.SupportsConditionalCreate(store))
+	conditional, ok := store.(objectstore.ConditionalStore)
+	require.True(t, ok)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
+	defer cancel()
+	fixture := newOCIBlockBuildFixture(t)
+	prefix := fmt.Sprintf("rootfs/integration/oci-import/%d", time.Now().UnixNano())
+	fixture.request.BlockOptions.ObjectPrefix = prefix
+	t.Cleanup(func() {
+		for _, key := range listRootFSImporterObjectKeys(t, store, prefix) {
+			require.NoError(t, store.Delete(key))
+		}
+		require.Empty(t, listRootFSImporterObjectKeys(t, store, prefix))
+	})
+	const marker = "sandbox0-rootfs-rustfs-roundtrip\n"
+	fixture.unpacker.populate = func(root string) error {
+		if err := os.Mkdir(filepath.Join(root, "etc"), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, "etc", "marker"), []byte(marker), 0o640)
+	}
+	journal := newRecordingPublicationJournal()
+	result, err := (BlockBuilder{
+		Unpacker:   fixture.unpacker,
+		Filesystem: rootfsartifact.XFSBuilder{},
+		Publisher: JournaledPublisher{
+			OperationID: fmt.Sprintf("rootfs-import-rustfs-%d", time.Now().UnixNano()),
+			Journal:     journal,
+			Publisher:   rootfsblock.ObjectStorePublisher{Store: conditional},
+		},
+	}).Build(ctx, fixture.request)
+	require.NoError(t, err)
+	require.NoDirExists(t, fixture.unpacker.lastRoot)
+	require.NoFileExists(t, fixture.unpacker.lastRoot+".xfs")
+	require.Len(t, journal.prepared, len(result.References))
+	for _, reference := range result.References {
+		require.Equal(t, reference, journal.prepared[reference.Key])
+		require.Equal(t, "published", journal.states[reference.Key])
+		require.Equal(t, 1, journal.prepareCalls[reference.Key])
+	}
+	require.Len(t, listRootFSImporterObjectKeys(t, store, prefix), len(result.References))
+	assertMountableBlockResult(t, ctx, fixture.request.Image.WorkRoot, conditional, result, marker)
+}
+
+func assertMountableBlockResult(
+	t *testing.T,
+	ctx context.Context,
+	workRoot string,
+	source rootfsblock.RangeSource,
+	result BuildResult,
+	marker string,
+) {
+	t.Helper()
+
+	reader, err := rootfsblock.NewReader(source, result.Descriptor, 64<<20)
+	require.NoError(t, err)
+	reconstructed := filepath.Join(workRoot, "reconstructed.xfs")
 	image, err := os.OpenFile(reconstructed, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	require.NoError(t, err)
 	require.NoError(t, image.Truncate(result.LogicalSizeBytes))
@@ -220,7 +308,7 @@ func TestPrivilegedBlockBuilderPublishesMountableXFSArtifact(t *testing.T) {
 	}
 	require.NoError(t, image.Sync())
 	require.NoError(t, image.Close())
-	mountRoot := filepath.Join(fixture.request.Image.WorkRoot, "verify")
+	mountRoot := filepath.Join(workRoot, "verify")
 	require.NoError(t, os.Mkdir(mountRoot, 0o700))
 	require.NoError(t, runRootFSImporterCommand(ctx, "mount", "-t", "xfs", "-o", "loop,ro,nouuid,noatime", reconstructed, mountRoot))
 	mounted := true
@@ -238,6 +326,26 @@ func TestPrivilegedBlockBuilderPublishesMountableXFSArtifact(t *testing.T) {
 	require.Equal(t, marker, string(payload))
 	require.NoError(t, runRootFSImporterCommand(ctx, "umount", mountRoot))
 	mounted = false
+}
+
+func listRootFSImporterObjectKeys(t *testing.T, store objectstore.Store, prefix string) []string {
+	t.Helper()
+	var keys []string
+	var token string
+	for {
+		items, truncated, next, err := store.List(prefix, "", token, "", 1000)
+		require.NoError(t, err)
+		for _, item := range items {
+			if !item.IsPrefix {
+				keys = append(keys, item.Key)
+			}
+		}
+		if !truncated {
+			return keys
+		}
+		require.NotEmpty(t, next)
+		token = next
+	}
 }
 
 type ociBlockBuildFixture struct {

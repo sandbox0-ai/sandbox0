@@ -10,7 +10,7 @@ import (
 )
 
 func TestObjectStorePublisherIsIdempotentAndRejectsConflict(t *testing.T) {
-	store := objectstore.NewMemoryStore("").(objectstore.ConditionalStore)
+	store := objectstore.NewMemoryStore("").(objectstore.ContextConditionalStore)
 	publisher := ObjectStorePublisher{Store: store}
 	require.NoError(t, publisher.PutImmutable(t.Context(), "rootfs/object", []byte("first")))
 	require.NoError(t, publisher.PutImmutable(t.Context(), "rootfs/object", []byte("first")))
@@ -26,7 +26,13 @@ func TestObjectStorePublisherIsIdempotentAndRejectsConflict(t *testing.T) {
 }
 
 func TestObjectStorePublisherRejectsNonContextualStore(t *testing.T) {
-	store := nonContextConditionalStore{Store: objectstore.NewMemoryStore(t.Name())}
+	wrapped := objectstore.Prefix(
+		nonContextConditionalStore{Store: objectstore.NewMemoryStore(t.Name())},
+		"rootfs",
+	)
+	store, ok := wrapped.(objectstore.ContextConditionalStore)
+	require.True(t, ok, "prefix wrappers expose one stable method set")
+	require.False(t, objectstore.SupportsContextConditionalCreate(wrapped))
 	err := (ObjectStorePublisher{Store: store}).PutImmutable(t.Context(), "rootfs/object", []byte("payload"))
 	require.ErrorContains(t, err, "contextual conditional object store")
 }

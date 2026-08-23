@@ -74,7 +74,7 @@ type runtimeState struct {
 	pool        *pgxpool.Pool
 	store       *sandboxstore.PGSandboxStore
 	objects     objectstore.Store
-	conditional objectstore.ConditionalStore
+	conditional objectstore.ContextConditionalStore
 	worker      *rootfsmaterializer.Worker
 }
 
@@ -604,7 +604,7 @@ func openRuntime(ctx context.Context, opts options, endpoint string) (*runtimeSt
 		pool.Close()
 		return nil, fmt.Errorf("create RustFS client: %w", err)
 	}
-	conditional, ok := objects.(objectstore.ConditionalStore)
+	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
 		pool.Close()
 		return nil, fmt.Errorf("RustFS client lacks contextual conditional access")
@@ -956,7 +956,7 @@ func ensureMaterializerObjectIdentity(
 	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already") {
 		return fmt.Errorf("create dedicated RustFS bucket: %w", err)
 	}
-	conditional, ok := store.(objectstore.ConditionalStore)
+	conditional, ok := store.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
 		return fmt.Errorf("RustFS soak identity requires contextual conditional access")
 	}

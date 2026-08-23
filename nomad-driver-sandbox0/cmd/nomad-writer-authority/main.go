@@ -483,7 +483,7 @@ func newMaterializer(
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS object store: %w", err)
 	}
-	conditional, ok := objects.(objectstore.ConditionalStore)
+	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
 		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", objects)
 	}

@@ -290,7 +290,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 			KeyEncryptor: keyEncryptor,
 		})
 	}
-	conditional, ok := store.(objectstore.ConditionalStore)
+	conditional, ok := store.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
 		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", store)
 	}

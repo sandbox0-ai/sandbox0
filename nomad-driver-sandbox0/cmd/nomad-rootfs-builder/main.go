@@ -77,9 +77,9 @@ func run(source, output, rootfsID, image string, logicalSize int64, objectType, 
 	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "alreadyownedbyyou") {
 		return fmt.Errorf("create bucket: %w", err)
 	}
-	conditional, ok := store.(objectstore.ConditionalStore)
-	if !ok {
-		return fmt.Errorf("object store %s does not support conditional create", store)
+	conditional, ok := store.(objectstore.ContextConditionalStore)
+	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
+		return fmt.Errorf("object store %s does not support contextual conditional access", store)
 	}
 	descriptor, err := rootfsbuilder.Build(context.Background(), conditional, rootfsbuilder.Options{
 		SourceRoot: absoluteSource, ImagePath: absoluteImage, LogicalSize: logicalSize,

@@ -228,8 +228,8 @@ func TestPrivilegedBlockBuilderPublishesMountableRustFSArtifact(t *testing.T) {
 		SecretKey: os.Getenv("SANDBOX0_RUSTFS_SECRET_KEY"),
 	})
 	require.NoError(t, err)
-	require.True(t, objectstore.SupportsConditionalCreate(store))
-	conditional, ok := store.(objectstore.ConditionalStore)
+	require.True(t, objectstore.SupportsContextConditionalCreate(store))
+	conditional, ok := store.(objectstore.ContextConditionalStore)
 	require.True(t, ok)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)

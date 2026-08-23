@@ -21,7 +21,7 @@ func buildRootFSCompositeMaterializer(
 	if cfg.RootFSMaintenance.MaterializerDisabled || objects == nil {
 		return nil, nil
 	}
-	conditional, ok := objects.(objectstore.ConditionalStore)
+	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
 		return nil, fmt.Errorf("RootFS object store must support contextual conditional create for composite materialization")
 	}

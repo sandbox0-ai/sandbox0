@@ -33,7 +33,7 @@ func configureRootFSImportWorker(
 	if store == nil {
 		return nil, fmt.Errorf("Nomad RootFS importer requires PostgreSQL")
 	}
-	conditional, ok := objects.(objectstore.ConditionalStore)
+	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
 		return nil, fmt.Errorf("Nomad RootFS importer requires contextual conditional object storage")
 	}

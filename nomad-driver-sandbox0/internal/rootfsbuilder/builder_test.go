@@ -29,7 +29,7 @@ func TestBuildProducesDurableGenerationDescriptor(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "marker"), []byte("base"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ConditionalStore)
+	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ContextConditionalStore)
 	image := filepath.Join(t.TempDir(), "base.xfs")
 	descriptor, err := Build(context.Background(), store, Options{
 		SourceRoot: source, ImagePath: image, RootFSID: "rootfs-1",

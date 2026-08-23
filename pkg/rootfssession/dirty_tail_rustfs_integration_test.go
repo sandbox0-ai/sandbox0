@@ -239,7 +239,7 @@ func newRustFSIntegrationStore(
 	t *testing.T,
 	endpoint string,
 	observer objectstore.RequestObserver,
-) objectstore.ConditionalStore {
+) objectstore.ContextConditionalStore {
 	t.Helper()
 	bucket := "s0-rootfs-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	store, err := objectstore.Create(objectstore.Config{
@@ -250,8 +250,9 @@ func newRustFSIntegrationStore(
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.Create())
-	conditional, ok := store.(objectstore.ConditionalStore)
+	conditional, ok := store.(objectstore.ContextConditionalStore)
 	require.True(t, ok)
+	require.True(t, objectstore.SupportsContextConditionalCreate(store))
 	return conditional
 }
 

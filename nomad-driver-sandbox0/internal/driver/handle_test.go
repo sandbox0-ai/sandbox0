@@ -678,7 +678,7 @@ func TestWriterLeaseLossKillsTaskAndCrashAbandonsRootFS(t *testing.T) {
 
 func newAuthorizedRootFSStage(t *testing.T, source string) (rootfshandoff.StageRequest, string, string) {
 	t.Helper()
-	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ConditionalStore)
+	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ContextConditionalStore)
 	descriptor, err := rootfsbuilder.Build(context.Background(), store, rootfsbuilder.Options{
 		SourceRoot: source, ImagePath: filepath.Join(t.TempDir(), "base.xfs"),
 		RootFSID: "rootfs-1", ObjectPrefix: "driver-test/rootfs", Runner: noOpCommandRunner{},

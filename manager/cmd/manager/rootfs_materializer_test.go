@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -53,9 +54,13 @@ func (rootFSCompositeMaterializerTestStore) ReconcileRootFSGenerationMaterializa
 	return &sandboxstore.RootFSGenerationMaterializationGarbageResult{}, nil
 }
 
-type objectStoreWithoutConditionalCreate struct{ objectstore.Store }
+type objectStoreWithoutContextualConditionalAccess struct{ objectstore.Store }
 
-func TestBuildRootFSCompositeMaterializerUsesConditionalObjectStore(t *testing.T) {
+func (s objectStoreWithoutContextualConditionalAccess) PutIfAbsent(key string, reader io.Reader) (bool, error) {
+	return s.Store.(objectstore.ConditionalStore).PutIfAbsent(key, reader)
+}
+
+func TestBuildRootFSCompositeMaterializerUsesContextualConditionalObjectStore(t *testing.T) {
 	cfg := &config.ManagerConfig{RootFSMaintenance: config.RootFSMaintenanceConfig{
 		MaterializerInterval: metav1.Duration{Duration: 20 * time.Millisecond}, MaterializerScanLimit: 8,
 	}}
@@ -70,9 +75,9 @@ func TestBuildRootFSCompositeMaterializerUsesConditionalObjectStore(t *testing.T
 	}
 
 	_, err = buildRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{},
-		objectStoreWithoutConditionalCreate{Store: objectstore.NewMemoryStore(t.Name() + "-plain")})
-	if err == nil || !strings.Contains(err.Error(), "conditional create") {
-		t.Fatalf("non-conditional object store error = %v", err)
+		objectStoreWithoutContextualConditionalAccess{Store: objectstore.NewMemoryStore(t.Name() + "-plain")})
+	if err == nil || !strings.Contains(err.Error(), "contextual conditional create") {
+		t.Fatalf("non-contextual object store error = %v", err)
 	}
 }
 

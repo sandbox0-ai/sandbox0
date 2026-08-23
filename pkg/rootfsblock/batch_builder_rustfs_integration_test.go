@@ -33,8 +33,9 @@ func TestRustFSBatchMaterializationTenThousandTinyGenerations(t *testing.T) {
 		SecretKey: os.Getenv("SANDBOX0_RUSTFS_SECRET_KEY"),
 	})
 	require.NoError(t, err)
-	conditional, ok := store.(objectstore.ConditionalStore)
+	conditional, ok := store.(objectstore.ContextConditionalStore)
 	require.True(t, ok)
+	require.True(t, objectstore.SupportsContextConditionalCreate(store))
 	if err := store.Create(); err != nil {
 		require.Contains(t, strings.ToLower(err.Error()), "already")
 	}

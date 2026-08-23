@@ -98,11 +98,96 @@ func TestDockerResolverAuthenticatesAndImportsPinnedIndex(t *testing.T) {
 	}
 }
 
+func TestDockerResolverFencesCrossHostPlaintextRedirects(t *testing.T) {
+	layer := testLayer(t, testTarEntry{name: "redirected", body: "verified-redirect\n"})
+	fixture := newOCIImportFixture(t, []testLayerBlob{layer})
+	var mirrorRequests atomic.Int64
+	var mirrorSensitiveHeaders atomic.Int64
+	mirror := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mirrorRequests.Add(1)
+		if request.Header.Get("Authorization") != "" || request.Header.Get("Proxy-Authorization") != "" ||
+			request.Header.Get("Cookie") != "" {
+			mirrorSensitiveHeaders.Add(1)
+		}
+		response.Header().Set("Content-Type", layer.descriptor.MediaType)
+		response.Header().Set("Content-Length", strconv.Itoa(len(layer.compressed)))
+		response.Header().Set("Docker-Content-Digest", layer.descriptor.Digest.String())
+		_, _ = response.Write(layer.compressed)
+	}))
+	t.Cleanup(mirror.Close)
+	mirrorHost := strings.TrimPrefix(mirror.URL, "http://")
+	registry := &authenticatedOCIRegistry{
+		username: "rootfs-importer", password: "test-password",
+		blobs: fixture.resolver.blobs,
+		mediaTypes: map[digest.Digest]string{
+			fixture.sourceDescriptor.Digest:   fixture.sourceDescriptor.MediaType,
+			fixture.manifestDescriptor.Digest: fixture.manifestDescriptor.MediaType,
+			fixture.configDescriptor.Digest:   fixture.configDescriptor.MediaType,
+			layer.descriptor.Digest:           layer.descriptor.MediaType,
+		},
+		redirects: map[digest.Digest]string{
+			layer.descriptor.Digest: mirror.URL + "/layer",
+		},
+	}
+	server := httptest.NewServer(registry)
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+	credentialsPayload, err := json.Marshal(dockerCredentialsFile{Auths: map[string]dockerAuthEntry{
+		host: {Username: registry.username, Password: registry.password},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := writeCredentialsFile(t, string(credentialsPayload), 0o600)
+	request := fixture.request()
+	request.Reference = fmt.Sprintf("%s/sandbox/base@%s", host, fixture.sourceDescriptor.Digest)
+	importFrom := func(plainHTTPHosts []string) (Result, error) {
+		resolver, resolverErr := newDockerResolverOwnedBy(DockerResolverConfig{
+			CredentialsFile: credentialsPath, PlainHTTPHosts: plainHTTPHosts,
+		}, uint32(os.Geteuid()))
+		if resolverErr != nil {
+			return Result{}, resolverErr
+		}
+		return (&Importer{resolver: resolver, limits: testLimits(), allowNonRoot: true}).Import(t.Context(), request)
+	}
+
+	if _, err := importFrom([]string{host}); err == nil {
+		t.Fatal("expected redirect to a plaintext host outside the allowlist to fail")
+	}
+	if mirrorRequests.Load() != 0 {
+		t.Fatal("disallowed redirect reached the mirror")
+	}
+	if entries := mustReadDir(t, fixture.workRoot); len(entries) != 0 {
+		t.Fatalf("failed redirect left staging entries: %#v", entries)
+	}
+	result, err := importFrom([]string{host, mirrorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(result.RootPath); err != nil {
+			t.Error(err)
+		}
+	})
+	if mirrorRequests.Load() == 0 || mirrorSensitiveHeaders.Load() != 0 {
+		t.Fatalf("unexpected mirror requests=%d sensitive_headers=%d",
+			mirrorRequests.Load(), mirrorSensitiveHeaders.Load())
+	}
+	payload, err := os.ReadFile(filepath.Join(result.RootPath, "redirected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "verified-redirect\n" {
+		t.Fatalf("unexpected redirected layer payload %q", payload)
+	}
+}
+
 type authenticatedOCIRegistry struct {
 	username   string
 	password   string
 	blobs      map[digest.Digest][]byte
 	mediaTypes map[digest.Digest]string
+	redirects  map[digest.Digest]string
 
 	unauthorized atomic.Int64
 	authorized   atomic.Int64
@@ -150,6 +235,11 @@ func (r *authenticatedOCIRegistry) ServeHTTP(response http.ResponseWriter, reque
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		response.Header().Set("Allow", "GET, HEAD")
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if target, redirect := r.redirects[parsed]; redirect && request.Method == http.MethodGet {
+		response.Header().Set("Location", target)
+		response.WriteHeader(http.StatusTemporaryRedirect)
 		return
 	}
 	response.Header().Set("Content-Type", r.mediaTypes[parsed])

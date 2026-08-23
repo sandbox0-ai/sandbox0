@@ -2,6 +2,7 @@ package ocirootfs
 
 import (
 	"encoding/base64"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,5 +90,70 @@ func TestNormalizeRegistryHostsRejectsAliasesAndDuplicates(t *testing.T) {
 		if _, err := normalizeRegistryHosts(hosts); err == nil {
 			t.Fatalf("expected invalid hosts: %#v", hosts)
 		}
+	}
+}
+
+func TestDockerRedirectPolicyRejectsUnsafeTargets(t *testing.T) {
+	origin, err := http.NewRequest(http.MethodGet, "https://registry.example/v2/team/image/blobs/value", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenHops := make([]*http.Request, maxDockerRedirects)
+	for index := range tenHops {
+		tenHops[index] = origin
+	}
+	for name, test := range map[string]struct {
+		target string
+		via    []*http.Request
+	}{
+		"no origin":          {target: "https://mirror.example/blob"},
+		"too many hops":      {target: "https://mirror.example/blob", via: tenHops},
+		"URL credentials":    {target: "https://user:password@mirror.example/blob", via: []*http.Request{origin}},
+		"unsupported scheme": {target: "ftp://mirror.example/blob", via: []*http.Request{origin}},
+		"unlisted plaintext": {target: "http://mirror.example/blob", via: []*http.Request{origin}},
+		"noncanonical host":  {target: "https://Mirror.example/blob", via: []*http.Request{origin}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			redirect, err := http.NewRequest(http.MethodGet, test.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := dockerRedirectPolicy(map[string]struct{}{})(redirect, test.via); err == nil {
+				t.Fatal("expected redirect policy error")
+			}
+		})
+	}
+}
+
+func TestDockerRedirectPolicyStripsSensitiveHeadersAcrossHosts(t *testing.T) {
+	origin, err := http.NewRequest(http.MethodGet, "https://registry.example/v2/team/image/blobs/value", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := http.NewRequest(http.MethodGet, "https://mirror.example/blob", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect.Header.Set("Authorization", "Basic secret")
+	redirect.Header.Set("Proxy-Authorization", "Basic proxy-secret")
+	redirect.Header.Set("Cookie", "registry-session=secret")
+	if err := dockerRedirectPolicy(nil)(redirect, []*http.Request{origin}); err != nil {
+		t.Fatal(err)
+	}
+	for _, header := range []string{"Authorization", "Proxy-Authorization", "Cookie"} {
+		if redirect.Header.Get(header) != "" {
+			t.Fatalf("redirect retained %s", header)
+		}
+	}
+	sameHost, err := http.NewRequest(http.MethodGet, "https://registry.example/another", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameHost.Header.Set("Authorization", "Basic same-host")
+	if err := dockerRedirectPolicy(nil)(sameHost, []*http.Request{origin}); err != nil {
+		t.Fatal(err)
+	}
+	if sameHost.Header.Get("Authorization") == "" {
+		t.Fatal("same-host redirect unexpectedly removed authorization")
 	}
 }

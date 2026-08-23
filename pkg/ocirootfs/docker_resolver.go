@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ const (
 	maxDockerCredentialsBytes = 1 << 20
 	maxDockerAuthEntries      = 256
 	maxDockerCredentialBytes  = 16 << 10
+	maxDockerRedirects        = 10
 )
 
 // DockerResolverConfig defines a pull-only resolver. Credentials are loaded
@@ -72,8 +74,13 @@ func newDockerResolverOwnedBy(config DockerResolverConfig, expectedUID uint32) (
 		return credential.username, credential.password, nil
 	}
 	authorizer := docker.NewDockerAuthorizer(docker.WithAuthCreds(credentialCallback))
+	client := &http.Client{
+		Transport:     docker.DefaultHTTPTransport(nil),
+		CheckRedirect: dockerRedirectPolicy(plainHTTPHosts),
+	}
 	hosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(authorizer),
+		docker.WithClient(client),
 		docker.WithPlainHTTP(func(host string) (bool, error) {
 			normalized, err := normalizeRegistryHost(host)
 			if err != nil {
@@ -84,6 +91,43 @@ func newDockerResolverOwnedBy(config DockerResolverConfig, expectedUID uint32) (
 		}),
 	)
 	return docker.NewResolver(docker.ResolverOptions{Hosts: hosts}), nil
+}
+
+func dockerRedirectPolicy(plainHTTPHosts map[string]struct{}) func(*http.Request, []*http.Request) error {
+	return func(request *http.Request, via []*http.Request) error {
+		if request == nil || request.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+			return fmt.Errorf("OCI registry redirect has no canonical origin")
+		}
+		if len(via) >= maxDockerRedirects {
+			return fmt.Errorf("OCI registry redirect exceeds %d hops", maxDockerRedirects)
+		}
+		if request.URL.User != nil {
+			return fmt.Errorf("OCI registry redirect must not contain URL credentials")
+		}
+		host, err := normalizeRegistryHost(request.URL.Host)
+		if err != nil {
+			return fmt.Errorf("OCI registry redirect host: %w", err)
+		}
+		switch request.URL.Scheme {
+		case "https":
+		case "http":
+			if _, allowed := plainHTTPHosts[host]; !allowed {
+				return fmt.Errorf("OCI registry redirect to plaintext host %s is not allowed", host)
+			}
+		default:
+			return fmt.Errorf("OCI registry redirect scheme %q is not allowed", request.URL.Scheme)
+		}
+		origin, err := normalizeRegistryHost(via[0].URL.Host)
+		if err != nil {
+			return fmt.Errorf("OCI registry redirect origin: %w", err)
+		}
+		if host != origin {
+			request.Header.Del("Authorization")
+			request.Header.Del("Proxy-Authorization")
+			request.Header.Del("Cookie")
+		}
+		return nil
+	}
 }
 
 type dockerCredential struct {

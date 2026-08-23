@@ -577,8 +577,16 @@ func TestRequestSandboxRuntimeClaimCleanupRequiresReadyPhysicalRecord(t *testing
 		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `DELETE FROM manager.runtime_slots WHERE slot_id = $1`, claimed.ID)
+	tx, err := pool.Begin(ctx)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	_, err = tx.Exec(ctx, `UPDATE manager.runtime_slots SET resource_lease_id = NULL WHERE slot_id = $1`, claimed.ID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `DELETE FROM manager.runtime_resource_leases WHERE slot_id = $1`, claimed.ID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `DELETE FROM manager.runtime_slots WHERE slot_id = $1`, claimed.ID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 
 	candidate, err := store.RequestSandboxRuntimeClaimCleanup(ctx, record.ID, "sandbox deletion requested")
 	require.NoError(t, err)

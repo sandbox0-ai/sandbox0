@@ -215,6 +215,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default={}
 	ProcdConfig         ProcdConfig               `yaml:"procd_config" json:"procdConfig"`
 	RootFSMaintenance   RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
+	RootFSImporter      RootFSImporterConfig      `yaml:"rootfs_importer" json:"-"`
 	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 	NodeAuthority       NodeAuthorityConfig       `yaml:"node_authority" json:"-"`
 
@@ -320,6 +321,25 @@ type RootFSMaintenanceConfig struct {
 	MaterializerGarbageInterval     metav1.Duration `yaml:"materializer_garbage_interval" json:"-"`
 	MaterializerUploadingStale      metav1.Duration `yaml:"materializer_uploading_stale" json:"-"`
 	MaterializerTerminalRetention   metav1.Duration `yaml:"materializer_terminal_retention" json:"-"`
+}
+
+// RootFSImporterConfig configures the active-active digest-pinned OCI to
+// immutable block artifact worker.
+type RootFSImporterConfig struct {
+	Disabled          bool            `yaml:"disabled" json:"-"`
+	WorkerID          string          `yaml:"worker_id" json:"-"`
+	Interval          metav1.Duration `yaml:"interval" json:"-"`
+	LeaseTTL          metav1.Duration `yaml:"lease_ttl" json:"-"`
+	LeaseRenewal      metav1.Duration `yaml:"lease_renewal" json:"-"`
+	MaxAttempts       int             `yaml:"max_attempts" json:"-"`
+	GarbageInterval   metav1.Duration `yaml:"garbage_interval" json:"-"`
+	TerminalRetention metav1.Duration `yaml:"terminal_retention" json:"-"`
+	GarbageLimit      int             `yaml:"garbage_limit" json:"-"`
+	WorkRoot          string          `yaml:"work_root" json:"-"`
+	ProcdPath         string          `yaml:"procd_path" json:"-"`
+	ProcdProtocol     string          `yaml:"procd_protocol" json:"-"`
+	ProcdDigest       string          `yaml:"procd_digest" json:"-"`
+	PlainHTTPHosts    []string        `yaml:"plain_http_hosts" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -664,6 +684,7 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	applyRootFSMaintenanceDefaults(cfg)
+	applyRootFSImporterDefaults(cfg)
 	applySandboxRuntimeDefaults(cfg)
 	applyNodeAuthorityDefaults(cfg)
 	applySandboxObservabilityProducerDefaults(cfg)
@@ -785,6 +806,33 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.MaterializerTerminalRetention.Duration == 0 {
 		cfg.RootFSMaintenance.MaterializerTerminalRetention = metav1.Duration{Duration: 24 * time.Hour}
+	}
+}
+
+func applyRootFSImporterDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.RootFSImporter.Interval.Duration == 0 {
+		cfg.RootFSImporter.Interval = metav1.Duration{Duration: time.Second}
+	}
+	if cfg.RootFSImporter.LeaseTTL.Duration == 0 {
+		cfg.RootFSImporter.LeaseTTL = metav1.Duration{Duration: 2 * time.Minute}
+	}
+	if cfg.RootFSImporter.LeaseRenewal.Duration == 0 {
+		cfg.RootFSImporter.LeaseRenewal = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if cfg.RootFSImporter.MaxAttempts == 0 {
+		cfg.RootFSImporter.MaxAttempts = 5
+	}
+	if cfg.RootFSImporter.GarbageInterval.Duration == 0 {
+		cfg.RootFSImporter.GarbageInterval = metav1.Duration{Duration: time.Minute}
+	}
+	if cfg.RootFSImporter.TerminalRetention.Duration == 0 {
+		cfg.RootFSImporter.TerminalRetention = metav1.Duration{Duration: 24 * time.Hour}
+	}
+	if cfg.RootFSImporter.GarbageLimit == 0 {
+		cfg.RootFSImporter.GarbageLimit = 100
 	}
 }
 

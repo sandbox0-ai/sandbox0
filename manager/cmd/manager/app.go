@@ -9,6 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportworker"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
@@ -29,6 +30,7 @@ type managerApp struct {
 	httpServer             *httpserver.Server
 	nodeAuthority          *nodeauthority.Component
 	rootFSMaterializer     *rootfsmaterializer.Worker
+	rootFSImporter         *rootfsimportworker.Worker
 	sandboxClaimReconciler *sandboxclaimreconciler.Worker
 	informerFactory        informers.SharedInformerFactory
 	crdInformerFactory     externalversions.SharedInformerFactory
@@ -48,6 +50,12 @@ func (a *managerApp) Run() {
 			logRootFSCompositeMaterializerPass(a.logger, result, err)
 		})
 		a.logger.Info("Active-active Rootfs composite materializer started")
+	}
+	if a.rootFSImporter != nil {
+		go a.rootFSImporter.Run(a.ctx, func(result rootfsimportworker.Result, err error) {
+			logRootFSImportWorkerPass(a.logger, result, err)
+		})
+		a.logger.Info("Active-active durable Rootfs importer started")
 	}
 	if a.sandboxClaimReconciler != nil {
 		go a.sandboxClaimReconciler.Run(a.ctx, func(result sandboxclaimreconciler.Result, err error) {

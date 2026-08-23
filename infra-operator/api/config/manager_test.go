@@ -282,6 +282,59 @@ func TestRootFSMaintenanceDefaultsIncludeCompositeMaterializer(t *testing.T) {
 	}
 }
 
+func TestRootFSImporterDefaultsAreBounded(t *testing.T) {
+	cfg := &ManagerConfig{}
+	applyRootFSImporterDefaults(cfg)
+	if cfg.RootFSImporter.Interval.Duration != time.Second ||
+		cfg.RootFSImporter.LeaseTTL.Duration != 2*time.Minute ||
+		cfg.RootFSImporter.LeaseRenewal.Duration != 30*time.Second ||
+		cfg.RootFSImporter.MaxAttempts != 5 ||
+		cfg.RootFSImporter.GarbageInterval.Duration != time.Minute ||
+		cfg.RootFSImporter.TerminalRetention.Duration != 24*time.Hour ||
+		cfg.RootFSImporter.GarbageLimit != 100 {
+		t.Fatalf("rootfs importer defaults = %#v", cfg.RootFSImporter)
+	}
+}
+
+func TestLoadManagerConfigLoadsRootFSImporterContract(t *testing.T) {
+	path := writeManagerConfigFile(t, `
+rootfs_importer:
+  worker_id: manager.rootfs.import.test
+  interval:
+    duration: 2s
+  lease_ttl:
+    duration: 3m
+  lease_renewal:
+    duration: 45s
+  max_attempts: 7
+  garbage_interval:
+    duration: 2m
+  terminal_retention:
+    duration: 48h
+  garbage_limit: 75
+  work_root: /var/lib/sandbox0/rootfs-import
+  procd_path: /opt/sandbox0/bin/procd
+  procd_protocol: sandbox0.procd.v1
+  procd_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  plain_http_hosts:
+    - registry.internal:5000
+`)
+	cfg, err := loadManagerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importer := cfg.RootFSImporter
+	if importer.WorkerID != "manager.rootfs.import.test" || importer.Interval.Duration != 2*time.Second ||
+		importer.LeaseTTL.Duration != 3*time.Minute || importer.LeaseRenewal.Duration != 45*time.Second ||
+		importer.MaxAttempts != 7 || importer.GarbageInterval.Duration != 2*time.Minute ||
+		importer.TerminalRetention.Duration != 48*time.Hour || importer.GarbageLimit != 75 ||
+		importer.WorkRoot != "/var/lib/sandbox0/rootfs-import" || importer.ProcdPath != "/opt/sandbox0/bin/procd" ||
+		importer.ProcdProtocol != "sandbox0.procd.v1" || len(importer.PlainHTTPHosts) != 1 ||
+		importer.PlainHTTPHosts[0] != "registry.internal:5000" {
+		t.Fatalf("rootfs importer config = %#v", importer)
+	}
+}
+
 func writeManagerConfigFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "manager.yaml")

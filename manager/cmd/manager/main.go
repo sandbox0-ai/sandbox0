@@ -325,6 +325,10 @@ func main() {
 		}
 		logger.Warn("Rootfs composite materializer disabled", zap.Error(rootFSCompositeMaterializerErr))
 	}
+	rootFSImportWorker, err := configureRootFSImportWorker(cfg, sandboxStore, rootFSObjectStore)
+	if err != nil {
+		logger.Fatal("Durable RootFS importer is unavailable", zap.Error(err))
+	}
 	sandboxClaimReconciler, err := configureSandboxClaimReconciler(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Nomad abandoned sandbox claim reconciler is unavailable", zap.Error(err))
@@ -780,6 +784,7 @@ func main() {
 		httpServer:             httpServer,
 		nodeAuthority:          managerNodeAuthority,
 		rootFSMaterializer:     rootFSCompositeMaterializer,
+		rootFSImporter:         rootFSImportWorker,
 		sandboxClaimReconciler: sandboxClaimReconciler,
 		informerFactory:        informerFactory,
 		crdInformerFactory:     crdInformerFactory,

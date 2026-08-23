@@ -60,6 +60,22 @@ func NewImporter(resolver remotes.Resolver, limits Limits) (*Importer, error) {
 	return &Importer{resolver: resolver, limits: normalized}, nil
 }
 
+// ValidateLocalImportEnvironment verifies privileged local inputs without
+// contacting a registry or creating staging state.
+func ValidateLocalImportEnvironment(workRoot, procdPath string, expectedProcdDigest digest.Digest) error {
+	if _, err := validateWorkRoot(workRoot, false); err != nil {
+		return err
+	}
+	procd, _, _, err := openVerifiedProcd(procdPath, expectedProcdDigest, false)
+	if err != nil {
+		return err
+	}
+	if err := procd.Close(); err != nil {
+		return fmt.Errorf("close verified production procd: %w", err)
+	}
+	return nil
+}
+
 // Import creates a new operation-owned staging directory, applies all layers
 // with OCI whiteout semantics, injects exact procd, and syncs the filesystem.
 // Any failure removes the partial staging directory.

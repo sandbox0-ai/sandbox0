@@ -14,26 +14,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ocirootfs
+package rootfsartifact
 
 import (
 	"context"
 	"fmt"
-
-	"github.com/containerd/containerd/v2/core/remotes"
-	"github.com/opencontainers/go-digest"
 )
 
-type Importer struct{}
+// XFSBuilder is unavailable outside Linux production hosts.
+type XFSBuilder struct{}
 
-func NewImporter(remotes.Resolver, Limits) (*Importer, error) {
-	return nil, fmt.Errorf("OCI RootFS import requires Linux")
-}
-
-func ValidateLocalImportEnvironment(string, string, digest.Digest) error {
-	return fmt.Errorf("OCI RootFS import requires Linux")
-}
-
-func (*Importer) Import(context.Context, Request) (Result, error) {
-	return Result{}, fmt.Errorf("OCI RootFS import requires Linux")
+func (XFSBuilder) Build(context.Context, string, string, int64) error {
+	return fmt.Errorf("XFS RootFS artifact construction requires Linux")
 }

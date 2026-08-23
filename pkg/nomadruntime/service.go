@@ -158,6 +158,7 @@ type nodeRuntime struct {
 	trigger            chan string
 	allocations        nomadAllocationSource
 	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
+	resourceCgroups    runtimeResourceCgroup
 	journal            *runtimeSlotJournal
 	lastJournalPrune   time.Time
 	clusterID          string
@@ -282,6 +283,10 @@ type NomadAllocationConfig struct {
 	RuntimeSlotChannelPeerURISAN string
 	RuntimeSlotControlRoot       string
 	RuntimeSlotCtldNetworkSocket string
+	RuntimeResourceCPUMillicores int64
+	RuntimeResourceMemoryBytes   int64
+	RuntimeResourceCPUSetCPUs    string
+	RuntimeResourceCPUSetMems    string
 }
 
 // RunNodeRuntime runs the node-scoped owner for writer leases,
@@ -364,6 +369,13 @@ func run(
 		return err
 	}
 	defer runtime.Close()
+	resourceCgroups, err := newRuntimeResourceCgroup(
+		config.RuntimeResourceCgroupRoot,
+		runtimeNodeCapacity(nomadConfig),
+	)
+	if err != nil {
+		return fmt.Errorf("open runtime resource cgroup root: %w", err)
+	}
 	var runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
 	if controlSocket := strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket); controlSocket != "" {
 		runtimeSlotNetwork, err = protocol.NewRuntimeSlotNetworkClient(controlSocket, protocol.DefaultNodeControlTimeout)
@@ -376,11 +388,12 @@ func run(
 		config: config, logger: logger, inflight: make(map[string]*reconciliationState), trigger: make(chan string, 128),
 		allocations: allocations, runtimeSlotNetwork: runtimeSlotNetwork, journal: journal,
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
-		nodeUID: strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
+		nodeUID:         strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
+		resourceCgroups: resourceCgroups,
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
-	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork)
+	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork, resourceCgroups)
 	if err != nil {
 		return err
 	}
@@ -429,6 +442,10 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 	if !config.RuntimeSlotChannelEnabled {
 		return fmt.Errorf("runtime slot node channel is required for the ctld Nomad runtime")
 	}
+	capacity := runtimeNodeCapacity(config)
+	if err := capacity.Validate(); err != nil {
+		return fmt.Errorf("runtime node capacity: %w", err)
+	}
 	if err := validateCanonicalHTTPSOrigin("nomad_address", config.Address); err != nil {
 		return err
 	}
@@ -455,6 +472,16 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 		return fmt.Errorf("runtime_slot_channel_peer_uri_san must be canonical SPIFFE")
 	}
 	return nil
+}
+
+func runtimeNodeCapacity(config NomadAllocationConfig) protocol.NodeChannelCapacity {
+	return protocol.NodeChannelCapacity{
+		CPUMillicores:   config.RuntimeResourceCPUMillicores,
+		MemoryBytes:     config.RuntimeResourceMemoryBytes,
+		CPUSetCPUs:      config.RuntimeResourceCPUSetCPUs,
+		CPUSetMems:      config.RuntimeResourceCPUSetMems,
+		TTLMilliseconds: protocol.DefaultNodeChannelCapacityTTLMilliseconds,
+	}
 }
 
 // RegisterRuntimeSlot records all physical warm-slot identities before the
@@ -687,6 +714,9 @@ func (d *nodeRuntime) CleanupRuntimeSlot(
 	if d.runner == nil || d.mounter == nil || d.runtimeSlotNetwork == nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node runtime cleanup dependencies are unavailable: %w", errdefs.ErrUnavailable)
 	}
+	if !request.Resources.IsZero() && d.resourceCgroups == nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("runtime resource cgroup cleanup is unavailable: %w", errdefs.ErrUnavailable)
+	}
 	if request.WriterGrantID != "" && d.runtime == nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS runtime cleanup dependency is unavailable: %w", errdefs.ErrUnavailable)
 	}
@@ -803,6 +833,9 @@ func (d *nodeRuntime) cleanupWriterRuntimeSlot(
 		return d.cleanupJournaledRuntimeSlot(ctx, request, *journalRecord, rootFSProofDigest)
 	}
 	if err := d.cleanupRuntimeSlotNetwork(ctx, request, matched.Consumer, request.NetNSIdentity, netnsPath); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if err := d.cleanupRuntimeResourceCgroup(ctx, request); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
 	proof := completedNodeCleanupProof(request, rootFSProofDigest)
@@ -967,7 +1000,10 @@ func completedNodeCleanupProof(
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
 		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
 		RootFSOperationID: request.WriterOperationID, RootFSProofDigest: rootFSProofDigest,
-		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		Resources: request.Resources, ResourceLeaseID: request.Resources.LeaseID,
+		ResourceLeaseDigest: request.ResourceLeaseDigest,
+		RunscAbsent:         true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		ResourceCgroupAbsent: !request.Resources.IsZero(),
 	}
 }
 
@@ -1016,6 +1052,9 @@ func (d *nodeRuntime) cleanupJournaledRuntimeSlot(
 	if err := d.cleanupRuntimeSlotNetwork(ctx, request, consumer, request.NetNSIdentity, netnsPath); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
+	if err := d.cleanupRuntimeResourceCgroup(ctx, request); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
 	proof := completedNodeCleanupProof(request, rootFSProofDigest)
 	proof.ProofDigest, err = proof.Digest()
 	if err != nil {
@@ -1028,6 +1067,26 @@ func (d *nodeRuntime) cleanupJournaledRuntimeSlot(
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("persist journaled runtime slot cleanup proof: %w", err)
 	}
 	return proof, nil
+}
+
+func (d *nodeRuntime) cleanupRuntimeResourceCgroup(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+) error {
+	if request.Resources.IsZero() {
+		return nil
+	}
+	if d.resourceCgroups == nil {
+		return fmt.Errorf("runtime resource cgroup cleanup is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	absent, err := d.resourceCgroups.RemoveAndConfirm(ctx, request.Resources)
+	if err != nil {
+		return fmt.Errorf("remove runtime resource cgroup: %w", err)
+	}
+	if !absent {
+		return fmt.Errorf("runtime resource cgroup remains present: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
 }
 
 func (d *nodeRuntime) runtimeSlotStableMountPath(

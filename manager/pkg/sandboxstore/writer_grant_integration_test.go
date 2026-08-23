@@ -1512,6 +1512,8 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	terminal, err := store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
 		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		Reason: "reconciled_orphan", ProofDigest: terminalProof[:],
+		ResourceLeaseID:     claimed.ResourceLease.LeaseID,
+		ResourceLeaseDigest: claimed.ResourceLeaseDigest, ResourceCgroupAbsent: true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateTerminal, terminal.State)

@@ -4,6 +4,7 @@
 package runtimeslotclaim
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -163,6 +164,7 @@ type Request struct {
 	ClusterID           string
 	NetworkPolicy       string
 	Runtime             runtimecontrol.Assignment
+	Resources           protocol.RuntimeResourceRequest
 	// StartedAt may only be populated from the trusted regional ingress clock.
 	// A zero value starts the sample inside Planner.Claim.
 	StartedAt time.Time
@@ -354,7 +356,8 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
 		CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
 		RuntimeAssignmentRevision: runtimeRevision, NetworkPolicyDigest: policyDigest,
-		ClaimTTL: p.claimTTL,
+		ClaimTTL:  p.claimTTL,
+		Resources: normalized.Resources,
 	})
 	if err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
@@ -400,11 +403,21 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	recordPhase(PhaseNetworkPrepare, phaseStarted, true)
 
 	phaseStarted = time.Now()
+	resourceDigest, err := slot.ResourceLease.Digest()
+	resourceDigestBytes, decodeErr := hex.DecodeString(strings.TrimPrefix(resourceDigest, "sha256:"))
+	if err != nil || decodeErr != nil || len(resourceDigestBytes) != sha256.Size ||
+		!bytes.Equal(slot.ResourceLeaseDigest, resourceDigestBytes) {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
+		return nil, errors.New("runtime slot resource lease proof is invalid")
+	}
 	stage := rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         ids.parent, InitialGeneration: generation.ID, Generation: descriptor,
 		ExpectedPolicyToken: policyToken,
-		Labels:              map[string]string{protocol.RuntimeAssignmentRevisionLabel: runtimeRevision},
+		Labels: map[string]string{
+			protocol.RuntimeAssignmentRevisionLabel:  runtimeRevision,
+			protocol.RuntimeResourceLeaseDigestLabel: resourceDigest,
+		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: slot.NodeUID, BootID: slot.NodeBootID,
 			RuntimeGeneration: strconv.FormatInt(normalized.Runtime.RuntimeGeneration, 10),
@@ -479,6 +492,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		OperationID: normalized.OperationID, ClaimID: ids.claimID,
 		PolicyToken: ids.rawToken, WriterEpoch: strconv.FormatInt(writerEpoch, 10),
 		Stage: &stage, NetworkPolicy: normalized.NetworkPolicy, Runtime: &runtimeAssignment,
+		Resources: slot.ResourceLease,
 	}
 	if err := nodeClaim.ValidateRegional(); err != nil {
 		recordPhase(PhaseNodeClaim, phaseStarted, false)
@@ -635,6 +649,9 @@ func (p *Planner) validateRequest(request Request, now time.Time) (normalizedReq
 	if err := request.Runtime.Validate(); err != nil {
 		return normalizedRequest{}, fmt.Errorf("runtime assignment: %w", err)
 	}
+	if err := request.Resources.Validate(); err != nil {
+		return normalizedRequest{}, fmt.Errorf("runtime resources: %w", err)
+	}
 	if request.Runtime.SandboxID != request.SandboxID || request.Runtime.TeamID != request.TeamID ||
 		request.Runtime.EnvVars[runtimecontrol.EnvSandboxID] != request.SandboxID {
 		return normalizedRequest{}, errors.New("runtime assignment does not match sandbox and team")
@@ -727,7 +744,14 @@ func validateClaimedSlot(slot *sandboxstore.RuntimeSlot, request normalizedReque
 		slot.ClusterID == "" || (request.ClusterID != "" && slot.ClusterID != request.ClusterID) ||
 		slot.AllocationID == "" || slot.AllocationNamespace == "" || slot.NodeID == "" ||
 		slot.NodeUID == "" || slot.NodeBootID == "" || slot.NetNSIdentity == "" || slot.ControlEndpoint == "" ||
-		slot.ClaimLeaseExpiresAt.IsZero() || slot.ClaimedAt.IsZero() || slot.AuthorityObservedAt.IsZero() {
+		slot.ClaimLeaseExpiresAt.IsZero() || slot.ClaimedAt.IsZero() || slot.AuthorityObservedAt.IsZero() ||
+		slot.ResourceLease.OperationID != request.OperationID || slot.ResourceLease.ClaimID != ids.claimID ||
+		slot.ResourceLease.SlotID != slot.ID || slot.ResourceLease.ClusterID != slot.ClusterID ||
+		slot.ResourceLease.NodeID != slot.NodeID || slot.ResourceLease.NodeUID != slot.NodeUID ||
+		slot.ResourceLease.NodeBootID != slot.NodeBootID ||
+		slot.ResourceLease.CPUMillicores != request.Resources.CPUMillicores ||
+		slot.ResourceLease.MemoryBytes != request.Resources.MemoryBytes ||
+		slot.ResourceLease.PIDsLimit != request.Resources.PIDsLimit || len(slot.ResourceLeaseDigest) != sha256.Size {
 		return errors.New("runtime slot authority returned another claim binding")
 	}
 	if slot.State != sandboxstore.RuntimeSlotStateClaiming && slot.State != sandboxstore.RuntimeSlotStateStarting &&

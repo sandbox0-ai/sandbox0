@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,14 @@ func (f *fakeStore) FinalizeRuntimeSlot(_ context.Context, request *sandboxstore
 	if request.SlotID != f.slot.ID || request.OperationID != f.slot.ClaimOperationID || request.ClaimID != f.slot.ClaimID {
 		return nil, sandboxstore.ErrRuntimeSlotConflict
 	}
+	if f.slot.ResourceLease.IsZero() {
+		if request.ResourceLeaseID != "" || len(request.ResourceLeaseDigest) != 0 || request.ResourceCgroupAbsent {
+			return nil, sandboxstore.ErrRuntimeSlotConflict
+		}
+	} else if request.ResourceLeaseID != f.slot.ResourceLease.LeaseID ||
+		!bytes.Equal(request.ResourceLeaseDigest, f.slot.ResourceLeaseDigest) || !request.ResourceCgroupAbsent {
+		return nil, sandboxstore.ErrRuntimeSlotConflict
+	}
 	if f.grant != nil && f.grant.State != sandboxstore.RootFSWriterGrantStateRetired &&
 		f.grant.State != sandboxstore.RootFSWriterGrantStateCanceled {
 		return nil, sandboxstore.ErrRuntimeSlotInvalid
@@ -92,6 +101,10 @@ func (f *fakeStore) FinalizeRuntimeSlot(_ context.Context, request *sandboxstore
 	f.slot.State = sandboxstore.RuntimeSlotStateTerminal
 	f.slot.TerminalReason = request.Reason
 	f.slot.TerminalProofDigest = append([]byte(nil), request.ProofDigest...)
+	if !f.slot.ResourceLease.IsZero() {
+		f.slot.ResourceLeaseState = sandboxstore.RuntimeResourceLeaseReleased
+		f.slot.ResourceLeaseReleasedAt = f.slot.AuthorityObservedAt
+	}
 	f.terminalProof = append([]byte(nil), request.ProofDigest...)
 	f.slot.Revision++
 	return cloneSlot(f.slot), nil
@@ -105,6 +118,7 @@ func cloneSlot(source *sandboxstore.RuntimeSlot) *sandboxstore.RuntimeSlot {
 	clone := *source
 	clone.OrphanObservationDigest = append([]byte(nil), source.OrphanObservationDigest...)
 	clone.TerminalProofDigest = append([]byte(nil), source.TerminalProofDigest...)
+	clone.ResourceLeaseDigest = append([]byte(nil), source.ResourceLeaseDigest...)
 	return &clone
 }
 
@@ -154,7 +168,10 @@ func (f *fakeNode) Cleanup(_ context.Context, request NodeCleanupRequest) (NodeC
 	proof := NodeCleanupProof{
 		OperationID: request.OperationID, SlotID: request.SlotID, AllocationID: request.AllocationID,
 		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
-		ProofDigest: bytes.Repeat([]byte{0x41}, 32),
+		ResourceLeaseID:      request.Resources.LeaseID,
+		ResourceLeaseDigest:  append([]byte(nil), request.ResourceLeaseDigest...),
+		ResourceCgroupAbsent: !request.Resources.IsZero(),
+		ProofDigest:          bytes.Repeat([]byte{0x41}, 32),
 	}
 	if f.mutate != nil {
 		f.mutate(&proof)
@@ -272,6 +289,35 @@ func newReconcileFixture(t *testing.T, claimed bool) *reconcileFixture {
 	}
 }
 
+func attachResourceLease(t *testing.T, fixture *reconcileFixture) protocol.RuntimeResourceLease {
+	t.Helper()
+	slot := fixture.store.slot
+	lease, err := protocol.NewRuntimeResourceLease(
+		slot.ClaimOperationID, slot.ClaimID, slot.ID, slot.ClusterID,
+		slot.NodeID, slot.NodeUID, slot.NodeBootID,
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_500,
+			MemoryBytes: 768 << 20, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-1", "0",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := lease.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := protocol.DecodeProof("resource_lease_digest", strings.TrimPrefix(digest, "sha256:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot.ResourceLease = lease
+	slot.ResourceLeaseDigest = decoded
+	slot.ResourceLeaseState = sandboxstore.RuntimeResourceLeaseActive
+	return lease
+}
+
 func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 	fixture := newReconcileFixture(t, true)
 	result, err := fixture.reconciler.RunOnce(context.Background())
@@ -307,6 +353,56 @@ func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 		!bytes.Equal(fixture.writer.completes[0].NodeCleanupDigest, bytes.Repeat([]byte{0x41}, 32)) {
 		t.Fatalf("fence/cleanup binding = node %x writer %x", fixture.node.requests[0].WriterAuthorityDigest,
 			fixture.writer.completes[0].NodeCleanupDigest)
+	}
+}
+
+func TestReconcilerReleasesExactResourceLeaseOnlyAfterCgroupCleanupAndPurge(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	lease := attachResourceLease(t, fixture)
+
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result.Completed != 1 {
+		t.Fatalf("RunOnce() = %+v, %v", result, err)
+	}
+	if len(fixture.node.requests) != 1 || fixture.node.requests[0].Resources != lease ||
+		!bytes.Equal(fixture.node.requests[0].ResourceLeaseDigest, fixture.store.slot.ResourceLeaseDigest) {
+		t.Fatalf("resource cleanup request = %+v", fixture.node.requests)
+	}
+	if fixture.store.slot.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseReleased ||
+		fixture.store.slot.ResourceLeaseReleasedAt.IsZero() {
+		t.Fatalf("resource lease was not released after terminal cleanup: %+v", fixture.store.slot)
+	}
+	cleanupIndex := indexOf(*fixture.order, "cleanup-node")
+	purgeIndex := indexOf(*fixture.order, "purge-allocation")
+	finalizeIndex := indexOf(*fixture.order, "finalize-slot")
+	if cleanupIndex < 0 || purgeIndex <= cleanupIndex || finalizeIndex <= purgeIndex {
+		t.Fatalf("unsafe resource release order = %v", *fixture.order)
+	}
+}
+
+func TestReconcilerRejectsResourceCleanupProofWithoutExactCgroupAbsence(t *testing.T) {
+	tests := map[string]func(*NodeCleanupProof){
+		"cgroup remains": func(proof *NodeCleanupProof) { proof.ResourceCgroupAbsent = false },
+		"lease digest changed": func(proof *NodeCleanupProof) {
+			proof.ResourceLeaseDigest = bytes.Repeat([]byte{0xff}, 32)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newReconcileFixture(t, true)
+			attachResourceLease(t, fixture)
+			fixture.node.mutate = mutate
+
+			result, err := fixture.reconciler.RunOnce(t.Context())
+			if err == nil || result.Failed != 1 {
+				t.Fatalf("RunOnce() = %+v, %v", result, err)
+			}
+			if len(fixture.writer.completes) != 0 || len(fixture.allocation.purges) != 0 ||
+				fixture.store.markCalls != 0 || fixture.store.finalizeCalls != 0 ||
+				fixture.store.slot.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseActive {
+				t.Fatalf("invalid resource cleanup proof advanced teardown")
+			}
+		})
 	}
 }
 

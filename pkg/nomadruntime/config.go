@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 )
 
@@ -30,12 +31,13 @@ import (
 type Config struct {
 	SocketPath string
 
-	RunscPath  string
-	RunscRoot  string
-	Platform   string
-	Overlay2   string
-	FileAccess string
-	DirectFS   bool
+	RunscPath                 string
+	RunscRoot                 string
+	Platform                  string
+	Overlay2                  string
+	FileAccess                string
+	DirectFS                  bool
+	RuntimeResourceCgroupRoot string
 
 	RootFSStatePath                       string
 	RootFSBranchRoot                      string
@@ -94,6 +96,9 @@ func (c *Config) ApplyDefaults() {
 	if strings.TrimSpace(c.FileAccess) == "" {
 		c.FileAccess = "shared"
 	}
+	if strings.TrimSpace(c.RuntimeResourceCgroupRoot) == "" {
+		c.RuntimeResourceCgroupRoot = protocol.RuntimeResourceCgroupRoot
+	}
 	if strings.TrimSpace(c.RootFSStatePath) == "" {
 		c.RootFSStatePath = "/var/lib/sandbox0/ctld/nomad/rootfs-sessions.db"
 	}
@@ -146,6 +151,7 @@ func (c Config) Validate() error {
 		{"socket_path", c.SocketPath},
 		{"runsc_path", c.RunscPath},
 		{"runsc_root", c.RunscRoot},
+		{"runtime_resource_cgroup_root", c.RuntimeResourceCgroupRoot},
 		{"rootfs_state_path", c.RootFSStatePath},
 		{"rootfs_branch_root", c.RootFSBranchRoot},
 		{"rootfs_mount_root", c.RootFSMountRoot},
@@ -167,6 +173,9 @@ func (c Config) Validate() error {
 		if err := validateCanonicalAbsolutePath(path.name, path.value); err != nil {
 			return err
 		}
+	}
+	if c.RuntimeResourceCgroupRoot != protocol.RuntimeResourceCgroupRoot {
+		return fmt.Errorf("runtime_resource_cgroup_root must be %s", protocol.RuntimeResourceCgroupRoot)
 	}
 	if len(c.RootFSNBDDevices) == 0 {
 		return fmt.Errorf("at least one RootFS NBD device is required")

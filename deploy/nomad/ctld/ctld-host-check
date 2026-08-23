@@ -66,6 +66,23 @@ require_canonical_directory /run/sandbox0
 require_canonical_directory /run/sandbox0/nomad-slots
 require_canonical_directory /opt/nomad
 require_canonical_directory /run/netns
+require_canonical_directory /sys/fs/cgroup/sandbox0
+
+[ -f /sys/fs/cgroup/cgroup.controllers ] || {
+  echo "Sandbox0 requires a unified cgroup v2 hierarchy" >&2
+  exit 1
+}
+[ ! -s /sys/fs/cgroup/sandbox0/cgroup.procs ] || {
+  echo "resource cgroup root contains processes" >&2
+  exit 1
+}
+delegated=" $(cat /sys/fs/cgroup/sandbox0/cgroup.subtree_control) "
+for controller in cpu cpuset memory pids; do
+  case "$delegated" in
+    *" $controller "*) ;;
+    *) echo "resource cgroup controller is not delegated: $controller" >&2; exit 1 ;;
+  esac
+done
 
 [ -n "${SANDBOX0_NODE_NAME:-}" ] || { echo "SANDBOX0_NODE_NAME is required" >&2; exit 1; }
 

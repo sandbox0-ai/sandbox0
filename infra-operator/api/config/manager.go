@@ -18,17 +18,17 @@ const (
 	DefaultRuntimeReadyTimeout = 5 * time.Minute
 	// IdlePodRepairGraceBuffer prevents the warm-pool repair loop from racing a
 	// claim that is still inside its runtime readiness window.
-	IdlePodRepairGraceBuffer         = 30 * time.Second
-	DefaultNodeAuthorityPort         = 8421
-	NodeAuthorityTLSMountDir         = "/etc/sandbox0/node-authority/tls"
-	NodeAuthorityControlMountDir     = "/etc/sandbox0/node-authority/control"
-	NodeAuthorityClaimMountDir       = "/etc/sandbox0/node-authority/claim"
-	NodeAuthorityServerCertPath      = NodeAuthorityTLSMountDir + "/tls.crt"
-	NodeAuthorityServerKeyPath       = NodeAuthorityTLSMountDir + "/tls.key"
-	NodeAuthorityClientCAPath        = NodeAuthorityTLSMountDir + "/client-ca.crt"
-	NodeAuthorityNomadEndpointsPath  = NodeAuthorityControlMountDir + "/nomad-endpoints.json"
-	NodeAuthorityRuntimeProfilesPath = NodeAuthorityClaimMountDir + "/runtime-profiles.json"
-	NodeAuthorityWriterTokenKeyPath  = NodeAuthorityClaimMountDir + "/writer-token.key"
+	IdlePodRepairGraceBuffer        = 30 * time.Second
+	DefaultNodeAuthorityPort        = 8421
+	NodeAuthorityTLSMountDir        = "/etc/sandbox0/node-authority/tls"
+	NodeAuthorityControlMountDir    = "/etc/sandbox0/node-authority/control"
+	NodeAuthorityClaimMountDir      = "/etc/sandbox0/node-authority/claim"
+	NodeAuthorityServerCertPath     = NodeAuthorityTLSMountDir + "/tls.crt"
+	NodeAuthorityServerKeyPath      = NodeAuthorityTLSMountDir + "/tls.key"
+	NodeAuthorityClientCAPath       = NodeAuthorityTLSMountDir + "/client-ca.crt"
+	NodeAuthorityNomadEndpointsPath = NodeAuthorityControlMountDir + "/nomad-endpoints.json"
+	NodeAuthorityRuntimeClassesPath = NodeAuthorityClaimMountDir + "/runtime-classes.json"
+	NodeAuthorityWriterTokenKeyPath = NodeAuthorityClaimMountDir + "/writer-token.key"
 
 	SandboxRuntimeBackendKubernetes = "kubernetes"
 	SandboxRuntimeBackendNomad      = "nomad"
@@ -378,10 +378,10 @@ type NodeAuthorityConfig struct {
 }
 
 // RuntimeSlotClaimConfig controls the manager request path that binds logical
-// sandboxes to exact Nomad warm-slot compatibility profiles.
+// sandboxes to exact Nomad warm-slot compatibility classes.
 type RuntimeSlotClaimConfig struct {
 	SecretName         string          `yaml:"secret_name" json:"-"`
-	ProfileCatalogFile string          `yaml:"profile_catalog_file" json:"-"`
+	ClassCatalogFile   string          `yaml:"class_catalog_file" json:"-"`
 	WriterTokenKeyFile string          `yaml:"writer_token_key_file" json:"-"`
 	ClaimTTL           metav1.Duration `yaml:"claim_ttl" json:"-"`
 	SLO                metav1.Duration `yaml:"slo" json:"-"`
@@ -868,8 +868,8 @@ func applySandboxRuntimeDefaults(cfg *ManagerConfig) {
 	if cfg.SandboxRuntimeBackend != SandboxRuntimeBackendNomad {
 		return
 	}
-	if cfg.NodeAuthority.Claim.ProfileCatalogFile == "" {
-		cfg.NodeAuthority.Claim.ProfileCatalogFile = NodeAuthorityRuntimeProfilesPath
+	if cfg.NodeAuthority.Claim.ClassCatalogFile == "" {
+		cfg.NodeAuthority.Claim.ClassCatalogFile = NodeAuthorityRuntimeClassesPath
 	}
 	if cfg.NodeAuthority.Claim.WriterTokenKeyFile == "" {
 		cfg.NodeAuthority.Claim.WriterTokenKeyFile = NodeAuthorityWriterTokenKeyPath

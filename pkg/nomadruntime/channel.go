@@ -37,6 +37,7 @@ type nodeRuntimeChannelExecutor struct {
 	rebaser       runtimeSlotPausedRebaser
 	network       *protocol.RuntimeSlotNetworkClient
 	networkSource runtimeSlotNetworkPrepareSource
+	resources     runtimeResourceCgroup
 }
 
 var _ protocol.NodeChannelExecutor = (*nodeRuntimeChannelExecutor)(nil)
@@ -79,12 +80,16 @@ func newNodeRuntimeChannelAgent(
 	nomadConfig NomadAllocationConfig,
 	cleaner runtimeSlotCleaner,
 	network *protocol.RuntimeSlotNetworkClient,
+	resources runtimeResourceCgroup,
 ) (*protocol.NodeChannelAgentSet, error) {
 	if !nomadConfig.RuntimeSlotChannelEnabled {
 		return nil, nil
 	}
 	if network == nil {
 		return nil, fmt.Errorf("ctld runtime slot network control is required for the node channel: %w", errdefs.ErrFailedPrecondition)
+	}
+	if resources == nil {
+		return nil, fmt.Errorf("ctld runtime resource cgroup is required for the node channel: %w", errdefs.ErrFailedPrecondition)
 	}
 	rawControlRoot := nomadConfig.RuntimeSlotControlRoot
 	controlRoot := filepath.Clean(strings.TrimSpace(rawControlRoot))
@@ -105,6 +110,7 @@ func newNodeRuntimeChannelAgent(
 		control:   control,
 		cleaner:   cleaner,
 		network:   network,
+		resources: resources,
 	}
 	if forker, ok := cleaner.(runtimeSlotRunningForker); ok {
 		executor.forker = forker
@@ -132,6 +138,7 @@ func newNodeRuntimeChannelAgent(
 		NodeID:         executor.nodeID,
 		NodeUID:        executor.nodeUID, NodeBootIDFile: config.RuntimeSlotNodeBootIDFile,
 		Executor: executor,
+		Capacity: runtimeNodeCapacity(nomadConfig),
 	}
 	if executor.forker != nil {
 		agentConfig.RunningForkExecutor = executor
@@ -177,6 +184,17 @@ func (e *nodeRuntimeChannelExecutor) Claim(
 	}
 	if e.control == nil {
 		return protocol.NodeControlResponse{}, fmt.Errorf("runtime slot local control client is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if e.resources == nil {
+		return protocol.NodeControlResponse{}, fmt.Errorf("runtime resource cgroup is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if request.Resources.ClusterID != target.ClusterID || request.Resources.NodeID != target.NodeID ||
+		request.Resources.NodeUID != target.NodeUID || request.Resources.NodeBootID != target.NodeBootID ||
+		request.Resources.SlotID != target.SlotID {
+		return protocol.NodeControlResponse{}, fmt.Errorf("runtime resource lease does not match node target: %w", errdefs.ErrPermissionDenied)
+	}
+	if err := e.resources.Prepare(ctx, request.Resources); err != nil {
+		return protocol.NodeControlResponse{}, fmt.Errorf("prepare runtime resource cgroup: %w", err)
 	}
 	return e.control.Claim(ctx, target.ControlEndpoint, request)
 }

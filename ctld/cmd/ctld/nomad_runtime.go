@@ -71,6 +71,7 @@ func configuredNomadRuntimeFactory(
 		RootFSAuthorityTokenFile:              source.AuthorityTokenFile,
 		RuntimeSlotNodeBootIDFile:             source.NodeBootIDFile,
 		RuntimeSlotJournalPath:                source.RuntimeSlotJournalPath,
+		RuntimeResourceCgroupRoot:             source.ResourceCgroupRoot,
 	}
 	runtimeConfig.ApplyDefaults()
 	nomadConfig := nomadruntime.NomadAllocationConfig{
@@ -86,6 +87,10 @@ func configuredNomadRuntimeFactory(
 		RuntimeSlotChannelPeerURISAN: source.AuthorityPeerURISAN,
 		RuntimeSlotControlRoot:       source.ControlRoot,
 		RuntimeSlotCtldNetworkSocket: networkSocket,
+		RuntimeResourceCPUMillicores: source.ResourceCPUMillicores,
+		RuntimeResourceMemoryBytes:   source.ResourceMemoryBytes,
+		RuntimeResourceCPUSetCPUs:    source.ResourceCPUSetCPUs,
+		RuntimeResourceCPUSetMems:    source.ResourceCPUSetMems,
 	}
 	// NewService performs only static validation. Exclusive node resources are
 	// opened later, after this ctld instance acquires the HA primary lease.

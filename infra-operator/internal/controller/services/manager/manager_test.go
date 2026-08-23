@@ -626,7 +626,7 @@ func TestApplyManagerRuntimeDeploymentConfigPinsNomadClaimAssets(t *testing.T) {
 			Enabled: true, TLSSecretName: "manager-node-tls",
 			Identities: []config.NodeAuthorityIdentityConfig{{CommonName: "node", NodeUID: "uid", PodUID: "agent"}},
 			Claim: config.RuntimeSlotClaimConfig{
-				SecretName: "nomad-claim", ProfileCatalogFile: "/ignored/profiles.json", WriterTokenKeyFile: "/ignored/key",
+				SecretName: "nomad-claim", ClassCatalogFile: "/ignored/classes.json", WriterTokenKeyFile: "/ignored/key",
 			},
 			Terminal: config.RuntimeSlotTerminalConfig{Enabled: true, ControlSecretName: "nomad-control"},
 		},
@@ -635,7 +635,7 @@ func TestApplyManagerRuntimeDeploymentConfigPinsNomadClaimAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim := cfg.NodeAuthority.Claim
-	if claim.ProfileCatalogFile != config.NodeAuthorityRuntimeProfilesPath ||
+	if claim.ClassCatalogFile != config.NodeAuthorityRuntimeClassesPath ||
 		claim.WriterTokenKeyFile != config.NodeAuthorityWriterTokenKeyPath ||
 		claim.ClaimTTL.Duration != 15*time.Second || claim.SLO.Duration != time.Second {
 		t.Fatalf("Nomad claim deployment config = %#v", claim)

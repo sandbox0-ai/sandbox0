@@ -219,16 +219,19 @@ func (s *Service) nomadTemplateCaptureMetadata(
 		return nil, fmt.Errorf("%w: captured RootFS does not match the desired template image",
 			templatebuild.ErrCaptureInvalid)
 	}
-	quota, err := s.effectiveResources(desiredSpec, nil)
-	if err != nil {
+	if _, err := s.effectiveResources(desiredSpec, nil); err != nil {
 		return nil, err
 	}
-	profile, ok := s.profiles.Resolve(quota.CPU, quota.Memory)
-	if !ok {
-		return nil, fmt.Errorf("%w: no Nomad warm-slot profile for captured template resources",
+	clusterID := ""
+	if desiredSpec.ClusterId != nil {
+		clusterID = strings.TrimSpace(*desiredSpec.ClusterId)
+	}
+	runtimeClass, err := s.runtimeClasses.Resolve(clusterID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: no unambiguous Nomad runtime class for captured template",
 			templatepkg.ErrTemplateSourceUnavailable)
 	}
-	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(ctx, generation.BaseArtifactDigest, profile.ArtifactPlatform)
+	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(ctx, generation.BaseArtifactDigest, runtimeClass.ArtifactPlatform)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +245,8 @@ func (s *Service) nomadTemplateCaptureMetadata(
 		SnapshotID: snapshot.ID, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
 		HeadGenerationID: generation.ID, SourceOCIDigest: generation.SourceOCIDigest,
 		BaseArtifactDigest: generation.BaseArtifactDigest, FormatGeneration: generation.FormatGeneration,
-		Platform: ocispec.Platform{OS: profile.ArtifactPlatform.OS,
-			Architecture: profile.ArtifactPlatform.Architecture, Variant: profile.ArtifactPlatform.Variant},
+		Platform: ocispec.Platform{OS: runtimeClass.ArtifactPlatform.OS,
+			Architecture: runtimeClass.ArtifactPlatform.Architecture, Variant: runtimeClass.ArtifactPlatform.Variant},
 		CapturedAt: snapshot.CreatedAt.UTC(),
 	}, nil
 }

@@ -588,7 +588,15 @@ func prepareRuntimeSlotClaim(
 	if err != nil {
 		t.Fatalf("derive runtime assignment revision: %v", err)
 	}
-	stage.Labels = map[string]string{protocol.RuntimeAssignmentRevisionLabel: runtimeRevision}
+	resources := runtimeSlotResourceLease(t, fixture, stage)
+	resourceDigest, err := resources.Digest()
+	if err != nil {
+		t.Fatalf("derive runtime resource lease digest: %v", err)
+	}
+	stage.Labels = map[string]string{
+		protocol.RuntimeAssignmentRevisionLabel:  runtimeRevision,
+		protocol.RuntimeResourceLeaseDigestLabel: resourceDigest,
+	}
 	if err := stage.Validate(); err != nil {
 		t.Fatalf("validate regional runtime slot stage: %v", err)
 	}
@@ -601,6 +609,27 @@ func prepareRuntimeSlotClaim(
 	fixture.authority.claimID = "claim-1"
 	fixture.authority.mu.Unlock()
 	return handle, stage, token, networkPolicy, mounter
+}
+
+func runtimeSlotResourceLease(
+	t *testing.T,
+	fixture *runtimeSlotPluginFixture,
+	stage rootfshandoff.StageRequest,
+) protocol.RuntimeResourceLease {
+	t.Helper()
+	lease, err := protocol.NewRuntimeResourceLease(
+		"operation-1", "claim-1", fixture.task.ID, fixture.config.RuntimeSlotClusterID,
+		fixture.task.NodeID, stage.Identity.NodeUID, stage.Identity.BootID,
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_500,
+			MemoryBytes: 768 << 20, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-3", "0",
+	)
+	if err != nil {
+		t.Fatalf("build runtime resource lease: %v", err)
+	}
+	return lease
 }
 
 func runtimeSlotAssignment() *runtimecontrol.Assignment {
@@ -626,7 +655,7 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -694,6 +723,19 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 			t.Fatalf("Nomad task environment leaked into procd OCI environment: %q", value)
 		}
 	}
+	lease := runtimeSlotResourceLease(t, fixture, stage)
+	if spec.Linux == nil || spec.Linux.CgroupsPath != "/sandbox0/"+lease.CgroupName ||
+		spec.Linux.Resources == nil || spec.Linux.Resources.CPU == nil ||
+		spec.Linux.Resources.CPU.Period == nil || *spec.Linux.Resources.CPU.Period != lease.CPUPeriodMicros ||
+		spec.Linux.Resources.CPU.Quota == nil || *spec.Linux.Resources.CPU.Quota != lease.CPUQuotaMicros ||
+		spec.Linux.Resources.CPU.Shares == nil || *spec.Linux.Resources.CPU.Shares != lease.CPUShares ||
+		spec.Linux.Resources.CPU.Cpus != lease.CPUSetCPUs ||
+		spec.Linux.Resources.Memory == nil || spec.Linux.Resources.Memory.Limit == nil ||
+		*spec.Linux.Resources.Memory.Limit != lease.MemoryBytes ||
+		spec.Linux.Resources.Pids == nil || spec.Linux.Resources.Pids.Limit == nil ||
+		*spec.Linux.Resources.Pids.Limit != lease.PIDsLimit {
+		t.Fatalf("OCI runtime resource lease = %+v", spec.Linux)
+	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
 	}
@@ -709,7 +751,7 @@ func TestRuntimeSlotClaimStartingRejectionPoisonsWithoutRunsc(t *testing.T) {
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if !errdefs.IsPermissionDenied(err) {
 		t.Fatalf("Claim() error = %v, want permission denied", err)
@@ -743,7 +785,7 @@ func TestRuntimeSlotConsumedAttachFailureLeavesTerminalWriteForRegionalOwner(t *
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if err == nil || !strings.Contains(err.Error(), "regional runtime-slot cleanup is required") {
 		t.Fatalf("Claim() error = %v, want regional cleanup requirement", err)
@@ -771,7 +813,7 @@ func TestRuntimeSlotClaimAcceptsExactRetryAfterResponseLoss(t *testing.T) {
 	request := ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	}
 	if err := handle.Claim(request); err != nil {
 		t.Fatalf("first Claim() error = %v", err)
@@ -818,7 +860,7 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 	err := handle.Claim(ClaimRequest{
 		ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1",
 		Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if err == nil || !strings.Contains(err.Error(), "operation_id") {
 		t.Fatalf("Claim() error = %v, want missing operation ID", err)
@@ -843,7 +885,7 @@ func TestRuntimeSlotClaimRejectsNetworkTokenForAnotherAllocationAddress(t *testi
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("Claim() error = %v, want failed precondition", err)
@@ -877,7 +919,7 @@ func TestRuntimeSlotCommandReadyRetriesAcceptedResponseLoss(t *testing.T) {
 	if err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
@@ -937,7 +979,7 @@ func TestRuntimeSlotCommandReadyRejectionFencesWriter(t *testing.T) {
 	if err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
@@ -1029,7 +1071,7 @@ func TestRecoverRuntimeSlotLeavesTerminalWriteForRegionalOwner(t *testing.T) {
 	if err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-		Runtime: runtimeSlotAssignment(),
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
@@ -1281,8 +1323,8 @@ func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
 	}
 }
 
-func TestNormalizedRuntimeSlotResourcesEnforceExactNomadShape(t *testing.T) {
-	task := &drivers.TaskConfig{Resources: &drivers.Resources{
+func TestRuntimeCompatibilityDigestIgnoresCarrierResources(t *testing.T) {
+	first := &drivers.TaskConfig{Resources: &drivers.Resources{
 		NomadResources: &structs.AllocatedTaskResources{
 			Cpu:    structs.AllocatedCpuResources{CpuShares: 3900},
 			Memory: structs.AllocatedMemoryResources{MemoryMB: 1024},
@@ -1291,98 +1333,38 @@ func TestNormalizedRuntimeSlotResourcesEnforceExactNomadShape(t *testing.T) {
 			CPUShares: 3900, CpusetCpus: "2", PercentTicks: 0.5, MemoryLimitBytes: 1024 * 1024 * 1024,
 		},
 	}}
-	resources, err := normalizedRuntimeSlotResources(task)
-	if err != nil {
-		t.Fatalf("normalizedRuntimeSlotResources() error = %v", err)
-	}
-	if resources.CPUPeriod != 100000 || resources.CPUQuota != 100000 ||
-		resources.CPUShares != 1024 || resources.CPUSetCpus != "2" || resources.MemoryLimitBytes != 1024*1024*1024 {
-		t.Fatalf("normalized resources = %+v", resources)
-	}
-	digest, err := runtimeCompatibilityDigest(defaultPluginConfig(), task, "runsc version test")
+	second := &drivers.TaskConfig{Resources: &drivers.Resources{
+		NomadResources: &structs.AllocatedTaskResources{
+			Cpu:    structs.AllocatedCpuResources{CpuShares: 100},
+			Memory: structs.AllocatedMemoryResources{MemoryMB: 64},
+		},
+		LinuxResources: &drivers.LinuxResources{
+			CPUShares: 2, CpusetCpus: "0-7", MemoryLimitBytes: 64 * 1024 * 1024,
+		},
+	}}
+	digest, err := runtimeCompatibilityDigest(defaultPluginConfig(), first, "runsc version test")
 	if err != nil {
 		t.Fatalf("runtimeCompatibilityDigest() error = %v", err)
+	}
+	secondDigest, err := runtimeCompatibilityDigest(defaultPluginConfig(), second, "runsc version test")
+	if err != nil {
+		t.Fatalf("runtimeCompatibilityDigest(second) error = %v", err)
+	}
+	if digest != secondDigest {
+		t.Fatalf("carrier resources changed compatibility: %q != %q", digest, secondDigest)
 	}
 	wantDigest, err := (protocol.RuntimeCompatibility{
 		Version: protocol.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,
 		DriverVersion: PluginVersion, RunscVersion: "runsc version test",
 		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true,
 		Command: "/procd", ProcdPort: protocol.NomadProcdPort,
-		RuntimeMode: runtimecontrol.ControlModeStatic,
-		CPUPeriod:   100000, CPUQuota: 100000, CPUShares: 1024, MemoryLimitBytes: 1024 * 1024 * 1024,
+		RuntimeMode: runtimecontrol.ControlModeStatic, SecurityClass: "standard",
 	}).Digest()
 	if err != nil {
 		t.Fatalf("expected compatibility digest: %v", err)
 	}
 	if digest != wantDigest {
 		t.Fatalf("compatibility digest = %q, want %q", digest, wantDigest)
-	}
-}
-
-func TestNormalizedRuntimeSlotResourcesRejectAmbiguousNomadShape(t *testing.T) {
-	valid := func() *drivers.TaskConfig {
-		return &drivers.TaskConfig{Resources: &drivers.Resources{
-			NomadResources: &structs.AllocatedTaskResources{
-				Cpu:    structs.AllocatedCpuResources{CpuShares: 3900},
-				Memory: structs.AllocatedMemoryResources{MemoryMB: 1024},
-			},
-			LinuxResources: &drivers.LinuxResources{CpusetCpus: "2", MemoryLimitBytes: 1024 * 1024 * 1024},
-		}}
-	}
-	tests := []struct {
-		name   string
-		mutate func(*drivers.TaskConfig)
-	}{
-		{name: "missing resources", mutate: func(task *drivers.TaskConfig) { task.Resources = nil }},
-		{name: "zero cpu", mutate: func(task *drivers.TaskConfig) { task.Resources.NomadResources.Cpu.CpuShares = 0 }},
-		{name: "missing dedicated cores", mutate: func(task *drivers.TaskConfig) {
-			task.Resources.LinuxResources.CpusetCpus = ""
-		}},
-		{name: "reserved core mismatch", mutate: func(task *drivers.TaskConfig) {
-			task.Resources.NomadResources.Cpu.ReservedCores = []uint16{1, 2}
-		}},
-		{name: "noncanonical cpuset", mutate: func(task *drivers.TaskConfig) { task.Resources.LinuxResources.CpusetCpus = "02" }},
-		{name: "memory mismatch", mutate: func(task *drivers.TaskConfig) {
-			task.Resources.LinuxResources.MemoryLimitBytes--
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			task := valid()
-			test.mutate(task)
-			if _, err := normalizedRuntimeSlotResources(task); err == nil {
-				t.Fatal("ambiguous runtime slot resources were accepted")
-			}
-		})
-	}
-}
-
-func TestCountCanonicalCPUSet(t *testing.T) {
-	tests := []struct {
-		value string
-		want  int
-		ok    bool
-	}{
-		{value: "0", want: 1, ok: true},
-		{value: "0-3,6,8-9", want: 7, ok: true},
-		{value: "", ok: false},
-		{value: "00", ok: false},
-		{value: "1-1", ok: false},
-		{value: "2-1", ok: false},
-		{value: "0,0", ok: false},
-		{value: "0-2,2-3", ok: false},
-		{value: "0, 1", ok: false},
-	}
-	for _, test := range tests {
-		t.Run(test.value, func(t *testing.T) {
-			got, err := countCanonicalCPUSet(test.value)
-			if test.ok && (err != nil || got != test.want) {
-				t.Fatalf("countCanonicalCPUSet(%q) = %d, %v; want %d", test.value, got, err, test.want)
-			}
-			if !test.ok && err == nil {
-				t.Fatalf("countCanonicalCPUSet(%q) = %d, nil; want error", test.value, got)
-			}
-		})
 	}
 }
 

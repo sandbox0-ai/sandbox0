@@ -79,17 +79,22 @@ type NodeCleanupRequest struct {
 	RunscContainerID      string
 	WriterGrantID         string
 	WriterAuthorityDigest []byte
+	Resources             protocol.RuntimeResourceLease
+	ResourceLeaseDigest   []byte
 }
 
 // NodeCleanupProof is stable evidence that no node-local runtime, mount, or
 // network ownership remains for the exact slot incarnation.
 type NodeCleanupProof struct {
-	OperationID  string
-	SlotID       string
-	AllocationID string
-	NodeUID      string
-	NodeBootID   string
-	ProofDigest  []byte
+	OperationID          string
+	SlotID               string
+	AllocationID         string
+	NodeUID              string
+	NodeBootID           string
+	ResourceLeaseID      string
+	ResourceLeaseDigest  []byte
+	ResourceCgroupAbsent bool
+	ProofDigest          []byte
 }
 
 // NodeCleaner is the plugin-independent node teardown boundary. Cleanup must
@@ -333,6 +338,8 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
 		RunscContainerID: runscContainerID, WriterGrantID: slot.WriterGrantID,
 		WriterAuthorityDigest: append([]byte(nil), writerFence.ProofDigest...),
+		Resources:             slot.ResourceLease,
+		ResourceLeaseDigest:   append([]byte(nil), slot.ResourceLeaseDigest...),
 	})
 	if err != nil {
 		return false, fmt.Errorf("clean node runtime: %w", err)
@@ -424,6 +431,9 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	terminal, err := r.store.FinalizeRuntimeSlot(ctx, &sandboxstore.FinalizeRuntimeSlotRequest{
 		SlotID: slot.ID, OperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 		Reason: reason, ProofDigest: terminalProof,
+		ResourceLeaseID:      cleanupProof.ResourceLeaseID,
+		ResourceLeaseDigest:  append([]byte(nil), cleanupProof.ResourceLeaseDigest...),
+		ResourceCgroupAbsent: cleanupProof.ResourceCgroupAbsent,
 	})
 	if err != nil {
 		return false, fmt.Errorf("finalize runtime slot: %w", err)
@@ -460,6 +470,30 @@ func validateSlotIdentity(slot *sandboxstore.RuntimeSlot) error {
 	if slot.ClaimID != "" && (slot.ClaimOperationID == "" || slot.SandboxID == "" || slot.FilesystemID == "") {
 		return errors.New("runtime slot has incomplete claim identity")
 	}
+	if slot.ResourceLease.IsZero() {
+		if len(slot.ResourceLeaseDigest) != 0 || slot.ResourceLeaseState != "" || !slot.ResourceLeaseReleasedAt.IsZero() {
+			return errors.New("runtime slot has partial resource lease identity")
+		}
+		return nil
+	}
+	if err := slot.ResourceLease.Validate(); err != nil {
+		return fmt.Errorf("runtime slot resource lease: %w", err)
+	}
+	if slot.ResourceLease.SlotID != slot.ID || slot.ResourceLease.ClusterID != slot.ClusterID ||
+		slot.ResourceLease.NodeID != slot.NodeID || slot.ResourceLease.NodeUID != slot.NodeUID ||
+		slot.ResourceLease.NodeBootID != slot.NodeBootID ||
+		slot.ResourceLease.OperationID != slot.ClaimOperationID || slot.ResourceLease.ClaimID != slot.ClaimID ||
+		slot.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
+		return errors.New("runtime slot resource lease does not match its active claim")
+	}
+	digest, err := slot.ResourceLease.Digest()
+	if err != nil {
+		return fmt.Errorf("digest runtime slot resource lease: %w", err)
+	}
+	decoded, err := protocol.DecodeProof("resource_lease_digest", strings.TrimPrefix(digest, "sha256:"))
+	if err != nil || !bytes.Equal(decoded, slot.ResourceLeaseDigest) {
+		return errors.New("runtime slot resource lease digest changed")
+	}
 	return nil
 }
 
@@ -481,6 +515,14 @@ func validateNodeCleanupProof(proof NodeCleanupProof, slot *sandboxstore.Runtime
 	if proof.OperationID != operationID || proof.SlotID != slot.ID || proof.AllocationID != slot.AllocationID ||
 		proof.NodeUID != slot.NodeUID || proof.NodeBootID != slot.NodeBootID {
 		return errors.New("node cleanup proof does not match runtime slot")
+	}
+	if slot.ResourceLease.IsZero() {
+		if proof.ResourceLeaseID != "" || len(proof.ResourceLeaseDigest) != 0 || proof.ResourceCgroupAbsent {
+			return errors.New("legacy node cleanup proof contains resource lease facts")
+		}
+	} else if proof.ResourceLeaseID != slot.ResourceLease.LeaseID ||
+		!bytes.Equal(proof.ResourceLeaseDigest, slot.ResourceLeaseDigest) || !proof.ResourceCgroupAbsent {
+		return errors.New("node cleanup proof does not establish exact resource cgroup absence")
 	}
 	return validateProof("node cleanup", proof.ProofDigest)
 }
@@ -600,22 +642,28 @@ func terminalProofDigest(
 	orphanProof []byte,
 ) ([]byte, error) {
 	payload, err := json.Marshal(struct {
-		Version           int    `json:"version"`
-		SlotID            string `json:"slot_id"`
-		OperationID       string `json:"operation_id"`
-		ClaimID           string `json:"claim_id"`
-		CleanupDigest     string `json:"cleanup_digest"`
-		WriterGrantID     string `json:"writer_grant_id,omitempty"`
-		WriterFenceDigest string `json:"writer_fence_digest,omitempty"`
-		WriterState       string `json:"writer_state,omitempty"`
-		WriterDigest      string `json:"writer_digest,omitempty"`
-		AllocationDigest  string `json:"allocation_digest"`
+		Version              int    `json:"version"`
+		SlotID               string `json:"slot_id"`
+		OperationID          string `json:"operation_id"`
+		ClaimID              string `json:"claim_id"`
+		CleanupDigest        string `json:"cleanup_digest"`
+		WriterGrantID        string `json:"writer_grant_id,omitempty"`
+		WriterFenceDigest    string `json:"writer_fence_digest,omitempty"`
+		WriterState          string `json:"writer_state,omitempty"`
+		WriterDigest         string `json:"writer_digest,omitempty"`
+		AllocationDigest     string `json:"allocation_digest"`
+		ResourceLeaseID      string `json:"resource_lease_id,omitempty"`
+		ResourceLeaseDigest  string `json:"resource_lease_digest,omitempty"`
+		ResourceCgroupAbsent bool   `json:"resource_cgroup_absent"`
 	}{
-		Version: 1, SlotID: slot.ID, OperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
+		Version: 2, SlotID: slot.ID, OperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 		CleanupDigest: hex.EncodeToString(cleanup.ProofDigest), WriterGrantID: writer.GrantID,
 		WriterFenceDigest: hex.EncodeToString(fence.ProofDigest),
 		WriterState:       writer.State, WriterDigest: hex.EncodeToString(writer.ProofDigest),
-		AllocationDigest: hex.EncodeToString(orphanProof),
+		AllocationDigest:     hex.EncodeToString(orphanProof),
+		ResourceLeaseID:      cleanup.ResourceLeaseID,
+		ResourceLeaseDigest:  hex.EncodeToString(cleanup.ResourceLeaseDigest),
+		ResourceCgroupAbsent: cleanup.ResourceCgroupAbsent,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode runtime slot terminal proof: %w", err)

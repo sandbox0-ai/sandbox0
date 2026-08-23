@@ -3,14 +3,50 @@ package sandboxstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRuntimeResourceLeaseMigrationDownAndUpIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPoolThrough(t, "00045")
+	assertRuntimeResourceSchema := func(want bool) {
+		t.Helper()
+		var capacityTable, leaseTable, slotColumn bool
+		require.NoError(t, pool.QueryRow(ctx, `
+			SELECT to_regclass('manager.runtime_node_capacities') IS NOT NULL,
+				to_regclass('manager.runtime_resource_leases') IS NOT NULL,
+				EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_schema = 'manager' AND table_name = 'runtime_slots'
+						AND column_name = 'resource_lease_id'
+				)
+		`).Scan(&capacityTable, &leaseTable, &slotColumn))
+		require.Equal(t, want, capacityTable)
+		require.Equal(t, want, leaseTable)
+		require.Equal(t, want, slotColumn)
+	}
+	assertRuntimeResourceSchema(true)
+	require.NoError(t, migrate.Down(ctx, pool, ".",
+		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00045")),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
+	assertRuntimeResourceSchema(false)
+	require.NoError(t, migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00045")),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
+	assertRuntimeResourceSchema(true)
+}
 
 func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -19,15 +55,15 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-slot")
 	registration := runtimeSlotTestRegistration("slot-a", "allocation-a")
 
-	registered, err := store.RegisterRuntimeSlot(ctx, registration)
+	registered, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateRegistered, registered.State)
-	retried, err := store.RegisterRuntimeSlot(ctx, registration)
+	retried, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	require.Equal(t, registered.ID, retried.ID)
 	changed := *registration
 	changed.NodeBootID = "different-boot"
-	_, err = store.RegisterRuntimeSlot(ctx, &changed)
+	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, &changed)
 	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
 
 	proof := bytes.Repeat([]byte{0x31}, 32)
@@ -47,6 +83,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
 		ClaimTTL:                  time.Minute,
+		Resources:                 runtimeSlotTestResources(),
 	}
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
@@ -98,6 +135,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		LaunchAttempt: "launch-a", RunscContainerID: "runsc-a",
 		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x55}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	}
 	_, err = store.StartRuntimeSlot(ctx, wrongNodeStart)
 	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
@@ -107,6 +145,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		LaunchAttempt: "launch-a", RunscContainerID: "runsc-a",
 		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x55}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateStarting, started.State)
@@ -158,6 +197,8 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	_, err = store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
 		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		Reason: "crash_abandon", ProofDigest: bytes.Repeat([]byte{0x78}, 32),
+		ResourceLeaseID:     claimed.ResourceLease.LeaseID,
+		ResourceLeaseDigest: claimed.ResourceLeaseDigest, ResourceCgroupAbsent: true,
 	})
 	require.ErrorIs(t, err, ErrRuntimeSlotInvalid, "the slot must retain the purge orphan until its writer is terminal")
 }
@@ -169,7 +210,7 @@ func TestRuntimeSlotConcurrentAcquireUsesDistinctReadySlotsIntegration(t *testin
 	compatibility := runtimeSlotTestRegistration("unused", "unused").CompatibilityDigest
 	for index := 0; index < 2; index++ {
 		registration := runtimeSlotTestRegistration(fmt.Sprintf("slot-%d", index), fmt.Sprintf("allocation-%d", index))
-		_, err := store.RegisterRuntimeSlot(ctx, registration)
+		_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 		require.NoError(t, err)
 		_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
 			SlotID: registration.SlotID, AllocationID: registration.AllocationID,
@@ -207,6 +248,7 @@ func TestRuntimeSlotConcurrentAcquireUsesDistinctReadySlotsIntegration(t *testin
 				CompatibilityDigest: compatibility, ClusterID: "cluster-a",
 				RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 				NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+				Resources: runtimeSlotTestResources(),
 			})
 		}(index)
 	}
@@ -226,7 +268,7 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 			fmt.Sprintf("slot-idempotent-%d", index),
 			fmt.Sprintf("allocation-idempotent-%d", index),
 		)
-		_, err := store.RegisterRuntimeSlot(ctx, registration)
+		_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 		require.NoError(t, err)
 		_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
 			SlotID: registration.SlotID, AllocationID: registration.AllocationID,
@@ -246,6 +288,7 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 		CompatibilityDigest: compatibility, ClusterID: "cluster-a",
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	}
 
 	results := make([]*RuntimeSlot, 2)
@@ -275,11 +318,122 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 	require.Equal(t, 1, claimedCount)
 }
 
+func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupProofIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	registration := runtimeSlotTestRegistration("unused", "unused")
+	_, err := store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: registration.ClusterID, NodeID: registration.NodeID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		CPUMillicores: 2_000, MemoryBytes: 2 << 30,
+		CPUSetCPUs: "0-1", CPUSetMems: "0", TTL: time.Minute,
+	})
+	require.NoError(t, err)
+
+	type fixture struct {
+		request *AcquireRuntimeSlotRequest
+		slot    *RuntimeSlot
+		err     error
+	}
+	fixtures := make([]fixture, 3)
+	for index := range fixtures {
+		suffix := fmt.Sprintf("capacity-%d", index)
+		slotRegistration := runtimeSlotTestRegistration("slot-"+suffix, "allocation-"+suffix)
+		_, err = store.RegisterRuntimeSlot(ctx, slotRegistration)
+		require.NoError(t, err)
+		proof := bytes.Repeat([]byte{byte(0x90 + index)}, 32)
+		_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
+			SlotID: slotRegistration.SlotID, AllocationID: slotRegistration.AllocationID,
+			NodeUID: slotRegistration.NodeUID, NodeBootID: slotRegistration.NodeBootID,
+			RuntimeReadyDigest: proof, NetworkReadyDigest: proof, StorageReadyDigest: proof,
+			HeartbeatTTL: time.Minute,
+		})
+		require.NoError(t, err)
+		filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-"+suffix)
+		fixtures[index].request = &AcquireRuntimeSlotRequest{
+			OperationID: "operation-" + suffix, ClaimID: "claim-" + suffix,
+			SandboxID: "sandbox-" + suffix, FilesystemID: filesystem.ID,
+			SourceGenerationID: generation.ID, CompatibilityDigest: slotRegistration.CompatibilityDigest,
+			ClusterID:                 slotRegistration.ClusterID,
+			RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+			NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+			Resources: runtimeSlotTestResources(),
+		}
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range fixtures {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			fixtures[index].slot, fixtures[index].err = store.AcquireRuntimeSlot(ctx, fixtures[index].request)
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	var successful, unavailable []int
+	for index := range fixtures {
+		switch {
+		case fixtures[index].err == nil:
+			successful = append(successful, index)
+		case errors.Is(fixtures[index].err, ErrRuntimeSlotUnavailable):
+			unavailable = append(unavailable, index)
+		default:
+			t.Fatalf("claim %d failed unexpectedly: %v", index, fixtures[index].err)
+		}
+	}
+	require.Len(t, successful, 2)
+	require.Len(t, unavailable, 1)
+
+	first := &fixtures[successful[0]]
+	retried, err := store.AcquireRuntimeSlot(ctx, first.request)
+	require.NoError(t, err)
+	require.Equal(t, first.slot.ResourceLease, retried.ResourceLease)
+	require.Equal(t, first.slot.ResourceLeaseDigest, retried.ResourceLeaseDigest)
+	changed := *first.request
+	changed.Resources.CPUMillicores++
+	_, err = store.AcquireRuntimeSlot(ctx, &changed)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
+
+	_, err = store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
+		SlotID: first.slot.ID, OperationID: first.request.OperationID, ClaimID: first.request.ClaimID,
+		Reason: "prelaunch_abort", ProofDigest: bytes.Repeat([]byte{0xa5}, 32),
+		ResourceLeaseID:     first.slot.ResourceLease.LeaseID,
+		ResourceLeaseDigest: first.slot.ResourceLeaseDigest,
+	})
+	require.Error(t, err)
+	terminal, err := store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
+		SlotID: first.slot.ID, OperationID: first.request.OperationID, ClaimID: first.request.ClaimID,
+		Reason: "prelaunch_abort", ProofDigest: bytes.Repeat([]byte{0xa5}, 32),
+		ResourceLeaseID:     first.slot.ResourceLease.LeaseID,
+		ResourceLeaseDigest: first.slot.ResourceLeaseDigest, ResourceCgroupAbsent: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeResourceLeaseReleased, terminal.ResourceLeaseState)
+	require.False(t, terminal.ResourceLeaseReleasedAt.IsZero())
+
+	last := &fixtures[unavailable[0]]
+	last.slot, err = store.AcquireRuntimeSlot(ctx, last.request)
+	require.NoError(t, err)
+	require.NotNil(t, last.slot)
+	var activeCPU, activeMemory int64
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(cpu_millicores), 0), COALESCE(SUM(memory_bytes), 0)
+		FROM manager.runtime_resource_leases WHERE lease_state = $1
+	`, RuntimeResourceLeaseActive).Scan(&activeCPU, &activeMemory))
+	require.Equal(t, int64(2_000), activeCPU)
+	require.Equal(t, int64(2<<30), activeMemory)
+}
+
 func TestRuntimeSlotUnclaimedPurgeBecomesTerminalIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
 	registration := runtimeSlotTestRegistration("slot-unclaimed", "allocation-unclaimed")
-	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	proof := bytes.Repeat([]byte{0x7a}, 32)
 	terminal, err := store.MarkRuntimeSlotAllocationMissing(ctx, &MarkRuntimeSlotAllocationMissingRequest{
@@ -299,7 +453,7 @@ func TestRuntimeSlotReconcileFenceRechecksExpiryIntegration(t *testing.T) {
 	store := NewPGSandboxStore(pool)
 	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-fence")
 	registration := runtimeSlotTestRegistration("slot-reconcile-fence", "allocation-reconcile-fence")
-	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	proof := bytes.Repeat([]byte{0x7b}, 32)
 	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
@@ -314,6 +468,7 @@ func TestRuntimeSlotReconcileFenceRechecksExpiryIntegration(t *testing.T) {
 		SandboxID: "sandbox-reconcile-fence", FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
 		CompatibilityDigest: registration.CompatibilityDigest, RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest: "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	})
 	require.NoError(t, err)
 
@@ -354,7 +509,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	store := NewPGSandboxStore(pool)
 	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-writer")
 	registration := runtimeSlotTestRegistration("slot-reconcile-writer", "allocation-reconcile-writer")
-	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	proof := bytes.Repeat([]byte{0x7c}, 32)
 	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
@@ -369,6 +524,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 		SandboxID: "sandbox-reconcile-writer", FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
 		CompatibilityDigest: registration.CompatibilityDigest, RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest: "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	}
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
@@ -424,7 +580,7 @@ func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-abort")
 	_, unrelatedGeneration := runtimeSlotTestGeneration(t, store, "sandbox-unrelated")
 	registration := runtimeSlotTestRegistration("slot-abort", "allocation-abort")
-	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
 		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
@@ -441,6 +597,7 @@ func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 		CompatibilityDigest:       registration.CompatibilityDigest,
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: 20 * time.Second,
+		Resources: runtimeSlotTestResources(),
 	}
 	invalidSource := *acquire
 	invalidSource.OperationID = "operation-invalid-source"
@@ -454,6 +611,8 @@ func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	terminal, err := store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
 		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		Reason: "prelaunch_abort", ProofDigest: proof,
+		ResourceLeaseID:     claimed.ResourceLease.LeaseID,
+		ResourceLeaseDigest: claimed.ResourceLeaseDigest, ResourceCgroupAbsent: true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateTerminal, terminal.State)

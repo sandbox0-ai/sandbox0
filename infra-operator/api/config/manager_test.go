@@ -201,7 +201,7 @@ node_authority:
       pod_uid: agent-1
   claim:
     secret_name: manager-nomad-claim
-    profile_catalog_file: /claim/profiles.json
+    class_catalog_file: /claim/classes.json
     writer_token_key_file: /claim/writer.key
     claim_ttl:
       duration: 12s
@@ -233,7 +233,7 @@ node_authority:
 		node.Terminal.PassTimeout.Duration != time.Minute || node.Terminal.ScanLimit != 64 {
 		t.Fatalf("node authority nested config = %#v", node)
 	}
-	if node.Claim.SecretName != "manager-nomad-claim" || node.Claim.ProfileCatalogFile != "/claim/profiles.json" ||
+	if node.Claim.SecretName != "manager-nomad-claim" || node.Claim.ClassCatalogFile != "/claim/classes.json" ||
 		node.Claim.WriterTokenKeyFile != "/claim/writer.key" || node.Claim.ClaimTTL.Duration != 12*time.Second ||
 		node.Claim.SLO.Duration != 750*time.Millisecond {
 		t.Fatalf("node authority claim config = %#v", node.Claim)
@@ -243,7 +243,7 @@ node_authority:
 func TestSandboxRuntimeDefaultsNomadClaimPolicy(t *testing.T) {
 	cfg := &ManagerConfig{SandboxRuntimeBackend: SandboxRuntimeBackendNomad}
 	applySandboxRuntimeDefaults(cfg)
-	if cfg.NodeAuthority.Claim.ProfileCatalogFile != NodeAuthorityRuntimeProfilesPath ||
+	if cfg.NodeAuthority.Claim.ClassCatalogFile != NodeAuthorityRuntimeClassesPath ||
 		cfg.NodeAuthority.Claim.WriterTokenKeyFile != NodeAuthorityWriterTokenKeyPath ||
 		cfg.NodeAuthority.Claim.ClaimTTL.Duration != 15*time.Second ||
 		cfg.NodeAuthority.Claim.SLO.Duration != time.Second {

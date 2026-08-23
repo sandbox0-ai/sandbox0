@@ -2,11 +2,13 @@ package sandboxstore
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,6 +67,7 @@ func TestNormalizeAcquireRuntimeSlotRequestUsesMillisecondTTLPrecision(t *testin
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
 		ClaimTTL:                  1500*time.Millisecond + 900*time.Microsecond,
+		Resources:                 runtimeSlotTestResources(),
 	}
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	require.NoError(t, err)
@@ -79,6 +82,7 @@ func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
 		ClaimTTL:                  time.Second,
+		Resources:                 runtimeSlotTestResources(),
 	}
 	tests := []struct {
 		name   string
@@ -115,6 +119,30 @@ func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(
 			require.ErrorContains(t, err, test.error)
 		})
 	}
+}
+
+func runtimeSlotTestResources() protocol.RuntimeResourceRequest {
+	return protocol.RuntimeResourceRequest{
+		Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_000,
+		MemoryBytes: 1 << 30, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+	}
+}
+
+func registerRuntimeSlotWithTestCapacity(
+	t *testing.T,
+	ctx context.Context,
+	store *PGSandboxStore,
+	request *RegisterRuntimeSlotRequest,
+) (*RuntimeSlot, error) {
+	t.Helper()
+	if _, err := store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: request.ClusterID, NodeID: request.NodeID, NodeUID: request.NodeUID,
+		NodeBootID: request.NodeBootID, CPUMillicores: 8_000, MemoryBytes: 16 << 30,
+		CPUSetCPUs: "0-7", CPUSetMems: "0", TTL: time.Minute,
+	}); err != nil {
+		return nil, err
+	}
+	return store.RegisterRuntimeSlot(ctx, request)
 }
 
 func TestNormalizeFenceRuntimeSlotForReconcileRequest(t *testing.T) {

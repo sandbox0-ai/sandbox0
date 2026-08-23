@@ -34,6 +34,7 @@ import (
 	"go.uber.org/zap"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -114,7 +115,7 @@ type pausedRebaseController interface {
 type Config struct {
 	Store           Store
 	Templates       templatestore.TemplateStore
-	Profiles        *ProfileCatalog
+	RuntimeClasses  *RuntimeClassCatalog
 	Planner         planner
 	Allocation      allocationStopper
 	RunningFork     runningForkController
@@ -133,7 +134,7 @@ type Config struct {
 type Service struct {
 	store           Store
 	templates       templatestore.TemplateStore
-	profiles        *ProfileCatalog
+	runtimeClasses  *RuntimeClassCatalog
 	planner         planner
 	allocation      allocationStopper
 	runningFork     runningForkController
@@ -150,11 +151,11 @@ type Service struct {
 
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
-	if config.Store == nil || config.Templates == nil || config.Profiles == nil ||
+	if config.Store == nil || config.Templates == nil || config.RuntimeClasses == nil ||
 		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
 		config.PausedRebase == nil ||
 		config.QuotaLimits == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
+		return nil, fmt.Errorf("Nomad claim store, templates, runtime classes, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
@@ -169,7 +170,7 @@ func New(config Config) (*Service, error) {
 		config.Logger = zap.NewNop()
 	}
 	return &Service{
-		store: config.Store, templates: config.Templates, profiles: config.Profiles,
+		store: config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
 		planner: config.Planner, allocation: config.Allocation, runningFork: config.RunningFork,
 		pausedRebase: config.PausedRebase,
 		quotaLimits:  config.QuotaLimits, networkPolicies: config.NetworkPolicies,
@@ -347,10 +348,11 @@ func (s *Service) ResumePausedSandboxRuntime(ctx context.Context, sandboxID stri
 }
 
 type nomadResumePlan struct {
-	profile    Profile
-	request    service.ClaimRequest
-	policy     string
-	assignment runtimecontrol.Assignment
+	runtimeClass RuntimeClass
+	resources    protocol.RuntimeResourceRequest
+	request      service.ClaimRequest
+	policy       string
+	assignment   runtimecontrol.Assignment
 }
 
 func (s *Service) resumeNomadSandbox(
@@ -411,7 +413,8 @@ func (s *Service) resumeNomadSandbox(
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
 		OperationID: candidate.OperationID, SandboxID: candidate.SandboxID,
 		TeamID: candidate.Record.TeamID, UserID: candidate.Record.UserID,
-		CompatibilityDigest: plan.profile.CompatibilityDigest, ClusterID: plan.profile.ClusterID,
+		CompatibilityDigest: plan.runtimeClass.CompatibilityDigest, ClusterID: plan.runtimeClass.ClusterID,
+		Resources:     plan.resources,
 		NetworkPolicy: plan.policy, Runtime: plan.assignment, StartedAt: startedAt,
 	})
 	if err != nil {
@@ -428,6 +431,8 @@ func (s *Service) resumeNomadSandbox(
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
 		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
+		ResourceLeaseID:     result.Slot.ResourceLease.LeaseID,
+		ResourceLeaseDigest: append([]byte(nil), result.Slot.ResourceLeaseDigest...),
 	})
 	if err != nil {
 		return nil, nil, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err)
@@ -467,14 +472,19 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad resources are invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
 	}
-	profile, ok := s.profiles.Resolve(resources.CPU, resources.Memory)
-	if !ok || profile.ClusterID != record.ClusterID {
-		return nomadResumePlan{}, fmt.Errorf("%w: no compatible Nomad warm-slot profile for the stored sandbox",
+	runtimeClass, err := s.runtimeClasses.Resolve(record.ClusterID)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: no compatible Nomad warm-slot class for the stored sandbox",
 			service.ErrSandboxLifecycleUnavailable)
 	}
+	resourceRequest, err := runtimeResourceRequest(resources)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad resources are invalid: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
 	if configuredCluster := record.TemplateSpec.ClusterId; configuredCluster != nil &&
-		strings.TrimSpace(*configuredCluster) != "" && strings.TrimSpace(*configuredCluster) != profile.ClusterID {
-		return nomadResumePlan{}, fmt.Errorf("%w: stored template cluster has no compatible Nomad warm-slot profile",
+		strings.TrimSpace(*configuredCluster) != "" && strings.TrimSpace(*configuredCluster) != runtimeClass.ClusterID {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored template cluster has no compatible Nomad warm-slot class",
 			service.ErrSandboxLifecycleUnavailable)
 	}
 	req := service.ClaimRequest{
@@ -513,7 +523,7 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 		return nomadResumePlan{}, fmt.Errorf("%w: stored runtime assignment is invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
 	}
-	return nomadResumePlan{profile: profile, request: req, policy: policy, assignment: assignment}, nil
+	return nomadResumePlan{runtimeClass: runtimeClass, resources: resourceRequest, request: req, policy: policy, assignment: assignment}, nil
 }
 
 func validateNomadResumeCandidate(
@@ -526,7 +536,7 @@ func validateNomadResumeCandidate(
 	}
 	record := candidate.Record
 	if candidate.SandboxID != expected.ID || record.ID != expected.ID || record.TeamID != expected.TeamID ||
-		record.UserID != expected.UserID || record.ClusterID != plan.profile.ClusterID ||
+		record.UserID != expected.UserID || record.ClusterID != plan.runtimeClass.ClusterID ||
 		record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 		!apiequality.Semantic.DeepEqual(record.TemplateSpec, expected.TemplateSpec) ||
 		!nomadRuntimeConfigEqual(record.Config, expected.Config) {
@@ -768,16 +778,19 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, err
 	}
-	profile, ok := s.profiles.Resolve(quota.CPU, quota.Memory)
-	if !ok {
-		return nil, fmt.Errorf("%w: no Nomad warm-slot profile for cpu=%s memory=%s",
-			service.ErrDataPlaneNotReady, quota.CPU.String(), quota.Memory.String())
+	clusterID := ""
+	if tpl.Spec.ClusterId != nil {
+		clusterID = strings.TrimSpace(*tpl.Spec.ClusterId)
 	}
-	if tpl.Spec.ClusterId != nil && strings.TrimSpace(*tpl.Spec.ClusterId) != "" &&
-		strings.TrimSpace(*tpl.Spec.ClusterId) != profile.ClusterID {
-		return nil, fmt.Errorf("%w: template cluster has no matching Nomad warm-slot profile", service.ErrDataPlaneNotReady)
+	runtimeClass, err := s.runtimeClasses.Resolve(clusterID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve Nomad runtime class: %v", service.ErrDataPlaneNotReady, err)
 	}
-	sandboxID, err := naming.SandboxNameForOperation(profile.ClusterID, req.Template, req.OperationID)
+	resourceRequest, err := runtimeResourceRequest(quota)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
+	}
+	sandboxID, err := naming.SandboxNameForOperation(runtimeClass.ClusterID, req.Template, req.OperationID)
 	if err != nil {
 		return nil, fmt.Errorf("derive sandbox ID: %w", err)
 	}
@@ -802,7 +815,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err := assignment.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
-	rootFS, err := s.prepareRootFS(ctx, tpl, &req, profile.ArtifactPlatform)
+	rootFS, err := s.prepareRootFS(ctx, tpl, &req, runtimeClass.ArtifactPlatform)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRootFSBaseArtifactNotFound) {
 			return nil, fmt.Errorf("%w: %v", service.ErrDataPlaneNotReady, err)
@@ -811,7 +824,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	}
 
 	now := s.now().UTC()
-	record := s.claimRecord(tpl, &req, profile, now)
+	record := s.claimRecord(tpl, &req, runtimeClass, quota, now)
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
 		return nil, err
 	}
@@ -822,7 +835,8 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
 		OperationID: req.OperationID, SandboxID: sandboxID,
 		TeamID: req.TeamID, UserID: req.UserID,
-		CompatibilityDigest: profile.CompatibilityDigest, ClusterID: profile.ClusterID,
+		CompatibilityDigest: runtimeClass.CompatibilityDigest, ClusterID: runtimeClass.ClusterID,
+		Resources:     resourceRequest,
 		NetworkPolicy: policy, Runtime: assignment, StartedAt: req.StartedAt,
 	})
 	if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
@@ -837,6 +851,8 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	record, err = s.store.CompleteSandboxClaim(ctx, &sandboxstore.CompleteSandboxClaimRequest{
 		SandboxID: sandboxID, OperationID: req.OperationID, SlotID: result.Slot.ID,
 		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
+		ResourceLeaseID:     result.Slot.ResourceLease.LeaseID,
+		ResourceLeaseDigest: append([]byte(nil), result.Slot.ResourceLeaseDigest...),
 	})
 	if errors.Is(err, sandboxstore.ErrSandboxClaimCleanupPending) ||
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict) {
@@ -849,7 +865,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Duration("endToEndDuration", result.Duration),
 	)
-	clusterID := profile.ClusterID
+	clusterID = runtimeClass.ClusterID
 	return &service.ClaimResponse{
 		SandboxID: sandboxID, Status: "running", ProcdAddress: result.ProcdAddress,
 		PodName: result.Slot.AllocationID, Template: req.Template, ClusterId: &clusterID,
@@ -879,6 +895,26 @@ func effectiveResources(
 		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
 	}
 	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
+}
+
+func runtimeResourceRequest(quota v1alpha1.ResourceQuota) (protocol.RuntimeResourceRequest, error) {
+	millicpu := quota.CPU.MilliValue()
+	if millicpu <= 0 || resource.NewMilliQuantity(millicpu, resource.DecimalSI).Cmp(quota.CPU) != 0 {
+		return protocol.RuntimeResourceRequest{}, fmt.Errorf("CPU must be a positive exact millicore quantity")
+	}
+	memoryBytes := quota.Memory.Value()
+	if memoryBytes <= 0 || resource.NewQuantity(memoryBytes, resource.BinarySI).Cmp(quota.Memory) != 0 {
+		return protocol.RuntimeResourceRequest{}, fmt.Errorf("memory must be a positive exact byte quantity")
+	}
+	request := protocol.RuntimeResourceRequest{
+		Version:       protocol.RuntimeResourceRequestVersion,
+		CPUMillicores: millicpu, MemoryBytes: memoryBytes,
+		PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+	}
+	if err := request.Validate(); err != nil {
+		return protocol.RuntimeResourceRequest{}, err
+	}
+	return request, nil
 }
 
 func (s *Service) networkPolicy(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) (string, []v1alpha1.CredentialBinding, error) {
@@ -957,7 +993,7 @@ func (s *Service) prepareRootFS(
 		}
 		if source.Platform.OS != platform.OS || source.Platform.Architecture != platform.Architecture ||
 			source.Platform.Variant != platform.Variant {
-			return rootFSPlan{}, fmt.Errorf("%w: template RootFS platform does not match the warm-slot profile",
+			return rootFSPlan{}, fmt.Errorf("%w: template RootFS platform does not match the warm-slot class",
 				service.ErrDataPlaneNotReady)
 		}
 		snapshot, err := s.store.GetRootFSSnapshot(ctx, source.SnapshotID, req.TeamID)
@@ -1051,7 +1087,13 @@ func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimReques
 	return err
 }
 
-func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimRequest, profile Profile, now time.Time) *sandboxstore.SandboxRecord {
+func (s *Service) claimRecord(
+	tpl *templatepkg.Template,
+	req *service.ClaimRequest,
+	runtimeClass RuntimeClass,
+	quota v1alpha1.ResourceQuota,
+	now time.Time,
+) *sandboxstore.SandboxRecord {
 	config := service.CloneSandboxConfig(req.Config)
 	if config == nil {
 		config = &sandboxstore.SandboxConfig{}
@@ -1063,11 +1105,11 @@ func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimReque
 	record := &sandboxstore.SandboxRecord{
 		ID: req.SandboxID, TeamID: req.TeamID, UserID: req.UserID,
 		TemplateID: tpl.TemplateID, TemplateName: tpl.TemplateID, TemplateNamespace: tpl.Scope,
-		ClusterID: profile.ClusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		ClusterID: runtimeClass.ClusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
 		DesiredState: sandboxstore.SandboxDesiredStateActive,
 		Config:       *config, TemplateSpec: tpl.Spec, RuntimeGeneration: req.RuntimeGeneration,
-		ResourceMillicpu:  profile.TemplateCPU.MilliValue(),
-		ResourceMemoryMiB: bytesToMiBRoundUp(profile.TemplateMemory.Value()),
+		ResourceMillicpu:  quota.CPU.MilliValue(),
+		ResourceMemoryMiB: bytesToMiBRoundUp(quota.Memory.Value()),
 		ClaimedAt:         now, CreatedAt: now,
 	}
 	if req.Metadata != nil {

@@ -77,7 +77,7 @@ func TestBuildNomadSandboxRuntimeBackendFailsClosedBeforeLoadingAssets(t *testin
 	}
 	cfg.NodeAuthority.Terminal.Enabled = true
 	cfg.NodeAuthority.Claim.SecretName = "nomad-claim"
-	cfg.NodeAuthority.Claim.ProfileCatalogFile = "/tmp/profiles.json"
+	cfg.NodeAuthority.Claim.ClassCatalogFile = "/tmp/classes.json"
 	cfg.NodeAuthority.Claim.WriterTokenKeyFile = "/tmp/key"
 	if _, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{}); err == nil || !strings.Contains(err.Error(), "operator-pinned") {
 		t.Fatalf("unpinned asset path error = %v", err)

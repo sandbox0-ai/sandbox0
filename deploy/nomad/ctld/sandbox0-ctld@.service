@@ -14,8 +14,10 @@ Environment=CONFIG_PATH=/etc/sandbox0/ctld.yaml
 Environment=CTLD_NETWORK_CONFIG_PATH=/etc/sandbox0/ctld-networking.yaml
 Environment=SANDBOX0_CTLD_HTTP_ADDR=:8095
 Environment=SANDBOX0_CTLD_HA_METRICS_ADDR=
+Environment=SANDBOX0_RESOURCE_CGROUP_ROOT=/sys/fs/cgroup/sandbox0
 EnvironmentFile=/etc/sandbox0/ctld.env
 EnvironmentFile=-/etc/sandbox0/ctld-%i.env
+ExecStartPre=/usr/local/libexec/sandbox0/ctld-resource-cgroup-setup
 ExecStartPre=/usr/local/libexec/sandbox0/ctld-host-check %i
 ExecStart=/usr/local/bin/ctld \
   -http-addr=${SANDBOX0_CTLD_HTTP_ADDR} \

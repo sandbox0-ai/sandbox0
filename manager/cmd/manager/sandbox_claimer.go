@@ -72,11 +72,11 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 	if claim.SecretName == "" || claim.SecretName != strings.TrimSpace(claim.SecretName) {
 		return nil, fmt.Errorf("Nomad claim Secret name must be non-empty and canonical")
 	}
-	if claim.ProfileCatalogFile != config.NodeAuthorityRuntimeProfilesPath ||
+	if claim.ClassCatalogFile != config.NodeAuthorityRuntimeClassesPath ||
 		claim.WriterTokenKeyFile != config.NodeAuthorityWriterTokenKeyPath {
 		return nil, fmt.Errorf("Nomad claim assets must use operator-pinned mount paths")
 	}
-	profiles, err := nomadclaim.LoadProfileCatalog(claim.ProfileCatalogFile)
+	runtimeClasses, err := nomadclaim.LoadRuntimeClassCatalog(claim.ClassCatalogFile)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 		updated, err := backfiller.BackfillNomadMeteringResources(
 			backfillContext,
 			func(record *sandboxstore.SandboxRecord) (int64, int64, error) {
-				return profiles.ResolvePersistedMeteringResources(record, deps.resourcePolicy)
+				return runtimeClasses.ResolveLegacyMeteringResources(record, deps.resourcePolicy)
 			},
 		)
 		if err != nil {
@@ -111,7 +111,7 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 		return nil, fmt.Errorf("create Nomad runtime slot claim planner: %w", err)
 	}
 	claimer, err := nomadclaim.New(nomadclaim.Config{
-		Store: deps.store, Templates: deps.templates, Profiles: profiles, Planner: planner,
+		Store: deps.store, Templates: deps.templates, RuntimeClasses: runtimeClasses, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
 		RunningFork:     deps.nodeAuthority,
 		PausedRebase:    deps.nodeAuthority,

@@ -48,6 +48,10 @@ func validNomadAllocationConfig() NomadAllocationConfig {
 		RuntimeSlotChannelPeerURISAN: "spiffe://sandbox0.internal/region/runtime-slot-channel",
 		RuntimeSlotControlRoot:       "/run/sandbox0/nomad-slots",
 		RuntimeSlotCtldNetworkSocket: "/run/sandbox0/ctld-runtime-slot-network.sock",
+		RuntimeResourceCPUMillicores: 4_000,
+		RuntimeResourceMemoryBytes:   8 << 30,
+		RuntimeResourceCPUSetCPUs:    "0-3",
+		RuntimeResourceCPUSetMems:    "0",
 	}
 }
 
@@ -67,6 +71,7 @@ func TestConfigValidateRejectsUnsafeProductionInputs(t *testing.T) {
 	}{
 		{name: "non HTTPS authority", mutate: func(c *Config) { c.RootFSAuthorityURL = "http://manager.internal" }, match: "HTTPS origin"},
 		{name: "non canonical state", mutate: func(c *Config) { c.RootFSStatePath = "/var/lib/sandbox0/../sandbox0/state.db" }, match: "canonical"},
+		{name: "different resource root", mutate: func(c *Config) { c.RuntimeResourceCgroupRoot = "/sys/fs/cgroup/other" }, match: "must be /sys/fs/cgroup/sandbox0"},
 		{name: "duplicate device", mutate: func(c *Config) { c.RootFSNBDDevices = []string{"/dev/nbd0", "/dev/nbd0"} }, match: "duplicated"},
 		{name: "relative device", mutate: func(c *Config) { c.RootFSNBDDevices = []string{"dev/nbd0"} }, match: "canonical"},
 		{name: "arbitrary block device", mutate: func(c *Config) { c.RootFSNBDDevices = []string{"/dev/sda"} }, match: "/dev/nbd"},

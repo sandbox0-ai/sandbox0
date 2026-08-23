@@ -45,6 +45,11 @@ func validCtldNomadConfig() *apiconfig.CtldConfig {
 			NomadKeyFile:            "/etc/sandbox0/pki/nomad-key.pem",
 			NodeUID:                 "node-uid-1",
 			ControlRoot:             "/run/sandbox0/nomad-slots",
+			ResourceCgroupRoot:      "/sys/fs/cgroup/sandbox0",
+			ResourceCPUMillicores:   4_000,
+			ResourceMemoryBytes:     8 << 30,
+			ResourceCPUSetCPUs:      "0-3",
+			ResourceCPUSetMems:      "0",
 		},
 	}
 }

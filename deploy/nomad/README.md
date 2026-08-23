@@ -17,20 +17,32 @@ The following identities must agree across every generated file:
 - Nomad server cluster and exact client node IDs;
 - durable node UID and current node boot ID;
 - node certificate common name and its manager authority mapping;
-- runsc version, driver version, runtime settings, and Nomad CPU/memory shape;
-  and
+- runsc version, driver version, immutable runtime settings, and security
+  class; and
 - RootFS artifact OS/architecture.
 
 The exact compatibility object belongs in
-`nomad-driver-sandbox0/example/runtime-profiles.example.json`. Manager hashes
-that object, and the driver independently derives the same host-independent
-shape from the actual dedicated-core allocation. Nomad 1.11 leaves period and
-quota unset for external drivers, so the driver requires `resources.cores`,
-copies the allocated CPU set into OCI, and applies canonical 100000-period CFS
-limits and 1024 shares per core. Frequency-dependent `resources.cpu` pools are
-rejected instead of being mislabeled as an exact CPU profile. A mismatch
-intentionally leaves the pool unavailable instead of scheduling a
-near-compatible slot.
+`nomad-driver-sandbox0/example/runtime-classes.example.json`. Catalog version
+`3` contains only immutable carrier compatibility: architecture, driver/runsc
+versions, gVisor platform, filesystem settings, DirectFS, runtime mode, and
+security class. CPU, memory, PIDs, CPU quota/weight, and cpuset are forbidden
+from this catalog. Until the public API exposes an explicit class selector,
+configure exactly one class for each requested cluster; zero or multiple
+matches fail closed.
+
+Nomad schedules only dedicated Sandbox0 nodes and low-overhead, resource-neutral
+warm carriers. Manager atomically leases exact CPU and memory from the live
+capacity reported by ctld, then ctld creates `/sys/fs/cgroup/sandbox0/<lease>`
+and the driver writes that lease into OCI. Neither component derives sandbox
+limits from the carrier allocation; per-lease swap is disabled so it cannot
+bypass PostgreSQL memory accounting. Register these clients in the Nomad
+`sandbox0` node pool and set node metadata `sandbox0_dedicated=true`; the warm
+job requires both. Do not register general workloads against this node pool.
+After a node reboot, only plugin-independent cleanup may be routed through one
+authenticated successor boot for the same durable node UID. Ctld must replay
+the old slot journal and prove the old runsc, mount, network, writer, and lease
+cgroup absent before manager releases that old lease; ambiguous successors
+fail closed.
 
 ## Manager authority secrets
 
@@ -40,7 +52,7 @@ backend configuration:
 | Secret | Required keys |
 | --- | --- |
 | node authority TLS | `tls.crt`, `tls.key`, `client-ca.crt` |
-| claim authority | `runtime-profiles.json`, `writer-token.key` |
+| claim authority | `runtime-classes.json`, `writer-token.key` |
 | terminal Nomad control | `nomad-endpoints.json` and every credential file named by that catalog |
 
 `writer-token.key` must contain exactly 32 random bytes and remain stable
@@ -98,20 +110,23 @@ private and mutually authenticated.
    scheduler, cluster-gateway, and manager with the Nomad backend enabled.
 3. Install ctld A/B, runsc, and the task driver with
    `ctld/install-node.sh`. Verify both role-aware ctld health states before
-   enabling Nomad on the node.
+   enabling Nomad on the node. The installer provisions a cgroup-v2 subtree at
+   `/sys/fs/cgroup/sandbox0`, enables `cpu`, `cpuset`, `memory`, and `pids` for
+   child leases, and fails startup if those controllers are unavailable or the
+   resource root itself contains processes.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad`. Its count of eight
    is the minimum production acceptance width. Configure at least that many
-   ctld NBD devices and enough replacement headroom. The supplied 1 CPU/1 GiB
-   profile reserves eight dedicated cores and needs at least 8 CPUs and 8 GiB
-   of genuinely schedulable aggregate Nomad client capacity in addition to
-   host, ctld, runsc, and replacement overhead. Never falsify
-   `cpu_total_compute` or oversubscribe memory for an SLO report. A smaller
-   dedicated acceptance profile is valid only when the public template
-   declares that exact resource shape and the report label identifies it. Keep
-   the supplied `restart { attempts = 0 }` policy: one-shot slot termination
-   must create a fresh allocation and network namespace, never restart the
-   driver inside the consumed allocation.
-5. Confirm PostgreSQL shows healthy exact-profile slots, every node channel is
+   ctld NBD devices and enough replacement headroom. The example reserves only
+   50 MHz and 64 MiB of Nomad carrier overhead per slot; these are not sandbox
+   limits. For the production eight-way acceptance gate, ctld must truthfully
+   report at least eight dedicated CPU cores and sufficient sandbox memory
+   after host overhead. Never falsify Nomad node capacity, ctld capacity, or
+   cpusets, and never oversubscribe memory for an SLO report. Keep the supplied
+   `restart { attempts = 0 }` policy: one-shot slot termination must create a
+   fresh allocation and network namespace, never restart the driver inside the
+   consumed allocation.
+5. Confirm PostgreSQL shows healthy resource-neutral class slots and live node
+   capacity, every node channel is
    connected, warm default-deny is applied, and Nomad replacement allocations
    reach ready after one batch is deleted.
 6. Verify the acceptance team's active and rate quotas, then run the fixed

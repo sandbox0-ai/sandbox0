@@ -19,6 +19,11 @@ nomad_runtime:
   overlay2: none
   file_access: shared
   directfs: true
+  resource_cgroup_root: /sys/fs/cgroup/sandbox0
+  resource_cpu_millicores: ${SANDBOX0_RESOURCE_CPU_MILLICORES}
+  resource_memory_bytes: ${SANDBOX0_RESOURCE_MEMORY_BYTES}
+  resource_cpuset_cpus: "${SANDBOX0_RESOURCE_CPUSET_CPUS}"
+  resource_cpuset_mems: "${SANDBOX0_RESOURCE_CPUSET_MEMS}"
   state_path: /var/lib/sandbox0/ctld/nomad/rootfs-sessions.db
   branch_root: /var/lib/sandbox0/ctld/nomad/rootfs-branches
   mount_root: /run/sandbox0/rootfs

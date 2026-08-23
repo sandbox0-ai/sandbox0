@@ -27,9 +27,10 @@ const (
 	RuntimeSlotStateOrphaned      = string(protocol.StateOrphaned)
 	RuntimeSlotStateTerminal      = string(protocol.StateTerminal)
 
-	DefaultRuntimeSlotHeartbeatTTL = 30 * time.Second
-	DefaultRuntimeSlotClaimTTL     = 15 * time.Second
-	MaxRuntimeSlotReconcileLimit   = 1_000
+	DefaultRuntimeSlotHeartbeatTTL   = 30 * time.Second
+	DefaultRuntimeSlotClaimTTL       = 15 * time.Second
+	MaxRuntimeSlotReconcileLimit     = 1_000
+	maxRuntimeSlotCapacityCandidates = 1_024
 )
 
 var (
@@ -89,6 +90,10 @@ type RuntimeSlot struct {
 	CreatedAt                      time.Time
 	UpdatedAt                      time.Time
 	AuthorityObservedAt            time.Time
+	ResourceLease                  protocol.RuntimeResourceLease
+	ResourceLeaseDigest            []byte
+	ResourceLeaseState             string
+	ResourceLeaseReleasedAt        time.Time
 }
 
 type RegisterRuntimeSlotRequest struct {
@@ -135,6 +140,7 @@ type AcquireRuntimeSlotRequest struct {
 	RuntimeAssignmentRevision string
 	NetworkPolicyDigest       string
 	ClaimTTL                  time.Duration
+	Resources                 protocol.RuntimeResourceRequest
 }
 
 type BindRuntimeSlotWriterGrantRequest struct {
@@ -155,6 +161,8 @@ type StartRuntimeSlotRequest struct {
 	RunscContainerID    string
 	RootFSBindingDigest []byte
 	ClaimNetworkDigest  []byte
+	ResourceLeaseID     string
+	ResourceLeaseDigest []byte
 }
 
 type MarkRuntimeSlotCommandReadyRequest struct {
@@ -189,11 +197,14 @@ type MarkRuntimeSlotAllocationMissingRequest struct {
 }
 
 type FinalizeRuntimeSlotRequest struct {
-	SlotID      string
-	OperationID string
-	ClaimID     string
-	Reason      string
-	ProofDigest []byte
+	SlotID               string
+	OperationID          string
+	ClaimID              string
+	Reason               string
+	ProofDigest          []byte
+	ResourceLeaseID      string
+	ResourceLeaseDigest  []byte
+	ResourceCgroupAbsent bool
 }
 
 // RegisterRuntimeSlot creates one immutable allocation incarnation. Slot IDs
@@ -416,7 +427,7 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 
 	existing, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE claim_operation_id = $1
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, normalized.OperationID))
 	if err == nil {
 		if !runtimeSlotClaimMatches(existing, normalized) {
@@ -458,22 +469,31 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 		return nil, err
 	}
 
-	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE state = $1
-			AND heartbeat_expires_at > NOW()
-			AND compatibility_digest = $2
-			AND ($3 = '' OR cluster_id = $3)
-		ORDER BY fastpath_ready_at, slot_id
-		FOR UPDATE SKIP LOCKED
-		LIMIT 1
-	`, RuntimeSlotStateFastpathReady, normalized.CompatibilityDigest, normalized.ClusterID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrRuntimeSlotUnavailable
-	}
+	slot, resourceLease, resourceLeaseDigest, err := selectRuntimeSlotResourceLease(ctx, tx, normalized)
 	if err != nil {
 		return nil, err
 	}
 	_, err = tx.Exec(ctx, `
+		INSERT INTO manager.runtime_resource_leases (
+			lease_id, slot_id, operation_id, claim_id,
+			cluster_id, node_id, node_uid, node_boot_id,
+			cpu_millicores, cpu_period_micros, cpu_quota_micros,
+			cpu_shares, cpu_weight, cpuset_cpus, cpuset_mems,
+			memory_bytes, pids_limit, cgroup_name, lease_digest, lease_state
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+		)
+	`, resourceLease.LeaseID, resourceLease.SlotID, resourceLease.OperationID, resourceLease.ClaimID,
+		resourceLease.ClusterID, resourceLease.NodeID, resourceLease.NodeUID, resourceLease.NodeBootID,
+		resourceLease.CPUMillicores, int64(resourceLease.CPUPeriodMicros), resourceLease.CPUQuotaMicros,
+		int64(resourceLease.CPUShares), int64(resourceLease.CPUWeight), resourceLease.CPUSetCPUs,
+		resourceLease.CPUSetMems, resourceLease.MemoryBytes, resourceLease.PIDsLimit,
+		resourceLease.CgroupName, resourceLeaseDigest, RuntimeResourceLeaseActive)
+	if err != nil {
+		return nil, mapRuntimeSlotConflict("insert runtime resource lease", err)
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE manager.runtime_slots
 		SET state = $2, revision = revision + 1,
 			claim_operation_id = $3, claim_id = $4, sandbox_id = $5,
@@ -481,14 +501,17 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 			claim_cluster_filter = $8, claim_ttl_milliseconds = $9::bigint,
 			claim_runtime_assignment_revision = $10, claim_network_policy_digest = $11,
 			claim_lease_expires_at = NOW() + ($9::double precision * INTERVAL '1 millisecond'),
-			claimed_at = NOW(), updated_at = NOW()
-		WHERE slot_id = $1 AND state = $12
+			claimed_at = NOW(), updated_at = NOW(), resource_lease_id = $12
+		WHERE slot_id = $1 AND state = $13 AND resource_lease_id IS NULL
 	`, slot.ID, RuntimeSlotStateClaiming, normalized.OperationID, normalized.ClaimID,
 		normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID,
 		normalized.ClusterID, normalized.ClaimTTL.Milliseconds(), normalized.RuntimeAssignmentRevision,
-		normalized.NetworkPolicyDigest, RuntimeSlotStateFastpathReady)
+		normalized.NetworkPolicyDigest, resourceLease.LeaseID, RuntimeSlotStateFastpathReady)
 	if err != nil {
 		return nil, mapRuntimeSlotConflict("acquire runtime slot", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("%w: selected runtime slot changed before resource lease attachment", ErrRuntimeSlotConflict)
 	}
 	result, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slot.ID))
 	if err != nil {
@@ -498,6 +521,109 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 		return nil, mapRuntimeSlotConflict("commit runtime slot claim", err)
 	}
 	return result, nil
+}
+
+func selectRuntimeSlotResourceLease(
+	ctx context.Context,
+	tx pgx.Tx,
+	request *AcquireRuntimeSlotRequest,
+) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
+	excludedSlots := make([]string, 0, 8)
+	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
+		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+			WHERE state = $1
+				AND heartbeat_expires_at > NOW()
+				AND compatibility_digest = $2
+				AND ($3 = '' OR cluster_id = $3)
+				AND slot_id <> ALL($6::text[])
+				AND EXISTS (
+					SELECT 1
+					FROM manager.runtime_node_capacities AS capacity
+					WHERE capacity.cluster_id = runtime_slots.cluster_id
+						AND capacity.node_id = runtime_slots.node_id
+						AND capacity.node_uid = runtime_slots.node_uid
+						AND capacity.node_boot_id = runtime_slots.node_boot_id
+						AND capacity.heartbeat_expires_at > NOW()
+						AND capacity.cpu_millicores >= $4 + COALESCE((
+							SELECT SUM(lease.cpu_millicores)
+							FROM manager.runtime_resource_leases AS lease
+							WHERE lease.cluster_id = capacity.cluster_id
+								AND lease.node_id = capacity.node_id
+								AND lease.node_uid = capacity.node_uid
+								AND lease.node_boot_id = capacity.node_boot_id
+								AND lease.lease_state = 'active'
+						), 0)
+						AND capacity.memory_bytes >= $5 + COALESCE((
+							SELECT SUM(lease.memory_bytes)
+							FROM manager.runtime_resource_leases AS lease
+							WHERE lease.cluster_id = capacity.cluster_id
+								AND lease.node_id = capacity.node_id
+								AND lease.node_uid = capacity.node_uid
+								AND lease.node_boot_id = capacity.node_boot_id
+								AND lease.lease_state = 'active'
+						), 0)
+				)
+			ORDER BY fastpath_ready_at, slot_id
+			FOR UPDATE OF runtime_slots SKIP LOCKED
+			LIMIT 1
+		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
+			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
+		}
+		if err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		excludedSlots = append(excludedSlots, slot.ID)
+
+		var capacityCPU, capacityMemory int64
+		var cpusetCPUs, cpusetMems string
+		err = tx.QueryRow(ctx, `
+			SELECT cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems
+			FROM manager.runtime_node_capacities
+			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
+				AND heartbeat_expires_at > NOW()
+			FOR UPDATE
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(
+			&capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		var usedCPU, usedMemory int64
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(SUM(cpu_millicores), 0), COALESCE(SUM(memory_bytes), 0)
+			FROM manager.runtime_resource_leases
+			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
+				AND lease_state = 'active'
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(&usedCPU, &usedMemory); err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if capacityCPU-usedCPU < request.Resources.CPUMillicores ||
+			capacityMemory-usedMemory < request.Resources.MemoryBytes {
+			continue
+		}
+		lease, err := protocol.NewRuntimeResourceLease(
+			request.OperationID, request.ClaimID, slot.ID, slot.ClusterID,
+			slot.NodeID, slot.NodeUID, slot.NodeBootID, request.Resources, cpusetCPUs, cpusetMems,
+		)
+		if err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, fmt.Errorf("build runtime resource lease: %w", err)
+		}
+		digestValue, err := lease.Digest()
+		if err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		digestBytes, err := hex.DecodeString(strings.TrimPrefix(digestValue, "sha256:"))
+		if err != nil || len(digestBytes) != 32 {
+			return nil, protocol.RuntimeResourceLease{}, nil, fmt.Errorf("decode runtime resource lease digest")
+		}
+		return slot, lease, digestBytes, nil
+	}
+	return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 }
 
 func lockRuntimeSlotClaimOperation(ctx context.Context, tx pgx.Tx, operationID string) error {
@@ -674,6 +800,11 @@ func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRun
 		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
 			return nil, fmt.Errorf("%w: start caller does not match slot claim", ErrRuntimeSlotConflict)
 		}
+		if slot.ResourceLease.LeaseID != normalized.ResourceLeaseID ||
+			!bytes.Equal(slot.ResourceLeaseDigest, normalized.ResourceLeaseDigest) ||
+			slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
+			return nil, fmt.Errorf("%w: start resource lease does not match slot claim", ErrRuntimeSlotConflict)
+		}
 		if slot.State == RuntimeSlotStateStarting || slot.State == RuntimeSlotStateActive {
 			if slot.LaunchAttempt == normalized.LaunchAttempt &&
 				slot.RunscContainerID == normalized.RunscContainerID &&
@@ -844,6 +975,14 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
 			return nil, fmt.Errorf("%w: terminal caller does not match slot claim", ErrRuntimeSlotConflict)
 		}
+		if slot.ResourceLease.IsZero() {
+			if normalized.ResourceLeaseID != "" || len(normalized.ResourceLeaseDigest) != 0 || normalized.ResourceCgroupAbsent {
+				return nil, fmt.Errorf("%w: legacy slot received resource cleanup facts", ErrRuntimeSlotConflict)
+			}
+		} else if normalized.ResourceLeaseID != slot.ResourceLease.LeaseID ||
+			!bytes.Equal(normalized.ResourceLeaseDigest, slot.ResourceLeaseDigest) || !normalized.ResourceCgroupAbsent {
+			return nil, fmt.Errorf("%w: resource cleanup proof does not match slot lease", ErrRuntimeSlotConflict)
+		}
 		if slot.State == RuntimeSlotStateTerminal {
 			if slot.TerminalReason == normalized.Reason &&
 				bytes.Equal(slot.TerminalProofDigest, normalized.ProofDigest) {
@@ -866,6 +1005,24 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 			}
 			if grantState != RootFSWriterGrantStateRetired && grantState != RootFSWriterGrantStateCanceled {
 				return nil, fmt.Errorf("%w: writer grant remains %s", ErrRuntimeSlotInvalid, grantState)
+			}
+		}
+		if slot.ResourceLease.LeaseID != "" {
+			if slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
+				return nil, fmt.Errorf("%w: resource lease is not active before terminal cleanup", ErrRuntimeSlotInvalid)
+			}
+			tag, err := tx.Exec(ctx, `
+				UPDATE manager.runtime_resource_leases
+				SET lease_state = $2, released_at = NOW(), updated_at = NOW()
+				WHERE lease_id = $1 AND slot_id = $3 AND operation_id = $4 AND claim_id = $5
+					AND lease_state = $6 AND released_at IS NULL
+			`, slot.ResourceLease.LeaseID, RuntimeResourceLeaseReleased, slot.ID,
+				normalized.OperationID, normalized.ClaimID, RuntimeResourceLeaseActive)
+			if err != nil {
+				return nil, err
+			}
+			if tag.RowsAffected() != 1 {
+				return nil, fmt.Errorf("%w: resource lease changed before terminal cleanup", ErrRuntimeSlotConflict)
 			}
 		}
 		_, err := tx.Exec(ctx, `
@@ -923,7 +1080,7 @@ func (s *PGSandboxStore) withLockedRuntimeSlot(
 	defer func() { _ = tx.Rollback(ctx) }()
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE slot_id = $1
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, slotID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrRuntimeSlotNotFound, slotID)
@@ -1065,6 +1222,9 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 	}
 	// PostgreSQL persists and applies claim TTLs at millisecond precision.
 	normalized.ClaimTTL = time.Duration(normalized.ClaimTTL.Milliseconds()) * time.Millisecond
+	if err := normalized.Resources.Validate(); err != nil {
+		return nil, fmt.Errorf("resources: %w", err)
+	}
 	return &normalized, nil
 }
 
@@ -1121,6 +1281,14 @@ func normalizeStartRuntimeSlotRequest(request *StartRuntimeSlotRequest) (*StartR
 		return nil, err
 	}
 	normalized.ClaimNetworkDigest, err = normalizeRuntimeSlotProof("claim_network_digest", normalized.ClaimNetworkDigest)
+	if err != nil {
+		return nil, err
+	}
+	normalized.ResourceLeaseID = strings.TrimSpace(normalized.ResourceLeaseID)
+	if normalized.ResourceLeaseID == "" || len(normalized.ResourceLeaseID) > 512 {
+		return nil, fmt.Errorf("resource_lease_id is required and must not exceed 512 bytes")
+	}
+	normalized.ResourceLeaseDigest, err = normalizeRuntimeSlotProof("resource_lease_digest", normalized.ResourceLeaseDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -1185,6 +1353,22 @@ func normalizeFinalizeRuntimeSlotRequest(request *FinalizeRuntimeSlotRequest) (*
 	normalized.ProofDigest, err = normalizeRuntimeSlotProof("proof_digest", normalized.ProofDigest)
 	if err != nil {
 		return nil, err
+	}
+	normalized.ResourceLeaseID = strings.TrimSpace(normalized.ResourceLeaseID)
+	if normalized.ResourceLeaseID == "" {
+		if len(normalized.ResourceLeaseDigest) != 0 || normalized.ResourceCgroupAbsent {
+			return nil, fmt.Errorf("resource cleanup facts require resource_lease_id")
+		}
+	} else {
+		if len(normalized.ResourceLeaseID) > 512 || !normalized.ResourceCgroupAbsent {
+			return nil, fmt.Errorf("resource lease ID and cgroup absence are required")
+		}
+		normalized.ResourceLeaseDigest, err = normalizeRuntimeSlotProof(
+			"resource_lease_digest", normalized.ResourceLeaseDigest,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &normalized, nil
 }
@@ -1318,7 +1502,12 @@ func runtimeSlotClaimMatches(slot *RuntimeSlot, request *AcquireRuntimeSlotReque
 		slot.ClaimClusterFilter == request.ClusterID &&
 		slot.ClaimRuntimeAssignmentRevision == request.RuntimeAssignmentRevision &&
 		slot.ClaimNetworkPolicyDigest == request.NetworkPolicyDigest &&
-		slot.ClaimTTL == request.ClaimTTL
+		slot.ClaimTTL == request.ClaimTTL &&
+		slot.ResourceLease.CPUMillicores == request.Resources.CPUMillicores &&
+		slot.ResourceLease.MemoryBytes == request.Resources.MemoryBytes &&
+		slot.ResourceLease.PIDsLimit == request.Resources.PIDsLimit &&
+		slot.ResourceLease.OperationID == request.OperationID &&
+		slot.ResourceLease.ClaimID == request.ClaimID
 }
 
 func runtimeSlotClaimIdentityMatches(slot *RuntimeSlot, operationID, claimID string) bool {
@@ -1354,8 +1543,37 @@ func runtimeSlotSelectSQL() string {
 			procd_instance_id, procd_address, command_ready_digest, command_ready_at,
 			quiescing_at, orphan_observation_digest,
 			terminal_reason, terminal_proof_digest, terminal_at,
-			created_at, updated_at, NOW()
-		FROM manager.runtime_slots`
+			created_at, updated_at,
+			resource_lease.resource_lease_id, resource_lease.resource_operation_id,
+			resource_lease.resource_claim_id, resource_lease.resource_slot_id,
+			resource_lease.resource_cluster_id, resource_lease.resource_node_id,
+			resource_lease.resource_node_uid, resource_lease.resource_node_boot_id,
+			resource_lease.resource_cpu_millicores, resource_lease.resource_cpu_period_micros,
+			resource_lease.resource_cpu_quota_micros, resource_lease.resource_cpu_shares,
+			resource_lease.resource_cpu_weight, resource_lease.resource_cpuset_cpus,
+			resource_lease.resource_cpuset_mems, resource_lease.resource_memory_bytes,
+			resource_lease.resource_pids_limit, resource_lease.resource_cgroup_name,
+			resource_lease.resource_lease_digest, resource_lease.resource_lease_state,
+			resource_lease.resource_released_at,
+			NOW()
+		FROM manager.runtime_slots AS runtime_slots
+		LEFT JOIN LATERAL (
+			SELECT lease_id AS resource_lease_id,
+				operation_id AS resource_operation_id,
+				claim_id AS resource_claim_id, slot_id AS resource_slot_id,
+				cluster_id AS resource_cluster_id, node_id AS resource_node_id,
+				node_uid AS resource_node_uid, node_boot_id AS resource_node_boot_id,
+				cpu_millicores AS resource_cpu_millicores,
+				cpu_period_micros AS resource_cpu_period_micros,
+				cpu_quota_micros AS resource_cpu_quota_micros,
+				cpu_shares AS resource_cpu_shares, cpu_weight AS resource_cpu_weight,
+				cpuset_cpus AS resource_cpuset_cpus, cpuset_mems AS resource_cpuset_mems,
+				memory_bytes AS resource_memory_bytes, pids_limit AS resource_pids_limit,
+				cgroup_name AS resource_cgroup_name, lease_digest AS resource_lease_digest,
+				lease_state AS resource_lease_state, released_at AS resource_released_at
+			FROM manager.runtime_resource_leases
+			WHERE lease_id = runtime_slots.resource_lease_id
+		) AS resource_lease ON TRUE`
 }
 
 type runtimeSlotScanner interface {
@@ -1367,6 +1585,14 @@ func scanRuntimeSlot(row runtimeSlotScanner) (*RuntimeSlot, error) {
 	var claimTTLMilliseconds int64
 	var fastpathReadyAt, claimLeaseExpiresAt, claimedAt, startingAt pgtype.Timestamptz
 	var commandReadyAt, quiescingAt, terminalAt pgtype.Timestamptz
+	var resourceLeaseID, resourceOperationID, resourceClaimID, resourceSlotID pgtype.Text
+	var resourceClusterID, resourceNodeID, resourceNodeUID, resourceNodeBootID pgtype.Text
+	var resourceCPU, resourceCPUPeriod, resourceCPUQuota, resourceCPUShares, resourceCPUWeight pgtype.Int8
+	var resourceCPUSetCPUs, resourceCPUSetMems pgtype.Text
+	var resourceMemory, resourcePIDs pgtype.Int8
+	var resourceCgroupName, resourceLeaseState pgtype.Text
+	var resourceLeaseDigest []byte
+	var resourceReleasedAt pgtype.Timestamptz
 	if err := row.Scan(
 		&slot.ID, &slot.ClusterID, &slot.AllocationID, &slot.AllocationNamespace,
 		&slot.NodeID, &slot.NodeUID, &slot.NodeBootID, &slot.NetNSIdentity, &slot.ControlEndpoint,
@@ -1382,7 +1608,14 @@ func scanRuntimeSlot(row runtimeSlotScanner) (*RuntimeSlot, error) {
 		&slot.ProcdInstanceID, &slot.ProcdAddress, &slot.CommandReadyDigest, &commandReadyAt,
 		&quiescingAt, &slot.OrphanObservationDigest,
 		&slot.TerminalReason, &slot.TerminalProofDigest, &terminalAt,
-		&slot.CreatedAt, &slot.UpdatedAt, &slot.AuthorityObservedAt,
+		&slot.CreatedAt, &slot.UpdatedAt,
+		&resourceLeaseID, &resourceOperationID, &resourceClaimID, &resourceSlotID,
+		&resourceClusterID, &resourceNodeID, &resourceNodeUID, &resourceNodeBootID,
+		&resourceCPU, &resourceCPUPeriod, &resourceCPUQuota, &resourceCPUShares,
+		&resourceCPUWeight, &resourceCPUSetCPUs, &resourceCPUSetMems,
+		&resourceMemory, &resourcePIDs, &resourceCgroupName,
+		&resourceLeaseDigest, &resourceLeaseState, &resourceReleasedAt,
+		&slot.AuthorityObservedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1407,6 +1640,42 @@ func scanRuntimeSlot(row runtimeSlotScanner) (*RuntimeSlot, error) {
 	}
 	if terminalAt.Valid {
 		slot.TerminalAt = terminalAt.Time
+	}
+	if resourceLeaseID.Valid {
+		fieldsValid := resourceOperationID.Valid && resourceClaimID.Valid && resourceSlotID.Valid &&
+			resourceClusterID.Valid && resourceNodeID.Valid && resourceNodeUID.Valid && resourceNodeBootID.Valid &&
+			resourceCPU.Valid && resourceCPUPeriod.Valid && resourceCPUQuota.Valid && resourceCPUShares.Valid &&
+			resourceCPUWeight.Valid && resourceCPUSetCPUs.Valid && resourceCPUSetMems.Valid &&
+			resourceMemory.Valid && resourcePIDs.Valid && resourceCgroupName.Valid && resourceLeaseState.Valid &&
+			len(resourceLeaseDigest) == 32
+		if !fieldsValid || resourceCPUPeriod.Int64 < 0 || resourceCPUShares.Int64 < 0 || resourceCPUWeight.Int64 < 0 {
+			return nil, fmt.Errorf("runtime slot has an incomplete resource lease")
+		}
+		slot.ResourceLease = protocol.RuntimeResourceLease{
+			Version: protocol.RuntimeResourceLeaseVersion,
+			LeaseID: resourceLeaseID.String, OperationID: resourceOperationID.String,
+			ClaimID: resourceClaimID.String, SlotID: resourceSlotID.String,
+			ClusterID: resourceClusterID.String, NodeID: resourceNodeID.String,
+			NodeUID: resourceNodeUID.String, NodeBootID: resourceNodeBootID.String,
+			CPUMillicores: resourceCPU.Int64, CPUPeriodMicros: uint64(resourceCPUPeriod.Int64),
+			CPUQuotaMicros: resourceCPUQuota.Int64, CPUShares: uint64(resourceCPUShares.Int64),
+			CPUWeight: uint64(resourceCPUWeight.Int64), CPUSetCPUs: resourceCPUSetCPUs.String,
+			CPUSetMems: resourceCPUSetMems.String, MemoryBytes: resourceMemory.Int64,
+			PIDsLimit: resourcePIDs.Int64, CgroupName: resourceCgroupName.String,
+		}
+		resourceDigest, err := slot.ResourceLease.Digest()
+		if err != nil {
+			return nil, fmt.Errorf("runtime slot resource lease: %w", err)
+		}
+		expectedDigest, err := hex.DecodeString(strings.TrimPrefix(resourceDigest, "sha256:"))
+		if err != nil || !bytes.Equal(expectedDigest, resourceLeaseDigest) {
+			return nil, fmt.Errorf("runtime slot resource lease digest changed")
+		}
+		slot.ResourceLeaseDigest = append([]byte(nil), resourceLeaseDigest...)
+		slot.ResourceLeaseState = resourceLeaseState.String
+		if resourceReleasedAt.Valid {
+			slot.ResourceLeaseReleasedAt = resourceReleasedAt.Time
+		}
 	}
 	slot.RuntimeReadyDigest = append([]byte(nil), slot.RuntimeReadyDigest...)
 	slot.NetworkReadyDigest = append([]byte(nil), slot.NetworkReadyDigest...)

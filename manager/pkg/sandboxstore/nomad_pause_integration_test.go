@@ -261,7 +261,7 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	require.NoError(t, err)
 	registration := runtimeSlotTestRegistration(slotID, allocationID)
 	registration.AllocationNamespace = allocationNamespace
-	_, err = store.RegisterRuntimeSlot(ctx, registration)
+	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	proof := bytes.Repeat([]byte{0x91}, 32)
 	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
@@ -276,6 +276,7 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	}
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
@@ -307,6 +308,7 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 		NodeBootID: registration.NodeBootID, OperationID: operationID, ClaimID: claimID,
 		LaunchAttempt: "launch-" + suffix, RunscContainerID: "runsc-" + suffix,
 		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x93}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	_, err = store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
@@ -319,6 +321,7 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: sandboxID, OperationID: operationID, SlotID: claimed.ID,
 		AllocationID: allocationID, AllocationNamespace: allocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	return &nomadPauseStoreFixture{

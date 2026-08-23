@@ -27,6 +27,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
@@ -37,6 +38,27 @@ import (
 const testNodeChannelServerURI = "spiffe://sandbox0.test/region/runtime-slot-channel"
 
 type channelTestVerifier struct{}
+
+type channelTestCapacityStore struct{}
+
+func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
+	_ context.Context,
+	request *sandboxstore.RegisterRuntimeNodeCapacityRequest,
+) (*sandboxstore.RuntimeNodeCapacity, error) {
+	return &sandboxstore.RuntimeNodeCapacity{
+		ClusterID: request.ClusterID, NodeID: request.NodeID, NodeUID: request.NodeUID,
+		NodeBootID: request.NodeBootID, CPUMillicores: request.CPUMillicores,
+		MemoryBytes: request.MemoryBytes, CPUSetCPUs: request.CPUSetCPUs,
+		CPUSetMems: request.CPUSetMems, HeartbeatExpiresAt: time.Now().Add(request.TTL), Revision: 1,
+	}, nil
+}
+
+func channelTestCapacity() protocol.NodeChannelCapacity {
+	return protocol.NodeChannelCapacity{
+		CPUMillicores: 4_000, MemoryBytes: 8 << 30,
+		CPUSetCPUs: "0-3", CPUSetMems: "0", TTLMilliseconds: protocol.DefaultNodeChannelCapacityTTLMilliseconds,
+	}
+}
 
 func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Identity, error) {
 	if bearer != "Bearer node-token" {
@@ -101,7 +123,7 @@ func TestNodeChannelIdentityMustMatchAuthenticatedRoute(t *testing.T) {
 }
 
 func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
-	hub, err := NewChannelHub(channelTestVerifier{})
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +157,7 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
+		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
@@ -160,7 +183,7 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 }
 
 func TestNodeChannelHubReconnectWaitHonorsContext(t *testing.T) {
-	hub, err := NewChannelHub(channelTestVerifier{})
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +197,124 @@ func TestNodeChannelHubReconnectWaitHonorsContext(t *testing.T) {
 	}, testChannelClaimRequest())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("claim error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestNodeChannelHubRoutesOnlyCleanupThroughAuthenticatedSuccessorBoot(t *testing.T) {
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	if err := os.WriteFile(files.boot, []byte("boot-2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor := &channelTestExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token,
+		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
+		Capacity:     channelTestCapacity(),
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		AgentInstanceID: "agent-boot-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.Run(ctx) }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-2")
+
+	cleanup := testChannelCleanupRequest()
+	resources, err := protocol.NewRuntimeResourceLease(
+		"cleanup-reboot-operation", "cleanup-reboot-claim", cleanup.SlotID,
+		cleanup.ClusterID, cleanup.NodeID, cleanup.NodeUID, cleanup.NodeBootID,
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_500,
+			MemoryBytes: 768 << 20, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-3", "0",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceDigest, err := resources.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup.Resources = resources
+	cleanup.ResourceLeaseDigest = strings.TrimPrefix(resourceDigest, "sha256:")
+	proof, err := hub.CleanupRuntimeSlot(t.Context(), Target{
+		ClusterID: cleanup.ClusterID, NodeID: cleanup.NodeID,
+		NodeUID: cleanup.NodeUID, NodeBootID: cleanup.NodeBootID,
+	}, cleanup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proof.Validate(); err != nil || proof.Request() != cleanup || !proof.ResourceCgroupAbsent {
+		t.Fatalf("successor-boot cleanup proof = %+v, %v", proof, err)
+	}
+	executor.mu.Lock()
+	if len(executor.calls) != 1 || executor.calls[0] != cleanup {
+		t.Fatalf("successor-boot cleanup calls = %+v", executor.calls)
+	}
+	executor.mu.Unlock()
+
+	claimCtx, cancelClaim := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancelClaim()
+	_, err = hub.Claim(claimCtx, runtimeslotclaim.NodeTarget{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
+	}, testChannelClaimRequest())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cross-boot claim error = %v, want deadline exceeded", err)
+	}
+	executor.mu.Lock()
+	if len(executor.claims) != 0 {
+		t.Fatalf("successor boot received a claim for the old boot: %+v", executor.claims)
+	}
+	executor.mu.Unlock()
+
+	boot3File := filepath.Join(filepath.Dir(files.boot), "boot-id-3")
+	if err := os.WriteFile(boot3File, []byte("boot-3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent3, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token,
+		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: boot3File,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: &channelTestExecutor{},
+		Capacity:     channelTestCapacity(),
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		AgentInstanceID: "agent-boot-3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent3Ctx, cancelAgent3 := context.WithCancel(t.Context())
+	agent3Done := make(chan error, 1)
+	go func() { agent3Done <- agent3.Run(agent3Ctx) }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-3")
+	_, err = hub.CleanupRuntimeSlot(t.Context(), Target{
+		ClusterID: cleanup.ClusterID, NodeID: cleanup.NodeID,
+		NodeUID: cleanup.NodeUID, NodeBootID: cleanup.NodeBootID,
+	}, cleanup)
+	if !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("ambiguous successor-boot cleanup error = %v", err)
+	}
+	cancelAgent3()
+	if err := <-agent3Done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("successor agent Run() error = %v", err)
+	}
+
+	cancel()
+	if err := <-agentDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("agent Run() error = %v", err)
 	}
 }
 
@@ -271,7 +412,10 @@ func (e *channelTestExecutor) Cleanup(
 		AllocationID: request.AllocationID, NodeID: request.NodeID, NodeUID: request.NodeUID,
 		NodeBootID: request.NodeBootID, NetNSIdentity: request.NetNSIdentity,
 		RunscContainerID: request.RunscContainerID,
-		RunscAbsent:      true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		Resources:        request.Resources, ResourceLeaseID: request.Resources.LeaseID,
+		ResourceLeaseDigest: request.ResourceLeaseDigest,
+		RunscAbsent:         true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		ResourceCgroupAbsent: !request.Resources.IsZero(),
 	}
 	digest, err := proof.Digest()
 	if err != nil {
@@ -282,7 +426,7 @@ func (e *channelTestExecutor) Cleanup(
 }
 
 func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T) {
-	hub, err := NewChannelHub(channelTestVerifier{})
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +443,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		ClusterID: "cluster-1", NodeID: "node-1",
 		Executor: executor, RunningForkExecutor: executor,
 		PausedRebaseExecutor: executor, NetworkExecutor: executor,
+		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
@@ -324,6 +469,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
 		Executor: standbyExecutor, NetworkExecutor: standbyExecutor,
+		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-2",
 	})
@@ -576,6 +722,21 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
 	}
 	revision, _ := assignment.Revision()
+	resources, err := protocol.NewRuntimeResourceLease(
+		"operation-1", "claim-1", "slot-1", "cluster-1", "node-1", "node-uid-1", "boot-1",
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_000,
+			MemoryBytes: 1 << 30, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-3", "0",
+	)
+	if err != nil {
+		panic(err)
+	}
+	resourceDigest, err := resources.Digest()
+	if err != nil {
+		panic(err)
+	}
 	stage := &rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         "sha256:" + strings.Repeat("a", 64), InitialGeneration: "generation-1",
@@ -584,7 +745,10 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 			NetworkEpoch: 4, PolicyDigest: protocol.NetworkPolicyDigest(networkPolicy), PodIP: "192.0.2.2",
 			CtldGeneration: "ctld-1", NetNSIdentity: "1:2",
 		},
-		Labels: map[string]string{protocol.RuntimeAssignmentRevisionLabel: revision},
+		Labels: map[string]string{
+			protocol.RuntimeAssignmentRevisionLabel:  revision,
+			protocol.RuntimeResourceLeaseDigestLabel: resourceDigest,
+		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: "node-uid-1", BootID: "boot-1", RuntimeGeneration: "1",
 			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
@@ -597,7 +761,7 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 	return protocol.NodeClaimControlRequest{
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID, PolicyToken: token,
 		WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10), Stage: stage,
-		NetworkPolicy: networkPolicy, Runtime: assignment,
+		NetworkPolicy: networkPolicy, Runtime: assignment, Resources: resources,
 	}
 }
 

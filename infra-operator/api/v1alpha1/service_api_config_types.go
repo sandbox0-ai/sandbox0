@@ -1033,7 +1033,7 @@ type NodeAuthorityConfig struct {
 
 // RuntimeSlotClaimConfig configures logical Nomad warm-slot claims.
 type RuntimeSlotClaimConfig struct {
-	// SecretName contains runtime-profiles.json and an exact 32-byte
+	// SecretName contains runtime-classes.json and an exact 32-byte
 	// writer-token.key. The key must remain stable across retries and rollouts.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`

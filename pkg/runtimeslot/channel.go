@@ -17,11 +17,12 @@ const (
 	// NodeChannelPath is the mutually authenticated, node-initiated command
 	// channel. The channel never persists claim messages because they contain a
 	// one-time raw writer grant.
-	NodeChannelPath        = "/internal/v1/runtime-slot-node-channel"
-	NodeChannelSubprotocol = "sandbox0.runtime-slot.node.v2"
-	NodeChannelVersion     = 2
-	NodeChannelMaxBytes    = 2 << 20
-	NodeChannelMaxError    = 4 << 10
+	NodeChannelPath                           = "/internal/v1/runtime-slot-node-channel"
+	NodeChannelSubprotocol                    = "sandbox0.runtime-slot.node.v3"
+	NodeChannelVersion                        = 3
+	NodeChannelMaxBytes                       = 2 << 20
+	NodeChannelMaxError                       = 4 << 10
+	DefaultNodeChannelCapacityTTLMilliseconds = 90_000
 )
 
 // NodeChannelCommandKind identifies one root-owned node operation.
@@ -61,6 +62,38 @@ type NodeChannelHello struct {
 	NodeUID         string                   `json:"node_uid"`
 	NodeBootID      string                   `json:"node_boot_id"`
 	Capabilities    []NodeChannelCommandKind `json:"capabilities"`
+	Capacity        NodeChannelCapacity      `json:"capacity"`
+}
+
+// NodeChannelCapacity is the ctld-owned allocatable resource boundary for one
+// dedicated node boot. It is refreshed by bounded channel reconnects.
+type NodeChannelCapacity struct {
+	CPUMillicores   int64  `json:"cpu_millicores"`
+	MemoryBytes     int64  `json:"memory_bytes"`
+	CPUSetCPUs      string `json:"cpuset_cpus"`
+	CPUSetMems      string `json:"cpuset_mems"`
+	TTLMilliseconds int64  `json:"ttl_milliseconds"`
+}
+
+func (c NodeChannelCapacity) Validate() error {
+	physicalCPUs, err := ValidateCPUSet(c.CPUSetCPUs)
+	if err != nil {
+		return fmt.Errorf("node capacity cpuset_cpus: %w", err)
+	}
+	if _, err := ValidateCPUSet(c.CPUSetMems); err != nil {
+		return fmt.Errorf("node capacity cpuset_mems: %w", err)
+	}
+	if c.CPUMillicores < MinRuntimeCPUMillicores || c.CPUMillicores > int64(physicalCPUs)*1_000 ||
+		c.CPUMillicores > MaxRuntimeCPUMillicores {
+		return fmt.Errorf("node capacity cpu_millicores must fit its dedicated CPU set and supported range")
+	}
+	if c.MemoryBytes < 1 || c.MemoryBytes > MaxRuntimeMemoryBytes {
+		return fmt.Errorf("node capacity memory is outside the supported range")
+	}
+	if c.TTLMilliseconds < 1_000 || c.TTLMilliseconds > 600_000 {
+		return fmt.Errorf("node capacity TTL must be between 1000 and 600000 milliseconds")
+	}
+	return nil
 }
 
 // Validate rejects ambiguous stream identity and capability negotiation.
@@ -79,6 +112,9 @@ func (h NodeChannelHello) Validate() error {
 		if err := validateRequiredID(field.name, field.value); err != nil {
 			return err
 		}
+	}
+	if err := h.Capacity.Validate(); err != nil {
+		return err
 	}
 	capabilities := append([]NodeChannelCommandKind(nil), h.Capabilities...)
 	if len(capabilities) > 0 && capabilities[0] == NodeChannelCommandNetworkPrepare {

@@ -821,7 +821,7 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 	}
 	planned := fixture.planner.requests[0]
 	if planned.OperationID != "operation-1" || planned.SandboxID != expectedID ||
-		planned.CompatibilityDigest != fixture.profile.CompatibilityDigest ||
+		planned.CompatibilityDigest != fixture.runtimeClass.CompatibilityDigest ||
 		!planned.StartedAt.Equal(startedAt) {
 		t.Fatalf("planner request = %+v", planned)
 	}
@@ -1150,8 +1150,8 @@ func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {
 	planned := fixture.planner.requests[0]
 	if planned.OperationID != fixture.store.resumeCandidate.OperationID || planned.SandboxID != sandboxID ||
 		planned.TeamID != "team-1" || planned.UserID != "user-1" ||
-		planned.ClusterID != fixture.profile.ClusterID ||
-		planned.CompatibilityDigest != fixture.profile.CompatibilityDigest ||
+		planned.ClusterID != fixture.runtimeClass.ClusterID ||
+		planned.CompatibilityDigest != fixture.runtimeClass.CompatibilityDigest ||
 		planned.Runtime.RuntimeGeneration != 2 || !planned.StartedAt.Equal(fixture.now) {
 		t.Fatalf("resume planner request = %+v", planned)
 	}
@@ -2403,7 +2403,7 @@ type claimServiceFixture struct {
 	runningFork  *fakeRunningForkController
 	pausedRebase *fakePausedRebaseController
 	quotaLimits  *fakeQuotaLimitStore
-	profile      Profile
+	runtimeClass RuntimeClass
 	now          time.Time
 }
 
@@ -2521,16 +2521,15 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		DriverVersion: "0.1.0", RunscVersion: "runsc-1", Platform: "systrap",
 		Overlay2: "none", FileAccess: "shared", DirectFS: true,
 		Command: "/procd", ProcdPort: protocol.NomadProcdPort,
-		RuntimeMode: runtimecontrol.ControlModeStatic,
-		CPUPeriod:   100000, CPUQuota: 100000, CPUShares: 1024, MemoryLimitBytes: 1 << 30,
+		RuntimeMode:   runtimecontrol.ControlModeStatic,
+		SecurityClass: "standard",
 	}
 	compatibilityDigest, err := compatibility.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile := Profile{
+	runtimeClass := RuntimeClass{
 		Name: "one", ClusterID: "cluster-1",
-		TemplateCPU: resource.MustParse("1"), TemplateMemory: resource.MustParse("1Gi"),
 		ArtifactPlatform: sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		Compatibility:    compatibility, CompatibilityDigest: compatibilityDigest,
 	}
@@ -2553,7 +2552,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
-		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner, Allocation: allocation,
+		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{runtimeClass}}, Planner: planner, Allocation: allocation,
 		RunningFork:     runningFork,
 		PausedRebase:    pausedRebase,
 		QuotaLimits:     quotaLimits,
@@ -2568,7 +2567,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	return claimServiceFixture{
 		service: claimService, store: store, planner: planner, allocation: allocation, runningFork: runningFork,
 		pausedRebase: pausedRebase,
-		quotaLimits:  quotaLimits, profile: profile, now: now,
+		quotaLimits:  quotaLimits, runtimeClass: runtimeClass, now: now,
 	}
 }
 

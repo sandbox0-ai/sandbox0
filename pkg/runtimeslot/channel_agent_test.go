@@ -125,7 +125,10 @@ func (e *testNodeChannelExecutor) Cleanup(
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
 		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
-		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		Resources: request.Resources, ResourceLeaseID: request.Resources.LeaseID,
+		ResourceLeaseDigest: request.ResourceLeaseDigest,
+		RunscAbsent:         true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		ResourceCgroupAbsent: !request.Resources.IsZero(),
 	}
 	if request.WriterGrantID != "" {
 		proof.RootFSOperationID = request.WriterOperationID
@@ -144,6 +147,7 @@ func TestNodeChannelAgentExecutesExactCommandsAndClassifiesErrors(t *testing.T) 
 	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
 		Executor: executor, NetworkExecutor: executor,
 		OperationTimeout: defaultNodeChannelOperationTimeout,
+		Capacity:         testNodeChannelCapacity(),
 	}}
 	network, err := NewNodeChannelNetworkPrepareCommand(testNodeChannelTarget(false), testNodeChannelNetworkPrepare())
 	if err != nil {
@@ -176,6 +180,7 @@ func TestNodeChannelAgentRejectsInvalidExecutorResult(t *testing.T) {
 	executor := &testNodeChannelExecutor{}
 	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
 		Executor: executor, OperationTimeout: defaultNodeChannelOperationTimeout,
+		Capacity: testNodeChannelCapacity(),
 	}}
 	command, err := NewNodeChannelCommandReadyCommand(
 		testNodeChannelTarget(true), CommandReadyControlRequest{Proof: testNodeChannelCommandProof()},
@@ -217,6 +222,7 @@ func TestNodeChannelAgentExecutesRunningForkWithDedicatedTimeout(t *testing.T) {
 	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
 		Executor: executor, RunningForkExecutor: executor,
 		OperationTimeout: time.Second, RunningForkTimeout: time.Second,
+		Capacity: testNodeChannelCapacity(),
 	}}
 	result := agent.execute(t.Context(), command)
 	if err := result.ValidateFor(command); err != nil || result.RunningFork == nil {
@@ -244,6 +250,7 @@ func TestNodeChannelAgentExecutesPausedRebaseWithDedicatedTimeout(t *testing.T) 
 	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
 		Executor: executor, PausedRebaseExecutor: executor,
 		OperationTimeout: time.Second, PausedRebaseTimeout: time.Second,
+		Capacity: testNodeChannelCapacity(),
 	}}
 	result := agent.execute(t.Context(), command)
 	if err := result.ValidateFor(command); err != nil || result.PausedRebase == nil {
@@ -293,6 +300,7 @@ func TestNewNodeChannelAgentRejectsAmbientOrIncompleteIdentity(t *testing.T) {
 		PeerURISAN: "spiffe://sandbox0.test/region/runtime-slot-channel",
 		ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
 		NodeBootIDFile: filepath.Join(directory, "boot-id"), Executor: &testNodeChannelExecutor{},
+		Capacity: testNodeChannelCapacity(),
 	}
 	if _, err := NewNodeChannelAgent(config); err != nil {
 		t.Fatal(err)
@@ -323,6 +331,7 @@ func TestNodeChannelAgentSetResolvesCanonicalExactEndpoints(t *testing.T) {
 			PeerURISAN: "spiffe://sandbox0.test/region/runtime-slot-channel",
 			ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
 			NodeBootIDFile: filepath.Join(directory, "boot-id"), Executor: &testNodeChannelExecutor{},
+			Capacity: testNodeChannelCapacity(),
 		},
 		Resolver: resolver,
 	})
@@ -349,6 +358,7 @@ func TestNodeChannelAgentSetRejectsVirtualOrUnboundedDiscovery(t *testing.T) {
 		PeerURISAN: "spiffe://sandbox0.test/region/runtime-slot-channel",
 		ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
 		NodeBootIDFile: filepath.Join(directory, "boot-id"), Executor: &testNodeChannelExecutor{},
+		Capacity: testNodeChannelCapacity(),
 	}, MaxEndpoints: 1}
 	base.Agent.BaseURL = "https://192.0.2.10:8421"
 	if _, err := NewNodeChannelAgentSet(base); !errdefs.IsInvalidArgument(err) {

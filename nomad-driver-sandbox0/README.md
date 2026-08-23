@@ -11,13 +11,15 @@ an authorized caller binds that generation to a private OCI root mount, writes
 the generic OCI spec, and invokes stock `runsc create` and `runsc start`. The
 claim is one-shot and is rejected after the first attempt.
 
-Production runtime slots require Nomad `resources.cores`, not the
-frequency-dependent `resources.cpu` compute field. The driver binds the exact
-allocated CPU set into the OCI spec and normalizes each dedicated core to a
-100000-period/100000-quota CFS limit with 1024 shares. This keeps the runtime
-profile identical across different host clock frequencies and prevents a
-nominal one-CPU slot from running uncapped when Nomad leaves external-driver
-period/quota fields at zero.
+Production warm allocations are resource-neutral carriers on the dedicated
+Nomad `sandbox0` node pool; the client and warm job must both select that pool.
+Their small Nomad `resources` block reserves only
+driver/carrier overhead and is never used as the sandbox limit. Manager
+atomically allocates CPU and memory from ctld-reported node capacity;
+ctld creates the exact cgroup-v2 lease before the claim reaches the driver;
+and the driver copies the lease's period, quota, weight, cpuset, memory, and
+PIDs values into OCI. A compatibility class contains only immutable runtime
+settings and cannot fragment the warm pool by CPU or memory shape.
 
 ## Status
 
@@ -27,6 +29,8 @@ Implemented:
 - stock `runsc` CLI adapter with `overlay2=none`
 - generic writable OCI bundle generation
 - generic warm allocation with no image-specific runtime state
+- PostgreSQL node-capacity accounting and immutable per-claim resource leases
+- ctld-owned per-lease cgroup-v2 prepare and cleanup, fenced by terminal proof
 - local Unix control socket with `GET /status` and `PUT /claim`
 - ctld-journaled warm default-deny and claim-time production network policy,
   compiled and redirected through the normal node TPROXY/ipset path
@@ -281,12 +285,13 @@ sha256sum /tmp/runtime-slot-slo
 
 Prepare a dedicated acceptance team before starting either report:
 
-- at least eight healthy, exact-profile warm allocations must be registered,
+- at least eight healthy resource-neutral warm carriers must be registered,
   and the Nomad service job must replenish a claimed allocation within the
   configured batch-settle interval;
-- Nomad must advertise enough real schedulable CPU and memory for all eight
-  exact profiles plus host/ctld headroom; do not inflate client capacity or
-  oversubscribe the acceptance pool to make placement succeed;
+- ctld must report at least eight genuinely dedicated CPU cores and sufficient
+  memory after host overhead for the requested eight claims; do not inflate
+  the ctld capacity, widen its cpuset beyond the delegated cgroup, or
+  oversubscribe memory to make the gate pass;
 - every participating node must expose at least eight configured ctld NBD
   devices, not merely a large kernel `nbds_max` value;
 - `active_sandboxes` must have at least eight remaining units; and
@@ -503,11 +508,14 @@ is retained for the HTTP authority and TLS DNS verification; resolved Pod IPs
 are used only as pinned TCP destinations. Duplicate or reordered DNS answers
 are canonicalized, membership additions and removals are reconciled every
 second, resolution failures retain the last known exact set, and an empty set
-never falls back to a load-balanced virtual IP. The regional hub
-derives cluster, Nomad node, and node UID from authentication, checks the
-advertised boot ID, and routes only commands whose cluster, node, allocation,
-slot, UID, boot, and local control endpoint match the canonical request. The
-agent then invokes the mode-`0600`, root-owned task socket or the
+never falls back to a load-balanced virtual IP. The regional hub derives
+cluster, Nomad node, and node UID from authentication and checks the advertised
+boot ID. Network preparation, claim, command-ready, and fork remain bound to
+that exact boot. Cleanup for a disappeared boot may use exactly one
+authenticated successor boot for the same node UID; the persistent node
+journal still validates the old allocation/slot/boot incarnation and proves
+physical absence, while multiple successor boots fail closed. The agent then
+invokes the mode-`0600`, root-owned task socket or the
 plugin-independent cleaner locally. Network preparation is advertised only
 when the ctld client is configured. Ctld requires the pre-existing exact warm
 registration, then durably transitions it to the region-authenticated claim
@@ -522,8 +530,9 @@ records are pruned periodically rather than only at process startup.
 It requires `nomad_runtime.node_uid`, an exact
 `nomad_runtime.authority_peer_uri_san`, and a canonical
 `nomad_runtime.control_root`; ambient proxies are disabled and certificates,
-boot ID, and projected bearer token are reloaded on reconnect, with a bounded
-five-minute connection age so rotated credentials are eventually enforced.
+boot ID, and projected bearer token are reloaded on reconnect. The default
+one-minute connection age refreshes the 90-second PostgreSQL node-capacity TTL
+and also ensures rotated credentials are eventually enforced.
 `nomad_runtime.authority_url` must therefore use a resolvable headless-Service or private
 DNS hostname whose complete answer is the reachable manager replica set, and
 the server certificate must contain that hostname as a DNS SAN. An IP literal

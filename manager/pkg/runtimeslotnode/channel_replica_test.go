@@ -50,12 +50,12 @@ func (r *replicaChannelResolver) fail(err error) {
 }
 
 func TestNodeChannelAgentSetRoutesThroughEveryManagerReplica(t *testing.T) {
-	hubA, err := NewChannelHub(channelTestVerifier{})
+	hubA, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer hubA.Close()
-	hubB, err := NewChannelHub(channelTestVerifier{})
+	hubB, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +79,7 @@ func TestNodeChannelAgentSetRoutesThroughEveryManagerReplica(t *testing.T) {
 			PeerURISAN: testNodeChannelServerURI,
 			ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
 			NodeBootIDFile: files.boot, Executor: executor, NetworkExecutor: executor,
+			Capacity:     channelTestCapacity(),
 			ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 			AgentInstanceID: "agent-1",
 		},

@@ -3789,7 +3789,7 @@ spec:
                                     type: string
                                   secretName:
                                     description: |-
-                                      SecretName contains runtime-profiles.json and an exact 32-byte
+                                      SecretName contains runtime-classes.json and an exact 32-byte
                                       writer-token.key. The key must remain stable across retries and rollouts.
                                     type: string
                                   slo:

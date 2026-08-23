@@ -1,6 +1,14 @@
 job "sandbox0-warm-slots" {
   datacenters = ["dc1"]
+  node_pool   = "sandbox0"
   type        = "service"
+
+  # Sandbox0 owns allocatable CPU and memory inside these nodes. Do not place
+  # warm carriers on a Nomad client that also accepts general workloads.
+  constraint {
+    attribute = "${meta.sandbox0_dedicated}"
+    value     = "true"
+  }
 
   group "warm" {
     # Eight is the minimum pool width used by the production acceptance gate.
@@ -35,8 +43,11 @@ job "sandbox0-warm-slots" {
       }
 
       resources {
-        cores  = 1
-        memory = 1024
+        # These values reserve only the carrier/driver overhead. They are not
+        # the sandbox limit and must not be copied into OCI. Manager leases
+        # sandbox CPU and memory from ctld-reported dedicated-node capacity.
+        cpu    = 50
+        memory = 64
       }
     }
   }

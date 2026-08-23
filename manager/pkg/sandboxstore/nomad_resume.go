@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -55,6 +56,8 @@ type CompleteNomadSandboxResumeRequest struct {
 	SlotID              string
 	AllocationID        string
 	AllocationNamespace string
+	ResourceLeaseID     string
+	ResourceLeaseDigest []byte
 }
 
 // NomadSandboxResumeOperationID derives the stable lifecycle and slot-claim
@@ -300,6 +303,20 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 			record.CurrentPodNamespace != normalized.AllocationNamespace {
 			return nil, fmt.Errorf("%w: committed resume binding changed", ErrNomadSandboxResumeConflict)
 		}
+		slot, slotErr := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+			WHERE slot_id = $1 AND claim_operation_id = $2
+			FOR SHARE OF runtime_slots
+		`, normalized.SlotID, normalized.OperationID))
+		if slotErr != nil || slot.State != RuntimeSlotStateActive || slot.SandboxID != record.ID ||
+			slot.AllocationID != normalized.AllocationID || slot.AllocationNamespace != normalized.AllocationNamespace {
+			return nil, fmt.Errorf("%w: committed resume slot changed", ErrNomadSandboxResumeConflict)
+		}
+		millicpu, memoryMiB, leaseErr := validateCompletedRuntimeResourceLease(
+			slot, normalized.OperationID, normalized.ResourceLeaseID, normalized.ResourceLeaseDigest,
+		)
+		if leaseErr != nil || record.ResourceMillicpu != millicpu || record.ResourceMemoryMiB != memoryMiB {
+			return nil, fmt.Errorf("%w: committed resume resource lease changed", ErrNomadSandboxResumeConflict)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit completed Nomad resume retry: %w", err)
 		}
@@ -317,7 +334,7 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE slot_id = $1 AND claim_operation_id = $2
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, normalized.SlotID, normalized.OperationID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: resumed runtime slot is missing", ErrNomadSandboxResumeNotReady)
@@ -329,6 +346,12 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 		slot.SourceGenerationID != sourceGenerationID || slot.AllocationID != normalized.AllocationID ||
 		slot.AllocationNamespace != normalized.AllocationNamespace || slot.WriterGrantID == "" {
 		return nil, fmt.Errorf("%w: runtime slot is not the exact command-ready resume", ErrNomadSandboxResumeNotReady)
+	}
+	resourceMillicpu, resourceMemoryMiB, err := validateCompletedRuntimeResourceLease(
+		slot, normalized.OperationID, normalized.ResourceLeaseID, normalized.ResourceLeaseDigest,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrNomadSandboxResumeNotReady, err)
 	}
 	grantRecord, err := getRootFSWriterGrantForUpdate(ctx, tx, slot.WriterGrantID)
 	if err != nil {
@@ -360,6 +383,13 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 	if err := locked.SaveRuntime(ctx, record.ID, slot.AllocationNamespace, slot.AllocationID,
 		lifecycle.ToGeneration, expiresAt, record.HardExpiresAt, SandboxRuntimeMetadata{}); err != nil {
 		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET resource_millicpu = $2, resource_memory_mib = $3, updated_at = NOW()
+		WHERE sandbox_id = $1
+	`, record.ID, resourceMillicpu, resourceMemoryMiB); err != nil {
+		return nil, fmt.Errorf("persist resumed runtime lease metering: %w", err)
 	}
 	if err := locked.SetLifecycleTxnRuntime(ctx, lifecycle.ID, slot.AllocationNamespace, slot.AllocationID); err != nil {
 		return nil, err
@@ -422,13 +452,36 @@ func normalizeCompleteNomadSandboxResumeRequest(request *CompleteNomadSandboxRes
 	for name, value := range map[string]string{
 		"sandbox_id": request.SandboxID, "operation_id": request.OperationID, "slot_id": request.SlotID,
 		"allocation_id": request.AllocationID, "allocation_namespace": request.AllocationNamespace,
+		"resource_lease_id": request.ResourceLeaseID,
 	} {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" || trimmed != value || len(trimmed) > 512 {
 			return nil, fmt.Errorf("%s must be canonical and at most 512 bytes", name)
 		}
 	}
+	if len(request.ResourceLeaseDigest) != sha256.Size {
+		return nil, fmt.Errorf("resource_lease_digest must contain exactly %d bytes", sha256.Size)
+	}
+	normalized.ResourceLeaseDigest = append([]byte(nil), request.ResourceLeaseDigest...)
 	return &normalized, nil
+}
+
+func validateCompletedRuntimeResourceLease(
+	slot *RuntimeSlot,
+	operationID, leaseID string,
+	leaseDigest []byte,
+) (int64, int64, error) {
+	if slot == nil || slot.ResourceLease.IsZero() || slot.ResourceLease.LeaseID != leaseID ||
+		slot.ResourceLease.OperationID != operationID || slot.ResourceLease.SlotID != slot.ID ||
+		slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() ||
+		!bytes.Equal(slot.ResourceLeaseDigest, leaseDigest) {
+		return 0, 0, fmt.Errorf("runtime resource lease is not the exact active binding")
+	}
+	memoryMiB := (slot.ResourceLease.MemoryBytes + (1 << 20) - 1) / (1 << 20)
+	if slot.ResourceLease.CPUMillicores <= 0 || memoryMiB <= 0 {
+		return 0, 0, fmt.Errorf("runtime resource lease has invalid metering values")
+	}
+	return slot.ResourceLease.CPUMillicores, memoryMiB, nil
 }
 
 func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string) (string, string, error) {

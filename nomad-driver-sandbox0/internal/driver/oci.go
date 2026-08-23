@@ -40,6 +40,8 @@ type driversResources struct {
 	CPUShares        int64
 	CPUSetCpus       string
 	MemoryLimitBytes int64
+	PIDsLimit        int64
+	CgroupPath       string
 }
 
 func buildSpec(options specOptions) specs.Spec {
@@ -75,7 +77,9 @@ func buildSpec(options specOptions) specs.Spec {
 		resources := &specs.LinuxResources{}
 		if options.Resources.MemoryLimitBytes > 0 {
 			limit := options.Resources.MemoryLimitBytes
-			resources.Memory = &specs.LinuxMemory{Limit: &limit}
+			// OCI swap is the combined memory+swap ceiling. Equal limits convert
+			// to memory.swap.max=0 on cgroup v2 and prevent unleased swap usage.
+			resources.Memory = &specs.LinuxMemory{Limit: &limit, Swap: &limit}
 		}
 		if options.Resources.CPUPeriod > 0 || options.Resources.CPUQuota > 0 || options.Resources.CPUShares > 0 || options.Resources.CPUSetCpus != "" {
 			resources.CPU = &specs.LinuxCPU{}
@@ -93,7 +97,12 @@ func buildSpec(options specOptions) specs.Spec {
 			}
 			resources.CPU.Cpus = options.Resources.CPUSetCpus
 		}
+		if options.Resources.PIDsLimit > 0 {
+			limit := options.Resources.PIDsLimit
+			resources.Pids = &specs.LinuxPids{Limit: &limit}
+		}
 		linux.Resources = resources
+		linux.CgroupsPath = options.Resources.CgroupPath
 	}
 
 	return specs.Spec{

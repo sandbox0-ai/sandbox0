@@ -8,6 +8,7 @@ plugin "sandbox0-gvisor" {
     overlay2                      = "none"
     file_access                   = "shared"
     directfs                      = true
+    resource_cgroup_root          = "/sys/fs/cgroup/sandbox0"
     network_policy_enabled        = true
     rootfs_enabled                = true
     rootfs_node_socket            = "/run/sandbox0/ctld-nomad-runtime.sock"

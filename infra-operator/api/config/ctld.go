@@ -40,13 +40,18 @@ type CtldConfig struct {
 type CtldNomadRuntimeConfig struct {
 	Enabled bool `yaml:"enabled" json:"-"`
 
-	SocketPath string `yaml:"socket_path" json:"-"`
-	RunscPath  string `yaml:"runsc_path" json:"-"`
-	RunscRoot  string `yaml:"runsc_root" json:"-"`
-	Platform   string `yaml:"platform" json:"-"`
-	Overlay2   string `yaml:"overlay2" json:"-"`
-	FileAccess string `yaml:"file_access" json:"-"`
-	DirectFS   *bool  `yaml:"directfs" json:"-"`
+	SocketPath            string `yaml:"socket_path" json:"-"`
+	RunscPath             string `yaml:"runsc_path" json:"-"`
+	RunscRoot             string `yaml:"runsc_root" json:"-"`
+	Platform              string `yaml:"platform" json:"-"`
+	Overlay2              string `yaml:"overlay2" json:"-"`
+	FileAccess            string `yaml:"file_access" json:"-"`
+	DirectFS              *bool  `yaml:"directfs" json:"-"`
+	ResourceCgroupRoot    string `yaml:"resource_cgroup_root" json:"-"`
+	ResourceCPUMillicores int64  `yaml:"resource_cpu_millicores" json:"-"`
+	ResourceMemoryBytes   int64  `yaml:"resource_memory_bytes" json:"-"`
+	ResourceCPUSetCPUs    string `yaml:"resource_cpuset_cpus" json:"-"`
+	ResourceCPUSetMems    string `yaml:"resource_cpuset_mems" json:"-"`
 
 	StatePath                       string   `yaml:"state_path" json:"-"`
 	BranchRoot                      string   `yaml:"branch_root" json:"-"`

@@ -56,9 +56,13 @@ func (c *Controller) Cleanup(
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
 		WriterGrantID: request.WriterGrantID,
+		Resources:     request.Resources,
 	}
 	if len(request.WriterAuthorityDigest) != 0 {
 		controlRequest.WriterAuthorityDigest = hex.EncodeToString(request.WriterAuthorityDigest)
+	}
+	if len(request.ResourceLeaseDigest) != 0 {
+		controlRequest.ResourceLeaseDigest = hex.EncodeToString(request.ResourceLeaseDigest)
 	}
 	if err := controlRequest.Validate(); err != nil {
 		return runtimeslotreconciler.NodeCleanupProof{}, fmt.Errorf("validate runtime slot node cleanup: %w", err)
@@ -81,8 +85,17 @@ func (c *Controller) Cleanup(
 	if err != nil {
 		return runtimeslotreconciler.NodeCleanupProof{}, err
 	}
+	var resourceDigest []byte
+	if proof.ResourceLeaseDigest != "" {
+		resourceDigest, err = protocol.DecodeProof("resource_lease_digest", proof.ResourceLeaseDigest)
+		if err != nil {
+			return runtimeslotreconciler.NodeCleanupProof{}, err
+		}
+	}
 	return runtimeslotreconciler.NodeCleanupProof{
 		OperationID: proof.OperationID, SlotID: proof.SlotID, AllocationID: proof.AllocationID,
-		NodeUID: proof.NodeUID, NodeBootID: proof.NodeBootID, ProofDigest: digest,
+		NodeUID: proof.NodeUID, NodeBootID: proof.NodeBootID,
+		ResourceLeaseID: proof.ResourceLeaseID, ResourceLeaseDigest: resourceDigest,
+		ResourceCgroupAbsent: proof.ResourceCgroupAbsent, ProofDigest: digest,
 	}, nil
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,6 +180,7 @@ func TestCompleteSandboxClaimRequiresExactActiveRuntimeSlot(t *testing.T) {
 	_, err := store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-complete", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.ErrorIs(t, err, ErrSandboxClaimReservationConflict)
 	_, err = pool.Exec(ctx, `UPDATE manager.runtime_slots SET state = $2 WHERE slot_id = $1`, claimed.ID, RuntimeSlotStateActive)
@@ -186,16 +188,40 @@ func TestCompleteSandboxClaimRequiresExactActiveRuntimeSlot(t *testing.T) {
 	completed, err := store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-complete", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	require.Equal(t, claimed.AllocationID, completed.CurrentPodName)
 	require.Equal(t, claimed.AllocationNamespace, completed.CurrentPodNamespace)
+	require.Equal(t, claimed.ResourceLease.CPUMillicores, completed.ResourceMillicpu)
+	require.Equal(t, (claimed.ResourceLease.MemoryBytes+(1<<20)-1)/(1<<20), completed.ResourceMemoryMiB)
+	wrongLease := &CompleteSandboxClaimRequest{
+		SandboxID: record.ID, OperationID: "operation-complete", SlotID: claimed.ID,
+		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID:     claimed.ResourceLease.LeaseID,
+		ResourceLeaseDigest: bytes.Repeat([]byte{0xff}, 32),
+	}
+	_, err = store.CompleteSandboxClaim(ctx, wrongLease)
+	require.ErrorIs(t, err, ErrSandboxClaimReservationConflict)
+	completedRetry, err := store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
+		SandboxID: record.ID, OperationID: "operation-complete", SlotID: claimed.ID,
+		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
+	})
+	require.NoError(t, err)
+	require.Equal(t, completed.ResourceMillicpu, completedRetry.ResourceMillicpu)
+	require.Equal(t, completed.ResourceMemoryMiB, completedRetry.ResourceMemoryMiB)
 	retried, err := store.AcquireRuntimeSlot(ctx, &AcquireRuntimeSlotRequest{
 		OperationID: claimed.ClaimOperationID, ClaimID: claimed.ClaimID, SandboxID: claimed.SandboxID,
 		FilesystemID: claimed.FilesystemID, SourceGenerationID: claimed.SourceGenerationID,
 		CompatibilityDigest: claimed.CompatibilityDigest, ClusterID: claimed.ClaimClusterFilter,
 		RuntimeAssignmentRevision: claimed.ClaimRuntimeAssignmentRevision,
 		NetworkPolicyDigest:       claimed.ClaimNetworkPolicyDigest, ClaimTTL: claimed.ClaimTTL,
+		Resources: protocol.RuntimeResourceRequest{
+			Version:       protocol.RuntimeResourceRequestVersion,
+			CPUMillicores: claimed.ResourceLease.CPUMillicores,
+			MemoryBytes:   claimed.ResourceLease.MemoryBytes, PIDsLimit: claimed.ResourceLease.PIDsLimit,
+		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, claimed.ID, retried.ID)
@@ -279,6 +305,7 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-delete-ready", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
@@ -335,6 +362,7 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-delete-ready", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.ErrorIs(t, err, ErrSandboxClaimCleanupPending)
 }
@@ -405,6 +433,7 @@ func TestRequestSandboxRuntimeClaimCleanupPreservesMatchingCrashLifecycle(t *tes
 	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-delete-crash-lifecycle", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
@@ -446,6 +475,7 @@ func TestRequestSandboxRuntimeClaimCleanupSerializesWithClaimCompletion(t *testi
 		_, err := store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 			SandboxID: record.ID, OperationID: "operation-delete-race", SlotID: claimed.ID,
 			AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+			ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 		})
 		completeErr <- err
 	}()
@@ -544,6 +574,7 @@ func TestRequestSandboxRuntimeClaimCleanupRequiresReadyPhysicalRecord(t *testing
 	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
 		SandboxID: record.ID, OperationID: "operation-delete-missing-slot", SlotID: claimed.ID,
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `DELETE FROM manager.runtime_slots WHERE slot_id = $1`, claimed.ID)
@@ -603,7 +634,7 @@ func sandboxRuntimeClaimReadySlotFixture(
 	})
 	require.NoError(t, err)
 	registration := runtimeSlotTestRegistration("slot-"+suffix, "allocation-"+suffix)
-	_, err = store.RegisterRuntimeSlot(ctx, registration)
+	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
 		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
@@ -629,6 +660,7 @@ func sandboxRuntimeSlotAcquireRequest(
 		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	}
 }
 

@@ -39,6 +39,8 @@ func TestSystemdUnitPreservesHostNamespacesAndABIsolation(t *testing.T) {
 		"ctld-%i-ha.sock",
 		"/run/sandbox0/ctld-runtime-slot-network.sock",
 		"-runtime-slot-netns-root=/run/netns",
+		"ExecStartPre=/usr/local/libexec/sandbox0/ctld-resource-cgroup-setup",
+		"SANDBOX0_RESOURCE_CGROUP_ROOT=/sys/fs/cgroup/sandbox0",
 		"TimeoutStopSec=45s",
 		"KillMode=mixed",
 	} {
@@ -73,6 +75,10 @@ func TestExampleConfigsDecodeAfterEnvironmentExpansion(t *testing.T) {
 		"SANDBOX0_NOMAD_NODE_ID":             "node-1",
 		"SANDBOX0_NODE_UID":                  "node-uid-1",
 		"SANDBOX0_NODE_NAME":                 "node-1",
+		"SANDBOX0_RESOURCE_CPU_MILLICORES":   "8000",
+		"SANDBOX0_RESOURCE_MEMORY_BYTES":     "17179869184",
+		"SANDBOX0_RESOURCE_CPUSET_CPUS":      "0-7",
+		"SANDBOX0_RESOURCE_CPUSET_MEMS":      "0",
 		"SANDBOX0_CLUSTER_DNS_CIDR":          "10.0.0.53/32",
 		"SANDBOX0_PLATFORM_ALLOWED_CIDRS":    "10.0.0.0/8",
 	}
@@ -89,7 +95,12 @@ func TestExampleConfigsDecodeAfterEnvironmentExpansion(t *testing.T) {
 	}
 	if !ctldConfig.NomadRuntime.Enabled || len(ctldConfig.NomadRuntime.NBDDevices) != 2 ||
 		ctldConfig.NomadRuntime.ConsumerMountRoot != "/opt/nomad" ||
-		ctldConfig.NomadRuntime.ConsumerNetNSRoot != "/run/netns" {
+		ctldConfig.NomadRuntime.ConsumerNetNSRoot != "/run/netns" ||
+		ctldConfig.NomadRuntime.ResourceCgroupRoot != "/sys/fs/cgroup/sandbox0" ||
+		ctldConfig.NomadRuntime.ResourceCPUMillicores != 8000 ||
+		ctldConfig.NomadRuntime.ResourceMemoryBytes != 17179869184 ||
+		ctldConfig.NomadRuntime.ResourceCPUSetCPUs != "0-7" ||
+		ctldConfig.NomadRuntime.ResourceCPUSetMems != "0" {
 		t.Fatalf("decoded ctld Nomad runtime = %+v", ctldConfig.NomadRuntime)
 	}
 	networkPath := filepath.Join(t.TempDir(), "network.yaml")
@@ -121,6 +132,7 @@ func TestNomadPluginExampleUsesCtldRuntimeOnly(t *testing.T) {
 	for _, required := range []string{
 		`plugin "sandbox0-gvisor"`,
 		`rootfs_node_socket            = "/run/sandbox0/ctld-nomad-runtime.sock"`,
+		`resource_cgroup_root          = "/sys/fs/cgroup/sandbox0"`,
 		`runtime_slot_enabled              = true`,
 	} {
 		if !strings.Contains(config, required) {
@@ -188,6 +200,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 		"opt/nomad/plugins/sandbox0-gvisor",
 		"etc/nomad.d/30-sandbox0-gvisor.hcl",
 		"usr/local/libexec/sandbox0/ctld-host-check",
+		"usr/local/libexec/sandbox0/ctld-resource-cgroup-setup",
 		"usr/local/libexec/sandbox0/ctld-rollout-node",
 		"etc/systemd/system/sandbox0-ctld@.service",
 		"etc/systemd/system/nomad.service.d/20-sandbox0-ctld.conf",
@@ -216,7 +229,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 }
 
 func TestShellAssetsParse(t *testing.T) {
-	for _, path := range []string{"ctld-host-check", "install-node.sh", "rollout-node.sh"} {
+	for _, path := range []string{"ctld-host-check", "ctld-resource-cgroup-setup", "install-node.sh", "rollout-node.sh"} {
 		if output, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
 			t.Fatalf("sh -n %s: %v\n%s", path, err, output)
 		}

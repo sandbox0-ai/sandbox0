@@ -36,7 +36,7 @@ const (
 	defaultNodeChannelReconnectMin        = 100 * time.Millisecond
 	defaultNodeChannelReconnectMax        = 10 * time.Second
 	defaultNodeChannelHandshakeTimeout    = 5 * time.Second
-	defaultNodeChannelConnectionMaxAge    = 5 * time.Minute
+	defaultNodeChannelConnectionMaxAge    = time.Minute
 	defaultNodeChannelMaxConcurrent       = 64
 	maxNodeChannelCredentialBytes         = 64 << 10
 )
@@ -97,6 +97,7 @@ type NodeChannelAgentConfig struct {
 	ConnectionMaxAge    time.Duration
 	MaxConcurrent       int
 	AgentInstanceID     string
+	Capacity            NodeChannelCapacity
 }
 
 // NodeChannelAgent maintains an outbound stream and executes a bounded number
@@ -154,6 +155,9 @@ func newNodeChannelAgent(config NodeChannelAgentConfig, dialAddress string) (*No
 	if config.Executor == nil {
 		return nil, errors.New("node channel executor is required")
 	}
+	if err := config.Capacity.Validate(); err != nil {
+		return nil, fmt.Errorf("node channel capacity: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
 	if config.OperationTimeout == 0 {
 		config.OperationTimeout = defaultNodeChannelOperationTimeout
 	}
@@ -186,6 +190,9 @@ func newNodeChannelAgent(config NodeChannelAgentConfig, dialAddress string) (*No
 	}
 	if config.ConnectionMaxAge < time.Minute || config.ConnectionMaxAge > time.Hour {
 		return nil, fmt.Errorf("node channel connection max age must be between one minute and one hour: %w", errdefs.ErrInvalidArgument)
+	}
+	if config.ConnectionMaxAge+5*time.Second >= time.Duration(config.Capacity.TTLMilliseconds)*time.Millisecond {
+		return nil, fmt.Errorf("node capacity TTL must exceed channel max age by at least five seconds: %w", errdefs.ErrInvalidArgument)
 	}
 	if config.MaxConcurrent == 0 {
 		config.MaxConcurrent = defaultNodeChannelMaxConcurrent
@@ -299,6 +306,7 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 		ClusterID: a.config.ClusterID, NodeID: a.config.NodeID,
 		NodeUID: a.config.NodeUID, NodeBootID: bootID,
 		Capabilities: capabilities,
+		Capacity:     a.config.Capacity,
 	}
 	if a.config.NetworkExecutor != nil {
 		hello.Capabilities = append([]NodeChannelCommandKind{NodeChannelCommandNetworkPrepare}, hello.Capabilities...)
@@ -343,9 +351,14 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 		if err := decodeNodeChannelMessage(payload, &command); err != nil {
 			return connectedAt, fmt.Errorf("decode node channel command: %w: %w", err, errdefs.ErrUnavailable)
 		}
+		// A successor boot may attest cleanup of an older incarnation through
+		// the persistent node journal. Every operation that can create or mutate
+		// a live runtime remains bound to the exact current boot.
+		bootMatches := command.Target.NodeBootID == hello.NodeBootID ||
+			command.Kind == NodeChannelCommandCleanup
 		if err := command.Validate(); err != nil || !hello.Supports(command.Kind) ||
 			command.Target.ClusterID != hello.ClusterID || command.Target.NodeID != hello.NodeID ||
-			command.Target.NodeUID != hello.NodeUID || command.Target.NodeBootID != hello.NodeBootID {
+			command.Target.NodeUID != hello.NodeUID || !bootMatches {
 			return connectedAt, fmt.Errorf("node channel command target is invalid: %v: %w", err, errdefs.ErrPermissionDenied)
 		}
 		select {

@@ -388,6 +388,20 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	require.NoError(t, err)
 	request := testNodeCleanupRequest()
 	request.NetNSIdentity = netnsIdentity
+	resourceLease, err := protocol.NewRuntimeResourceLease(
+		"claim-operation-1", "claim-1", request.SlotID, request.ClusterID,
+		request.NodeID, request.NodeUID, request.NodeBootID,
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1_500,
+			MemoryBytes: 768 << 20, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-1", "0",
+	)
+	require.NoError(t, err)
+	resourceDigest, err := resourceLease.Digest()
+	require.NoError(t, err)
+	request.Resources = resourceLease
+	request.ResourceLeaseDigest = strings.TrimPrefix(resourceDigest, "sha256:")
 	stage := rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion, Parent: "parent-1",
 		InitialGeneration:   "generation-1",
@@ -430,11 +444,17 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
 	network := newFakeCtldNetwork(t)
+	resourceCgroups := &fakeRuntimeResourceCgroup{removeOK: true}
+	resourceCgroups.onRemove = func() {
+		require.Equal(t, []string{"kill:KILL", "delete:force", "state"}, runner.callsSnapshot())
+		require.Equal(t, 1, network.cleanupCount())
+	}
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client,
+		resourceCgroups: resourceCgroups, journal: journal,
 		config: Config{
 			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
 		},
@@ -451,8 +471,13 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	first, err := daemon.CleanupRuntimeSlot(t.Context(), request)
 	require.NoError(t, err)
 	require.NoError(t, first.Validate())
+	require.Equal(t, request.Resources.LeaseID, first.ResourceLeaseID)
+	require.Equal(t, request.ResourceLeaseDigest, first.ResourceLeaseDigest)
+	require.True(t, first.ResourceCgroupAbsent)
+	require.Equal(t, []protocol.RuntimeResourceLease{request.Resources}, resourceCgroups.removedSnapshot())
 	require.Equal(t, request.WriterOperationID, first.RootFSOperationID)
 	runtime.recovery = nil
+	daemon.resourceCgroups = nil
 	second, err := daemon.CleanupRuntimeSlot(t.Context(), request)
 	require.NoError(t, err)
 	require.True(t, reflect.DeepEqual(first, second), "retry changed proof: %#v != %#v", first, second)
@@ -466,9 +491,14 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	}
 	cleanups := network.cleanupCount()
 	require.Equal(t, 1, cleanups)
+	require.Equal(t, []protocol.RuntimeResourceLease{request.Resources}, resourceCgroups.removedSnapshot())
 
 	changed := request
 	changed.NodeBootID = "another-boot"
+	changed.Resources.NodeBootID = changed.NodeBootID
+	changedResourceDigest, digestErr := changed.Resources.Digest()
+	require.NoError(t, digestErr)
+	changed.ResourceLeaseDigest = strings.TrimPrefix(changedResourceDigest, "sha256:")
 	_, err = daemon.CleanupRuntimeSlot(t.Context(), changed)
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }

@@ -123,7 +123,8 @@ func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 	starting := protocol.StartingRequest{
 		AllocationID: "allocation", NodeBootID: "boot", OperationID: "operation", ClaimID: "claim",
 		LaunchAttempt: "launch", RunscContainerID: "runsc", RootFSBindingDigest: proof,
-		ClaimNetworkDigest: strings.Repeat("de", 32),
+		ClaimNetworkDigest: strings.Repeat("de", 32), ResourceLeaseID: "resource-lease",
+		ResourceLeaseDigest: strings.Repeat("ad", 32),
 	}
 	response = doJSON(t, handler, http.MethodPut, protocol.StartingPath("slot"), starting, "token")
 	require.Equal(t, http.StatusOK, response.Code)

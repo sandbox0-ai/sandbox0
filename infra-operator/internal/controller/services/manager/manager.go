@@ -196,7 +196,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 					SecretName: config.NodeAuthority.Claim.SecretName,
 					Items: []corev1.KeyToPath{
-						{Key: "runtime-profiles.json", Path: "runtime-profiles.json"},
+						{Key: "runtime-classes.json", Path: "runtime-classes.json"},
 						{Key: "writer-token.key", Path: "writer-token.key"},
 					},
 				}},
@@ -473,7 +473,7 @@ func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
 		if err := validateNodeAuthoritySecretName("claim", cfg.NodeAuthority.Claim.SecretName); err != nil {
 			return err
 		}
-		cfg.NodeAuthority.Claim.ProfileCatalogFile = apiconfig.NodeAuthorityRuntimeProfilesPath
+		cfg.NodeAuthority.Claim.ClassCatalogFile = apiconfig.NodeAuthorityRuntimeClassesPath
 		cfg.NodeAuthority.Claim.WriterTokenKeyFile = apiconfig.NodeAuthorityWriterTokenKeyPath
 		if cfg.NodeAuthority.Claim.ClaimTTL.Duration == 0 {
 			cfg.NodeAuthority.Claim.ClaimTTL = metav1.Duration{Duration: 15 * time.Second}
@@ -494,7 +494,7 @@ func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
 }
 
 func runtimeSlotClaimConfigEmpty(cfg apiconfig.RuntimeSlotClaimConfig) bool {
-	return strings.TrimSpace(cfg.SecretName) == "" && strings.TrimSpace(cfg.ProfileCatalogFile) == "" &&
+	return strings.TrimSpace(cfg.SecretName) == "" && strings.TrimSpace(cfg.ClassCatalogFile) == "" &&
 		strings.TrimSpace(cfg.WriterTokenKeyFile) == "" && cfg.ClaimTTL.Duration == 0 && cfg.SLO.Duration == 0
 }
 

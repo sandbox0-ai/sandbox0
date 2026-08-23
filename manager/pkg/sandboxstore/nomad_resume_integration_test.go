@@ -65,7 +65,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 
 	registration := runtimeSlotTestRegistration("slot-nomad-resume-new", "allocation-nomad-resume-new")
 	registration.AllocationNamespace = "nomad"
-	_, err = fixture.store.RegisterRuntimeSlot(fixture.ctx, registration)
+	_, err = registerRuntimeSlotWithTestCapacity(t, fixture.ctx, fixture.store, registration)
 	require.NoError(t, err)
 	readyProof := bytes.Repeat([]byte{0xa1}, 32)
 	_, err = fixture.store.ReportRuntimeSlotReady(fixture.ctx, &ReportRuntimeSlotReadyRequest{
@@ -82,6 +82,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
 	}
 	claimed, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
 	require.NoError(t, err)
@@ -119,6 +120,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		LaunchAttempt: "launch-nomad-resume", RunscContainerID: "runsc-nomad-resume",
 		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0xa3}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
 	_, err = fixture.store.MarkRuntimeSlotCommandReady(fixture.ctx, &MarkRuntimeSlotCommandReadyRequest{
@@ -133,6 +135,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	completeRequest := &CompleteNomadSandboxResumeRequest{
 		SandboxID: fixture.sandboxID, OperationID: requested.OperationID, SlotID: claimed.ID,
 		AllocationID: registration.AllocationID, AllocationNamespace: registration.AllocationNamespace,
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	}
 	completed, err := fixture.store.CompleteNomadSandboxResume(fixture.ctx, completeRequest)
 	require.NoError(t, err)
@@ -140,6 +143,12 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.Equal(t, requested.RuntimeGeneration, completed.RuntimeGeneration)
 	require.Equal(t, registration.AllocationID, completed.CurrentPodName)
 	require.Equal(t, registration.AllocationNamespace, completed.CurrentPodNamespace)
+	require.Equal(t, claimed.ResourceLease.CPUMillicores, completed.ResourceMillicpu)
+	require.Equal(t, (claimed.ResourceLease.MemoryBytes+(1<<20)-1)/(1<<20), completed.ResourceMemoryMiB)
+	wrongLease := *completeRequest
+	wrongLease.ResourceLeaseDigest = bytes.Repeat([]byte{0xff}, 32)
+	_, err = fixture.store.CompleteNomadSandboxResume(fixture.ctx, &wrongLease)
+	require.ErrorIs(t, err, ErrNomadSandboxResumeConflict)
 
 	completedRetry, err := fixture.store.CompleteNomadSandboxResume(fixture.ctx, completeRequest)
 	require.NoError(t, err)
@@ -223,6 +232,8 @@ func terminalizeNomadPauseSlot(
 	_, err = fixture.store.FinalizeRuntimeSlot(fixture.ctx, &FinalizeRuntimeSlotRequest{
 		SlotID: slot.ID, OperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 		Reason: "planned_publish", ProofDigest: bytes.Repeat([]byte{0xb2}, 32),
+		ResourceLeaseID:     slot.ResourceLease.LeaseID,
+		ResourceLeaseDigest: slot.ResourceLeaseDigest, ResourceCgroupAbsent: true,
 	})
 	require.NoError(t, err)
 }

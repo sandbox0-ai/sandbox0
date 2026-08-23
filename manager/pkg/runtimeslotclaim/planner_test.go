@@ -3,6 +3,7 @@ package runtimeslotclaim
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"strings"
@@ -76,6 +77,23 @@ func (f *fakeStore) AcquireRuntimeSlot(_ context.Context, request *sandboxstore.
 		f.slot.SourceGenerationID = request.SourceGenerationID
 		f.slot.ClaimedAt = now
 		f.slot.ClaimLeaseExpiresAt = now.Add(request.ClaimTTL)
+		lease, err := protocol.NewRuntimeResourceLease(
+			request.OperationID, request.ClaimID, f.slot.ID, f.slot.ClusterID,
+			f.slot.NodeID, f.slot.NodeUID, f.slot.NodeBootID, request.Resources, "0-7", "0",
+		)
+		if err != nil {
+			return nil, err
+		}
+		digestValue, err := lease.Digest()
+		if err != nil {
+			return nil, err
+		}
+		f.slot.ResourceLease = lease
+		f.slot.ResourceLeaseDigest, err = hex.DecodeString(strings.TrimPrefix(digestValue, "sha256:"))
+		if err != nil {
+			return nil, err
+		}
+		f.slot.ResourceLeaseState = sandboxstore.RuntimeResourceLeaseActive
 	}
 	f.slot.AuthorityObservedAt = time.Now().UTC()
 	clone := *f.slot
@@ -364,6 +382,10 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 		Runtime: runtimecontrol.Assignment{
 			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 19,
 			EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
+		},
+		Resources: protocol.RuntimeResourceRequest{
+			Version:       protocol.RuntimeResourceRequestVersion,
+			CPUMillicores: 1_000, MemoryBytes: 1 << 30, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
 		},
 	}
 	return &plannerFixture{

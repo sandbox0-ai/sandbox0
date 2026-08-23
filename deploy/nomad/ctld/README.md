@@ -6,7 +6,7 @@ acceptance deployment contract.
 Nomad nodes run two `ctld` systemd instances directly in the host mount and
 network namespaces. They share the HA lock and durable state under
 `/var/lib/sandbox0/ctld`; only the elected primary opens NBD, Bolt, network,
-and control sockets. Do not add systemd filesystem isolation options such as
+control sockets, and per-lease cgroups. Do not add systemd filesystem isolation options such as
 `ProtectSystem`, `RootDirectory`, `BindPaths`, or `PrivateDevices`: those
 create a private mount/device namespace and break the exact mount namespace
 shared with the Nomad task driver.
@@ -15,8 +15,13 @@ Build the three pinned binaries, provision the files referenced by
 `ctld.yaml` under `/etc/sandbox0/pki` and `/etc/sandbox0/tokens`, copy the
 examples, and replace every placeholder. The supplied host check requires the
 fixed PKI/token paths from the example, root ownership, and no group/other
-write permission. Start from `nomad-plugin.hcl.example` for the Nomad client
-plugin configuration. Then install:
+write permission. Set the four `SANDBOX0_RESOURCE_*` values to the allocatable
+capacity of the dedicated cpuset after reserving host/ctld/Nomad overhead; do
+not copy carrier-job resources into these values. Start from
+`nomad-plugin.hcl.example` for the Nomad client plugin configuration. Register
+the Nomad client with `client.node_pool = "sandbox0"` and set node metadata
+`sandbox0_dedicated=true`; do not target that pool from general jobs. Then
+install:
 
 ```sh
 sudo ./deploy/nomad/ctld/install-node.sh \
@@ -33,10 +38,19 @@ sudo ./deploy/nomad/ctld/install-node.sh \
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
 64-device NBD pool, applies required networking sysctls, installs tmpfiles
 rules for the reboot-volatile runtime directories, and places the task driver
-in `/opt/nomad/plugins`. Installation fails instead of reloading an in-use NBD
+in `/opt/nomad/plugins`. Before each ctld start it provisions the root-owned
+`/sys/fs/cgroup/sandbox0` cgroup-v2 subtree, initializes its cpuset from the
+parent's effective confinement, and enables `cpu`, `cpuset`, `memory`, and
+`pids` for per-lease children. Startup fails if those controllers are not
+available/delegated or the root itself contains processes; existing active
+lease children are preserved across A/B restarts. Installation fails instead of reloading an in-use NBD
 module when it was already loaded with fewer than 64 devices; drain and reboot
 that node to apply the installed module option. The driver still performs a
 synchronous ctld socket fingerprint before advertising a warm slot.
+For a full node reboot, the authenticated new boot may execute cleanup for an
+old boot only through the plugin-independent path. The durable slot journal
+must match the old incarnation, and cleanup must independently observe the old
+runsc and resource cgroup absent before returning a terminal proof.
 
 The configured `nomad_runtime.nbd_devices` list, not only the kernel
 `nbds_max`, is the usable RootFS concurrency bound. Keep that list at least as

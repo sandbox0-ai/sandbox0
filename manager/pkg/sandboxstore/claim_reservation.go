@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -102,6 +103,8 @@ type CompleteSandboxClaimRequest struct {
 	SlotID              string
 	AllocationID        string
 	AllocationNamespace string
+	ResourceLeaseID     string
+	ResourceLeaseDigest []byte
 }
 
 // SandboxClaimCleanupCandidate joins one due logical cleanup workflow to its
@@ -295,26 +298,27 @@ func (s *PGSandboxStore) CompleteSandboxClaim(ctx context.Context, request *Comp
 	if claim.OperationID != request.OperationID {
 		return nil, fmt.Errorf("%w: operation identity changed", ErrSandboxClaimReservationConflict)
 	}
-	if claim.Phase == SandboxRuntimeClaimPhaseReady {
-		if record.CurrentPodName != request.AllocationID || record.CurrentPodNamespace != request.AllocationNamespace {
-			return nil, fmt.Errorf("%w: ready allocation binding changed", ErrSandboxClaimReservationConflict)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit completed sandbox claim retry: %w", err)
-		}
-		return record, nil
-	}
-	if claim.Phase != SandboxRuntimeClaimPhaseClaiming {
+	if claim.Phase != SandboxRuntimeClaimPhaseClaiming && claim.Phase != SandboxRuntimeClaimPhaseReady {
 		return nil, fmt.Errorf("%w: claim is %s", ErrSandboxClaimCleanupPending, claim.Phase)
 	}
-	var slotState, slotSandboxID, allocationID, allocationNamespace string
+	var slotState, slotSandboxID, slotClaimID, allocationID, allocationNamespace string
+	var resourceLeaseID, resourceOperationID, resourceClaimID, resourceLeaseState string
+	var resourceMillicpu, resourceMemoryBytes int64
+	var resourceLeaseDigest []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT state, COALESCE(sandbox_id, ''), allocation_id, allocation_namespace
-		FROM manager.runtime_slots
-		WHERE slot_id = $1 AND claim_operation_id = $2
-		FOR SHARE
+		SELECT slot.state, COALESCE(slot.sandbox_id, ''), slot.claim_id,
+			slot.allocation_id, slot.allocation_namespace,
+			lease.lease_id, lease.operation_id, lease.claim_id, lease.cpu_millicores,
+			lease.memory_bytes, lease.lease_digest, lease.lease_state
+		FROM manager.runtime_slots AS slot
+		JOIN manager.runtime_resource_leases AS lease
+			ON lease.lease_id = slot.resource_lease_id AND lease.slot_id = slot.slot_id
+		WHERE slot.slot_id = $1 AND slot.claim_operation_id = $2
+		FOR SHARE OF slot, lease
 	`, request.SlotID, request.OperationID).Scan(
-		&slotState, &slotSandboxID, &allocationID, &allocationNamespace,
+		&slotState, &slotSandboxID, &slotClaimID, &allocationID, &allocationNamespace,
+		&resourceLeaseID, &resourceOperationID, &resourceClaimID, &resourceMillicpu,
+		&resourceMemoryBytes, &resourceLeaseDigest, &resourceLeaseState,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w: command-ready runtime slot is missing", ErrSandboxClaimReservationConflict)
@@ -325,11 +329,32 @@ func (s *PGSandboxStore) CompleteSandboxClaim(ctx context.Context, request *Comp
 		allocationID != request.AllocationID || allocationNamespace != request.AllocationNamespace {
 		return nil, fmt.Errorf("%w: runtime slot is not the exact active claim binding", ErrSandboxClaimReservationConflict)
 	}
+	if resourceLeaseID != request.ResourceLeaseID || resourceOperationID != request.OperationID ||
+		resourceClaimID != slotClaimID || resourceLeaseState != RuntimeResourceLeaseActive ||
+		!bytes.Equal(resourceLeaseDigest, request.ResourceLeaseDigest) {
+		return nil, fmt.Errorf("%w: runtime resource lease is not the exact active claim binding", ErrSandboxClaimReservationConflict)
+	}
+	resourceMemoryMiB := (resourceMemoryBytes + (1 << 20) - 1) / (1 << 20)
+	if resourceMillicpu <= 0 || resourceMemoryMiB <= 0 {
+		return nil, fmt.Errorf("%w: runtime resource lease has invalid metering values", ErrSandboxClaimReservationConflict)
+	}
+	if claim.Phase == SandboxRuntimeClaimPhaseReady {
+		if record.CurrentPodName != request.AllocationID || record.CurrentPodNamespace != request.AllocationNamespace ||
+			record.ResourceMillicpu != resourceMillicpu || record.ResourceMemoryMiB != resourceMemoryMiB {
+			return nil, fmt.Errorf("%w: ready runtime binding changed", ErrSandboxClaimReservationConflict)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit completed sandbox claim retry: %w", err)
+		}
+		return record, nil
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET current_pod_name = $2, current_pod_namespace = $3, updated_at = NOW()
+		SET current_pod_name = $2, current_pod_namespace = $3,
+			resource_millicpu = $4, resource_memory_mib = $5, updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, request.SandboxID, request.AllocationID, request.AllocationNamespace); err != nil {
+	`, request.SandboxID, request.AllocationID, request.AllocationNamespace,
+		resourceMillicpu, resourceMemoryMiB); err != nil {
 		return nil, fmt.Errorf("bind completed sandbox runtime: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -765,7 +790,7 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 		WHERE sandbox_id = $1
 		ORDER BY CASE WHEN state = $2 THEN 1 ELSE 0 END, updated_at DESC
 		LIMIT 1
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, record.ID, RuntimeSlotStateTerminal))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("lock sandbox cleanup runtime slot: %w", err)
@@ -955,11 +980,15 @@ func validateCompleteSandboxClaimRequest(request *CompleteSandboxClaimRequest) e
 		"sandbox_id": request.SandboxID, "operation_id": request.OperationID,
 		"slot_id": request.SlotID, "allocation_id": request.AllocationID,
 		"allocation_namespace": request.AllocationNamespace,
+		"resource_lease_id":    request.ResourceLeaseID,
 	}
 	for name, value := range fields {
 		if value == "" || value != strings.TrimSpace(value) || len(value) > 512 {
 			return fmt.Errorf("%s is required, canonical, and at most 512 bytes", name)
 		}
+	}
+	if len(request.ResourceLeaseDigest) != 32 {
+		return fmt.Errorf("resource_lease_digest must contain exactly 32 bytes")
 	}
 	return nil
 }

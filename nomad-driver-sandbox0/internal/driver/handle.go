@@ -64,6 +64,8 @@ type claimMetadata struct {
 	ProcdInstanceID     string                      `json:"procd_instance_id,omitempty"`
 	CommandReadyDigest  string                      `json:"command_ready_digest,omitempty"`
 	RuntimeRevision     string                      `json:"runtime_revision,omitempty"`
+	ResourceLeaseID     string                      `json:"resource_lease_id,omitempty"`
+	ResourceLeaseDigest string                      `json:"resource_lease_digest,omitempty"`
 	RootfsPath          string                      `json:"rootfs_path"`
 	WriterEpoch         string                      `json:"writer_epoch"`
 	Stage               *rootfshandoff.StageRequest `json:"stage,omitempty"`
@@ -82,21 +84,22 @@ type PersistedState struct {
 }
 
 type taskHandleOptions struct {
-	taskConfig        *drivers.TaskConfig
-	driverConfig      TaskConfig
-	bundleDir         string
-	containerID       string
-	rootMount         string
-	socketPath        string
-	runner            Runsc
-	mounter           Mounter
-	allowedRoot       string
-	rootfsAllowedRoot string
-	rootfs            RootFSRuntime
-	network           NetworkRuntime
-	runtimeSlotNeeded bool
-	procdPort         int
-	logger            hclog.Logger
+	taskConfig         *drivers.TaskConfig
+	driverConfig       TaskConfig
+	bundleDir          string
+	containerID        string
+	rootMount          string
+	socketPath         string
+	runner             Runsc
+	mounter            Mounter
+	allowedRoot        string
+	rootfsAllowedRoot  string
+	resourceCgroupRoot string
+	rootfs             RootFSRuntime
+	network            NetworkRuntime
+	runtimeSlotNeeded  bool
+	procdPort          int
+	logger             hclog.Logger
 }
 
 type taskHandle struct {
@@ -105,22 +108,23 @@ type taskHandle struct {
 	// retryable cleanup as complete.
 	closeMu sync.Mutex
 
-	taskConfig        *drivers.TaskConfig
-	driverConfig      TaskConfig
-	bundleDir         string
-	containerID       string
-	rootMount         string
-	socketPath        string
-	allowedRoot       string
-	runner            Runsc
-	mounter           Mounter
-	rootfsAllowedRoot string
-	rootfs            RootFSRuntime
-	network           NetworkRuntime
-	runtimeSlotNeeded bool
-	procdPort         int
-	networkChain      string
-	logger            hclog.Logger
+	taskConfig         *drivers.TaskConfig
+	driverConfig       TaskConfig
+	bundleDir          string
+	containerID        string
+	rootMount          string
+	socketPath         string
+	allowedRoot        string
+	runner             Runsc
+	mounter            Mounter
+	rootfsAllowedRoot  string
+	resourceCgroupRoot string
+	rootfs             RootFSRuntime
+	network            NetworkRuntime
+	runtimeSlotNeeded  bool
+	procdPort          int
+	networkChain       string
+	logger             hclog.Logger
 
 	phase       slotPhase
 	startedAt   time.Time
@@ -213,25 +217,26 @@ func readPersistedState(path string) (PersistedState, error) {
 
 func newTaskHandle(options taskHandleOptions) *taskHandle {
 	return &taskHandle{
-		taskConfig:        options.taskConfig,
-		driverConfig:      options.driverConfig,
-		bundleDir:         options.bundleDir,
-		containerID:       options.containerID,
-		rootMount:         options.rootMount,
-		socketPath:        options.socketPath,
-		allowedRoot:       options.allowedRoot,
-		runner:            options.runner,
-		mounter:           options.mounter,
-		rootfsAllowedRoot: options.rootfsAllowedRoot,
-		rootfs:            options.rootfs,
-		network:           options.network,
-		runtimeSlotNeeded: options.runtimeSlotNeeded,
-		procdPort:         options.procdPort,
-		logger:            options.logger,
-		networkChain:      networkChainName(options.containerID),
-		phase:             phaseWarm,
-		done:              make(chan struct{}),
-		controlReady:      make(chan struct{}),
+		taskConfig:         options.taskConfig,
+		driverConfig:       options.driverConfig,
+		bundleDir:          options.bundleDir,
+		containerID:        options.containerID,
+		rootMount:          options.rootMount,
+		socketPath:         options.socketPath,
+		allowedRoot:        options.allowedRoot,
+		runner:             options.runner,
+		mounter:            options.mounter,
+		rootfsAllowedRoot:  options.rootfsAllowedRoot,
+		resourceCgroupRoot: options.resourceCgroupRoot,
+		rootfs:             options.rootfs,
+		network:            options.network,
+		runtimeSlotNeeded:  options.runtimeSlotNeeded,
+		procdPort:          options.procdPort,
+		logger:             options.logger,
+		networkChain:       networkChainName(options.containerID),
+		phase:              phaseWarm,
+		done:               make(chan struct{}),
+		controlReady:       make(chan struct{}),
 	}
 }
 
@@ -320,7 +325,10 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	return nil
 }
 
-func (h *taskHandle) writeClaimBundle(assignment *runtimecontrol.Assignment) error {
+func (h *taskHandle) writeClaimBundle(
+	assignment *runtimecontrol.Assignment,
+	resourceLease protocol.RuntimeResourceLease,
+) error {
 	netnsPath := ""
 	if h.taskConfig.NetworkIsolation != nil {
 		netnsPath = h.taskConfig.NetworkIsolation.Path
@@ -340,11 +348,22 @@ func (h *taskHandle) writeClaimBundle(assignment *runtimecontrol.Assignment) err
 		}
 	}
 	if h.runtimeSlotNeeded {
-		normalized, err := normalizedRuntimeSlotResources(h.taskConfig)
-		if err != nil {
-			return fmt.Errorf("normalize runtime slot resources: %w", err)
+		if err := resourceLease.Validate(); err != nil {
+			return fmt.Errorf("validate runtime resource lease: %w", err)
 		}
-		resources = &normalized
+		if resourceLease.SlotID != h.taskConfig.ID || resourceLease.NodeID != h.taskConfig.NodeID {
+			return fmt.Errorf("runtime resource lease does not match the Nomad carrier")
+		}
+		cgroupPath, err := runtimeLeaseCgroupsPath(h.resourceCgroupRoot, resourceLease.CgroupName)
+		if err != nil {
+			return err
+		}
+		resources = &driversResources{
+			CPUPeriod: int64(resourceLease.CPUPeriodMicros), CPUQuota: resourceLease.CPUQuotaMicros,
+			CPUShares: int64(resourceLease.CPUShares), CPUSetCpus: resourceLease.CPUSetCPUs,
+			MemoryLimitBytes: resourceLease.MemoryBytes, PIDsLimit: resourceLease.PIDsLimit,
+			CgroupPath: cgroupPath,
+		}
 	}
 	h.mu.Lock()
 	command := h.driverConfig.Command
@@ -379,6 +398,20 @@ func (h *taskHandle) writeClaimBundle(assignment *runtimecontrol.Assignment) err
 		return err
 	}
 	return nil
+}
+
+func runtimeLeaseCgroupsPath(root, cgroupName string) (string, error) {
+	const cgroupV2Mount = "/sys/fs/cgroup"
+	hostPath := filepath.Join(root, cgroupName)
+	if filepath.Dir(hostPath) != root {
+		return "", fmt.Errorf("runtime resource cgroup escaped its configured root")
+	}
+	relativeRoot, err := filepath.Rel(cgroupV2Mount, root)
+	if err != nil || relativeRoot == "." || relativeRoot == ".." || filepath.IsAbs(relativeRoot) ||
+		strings.HasPrefix(relativeRoot, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("runtime resource cgroup root must be below %s", cgroupV2Mount)
+	}
+	return "/" + filepath.ToSlash(filepath.Join(relativeRoot, cgroupName)), nil
 }
 
 // Claim writes the OCI bundle, attaches D as its initial root, then creates and starts runsc.
@@ -492,7 +525,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			return err
 		}
 	}
-	if err := h.writeClaimBundle(request.Runtime); err != nil {
+	if err := h.writeClaimBundle(request.Runtime, request.Resources); err != nil {
 		h.setPhase(phaseWarm)
 		return err
 	}
@@ -514,6 +547,8 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			h.claim.RootFSBindingDigest = startingRequest.RootFSBindingDigest
 			h.claim.ClaimNetworkDigest = startingRequest.ClaimNetworkDigest
 			h.claim.RuntimeRevision = runtimeRevision
+			h.claim.ResourceLeaseID = startingRequest.ResourceLeaseID
+			h.claim.ResourceLeaseDigest = startingRequest.ResourceLeaseDigest
 		}
 		h.stage = durableStage
 	}
@@ -658,8 +693,13 @@ func (h *taskHandle) activeRegionalClaimRetryMatchesLocked(request ClaimRequest)
 	if err != nil {
 		return false, fmt.Errorf("derive active runtime assignment revision: %w", err)
 	}
+	resourceDigest, err := request.Resources.Digest()
+	if err != nil {
+		return false, fmt.Errorf("derive active runtime resource lease digest: %w", err)
+	}
 	return requestDigest == storedDigest && requestDigestHex == h.claim.RootFSBindingDigest &&
-		runtimeRevision == h.claim.RuntimeRevision, nil
+		runtimeRevision == h.claim.RuntimeRevision && request.Resources.LeaseID == h.claim.ResourceLeaseID &&
+		strings.TrimPrefix(resourceDigest, "sha256:") == h.claim.ResourceLeaseDigest, nil
 }
 
 // handleWriterLeaseLoss poisons the one-shot slot before exposing its exit and

@@ -1,6 +1,8 @@
 package runtimeslot
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -43,6 +45,7 @@ func TestLifecycleRequestsRequireCanonicalProofs(t *testing.T) {
 		AllocationID: "allocation", NodeBootID: "boot", OperationID: "operation",
 		ClaimID: "claim", LaunchAttempt: "launch", RunscContainerID: "runsc",
 		RootFSBindingDigest: proof, ClaimNetworkDigest: proof,
+		ResourceLeaseID: "resource-lease", ResourceLeaseDigest: proof,
 	}
 	require.NoError(t, starting.Validate())
 	starting.ClaimNetworkDigest = "short"
@@ -184,6 +187,9 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 }
 
 func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
+	resources := testNodeClaimControlRequest().Resources
+	resourceDigest, err := resources.Digest()
+	require.NoError(t, err)
 	request := NodeCleanupControlRequest{
 		OperationID: "cleanup-1", WriterOperationID: "writer-1",
 		WriterRetireKind: WriterRetireKindCrashAbandon, SlotID: "slot-1",
@@ -191,6 +197,7 @@ func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
 		RunscContainerID: "runsc-1", WriterGrantID: "grant-1",
 		WriterAuthorityDigest: strings.Repeat("ab", 32),
+		Resources:             resources, ResourceLeaseDigest: strings.TrimPrefix(resourceDigest, "sha256:"),
 	}
 	require.NoError(t, request.Validate())
 	proof := NodeCleanupControlProof{
@@ -202,7 +209,10 @@ func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
 		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
 		RootFSOperationID: request.WriterOperationID, RootFSProofDigest: strings.Repeat("cd", 32),
-		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		Resources: request.Resources, ResourceLeaseID: request.Resources.LeaseID,
+		ResourceLeaseDigest: request.ResourceLeaseDigest,
+		RunscAbsent:         true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+		ResourceCgroupAbsent: true,
 	}
 	digest, err := proof.Digest()
 	require.NoError(t, err)
@@ -222,6 +232,29 @@ func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 	changed = proof
 	changed.RootFSOperationID = "another-writer-operation"
 	require.ErrorContains(t, changed.Validate(), "writer operation")
+	changed = proof
+	changed.ResourceCgroupAbsent = false
+	require.ErrorContains(t, changed.Validate(), "resource cgroup absence")
+}
+
+func TestNodeCleanupProofAcceptsExactLegacyJournalDigest(t *testing.T) {
+	proof := NodeCleanupControlProof{
+		Version: legacyNodeCleanupProofVersion, OperationID: "cleanup-legacy",
+		SlotID: "slot-legacy", ClusterID: "cluster-1", AllocationID: "allocation-legacy",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-old",
+		NetNSIdentity: "netns-v1:1:2", RunscContainerID: "runsc-legacy",
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	legacyPayload := `{"version":2,"operation_id":"cleanup-legacy","slot_id":"slot-legacy","cluster_id":"cluster-1","allocation_id":"allocation-legacy","node_id":"node-1","node_uid":"node-uid-1","node_boot_id":"boot-old","netns_identity":"netns-v1:1:2","runsc_container_id":"runsc-legacy","runsc_absent":true,"stable_mount_absent":true,"rootfs_writer_absent":true,"network_policy_absent":true,"proof_digest":""}`
+	expected := sha256.Sum256([]byte(legacyPayload))
+	digest, err := proof.Digest()
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(expected[:]), digest)
+	proof.ProofDigest = digest
+	require.NoError(t, proof.Validate())
+
+	proof.ResourceCgroupAbsent = true
+	require.ErrorContains(t, proof.Validate(), "legacy cleanup proof")
 }
 
 func TestNodeCleanupRequestAcceptsOnlyExplicitWriterRetirementKinds(t *testing.T) {
@@ -283,12 +316,31 @@ func testNodeClaimControlRequest() NodeClaimControlRequest {
 	if err != nil {
 		panic(err)
 	}
-	stage.Labels = map[string]string{RuntimeAssignmentRevisionLabel: revision}
+	resources, err := NewRuntimeResourceLease(
+		"operation-1", stage.Identity.ClaimID, stage.Identity.SlotNonce, "cluster-1",
+		"node-1", stage.Identity.NodeUID, stage.Identity.BootID,
+		RuntimeResourceRequest{
+			Version: RuntimeResourceRequestVersion, CPUMillicores: 1_000,
+			MemoryBytes: 1 << 30, PIDsLimit: DefaultRuntimePIDsLimit,
+		},
+		"0-3", "0",
+	)
+	if err != nil {
+		panic(err)
+	}
+	resourceDigest, err := resources.Digest()
+	if err != nil {
+		panic(err)
+	}
+	stage.Labels = map[string]string{
+		RuntimeAssignmentRevisionLabel:  revision,
+		RuntimeResourceLeaseDigestLabel: resourceDigest,
+	}
 	return NodeClaimControlRequest{
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID,
 		PolicyToken: token, WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10),
 		Stage: stage, NetworkPolicy: networkPolicy,
-		Runtime: runtime,
+		Runtime: runtime, Resources: resources,
 	}
 }
 

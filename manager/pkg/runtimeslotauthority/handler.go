@@ -176,11 +176,13 @@ func serveStarting(config HandlerConfig, identity nodeauth.Identity, slotID stri
 	}
 	rootfsProof, _ := protocol.DecodeProof("rootfs_binding_digest", body.RootFSBindingDigest)
 	networkProof, _ := protocol.DecodeProof("claim_network_digest", body.ClaimNetworkDigest)
+	resourceProof, _ := protocol.DecodeProof("resource_lease_digest", body.ResourceLeaseDigest)
 	slot, err := config.Store.StartRuntimeSlot(request.Context(), &sandboxstore.StartRuntimeSlotRequest{
 		SlotID: slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
 		NodeBootID: body.NodeBootID, OperationID: body.OperationID, ClaimID: body.ClaimID,
 		LaunchAttempt: body.LaunchAttempt, RunscContainerID: body.RunscContainerID,
 		RootFSBindingDigest: rootfsProof, ClaimNetworkDigest: networkProof,
+		ResourceLeaseID: body.ResourceLeaseID, ResourceLeaseDigest: resourceProof,
 	})
 	writeStoreResult(writer, slot, err)
 }

@@ -27,7 +27,7 @@ import (
 
 const minimumAcceptanceWidth = 8
 
-func TestAcceptanceExamplesReserveEnoughWarmSlotsAndNBDDevices(t *testing.T) {
+func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T) {
 	warmJob := readAsset(t, "../../nomad-driver-sandbox0/example/warm-slot.nomad")
 	countMatch := regexp.MustCompile(`(?m)^\s*count\s*=\s*([0-9]+)\s*$`).FindStringSubmatch(warmJob)
 	if len(countMatch) != 2 {
@@ -37,11 +37,19 @@ func TestAcceptanceExamplesReserveEnoughWarmSlotsAndNBDDevices(t *testing.T) {
 	if err != nil || warmCount < minimumAcceptanceWidth {
 		t.Fatalf("warm-slot count = %q, want at least %d", countMatch[1], minimumAcceptanceWidth)
 	}
-	if !regexp.MustCompile(`(?m)^\s*cores\s*=\s*1\s*$`).MatchString(warmJob) {
-		t.Fatal("warm-slot example must reserve one dedicated CPU core")
+	if regexp.MustCompile(`(?m)^\s*cores\s*=`).MatchString(warmJob) {
+		t.Fatal("warm carriers must not encode sandbox CPU as Nomad dedicated cores")
 	}
-	if regexp.MustCompile(`(?m)^\s*cpu\s*=`).MatchString(warmJob) {
-		t.Fatal("warm-slot example must not use host-frequency-dependent Nomad CPU compute")
+	if !regexp.MustCompile(`(?m)^\s*cpu\s*=\s*50\s*$`).MatchString(warmJob) ||
+		!regexp.MustCompile(`(?m)^\s*memory\s*=\s*64\s*$`).MatchString(warmJob) {
+		t.Fatal("warm carriers must reserve only the documented 50 MHz/64 MiB overhead")
+	}
+	if !strings.Contains(warmJob, `attribute = "${meta.sandbox0_dedicated}"`) ||
+		!strings.Contains(warmJob, `value     = "true"`) {
+		t.Fatal("warm carriers must require the dedicated Sandbox0 Nomad node pool")
+	}
+	if !regexp.MustCompile(`(?m)^\s*node_pool\s*=\s*"sandbox0"\s*$`).MatchString(warmJob) {
+		t.Fatal("warm carriers must target the sandbox0 Nomad node pool")
 	}
 	restartBlock := regexp.MustCompile(`(?s)restart\s*\{.*?\}`).FindString(warmJob)
 	if restartBlock == "" || !regexp.MustCompile(`(?m)^\s*attempts\s*=\s*0\s*$`).MatchString(restartBlock) ||

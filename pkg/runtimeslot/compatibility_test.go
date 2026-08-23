@@ -9,20 +9,20 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
-func TestRuntimeCompatibilityDigestKeepsVersionOneWireContract(t *testing.T) {
-	profile := RuntimeCompatibility{
+func TestRuntimeCompatibilityDigestKeepsResourceNeutralVersionTwoWireContract(t *testing.T) {
+	runtimeClass := RuntimeCompatibility{
 		Version: RuntimeCompatibilityVersion, Architecture: "amd64",
 		DriverVersion: "0.1.0", RunscVersion: "runsc version release-20260820.0",
 		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true,
 		Command: "/procd", ProcdPort: NomadProcdPort, RuntimeMode: runtimecontrol.ControlModeStatic,
-		CPUPeriod: 100000, CPUQuota: 100000, CPUShares: 1024, MemoryLimitBytes: 1 << 30,
+		SecurityClass: "standard",
 	}
 
-	got, err := profile.Digest()
+	got, err := runtimeClass.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(profile)
+	payload, err := json.Marshal(runtimeClass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,27 +33,29 @@ func TestRuntimeCompatibilityDigestKeepsVersionOneWireContract(t *testing.T) {
 	}
 }
 
-func TestRuntimeCompatibilityRejectsAmbiguousProfiles(t *testing.T) {
+func TestRuntimeCompatibilityRejectsAmbiguousClasses(t *testing.T) {
 	valid := RuntimeCompatibility{
 		Version: RuntimeCompatibilityVersion, Architecture: "amd64",
 		DriverVersion: "0.1.0", RunscVersion: "runsc-1", Platform: "systrap",
 		Overlay2: "none", FileAccess: "shared", Command: "/procd",
 		ProcdPort: NomadProcdPort, RuntimeMode: runtimecontrol.ControlModeStatic,
+		SecurityClass: "standard",
 	}
 	tests := map[string]func(*RuntimeCompatibility){
-		"wrong version":         func(profile *RuntimeCompatibility) { profile.Version++ },
-		"spaced architecture":   func(profile *RuntimeCompatibility) { profile.Architecture = " amd64" },
-		"missing runsc version": func(profile *RuntimeCompatibility) { profile.RunscVersion = "" },
-		"wrong command":         func(profile *RuntimeCompatibility) { profile.Command = "/bin/sh" },
-		"wrong port":            func(profile *RuntimeCompatibility) { profile.ProcdPort++ },
-		"wrong mode":            func(profile *RuntimeCompatibility) { profile.RuntimeMode = "watch" },
+		"wrong version":          func(runtimeClass *RuntimeCompatibility) { runtimeClass.Version++ },
+		"spaced architecture":    func(runtimeClass *RuntimeCompatibility) { runtimeClass.Architecture = " amd64" },
+		"missing runsc version":  func(runtimeClass *RuntimeCompatibility) { runtimeClass.RunscVersion = "" },
+		"missing security class": func(runtimeClass *RuntimeCompatibility) { runtimeClass.SecurityClass = "" },
+		"wrong command":          func(runtimeClass *RuntimeCompatibility) { runtimeClass.Command = "/bin/sh" },
+		"wrong port":             func(runtimeClass *RuntimeCompatibility) { runtimeClass.ProcdPort++ },
+		"wrong mode":             func(runtimeClass *RuntimeCompatibility) { runtimeClass.RuntimeMode = "watch" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
-			profile := valid
-			mutate(&profile)
-			if _, err := profile.Digest(); err == nil {
-				t.Fatal("invalid compatibility profile was accepted")
+			runtimeClass := valid
+			mutate(&runtimeClass)
+			if _, err := runtimeClass.Digest(); err == nil {
+				t.Fatal("invalid compatibility class was accepted")
 			}
 		})
 	}

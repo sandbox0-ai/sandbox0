@@ -461,7 +461,7 @@ func lockActiveNomadSandboxNetworkSlot(ctx context.Context, tx pgx.Tx, record *S
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE sandbox_id = $1 AND state <> $2
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, record.ID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: active runtime slot is missing", ErrNomadSandboxNetworkMutationNotReady)
@@ -477,7 +477,7 @@ func lockActiveNomadSandboxNetworkSlot(ctx context.Context, tx pgx.Tx, record *S
 
 func lockRuntimeSlotByID(ctx context.Context, tx pgx.Tx, slotID string) (*RuntimeSlot, error) {
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE slot_id = $1 FOR UPDATE
+		WHERE slot_id = $1 FOR UPDATE OF runtime_slots
 	`, slotID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRuntimeSlotNotFound

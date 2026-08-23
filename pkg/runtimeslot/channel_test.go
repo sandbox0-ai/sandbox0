@@ -191,6 +191,11 @@ func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	if err := hello.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	hello.Capacity.CPUMillicores = MinRuntimeCPUMillicores - 1
+	if err := hello.Validate(); err == nil || !strings.Contains(err.Error(), "cpu_millicores") {
+		t.Fatalf("sub-CFS-minimum capacity error = %v", err)
+	}
+	hello = testNodeChannelHello()
 	if hello.Supports(NodeChannelCommandNetworkPrepare) {
 		t.Fatal("legacy-capability hello advertised network preparation")
 	}
@@ -291,6 +296,14 @@ func testNodeChannelHello() NodeChannelHello {
 		Capabilities: []NodeChannelCommandKind{
 			NodeChannelCommandClaim, NodeChannelCommandCommandReady, NodeChannelCommandCleanup,
 		},
+		Capacity: testNodeChannelCapacity(),
+	}
+}
+
+func testNodeChannelCapacity() NodeChannelCapacity {
+	return NodeChannelCapacity{
+		CPUMillicores: 4_000, MemoryBytes: 8 << 30,
+		CPUSetCPUs: "0-3", CPUSetMems: "0", TTLMilliseconds: DefaultNodeChannelCapacityTTLMilliseconds,
 	}
 }
 

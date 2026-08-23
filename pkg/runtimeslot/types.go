@@ -19,19 +19,21 @@ import (
 )
 
 const (
-	PathPrefix                     = "/internal/v1/runtime-slots/"
-	ProcdCommandReadyProbePath     = "/api/v1/runtime/command-ready-probe"
-	NodeClaimControlPath           = "/claim"
-	NodeCommandReadyControlPath    = "/command-ready"
-	NodeCleanupControlPath         = "/v1/runtime-slots/cleanup"
-	CommandReadyProofVersion       = 1
-	NodeCleanupProofVersion        = 2
-	NomadProcdPort                 = 49983
-	NomadProcdPortLabel            = "procd"
-	NomadTaskName                  = "slot"
-	RuntimeAssignmentRevisionLabel = "sandbox0.ai/runtime-assignment-revision"
-	MaxRuntimeAssignmentBytes      = 64 << 10
-	MaxNetworkPolicyBytes          = 64 << 10
+	PathPrefix                      = "/internal/v1/runtime-slots/"
+	ProcdCommandReadyProbePath      = "/api/v1/runtime/command-ready-probe"
+	NodeClaimControlPath            = "/claim"
+	NodeCommandReadyControlPath     = "/command-ready"
+	NodeCleanupControlPath          = "/v1/runtime-slots/cleanup"
+	CommandReadyProofVersion        = 1
+	legacyNodeCleanupProofVersion   = 2
+	NodeCleanupProofVersion         = 3
+	NomadProcdPort                  = 49983
+	NomadProcdPortLabel             = "procd"
+	NomadTaskName                   = "slot"
+	RuntimeAssignmentRevisionLabel  = "sandbox0.ai/runtime-assignment-revision"
+	RuntimeResourceLeaseDigestLabel = "sandbox0.ai/runtime-resource-lease-digest"
+	MaxRuntimeAssignmentBytes       = 64 << 10
+	MaxNetworkPolicyBytes           = 64 << 10
 
 	readyPathSuffix        = "/ready"
 	heartbeatPathSuffix    = "/heartbeat"
@@ -51,19 +53,21 @@ const (
 // evidence from the regional authority; it is never accepted as a liveness
 // assertion without node-local absence checks.
 type NodeCleanupControlRequest struct {
-	OperationID           string `json:"operation_id"`
-	WriterOperationID     string `json:"writer_operation_id,omitempty"`
-	WriterRetireKind      string `json:"writer_retire_kind,omitempty"`
-	SlotID                string `json:"slot_id"`
-	ClusterID             string `json:"cluster_id"`
-	AllocationID          string `json:"allocation_id"`
-	NodeID                string `json:"node_id"`
-	NodeUID               string `json:"node_uid"`
-	NodeBootID            string `json:"node_boot_id"`
-	NetNSIdentity         string `json:"netns_identity"`
-	RunscContainerID      string `json:"runsc_container_id,omitempty"`
-	WriterGrantID         string `json:"writer_grant_id,omitempty"`
-	WriterAuthorityDigest string `json:"writer_authority_digest,omitempty"`
+	OperationID           string               `json:"operation_id"`
+	WriterOperationID     string               `json:"writer_operation_id,omitempty"`
+	WriterRetireKind      string               `json:"writer_retire_kind,omitempty"`
+	SlotID                string               `json:"slot_id"`
+	ClusterID             string               `json:"cluster_id"`
+	AllocationID          string               `json:"allocation_id"`
+	NodeID                string               `json:"node_id"`
+	NodeUID               string               `json:"node_uid"`
+	NodeBootID            string               `json:"node_boot_id"`
+	NetNSIdentity         string               `json:"netns_identity"`
+	RunscContainerID      string               `json:"runsc_container_id,omitempty"`
+	WriterGrantID         string               `json:"writer_grant_id,omitempty"`
+	WriterAuthorityDigest string               `json:"writer_authority_digest,omitempty"`
+	Resources             RuntimeResourceLease `json:"resources"`
+	ResourceLeaseDigest   string               `json:"resource_lease_digest,omitempty"`
 }
 
 // Validate rejects incomplete or non-canonical node cleanup identities.
@@ -87,6 +91,31 @@ func (r NodeCleanupControlRequest) Validate() error {
 			}
 		}
 	}
+	if r.Resources.IsZero() {
+		if r.ResourceLeaseDigest != "" {
+			return fmt.Errorf("resource lease digest requires a resource lease")
+		}
+	} else {
+		if err := r.Resources.Validate(); err != nil {
+			return fmt.Errorf("resource lease: %w", err)
+		}
+		if r.Resources.SlotID != r.SlotID || r.Resources.ClusterID != r.ClusterID ||
+			r.Resources.NodeID != r.NodeID || r.Resources.NodeUID != r.NodeUID ||
+			r.Resources.NodeBootID != r.NodeBootID {
+			return fmt.Errorf("resource lease does not match cleanup incarnation")
+		}
+		digest, err := r.Resources.Digest()
+		if err != nil {
+			return fmt.Errorf("digest resource lease: %w", err)
+		}
+		expectedDigest := strings.TrimPrefix(digest, "sha256:")
+		if _, err := DecodeProof("resource_lease_digest", r.ResourceLeaseDigest); err != nil {
+			return err
+		}
+		if r.ResourceLeaseDigest != expectedDigest {
+			return fmt.Errorf("resource lease digest does not match cleanup lease")
+		}
+	}
 	if r.WriterGrantID == "" {
 		if r.WriterOperationID != "" || r.WriterRetireKind != "" || r.WriterAuthorityDigest != "" {
 			return fmt.Errorf("writer operation, retirement kind, and authority proof require a writer grant")
@@ -106,6 +135,38 @@ func (r NodeCleanupControlRequest) Validate() error {
 // NodeCleanupControlProof is stable evidence that the exact node incarnation
 // no longer owns runsc, RootFS, or network state.
 type NodeCleanupControlProof struct {
+	Version               int                  `json:"version"`
+	OperationID           string               `json:"operation_id"`
+	WriterOperationID     string               `json:"writer_operation_id,omitempty"`
+	SlotID                string               `json:"slot_id"`
+	ClusterID             string               `json:"cluster_id"`
+	AllocationID          string               `json:"allocation_id"`
+	NodeID                string               `json:"node_id"`
+	NodeUID               string               `json:"node_uid"`
+	NodeBootID            string               `json:"node_boot_id"`
+	NetNSIdentity         string               `json:"netns_identity"`
+	RunscContainerID      string               `json:"runsc_container_id,omitempty"`
+	WriterGrantID         string               `json:"writer_grant_id,omitempty"`
+	WriterRetireKind      string               `json:"writer_retire_kind,omitempty"`
+	WriterAuthorityDigest string               `json:"writer_authority_digest,omitempty"`
+	RootFSOperationID     string               `json:"rootfs_operation_id,omitempty"`
+	RootFSProofDigest     string               `json:"rootfs_proof_digest,omitempty"`
+	Resources             RuntimeResourceLease `json:"resources"`
+	ResourceLeaseID       string               `json:"resource_lease_id,omitempty"`
+	ResourceLeaseDigest   string               `json:"resource_lease_digest,omitempty"`
+	RunscAbsent           bool                 `json:"runsc_absent"`
+	StableMountAbsent     bool                 `json:"stable_mount_absent"`
+	RootFSWriterAbsent    bool                 `json:"rootfs_writer_absent"`
+	NetworkPolicyAbsent   bool                 `json:"network_policy_absent"`
+	ResourceCgroupAbsent  bool                 `json:"resource_cgroup_absent"`
+	ProofDigest           string               `json:"proof_digest"`
+}
+
+// legacyNodeCleanupControlProof preserves the exact version-2 JSON shape so a
+// ctld restart can finish a cleanup proof durably written before resource
+// leasing was deployed. Version 2 is accepted only when every resource field
+// is absent.
+type legacyNodeCleanupControlProof struct {
 	Version               int    `json:"version"`
 	OperationID           string `json:"operation_id"`
 	WriterOperationID     string `json:"writer_operation_id,omitempty"`
@@ -135,11 +196,22 @@ func (p NodeCleanupControlProof) Validate() error {
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	if p.Version != NodeCleanupProofVersion {
+	if p.Version != legacyNodeCleanupProofVersion && p.Version != NodeCleanupProofVersion {
 		return fmt.Errorf("unsupported node cleanup proof version %d", p.Version)
 	}
 	if !p.RunscAbsent || !p.StableMountAbsent || !p.RootFSWriterAbsent || !p.NetworkPolicyAbsent {
 		return fmt.Errorf("node cleanup proof does not establish physical absence")
+	}
+	if p.Version == legacyNodeCleanupProofVersion &&
+		(!p.Resources.IsZero() || p.ResourceLeaseID != "" || p.ResourceLeaseDigest != "" || p.ResourceCgroupAbsent) {
+		return fmt.Errorf("legacy cleanup proof contains resource lease facts")
+	}
+	if p.Resources.IsZero() {
+		if p.ResourceLeaseID != "" || p.ResourceLeaseDigest != "" || p.ResourceCgroupAbsent {
+			return fmt.Errorf("legacy cleanup proof contains resource lease facts")
+		}
+	} else if p.ResourceLeaseID != p.Resources.LeaseID || !p.ResourceCgroupAbsent {
+		return fmt.Errorf("node cleanup proof does not establish resource cgroup absence")
 	}
 	if p.WriterGrantID == "" {
 		if p.RootFSOperationID != "" || p.RootFSProofDigest != "" {
@@ -175,6 +247,7 @@ func (p NodeCleanupControlProof) Request() NodeCleanupControlRequest {
 		NodeID: p.NodeID, NodeUID: p.NodeUID, NodeBootID: p.NodeBootID,
 		NetNSIdentity: p.NetNSIdentity, RunscContainerID: p.RunscContainerID,
 		WriterGrantID: p.WriterGrantID, WriterAuthorityDigest: p.WriterAuthorityDigest,
+		Resources: p.Resources, ResourceLeaseDigest: p.ResourceLeaseDigest,
 	}
 }
 
@@ -190,8 +263,30 @@ func validWriterRetireKind(kind string) bool {
 
 // Digest hashes the cleanup facts without the self-referential ProofDigest.
 func (p NodeCleanupControlProof) Digest() (string, error) {
-	p.ProofDigest = ""
-	payload, err := json.Marshal(p)
+	var value any
+	switch p.Version {
+	case legacyNodeCleanupProofVersion:
+		if !p.Resources.IsZero() || p.ResourceLeaseID != "" || p.ResourceLeaseDigest != "" || p.ResourceCgroupAbsent {
+			return "", fmt.Errorf("legacy cleanup proof contains resource lease facts")
+		}
+		value = legacyNodeCleanupControlProof{
+			Version: p.Version, OperationID: p.OperationID, WriterOperationID: p.WriterOperationID,
+			SlotID: p.SlotID, ClusterID: p.ClusterID, AllocationID: p.AllocationID,
+			NodeID: p.NodeID, NodeUID: p.NodeUID, NodeBootID: p.NodeBootID,
+			NetNSIdentity: p.NetNSIdentity, RunscContainerID: p.RunscContainerID,
+			WriterGrantID: p.WriterGrantID, WriterRetireKind: p.WriterRetireKind,
+			WriterAuthorityDigest: p.WriterAuthorityDigest, RootFSOperationID: p.RootFSOperationID,
+			RootFSProofDigest: p.RootFSProofDigest, RunscAbsent: p.RunscAbsent,
+			StableMountAbsent: p.StableMountAbsent, RootFSWriterAbsent: p.RootFSWriterAbsent,
+			NetworkPolicyAbsent: p.NetworkPolicyAbsent,
+		}
+	case NodeCleanupProofVersion:
+		p.ProofDigest = ""
+		value = p
+	default:
+		return "", fmt.Errorf("unsupported node cleanup proof version %d", p.Version)
+	}
+	payload, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode node cleanup proof: %w", err)
 	}
@@ -211,6 +306,7 @@ type NodeClaimControlRequest struct {
 	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
 	NetworkPolicy string                      `json:"network_policy,omitempty"`
 	Runtime       *runtimecontrol.Assignment  `json:"runtime,omitempty"`
+	Resources     RuntimeResourceLease        `json:"resources"`
 }
 
 // ValidateRegional rejects development-only claims before they reach the
@@ -239,6 +335,21 @@ func (r NodeClaimControlRequest) ValidateRegional() error {
 	}
 	if r.WriterEpoch != strconv.FormatInt(r.Stage.Identity.WriterEpoch, 10) {
 		return fmt.Errorf("writer_epoch does not match stage")
+	}
+	if err := r.Resources.Validate(); err != nil {
+		return fmt.Errorf("resource lease: %w", err)
+	}
+	if r.Resources.OperationID != r.OperationID || r.Resources.ClaimID != r.ClaimID ||
+		r.Resources.SlotID != r.Stage.Identity.SlotNonce ||
+		r.Resources.NodeUID != r.Stage.Identity.NodeUID || r.Resources.NodeBootID != r.Stage.Identity.BootID {
+		return fmt.Errorf("resource lease does not match the regional claim")
+	}
+	resourceDigest, err := r.Resources.Digest()
+	if err != nil {
+		return fmt.Errorf("resource lease digest: %w", err)
+	}
+	if r.Stage.Labels[RuntimeResourceLeaseDigestLabel] != resourceDigest {
+		return fmt.Errorf("resource lease digest does not match stage")
 	}
 	if len(r.NetworkPolicy) > MaxNetworkPolicyBytes {
 		return fmt.Errorf("network policy exceeds 64 KiB")
@@ -504,6 +615,8 @@ type StartingRequest struct {
 	RunscContainerID    string `json:"runsc_container_id"`
 	RootFSBindingDigest string `json:"rootfs_binding_digest"`
 	ClaimNetworkDigest  string `json:"claim_network_digest"`
+	ResourceLeaseID     string `json:"resource_lease_id"`
+	ResourceLeaseDigest string `json:"resource_lease_digest"`
 }
 
 func (r StartingRequest) Validate() error {
@@ -513,6 +626,7 @@ func (r StartingRequest) Validate() error {
 	for name, value := range map[string]string{
 		"operation_id": r.OperationID, "claim_id": r.ClaimID,
 		"launch_attempt": r.LaunchAttempt, "runsc_container_id": r.RunscContainerID,
+		"resource_lease_id": r.ResourceLeaseID,
 	} {
 		if err := validateRequiredID(name, value); err != nil {
 			return err
@@ -521,7 +635,10 @@ func (r StartingRequest) Validate() error {
 	if _, err := DecodeProof("rootfs_binding_digest", r.RootFSBindingDigest); err != nil {
 		return err
 	}
-	_, err := DecodeProof("claim_network_digest", r.ClaimNetworkDigest)
+	if _, err := DecodeProof("claim_network_digest", r.ClaimNetworkDigest); err != nil {
+		return err
+	}
+	_, err := DecodeProof("resource_lease_digest", r.ResourceLeaseDigest)
 	return err
 }
 

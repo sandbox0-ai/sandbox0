@@ -74,6 +74,35 @@ func TestRuntimeSlotJournalPersistsExactCleanupProof(t *testing.T) {
 	require.Error(t, journal.CompleteCleanup(request, changedProof))
 }
 
+func TestRuntimeSlotJournalReplaysLegacyCleanupProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime-slots.db")
+	journal, err := newRuntimeSlotJournal(path, time.Hour)
+	require.NoError(t, err)
+	registration := testRuntimeSlotJournalRegistration(t, "slot-legacy")
+	require.NoError(t, journal.Register(registration))
+	request := testRuntimeSlotJournalCleanup(registration)
+	_, err = journal.BeginCleanup(request)
+	require.NoError(t, err)
+	proof := protocol.NodeCleanupControlProof{
+		Version: 2, OperationID: request.OperationID, SlotID: request.SlotID,
+		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	proof.ProofDigest, err = proof.Digest()
+	require.NoError(t, err)
+	require.NoError(t, journal.CompleteCleanup(request, proof))
+	require.NoError(t, journal.Close())
+
+	journal, err = newRuntimeSlotJournal(path, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	recovered, err := journal.BeginCleanup(request)
+	require.NoError(t, err)
+	require.Equal(t, proof, *recovered.Proof)
+}
+
 func TestRuntimeSlotJournalPrunesOnlyExpiredCompletedProofs(t *testing.T) {
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)

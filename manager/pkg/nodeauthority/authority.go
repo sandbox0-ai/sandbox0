@@ -37,6 +37,7 @@ type Store interface {
 	rootfswriterauthority.LifecycleStore
 	runtimeslotauthority.Store
 	runtimeslotclaim.Store
+	runtimeslotnode.CapacityStore
 	runtimeslotterminal.Store
 	GetRootFSCompositeBacklogUsage(context.Context) (sandboxstore.RootFSCompositeBacklogUsage, error)
 }
@@ -150,7 +151,7 @@ func New(config Config) (*Component, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot authority handler: %w", err)
 	}
-	hub, err := runtimeslotnode.NewChannelHub(verifier)
+	hub, err := runtimeslotnode.NewChannelHub(verifier, config.Store)
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot node channel: %w", err)
 	}

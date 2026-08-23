@@ -83,6 +83,14 @@ var (
 			hclspec.NewAttr("directfs", "bool", false),
 			hclspec.NewLiteral(`true`),
 		),
+		"security_class": hclspec.NewDefault(
+			hclspec.NewAttr("security_class", "string", false),
+			hclspec.NewLiteral(`"standard"`),
+		),
+		"resource_cgroup_root": hclspec.NewDefault(
+			hclspec.NewAttr("resource_cgroup_root", "string", false),
+			hclspec.NewLiteral(`"/sys/fs/cgroup/sandbox0"`),
+		),
 		"dev_smoke_enabled": hclspec.NewAttr("dev_smoke_enabled", "bool", false),
 		"network_policy_enabled": hclspec.NewDefault(
 			hclspec.NewAttr("network_policy_enabled", "bool", false),
@@ -144,6 +152,8 @@ type PluginConfig struct {
 	Overlay2             string `codec:"overlay2"`
 	FileAccess           string `codec:"file_access"`
 	DirectFS             bool   `codec:"directfs"`
+	SecurityClass        string `codec:"security_class"`
+	ResourceCgroupRoot   string `codec:"resource_cgroup_root"`
 	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
 	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
@@ -222,6 +232,8 @@ func defaultPluginConfig() *PluginConfig {
 		Overlay2:                  "none",
 		FileAccess:                "shared",
 		DirectFS:                  true,
+		SecurityClass:             "standard",
+		ResourceCgroupRoot:        protocol.RuntimeResourceCgroupRoot,
 		DevSmokeEnabled:           false,
 		RootFSNodeSocket:          "/run/sandbox0/ctld-nomad-runtime.sock",
 		RuntimeSlotNodeBootIDFile: "/proc/sys/kernel/random/boot_id",
@@ -256,14 +268,26 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.Platform = strings.TrimSpace(decoded.Platform)
 	decoded.Overlay2 = strings.TrimSpace(decoded.Overlay2)
 	decoded.FileAccess = strings.TrimSpace(decoded.FileAccess)
+	decoded.SecurityClass = strings.TrimSpace(decoded.SecurityClass)
+	decoded.ResourceCgroupRoot = strings.TrimSpace(decoded.ResourceCgroupRoot)
 	if decoded.RunscPath == "" || decoded.RunscRoot == "" || decoded.ControlDir == "" || decoded.AllowedRootfsDir == "" {
 		return errors.New("runsc, control, and rootfs paths must be non-empty")
+	}
+	if !filepath.IsAbs(decoded.ResourceCgroupRoot) || filepath.Clean(decoded.ResourceCgroupRoot) != decoded.ResourceCgroupRoot ||
+		decoded.ResourceCgroupRoot == string(filepath.Separator) {
+		return errors.New("resource_cgroup_root must be a canonical non-root absolute path")
+	}
+	if decoded.ResourceCgroupRoot != protocol.RuntimeResourceCgroupRoot {
+		return fmt.Errorf("resource_cgroup_root must be %s", protocol.RuntimeResourceCgroupRoot)
+	}
+	if _, err := runtimeLeaseCgroupsPath(decoded.ResourceCgroupRoot, "s0-config-validation"); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(decoded.RunscPath) || !filepath.IsAbs(decoded.RunscRoot) || !filepath.IsAbs(decoded.ControlDir) || !filepath.IsAbs(decoded.AllowedRootfsDir) {
 		return errors.New("runsc, control, and rootfs paths must be absolute")
 	}
-	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" {
-		return errors.New("platform, overlay2, and file_access cannot be empty")
+	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" || decoded.SecurityClass == "" {
+		return errors.New("platform, overlay2, file_access, and security_class cannot be empty")
 	}
 	if decoded.Overlay2 != "none" {
 		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
@@ -441,20 +465,21 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	}
 
 	handle := newTaskHandle(taskHandleOptions{
-		taskConfig:        config,
-		bundleDir:         bundleDir,
-		containerID:       containerID,
-		rootMount:         rootMount,
-		socketPath:        socketPath,
-		runner:            p.newRunner(*p.config),
-		mounter:           systemMounter{},
-		allowedRoot:       p.config.AllowedRootfsDir,
-		rootfsAllowedRoot: rootfsAllowedRoot,
-		rootfs:            rootfs,
-		network:           p.newNetwork(p.config),
-		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
-		procdPort:         protocol.NomadProcdPort,
-		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
+		taskConfig:         config,
+		bundleDir:          bundleDir,
+		containerID:        containerID,
+		rootMount:          rootMount,
+		socketPath:         socketPath,
+		runner:             p.newRunner(*p.config),
+		mounter:            systemMounter{},
+		allowedRoot:        p.config.AllowedRootfsDir,
+		rootfsAllowedRoot:  rootfsAllowedRoot,
+		resourceCgroupRoot: p.config.ResourceCgroupRoot,
+		rootfs:             rootfs,
+		network:            p.newNetwork(p.config),
+		runtimeSlotNeeded:  p.config.RuntimeSlotEnabled,
+		procdPort:          protocol.NomadProcdPort,
+		logger:             p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
 	if err := handle.Prepare(taskConfig); err != nil {
@@ -546,21 +571,22 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		rootfsAllowedRoot = info.MountRoot
 	}
 	recovered := newTaskHandle(taskHandleOptions{
-		taskConfig:        state.TaskConfig,
-		driverConfig:      taskConfig,
-		bundleDir:         state.BundleDir,
-		containerID:       state.ContainerID,
-		rootMount:         state.RootMount,
-		socketPath:        controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
-		runner:            runner,
-		mounter:           systemMounter{},
-		allowedRoot:       p.config.AllowedRootfsDir,
-		rootfsAllowedRoot: rootfsAllowedRoot,
-		rootfs:            rootfs,
-		network:           p.newNetwork(p.config),
-		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
-		procdPort:         protocol.NomadProcdPort,
-		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
+		taskConfig:         state.TaskConfig,
+		driverConfig:       taskConfig,
+		bundleDir:          state.BundleDir,
+		containerID:        state.ContainerID,
+		rootMount:          state.RootMount,
+		socketPath:         controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
+		runner:             runner,
+		mounter:            systemMounter{},
+		allowedRoot:        p.config.AllowedRootfsDir,
+		rootfsAllowedRoot:  rootfsAllowedRoot,
+		resourceCgroupRoot: p.config.ResourceCgroupRoot,
+		rootfs:             rootfs,
+		network:            p.newNetwork(p.config),
+		runtimeSlotNeeded:  p.config.RuntimeSlotEnabled,
+		procdPort:          protocol.NomadProcdPort,
+		logger:             p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {
 		return err

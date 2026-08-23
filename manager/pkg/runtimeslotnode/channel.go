@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -35,12 +36,22 @@ const (
 // persists messages; exact retry remains anchored in PostgreSQL and the node
 // cleanup journal.
 type ChannelHub struct {
-	verifier nodeauth.Verifier
+	verifier      nodeauth.Verifier
+	capacityStore CapacityStore
 
 	mu      sync.Mutex
 	routes  map[nodeChannelKey]*nodeChannelRoute
 	changed chan struct{}
 	closed  bool
+}
+
+// CapacityStore persists one exact ctld-reported node incarnation before its
+// command route becomes available to a claim planner.
+type CapacityStore interface {
+	RegisterRuntimeNodeCapacity(
+		context.Context,
+		*sandboxstore.RegisterRuntimeNodeCapacityRequest,
+	) (*sandboxstore.RuntimeNodeCapacity, error)
 }
 
 type nodeChannelKey struct {
@@ -87,14 +98,14 @@ var (
 )
 
 // NewChannelHub constructs an authenticated regional node channel registry.
-func NewChannelHub(verifier nodeauth.Verifier) (*ChannelHub, error) {
-	if verifier == nil {
-		return nil, errors.New("runtime slot node channel verifier is required")
+func NewChannelHub(verifier nodeauth.Verifier, capacityStore CapacityStore) (*ChannelHub, error) {
+	if verifier == nil || capacityStore == nil {
+		return nil, errors.New("runtime slot node channel verifier and capacity store are required")
 	}
 	return &ChannelHub{
-		verifier: verifier,
-		routes:   make(map[nodeChannelKey]*nodeChannelRoute),
-		changed:  make(chan struct{}),
+		verifier: verifier, capacityStore: capacityStore,
+		routes:  make(map[nodeChannelKey]*nodeChannelRoute),
+		changed: make(chan struct{}),
 	}, nil
 }
 
@@ -178,6 +189,20 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	if err != nil || !nodeChannelIdentityMatches(identity, hello) {
 		_ = connection.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "node channel identity is invalid"),
+			time.Now().Add(time.Second))
+		_ = connection.Close()
+		return
+	}
+	if _, err := h.capacityStore.RegisterRuntimeNodeCapacity(request.Context(),
+		&sandboxstore.RegisterRuntimeNodeCapacityRequest{
+			ClusterID: hello.ClusterID, NodeID: hello.NodeID, NodeUID: hello.NodeUID,
+			NodeBootID: hello.NodeBootID, CPUMillicores: hello.Capacity.CPUMillicores,
+			MemoryBytes: hello.Capacity.MemoryBytes, CPUSetCPUs: hello.Capacity.CPUSetCPUs,
+			CPUSetMems: hello.Capacity.CPUSetMems,
+			TTL:        time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
+		}); err != nil {
+		_ = connection.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "node capacity registration failed"),
 			time.Now().Add(time.Second))
 		_ = connection.Close()
 		return
@@ -566,7 +591,10 @@ func (h *ChannelHub) dispatch(
 	var reconnectDeadline time.Time
 	var lastTransportErr error
 	for {
-		connection, changed, closed := h.connection(key)
+		connection, changed, closed, routeErr := h.connectionForCommand(key, command.Kind)
+		if routeErr != nil {
+			return protocol.NodeChannelResult{}, routeErr
+		}
 		if closed {
 			return protocol.NodeChannelResult{}, fmt.Errorf("runtime slot node channel hub is closed: %w", errdefs.ErrUnavailable)
 		}
@@ -604,21 +632,54 @@ func (h *ChannelHub) dispatch(
 	}
 }
 
-func (h *ChannelHub) connection(key nodeChannelKey) (*nodeChannelConnection, <-chan struct{}, bool) {
+// connectionForCommand preserves exact-boot routing for every live operation.
+// Cleanup alone may use one authenticated successor boot after the old boot's
+// stream has disappeared: the persistent node journal still binds the request
+// to the old incarnation, while reboot itself guarantees that its processes
+// and cgroups cannot remain live. More than one successor fails closed.
+func (h *ChannelHub) connectionForCommand(
+	key nodeChannelKey,
+	kind protocol.NodeChannelCommandKind,
+) (*nodeChannelConnection, <-chan struct{}, bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, nil, true
+		return nil, nil, true, nil
 	}
 	changed := h.changed
 	route := h.routes[key]
-	if route == nil {
-		return nil, changed, false
+	if route != nil {
+		route.mu.Lock()
+		connection := route.conn
+		route.mu.Unlock()
+		if connection != nil && !connection.isClosed() {
+			return connection, changed, false, nil
+		}
 	}
-	route.mu.Lock()
-	connection := route.conn
-	route.mu.Unlock()
-	return connection, changed, false
+	if kind != protocol.NodeChannelCommandCleanup {
+		return nil, changed, false, nil
+	}
+	var successor *nodeChannelConnection
+	for candidateKey, candidateRoute := range h.routes {
+		if candidateKey.clusterID != key.clusterID || candidateKey.nodeID != key.nodeID ||
+			candidateKey.nodeUID != key.nodeUID || candidateKey.nodeBootID == key.nodeBootID {
+			continue
+		}
+		candidateRoute.mu.Lock()
+		candidate := candidateRoute.conn
+		candidateRoute.mu.Unlock()
+		if candidate == nil || candidate.isClosed() {
+			continue
+		}
+		if successor != nil {
+			return nil, changed, false, fmt.Errorf(
+				"runtime slot cleanup has multiple authenticated successor boots: %w",
+				errdefs.ErrFailedPrecondition,
+			)
+		}
+		successor = candidate
+	}
+	return successor, changed, false, nil
 }
 
 func waitForNodeChannelChange(ctx context.Context, changed <-chan struct{}, deadline time.Time) error {

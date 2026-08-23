@@ -152,7 +152,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE sandbox_id = $1 AND state <> $2
-		FOR UPDATE
+		FOR UPDATE OF runtime_slots
 	`, sandboxID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {
 		if alreadyPaused {

@@ -142,3 +142,9 @@ func validateArtifactSHA256Digest(value digest.Digest) error {
 	}
 	return nil
 }
+
+// ValidateArtifactSHA256Digest rejects digests that cannot participate in an
+// immutable RootFS artifact identity.
+func ValidateArtifactSHA256Digest(value digest.Digest) error {
+	return validateArtifactSHA256Digest(value)
+}

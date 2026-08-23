@@ -171,6 +171,12 @@ func validateProcdProtocol(value string) error {
 	return nil
 }
 
+// ValidateProcdProtocol rejects protocol identities that cannot participate in
+// canonical ready-artifact attestation.
+func ValidateProcdProtocol(value string) error {
+	return validateProcdProtocol(value)
+}
+
 func validateReadyArtifactPlatform(value ReadyArtifactPlatform) error {
 	if value.OS != "linux" || !validPlatformPart(value.Architecture) ||
 		(value.Variant != "" && !validPlatformPart(value.Variant)) {

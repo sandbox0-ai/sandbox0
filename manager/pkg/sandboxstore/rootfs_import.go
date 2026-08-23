@@ -440,6 +440,11 @@ func normalizeRootFSImportWorkerID(value string) (string, error) {
 	return value, nil
 }
 
+// NormalizeRootFSImportWorkerID rejects non-canonical lease owner identities.
+func NormalizeRootFSImportWorkerID(value string) (string, error) {
+	return normalizeRootFSImportWorkerID(value)
+}
+
 func validateRootFSImportLeaseTTL(value time.Duration) error {
 	if value < MinRootFSImportLeaseTTL || value > MaxRootFSImportLeaseTTL || value%time.Millisecond != 0 {
 		return fmt.Errorf("rootfs import lease TTL must be a whole millisecond within %s..%s",

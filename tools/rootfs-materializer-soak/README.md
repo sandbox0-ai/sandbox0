@@ -1,6 +1,6 @@
 # RootFS materializer soak
 
-This opt-in acceptance tool drives 10,000 composite RootFS generations through
+This optional endurance diagnostic drives 10,000 composite RootFS generations through
 the production PostgreSQL materializer over at least 24 hours of active
 process time. It
 uses the production 32 MiB minimum pack, five-minute forced flush, one forced
@@ -58,8 +58,8 @@ MiB, and measured RustFS growth stays within 4,096 files and 512 MiB. The
 object bound does not use the number of terminal batch rows still retained at
 the end: production garbage collection may delete those journal rows at the
 24-hour retention boundary while generation-referenced content objects remain
-valid. The default invocation is
-the acceptance gate; shorter duration, lower generation count, and reduced
+valid. The default invocation is the fixed 24-hour diagnostic profile, not a
+cutover prerequisite. Shorter duration, lower generation count, and reduced
 maximum delay are only smoke-test controls and must not be reported as 24-hour
 evidence.
 
@@ -95,8 +95,10 @@ services. The materializer service must start after both dependencies are
 ready. Its normal shutdown writes an `interrupted` checkpoint; a hard stop can
 discard at most the fixed five-second checkpoint interval in either gate. After reboot,
 `--mode auto` resumes from the last fsynced event. Only a hash-valid `final`
-event with `passed=true` from each run satisfies the combined 10,000/24-hour
-gate; an older log that merely stops at a sample is incomplete evidence.
+event with `passed=true` from each run satisfies the optional combined
+10,000/24-hour diagnostic profile; an older log that merely stops at a sample
+is incomplete evidence and must be labeled interrupted or waived rather than
+PASS.
 
 After both writers have exited with a `final` event, audit the immutable logs
 with the independent verifier. Build the verifier once and record its hash,

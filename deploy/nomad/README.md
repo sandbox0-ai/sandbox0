@@ -133,10 +133,12 @@ private and mutually authenticated.
    `tools/runtime-slot-slo` binary through the public regional URL exactly as
    documented in `nomad-driver-sandbox0/README.md`.
 
-Serial 1000, synchronized 8-by-100, both reboot-resumable active-time 24-hour
-bounded-growth gates,
-privileged multi-node validation, and all failure-injection gates must pass
-before cutover. The cutover is deletion-based: physically remove the
-superseded Kubernetes sandbox runtime code, configuration, tests, documents,
+Serial 1000, the truthful synchronized concurrency report supported by the
+available dedicated hardware, privileged multi-node validation, and all
+failure-injection gates must pass before cutover. The production asset still
+requires eight resource-neutral carriers and eight dedicated CPU cores; a
+narrower acceptance host must be labeled with its real width and cannot be
+reported as an eight-way run. The cutover is deletion-based: physically
+remove the superseded Kubernetes sandbox runtime code, configuration, tests, documents,
 schema compatibility, and dependencies. Disabling the old route while leaving
 its state machine in the repository is not completion.

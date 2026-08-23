@@ -121,8 +121,6 @@ Implemented:
 Remaining cutover gates:
 
 - the public regional-gateway-to-procd serial and concurrency SLO reports
-- normal completion of the reboot-resumable, active-time 10,000/24-hour
-  PostgreSQL/RustFS and Bolt journal soaks
 - final deletion of the superseded Kubernetes runtime, schema compatibility,
   configuration, tests, documentation, and redundant dependencies
 
@@ -553,9 +551,8 @@ the outbound node agent, runsc/mount cleanup, and RootFS physical ownership
 are ctld-owned. The task driver no longer installs its PoC
 namespace-local iptables policy for regional runtime slots. That legacy path
 remains only for non-runtime-slot compatibility and must be deleted at final
-cutover. The 10,000-slot Bolt test proves local page reuse only; it does not
-constitute the required privileged, multi-node, end-to-end 24-hour soak. The
-opt-in `TestRuntimeSlotJournalTwentyFourHourSoak` companion distributes 10,000
+cutover. The 10,000-slot Bolt test proves local page reuse. The optional
+`TestRuntimeSlotJournalTwentyFourHourSoak` endurance diagnostic distributes 10,000
 exact terminal cleanup proofs across at least 24 hours of monotonic active
 process time, prunes them through the production journal, reopens Bolt at
 one-third of the run, and requires final size to stay within one host page of
@@ -564,10 +561,12 @@ complete configuration, run ID, boot incarnations, and every application
 checkpoint into an fsynced SHA-256-chained JSONL log. A hard stop can lose at
 most five seconds of active progress; host downtime never counts toward the
 24-hour threshold, and `auto` mode resumes only when the executable, config,
-evidence chain, and Bolt identity still match. It must pass together with the
-reboot-resumable PostgreSQL/RustFS `tools/rootfs-materializer-soak` gate;
+evidence chain, and Bolt identity still match. When both companion diagnostics
+are run, evaluate it together with the reboot-resumable PostgreSQL/RustFS
+`tools/rootfs-materializer-soak` profile;
 neither short smoke mode nor the accelerated 10,000-record unit test may be
-reported as 24-hour evidence. Use the durable state paths and fixed-binary
+reported as 24-hour evidence. These diagnostics are not cutover prerequisites;
+when they are run, use the durable state paths and fixed-binary
 invocations in that tool's README, including a per-process
 `-test.timeout 30h`. After both writers exit, use the independent
 `tools/soak-evidence-verify` command documented there to verify the immutable

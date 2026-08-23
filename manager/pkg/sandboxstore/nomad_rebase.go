@@ -827,5 +827,6 @@ func cloneRootFSBaseArtifact(artifact *RootFSBaseArtifact) *RootFSBaseArtifact {
 	}
 	clone := *artifact
 	clone.Descriptor = append([]byte(nil), artifact.Descriptor...)
+	clone.Attestation = append([]byte(nil), artifact.Attestation...)
 	return &clone
 }

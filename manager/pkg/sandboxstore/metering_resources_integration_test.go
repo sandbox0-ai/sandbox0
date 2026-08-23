@@ -6,14 +6,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNomadMeteringMigrationDownAndUpIntegration(t *testing.T) {
 	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
+	pool := newSandboxStoreIntegrationPoolThrough(t, "00041")
 	record := rootFSTestSandboxRecord("sandbox-metering-migration", "team-metering")
 	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.ClaimedAt = time.Now().UTC()
@@ -25,7 +24,7 @@ func TestNomadMeteringMigrationDownAndUpIntegration(t *testing.T) {
 	require.Error(t, err)
 
 	require.NoError(t, migrate.Down(ctx, pool, ".",
-		migrate.WithBaseFS(storemigrations.FS),
+		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00041")),
 		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
 		migrate.WithSchema(sandboxStoreSchemaName),
 	))
@@ -37,7 +36,11 @@ func TestNomadMeteringMigrationDownAndUpIntegration(t *testing.T) {
 	`).Scan(&queueExists))
 	require.False(t, queueExists)
 
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	require.NoError(t, migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00041")),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
 	assertSandboxStoreColumnExists(t, ctx, pool, "resource_millicpu", true)
 	assertSandboxStoreColumnExists(t, ctx, pool, "resource_memory_mib", true)
 	require.NoError(t, pool.QueryRow(ctx, `

@@ -43,7 +43,7 @@ type JournaledPublisher struct {
 
 // PutImmutable implements rootfsblock.ImmutableObjectPublisher.
 func (p JournaledPublisher) PutImmutable(ctx context.Context, key string, payload []byte) error {
-	operationID, err := validateImportOperationID(p.OperationID)
+	operationID, err := NormalizeOperationID(p.OperationID)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,8 @@ func publicationReference(key string, payload []byte) (rootfsblock.ObjectReferen
 	return reference, nil
 }
 
-func validateImportOperationID(value string) (string, error) {
+// NormalizeOperationID rejects non-canonical durable operation identities.
+func NormalizeOperationID(value string) (string, error) {
 	if value == "" || value != strings.TrimSpace(value) || len(value) > 128 {
 		return "", fmt.Errorf("RootFS import operation ID must contain 1..128 canonical bytes")
 	}

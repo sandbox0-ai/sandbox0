@@ -127,6 +127,12 @@ func pinnedSourceDigest(reference string) (digest.Digest, error) {
 	return value, nil
 }
 
+// PinnedSourceDigest returns the canonical SHA-256 digest bound by a
+// normalized OCI reference.
+func PinnedSourceDigest(reference string) (digest.Digest, error) {
+	return pinnedSourceDigest(reference)
+}
+
 func validateArtifactSHA256Digest(value digest.Digest) error {
 	if err := value.Validate(); err != nil {
 		return err

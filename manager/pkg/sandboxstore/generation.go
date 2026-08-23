@@ -63,11 +63,18 @@ type RootFSBaseArtifact struct {
 	ArtifactDigest   string
 	SourceOCIRef     string
 	SourceOCIDigest  string
+	ManifestDigest   string
+	ConfigDigest     string
 	BaseBlockRoot    string
 	FormatGeneration int
 	Platform         RootFSArtifactPlatform
+	ProcdProtocol    string
+	ProcdDigest      string
+	LogicalSizeBytes int64
+	DescriptorDigest string
 	State            string
 	Descriptor       []byte
+	Attestation      []byte
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -991,7 +998,11 @@ func rootFSBaseArtifactSelectSQL() string {
 	return `
 		SELECT artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
 			format_generation, COALESCE(oci_os, ''), COALESCE(oci_architecture, ''),
-			COALESCE(oci_variant, ''), state, descriptor, created_at, updated_at
+			COALESCE(oci_variant, ''), state, descriptor,
+			COALESCE(attestation, ''::bytea), COALESCE(manifest_digest, ''),
+			COALESCE(config_digest, ''), COALESCE(procd_protocol, ''),
+			COALESCE(procd_digest, ''), COALESCE(logical_size_bytes, 0),
+			COALESCE(descriptor_digest, ''), created_at, updated_at
 		FROM manager.rootfs_base_artifacts `
 }
 
@@ -1008,11 +1019,14 @@ func scanRootFSBaseArtifact(row sandboxRecordScanner) (*RootFSBaseArtifact, erro
 	if err := row.Scan(&artifact.ArtifactDigest, &artifact.SourceOCIRef, &artifact.SourceOCIDigest,
 		&artifact.BaseBlockRoot, &artifact.FormatGeneration, &artifact.Platform.OS,
 		&artifact.Platform.Architecture, &artifact.Platform.Variant,
-		&artifact.State, &artifact.Descriptor,
+		&artifact.State, &artifact.Descriptor, &artifact.Attestation,
+		&artifact.ManifestDigest, &artifact.ConfigDigest, &artifact.ProcdProtocol,
+		&artifact.ProcdDigest, &artifact.LogicalSizeBytes, &artifact.DescriptorDigest,
 		&artifact.CreatedAt, &artifact.UpdatedAt); err != nil {
 		return nil, err
 	}
 	artifact.Descriptor = append([]byte(nil), artifact.Descriptor...)
+	artifact.Attestation = append([]byte(nil), artifact.Attestation...)
 	return &artifact, nil
 }
 

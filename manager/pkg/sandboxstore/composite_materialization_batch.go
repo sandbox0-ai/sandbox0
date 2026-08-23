@@ -810,6 +810,14 @@ func releaseUnreferencedRootFSMaterializationObject(
 				SELECT 1 FROM manager.rootfs_generation_materialization_objects locator_object
 				WHERE locator_object.object_key = object_record.object_key
 			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_import_operation_objects import_object
+				WHERE import_object.object_key = object_record.object_key
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_base_artifact_objects artifact_object
+				WHERE artifact_object.object_key = object_record.object_key
+			)
 		RETURNING uploaded_at
 	`, objectKey).Scan(&uploadedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

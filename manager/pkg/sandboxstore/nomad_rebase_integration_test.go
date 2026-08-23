@@ -25,12 +25,18 @@ type nomadPausedRebaseStoreFixture struct {
 func TestRebaseWorkerIdentityMigrationAbortsLegacyActiveOperationIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPoolThrough(t, "00034")
-	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-rebase-worker-migration", "team-rebase")
 	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.DesiredState = SandboxDesiredStatePaused
-	require.NoError(t, store.UpsertSandbox(ctx, record))
 	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.sandboxes (
+			sandbox_id, team_id, user_id, template_id, template_name,
+			template_namespace, runtime_backend, desired_state, config, template_spec
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '{}'::jsonb)
+	`, record.ID, record.TeamID, record.UserID, record.TemplateID,
+		record.TemplateName, record.TemplateNamespace, record.RuntimeBackend, record.DesiredState)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
 		INSERT INTO manager.sandbox_lifecycle_txns (
 			txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
 			from_generation, to_generation, target_generation_id,

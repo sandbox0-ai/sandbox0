@@ -188,7 +188,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	validSlotState := slot.State == RuntimeSlotStateActive || alreadyPaused &&
 		(slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned)
 	activeBindingMatches := alreadyPaused ||
-		(slot.AllocationID == record.CurrentPodName && slot.AllocationNamespace == record.CurrentPodNamespace)
+		(slot.AllocationID == record.RuntimeID && slot.AllocationNamespace == record.RuntimeNamespace)
 	if !validSlotState || slot.ClaimOperationID != claim.OperationID ||
 		slot.ClaimID == "" || slot.WriterGrantID == "" || !activeBindingMatches || slot.ClusterID != record.ClusterID {
 		return nil, fmt.Errorf("%w: active runtime slot does not match the sandbox claim", ErrNomadSandboxPauseNotReady)
@@ -206,7 +206,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		grant.SandboxID != sandboxID || grant.ClaimID != slot.ClaimID || grant.SlotID != slot.ID ||
 		grant.FilesystemID != slot.FilesystemID || grant.InitialGenerationID != slot.SourceGenerationID ||
 		grant.NodeUID != slot.NodeUID || grant.NodeBootID != slot.NodeBootID ||
-		grant.PodNamespace != slot.AllocationNamespace || grant.PodUID != slot.AllocationID ||
+		grant.RuntimeNamespace != slot.AllocationNamespace || grant.RuntimeIncarnationID != slot.AllocationID ||
 		grant.NodeName != slot.NodeID || grant.GateParent == "" {
 		return nil, fmt.Errorf("%w: writer grant does not match the active runtime", ErrNomadSandboxPauseNotReady)
 	}
@@ -245,8 +245,8 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 			lifecycle = &SandboxLifecycleTxn{
 				ID: operationID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
 				Phase: SandboxLifecyclePhasePreparing, Source: source, Cancelable: false,
-				FromGeneration: record.RuntimeGeneration, FromPodNamespace: record.CurrentPodNamespace,
-				FromPodName: record.CurrentPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+				FromGeneration: record.RuntimeGeneration, FromRuntimeNamespace: record.RuntimeNamespace,
+				FromRuntimeID: record.RuntimeID, ExpectedHeadLayerID: grant.InitialGenerationID,
 			}
 			if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 				return nil, fmt.Errorf("begin Nomad planned pause lifecycle: %w", err)
@@ -289,8 +289,8 @@ func nomadCommittedPlannedPauseLifecycleMatches(
 		txn.Kind == SandboxLifecycleKindPause &&
 		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto) &&
 		!txn.Cancelable && txn.CancelRequestedAt.IsZero() && txn.Phase == SandboxLifecyclePhaseCommitted &&
-		txn.FromGeneration == record.RuntimeGeneration && txn.FromPodNamespace == slot.AllocationNamespace &&
-		txn.FromPodName == slot.AllocationID && txn.ExpectedHeadLayerID == grant.InitialGenerationID &&
+		txn.FromGeneration == record.RuntimeGeneration && txn.FromRuntimeNamespace == slot.AllocationNamespace &&
+		txn.FromRuntimeID == slot.AllocationID && txn.ExpectedHeadLayerID == grant.InitialGenerationID &&
 		txn.PreparedHeadLayerID != ""
 }
 
@@ -310,6 +310,6 @@ func nomadPlannedPauseLifecycleMatches(
 		(txn.Phase == SandboxLifecyclePhasePreparing || txn.Phase == SandboxLifecyclePhaseBarriered ||
 			txn.Phase == SandboxLifecyclePhasePublishing || txn.Phase == SandboxLifecyclePhaseCommitting) &&
 		txn.FromGeneration == record.RuntimeGeneration &&
-		txn.FromPodNamespace == record.CurrentPodNamespace && txn.FromPodName == record.CurrentPodName &&
+		txn.FromRuntimeNamespace == record.RuntimeNamespace && txn.FromRuntimeID == record.RuntimeID &&
 		txn.ExpectedHeadLayerID == grant.InitialGenerationID && txn.PreparedHeadLayerID == ""
 }

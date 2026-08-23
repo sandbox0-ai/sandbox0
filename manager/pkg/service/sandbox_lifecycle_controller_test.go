@@ -352,12 +352,12 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 		credentialStore: store,
 		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID:                  "sandbox-a",
-				TeamID:              "team-a",
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
-				CurrentPodNamespace: "ns-a",
-				CurrentPodName:      "pod-new",
-				RuntimeGeneration:   2,
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
+				RuntimeNamespace:  "ns-a",
+				RuntimeID:         "pod-new",
+				RuntimeGeneration: 2,
 			},
 		}},
 		logger: zap.NewNop(),
@@ -388,7 +388,7 @@ func TestRuntimeDeletionDispositionDoesNotCacheStaleRuntime(t *testing.T) {
 			"sandbox-a": {
 				ID:                "sandbox-a",
 				DesiredState:      sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName:    "pod-new",
+				RuntimeID:         "pod-new",
 				RuntimeGeneration: 2,
 			},
 		}},

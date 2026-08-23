@@ -239,8 +239,8 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				return nil, fmt.Errorf("create runtime pod: %w", err)
 			}
 		}
-		txn.ToPodNamespace = pod.Namespace
-		txn.ToPodName = pod.Name
+		txn.ToRuntimeNamespace = pod.Namespace
+		txn.ToRuntimeID = pod.Name
 		if err := s.recordResumeLifecycleRuntime(ctx, record.ID, txn, pod); err != nil {
 			s.requestSandboxDeletionAfterClaimFailure(pod, "restored runtime transaction update failed")
 			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())

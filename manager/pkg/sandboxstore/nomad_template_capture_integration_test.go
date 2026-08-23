@@ -56,7 +56,7 @@ func TestNomadRunningTemplateCapturePublishesExactSnapshotIntegration(t *testing
 	_, err = fixture.pool.Exec(fixture.ctx, `
 		UPDATE manager.sandboxes
 		SET runtime_generation = runtime_generation + 1,
-			current_pod_name = 'replacement-allocation'
+			runtime_id = 'replacement-allocation'
 		WHERE sandbox_id = $1
 	`, source.ID)
 	require.NoError(t, err)

@@ -201,8 +201,8 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 	pod.Status.HostIP = ctldURL.Hostname()
 	markRuntimeIdentityPodReady(t, pod)
 	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now)
-	source.CurrentPodNamespace = pod.Namespace
-	source.CurrentPodName = pod.Name
+	source.RuntimeNamespace = pod.Namespace
+	source.RuntimeID = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
@@ -240,8 +240,8 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, sourceRecord.DesiredState)
-	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
-	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
+	assert.Equal(t, pod.Name, sourceRecord.RuntimeID)
+	assert.Equal(t, pod.Namespace, sourceRecord.RuntimeNamespace)
 	assert.Equal(t, 0, store.pauses)
 
 	sourceState := store.rootFSStates["sandbox-1"]
@@ -292,8 +292,8 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	pod.Status.HostIP = ctldURL.Hostname()
 	markRuntimeIdentityPodReady(t, pod)
 	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now)
-	source.CurrentPodNamespace = pod.Namespace
-	source.CurrentPodName = pod.Name
+	source.RuntimeNamespace = pod.Namespace
+	source.RuntimeID = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
@@ -331,8 +331,8 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, sourceRecord.DesiredState)
-	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
-	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
+	assert.Equal(t, pod.Name, sourceRecord.RuntimeID)
+	assert.Equal(t, pod.Namespace, sourceRecord.RuntimeNamespace)
 	assert.Equal(t, 0, store.pauses)
 
 	sourceState := store.rootFSStates["sandbox-1"]

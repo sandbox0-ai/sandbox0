@@ -191,18 +191,18 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
 	svc.sandboxStore = &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
-			ID:                  "sandbox-1",
-			TeamID:              "team-1",
-			UserID:              "user-1",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			DesiredState:        sandboxstore.SandboxDesiredStatePaused,
-			Config:              sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
-			CurrentPodName:      pod.Name,
-			CurrentPodNamespace: pod.Namespace,
-			RuntimeGeneration:   3,
-			ExpiresAt:           time.Date(2026, time.March, 7, 12, 5, 0, 0, time.UTC),
+			ID:                "sandbox-1",
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
+			Config:            sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
+			RuntimeID:         pod.Name,
+			RuntimeNamespace:  pod.Namespace,
+			RuntimeGeneration: 3,
+			ExpiresAt:         time.Date(2026, time.March, 7, 12, 5, 0, 0, time.UTC),
 		},
 	}}
 
@@ -239,17 +239,17 @@ func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testin
 			svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
 			store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 				"sandbox-1": {
-					ID:                  "sandbox-1",
-					TeamID:              "team-1",
-					UserID:              "user-1",
-					TemplateID:          "default",
-					TemplateName:        "default",
-					TemplateNamespace:   "tpl-default",
-					DesiredState:        desiredState,
-					Config:              sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
-					CurrentPodName:      pod.Name,
-					CurrentPodNamespace: pod.Namespace,
-					RuntimeGeneration:   3,
+					ID:                "sandbox-1",
+					TeamID:            "team-1",
+					UserID:            "user-1",
+					TemplateID:        "default",
+					TemplateName:      "default",
+					TemplateNamespace: "tpl-default",
+					DesiredState:      desiredState,
+					Config:            sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
+					RuntimeID:         pod.Name,
+					RuntimeNamespace:  pod.Namespace,
+					RuntimeGeneration: 3,
 				},
 			}}
 			svc.sandboxStore = store
@@ -378,7 +378,7 @@ func TestUpdateActiveNomadSandboxPersistsControlPlaneFieldsOnly(t *testing.T) {
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": {
 				ID: "sandbox-1", TeamID: "team-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-1",
+				DesiredState: sandboxstore.SandboxDesiredStateActive, RuntimeID: "allocation-1",
 				Config:    sandboxstore.SandboxConfig{TTL: &ttl, HardTTL: &hardTTL, AutoResume: &autoResume},
 				ExpiresAt: now.Add(time.Minute), HardExpiresAt: now.Add(2 * time.Minute),
 			},

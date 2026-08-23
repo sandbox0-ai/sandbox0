@@ -135,8 +135,8 @@ func (f fakeTx) CompleteRootFSWriterCrashAbandon(
 		f.store.lifecycle.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 		if f.store.record.DesiredState == sandboxstore.SandboxDesiredStateActive {
 			f.store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-			f.store.record.CurrentPodNamespace = ""
-			f.store.record.CurrentPodName = ""
+			f.store.record.RuntimeNamespace = ""
+			f.store.record.RuntimeID = ""
 		}
 	}
 	if grant.State != sandboxstore.RootFSWriterGrantStateRetired ||
@@ -238,8 +238,8 @@ func TestControllerFencesConsumedWriterDuringExplicitTermination(t *testing.T) {
 		t.Fatal(err)
 	}
 	if store.lifecycle == nil || store.lifecycle.SandboxID != store.record.ID ||
-		store.lifecycle.FromPodName != store.record.CurrentPodName ||
-		store.lifecycle.FromPodNamespace != store.record.CurrentPodNamespace {
+		store.lifecycle.FromRuntimeID != store.record.RuntimeID ||
+		store.lifecycle.FromRuntimeNamespace != store.record.RuntimeNamespace {
 		t.Fatalf("termination lifecycle = %+v", store.lifecycle)
 	}
 	_, err = controller.Complete(context.Background(), runtimeslotreconciler.WriterCompleteRequest{
@@ -251,7 +251,7 @@ func TestControllerFencesConsumedWriterDuringExplicitTermination(t *testing.T) {
 		t.Fatal(err)
 	}
 	if store.record.DesiredState != sandboxstore.SandboxDesiredStateTerminating ||
-		store.record.CurrentPodNamespace != "default" || store.record.CurrentPodName != "allocation-1" {
+		store.record.RuntimeNamespace != "default" || store.record.RuntimeID != "allocation-1" {
 		t.Fatalf("terminating record changed during writer retirement: %+v", store.record)
 	}
 }
@@ -323,7 +323,7 @@ func TestControllerRejectsAnotherLifecycleAndChangedProof(t *testing.T) {
 
 func TestControllerRequiresSandboxRuntimeToMatchAllocation(t *testing.T) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
-	store.record.CurrentPodName = "another-allocation"
+	store.record.RuntimeID = "another-allocation"
 	_, err := controller.Fence(context.Background(), request)
 	if err == nil || store.beginCalls != 0 || store.lifecycle != nil {
 		t.Fatalf("Fence() = %v, begin calls %d, lifecycle %+v", err, store.beginCalls, store.lifecycle)
@@ -332,8 +332,8 @@ func TestControllerRequiresSandboxRuntimeToMatchAllocation(t *testing.T) {
 
 func TestControllerFencesConsumedWriterForAbandonedInitialClaim(t *testing.T) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
-	store.record.CurrentPodNamespace = ""
-	store.record.CurrentPodName = ""
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
 	store.claim = &sandboxstore.SandboxRuntimeClaim{
 		SandboxID: store.record.ID, OperationID: "claim-operation-1",
 		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
@@ -343,16 +343,16 @@ func TestControllerFencesConsumedWriterForAbandonedInitialClaim(t *testing.T) {
 		t.Fatalf("Fence() error = %v", err)
 	}
 	if len(fence.ProofDigest) != 32 || store.lifecycle == nil ||
-		store.lifecycle.FromPodNamespace != store.grant.PodNamespace ||
-		store.lifecycle.FromPodName != store.grant.PodUID {
+		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
+		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
 		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
 	}
 }
 
 func TestControllerRejectsUnfencedInitialClaimWithoutRuntimeBinding(t *testing.T) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
-	store.record.CurrentPodNamespace = ""
-	store.record.CurrentPodName = ""
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
 	store.claim = &sandboxstore.SandboxRuntimeClaim{
 		SandboxID: store.record.ID, OperationID: "claim-operation-1",
 		Phase: sandboxstore.SandboxRuntimeClaimPhaseClaiming,
@@ -373,14 +373,14 @@ func newFixture(
 		SlotID: "slot-1", IssueOperationID: "issue-1", WriterEpoch: 9, State: state,
 		InitialGenerationID: "generation-1", BindingVersion: sandboxstore.RootFSWriterBindingVersion,
 		BindingDigest: bytes.Repeat([]byte{0x61}, 32), NodeUID: "node-1", NodeBootID: "boot-1",
-		PodNamespace: "default", PodName: "slot", PodUID: "allocation-1", NodeName: "nomad-node-1",
+		RuntimeNamespace: "default", RuntimeID: "slot", RuntimeIncarnationID: "allocation-1", NodeName: "nomad-node-1",
 		RuntimeGeneration: "7",
 	}
 	store := &fakeStore{
 		grant: grant,
 		record: &sandboxstore.SandboxRecord{
 			ID: grant.SandboxID, DesiredState: sandboxstore.SandboxDesiredStateActive,
-			RuntimeGeneration: 7, CurrentPodNamespace: grant.PodNamespace, CurrentPodName: grant.PodUID,
+			RuntimeGeneration: 7, RuntimeNamespace: grant.RuntimeNamespace, RuntimeID: grant.RuntimeIncarnationID,
 		},
 	}
 	controller, err := New(store)

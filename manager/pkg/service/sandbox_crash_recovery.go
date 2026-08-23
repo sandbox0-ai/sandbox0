@@ -182,15 +182,15 @@ func beginCrashRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, 
 		return fmt.Errorf("sandbox runtime identity changed before crash recovery")
 	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
-		ID:               uuid.NewString(),
-		SandboxID:        record.ID,
-		Kind:             sandboxstore.SandboxLifecycleKindPause,
-		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-		Source:           sandboxstore.SandboxLifecycleSourceCrash,
-		Cancelable:       false,
-		FromGeneration:   runtimeGenerationFromPod(pod),
-		FromPodNamespace: pod.Namespace,
-		FromPodName:      pod.Name,
+		ID:                   uuid.NewString(),
+		SandboxID:            record.ID,
+		Kind:                 sandboxstore.SandboxLifecycleKindPause,
+		Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:               sandboxstore.SandboxLifecycleSourceCrash,
+		Cancelable:           false,
+		FromGeneration:       runtimeGenerationFromPod(pod),
+		FromRuntimeNamespace: pod.Namespace,
+		FromRuntimeID:        pod.Name,
 	})
 }
 
@@ -206,15 +206,15 @@ func beginHealthRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx,
 		return fmt.Errorf("sandbox runtime identity changed before health recovery")
 	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
-		ID:               uuid.NewString(),
-		SandboxID:        record.ID,
-		Kind:             sandboxstore.SandboxLifecycleKindPause,
-		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-		Source:           sandboxstore.SandboxLifecycleSourceHealth,
-		Cancelable:       false,
-		FromGeneration:   runtimeGenerationFromPod(pod),
-		FromPodNamespace: pod.Namespace,
-		FromPodName:      pod.Name,
+		ID:                   uuid.NewString(),
+		SandboxID:            record.ID,
+		Kind:                 sandboxstore.SandboxLifecycleKindPause,
+		Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:               sandboxstore.SandboxLifecycleSourceHealth,
+		Cancelable:           false,
+		FromGeneration:       runtimeGenerationFromPod(pod),
+		FromRuntimeNamespace: pod.Namespace,
+		FromRuntimeID:        pod.Name,
 	})
 }
 
@@ -222,8 +222,8 @@ func sandboxRecordReferencesPod(record *sandboxstore.SandboxRecord, pod *corev1.
 	if record == nil || pod == nil {
 		return false
 	}
-	if strings.TrimSpace(record.CurrentPodNamespace) != strings.TrimSpace(pod.Namespace) ||
-		strings.TrimSpace(record.CurrentPodName) != strings.TrimSpace(pod.Name) {
+	if strings.TrimSpace(record.RuntimeNamespace) != strings.TrimSpace(pod.Namespace) ||
+		strings.TrimSpace(record.RuntimeID) != strings.TrimSpace(pod.Name) {
 		return false
 	}
 	return record.RuntimeGeneration == runtimeGenerationFromPod(pod)
@@ -242,8 +242,8 @@ func runtimeRecoveryTxnReferencesPod(txn *sandboxstore.SandboxLifecycleTxn, pod 
 		return false
 	}
 	return txn.FromGeneration == runtimeGenerationFromPod(pod) &&
-		strings.TrimSpace(txn.FromPodNamespace) == strings.TrimSpace(pod.Namespace) &&
-		strings.TrimSpace(txn.FromPodName) == strings.TrimSpace(pod.Name)
+		strings.TrimSpace(txn.FromRuntimeNamespace) == strings.TrimSpace(pod.Namespace) &&
+		strings.TrimSpace(txn.FromRuntimeID) == strings.TrimSpace(pod.Name)
 }
 
 func sandboxCrashRecoveryPodEligible(pod *corev1.Pod) bool {

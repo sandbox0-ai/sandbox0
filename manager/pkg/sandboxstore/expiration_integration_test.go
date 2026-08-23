@@ -8,36 +8,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestListSandboxExpirationCandidatesFiltersBackendStateAndLifecycleIntegration(t *testing.T) {
+func TestListSandboxExpirationCandidatesFiltersStateAndLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	now := time.Date(2026, time.August, 21, 12, 10, 0, 0, time.UTC)
-	record := func(id, backend, state string, soft, hard time.Time) *SandboxRecord {
+	record := func(id, state string, soft, hard time.Time) *SandboxRecord {
 		return &SandboxRecord{
 			ID: id, TeamID: "team-expiry", UserID: "user-expiry",
 			TemplateID: "template-expiry", TemplateName: "template-expiry",
 			TemplateNamespace: "template-default", ClusterID: "cluster-a",
-			RuntimeBackend: backend, DesiredState: state,
-			ExpiresAt: soft, HardExpiresAt: hard, CreatedAt: now.Add(-time.Hour),
+			DesiredState: state,
+			ExpiresAt:    soft, HardExpiresAt: hard, CreatedAt: now.Add(-time.Hour),
 		}
 	}
 	records := []*SandboxRecord{
-		record("hard-active", SandboxRuntimeBackendNomad, SandboxDesiredStateActive,
+		record("hard-active", SandboxDesiredStateActive,
 			now.Add(-time.Minute), now.Add(-2*time.Second)),
-		record("hard-paused", SandboxRuntimeBackendNomad, SandboxDesiredStatePaused,
+		record("hard-paused", SandboxDesiredStatePaused,
 			time.Time{}, now.Add(-time.Second)),
-		record("soft-active", SandboxRuntimeBackendNomad, SandboxDesiredStateActive,
+		record("soft-active", SandboxDesiredStateActive,
 			now.Add(-3*time.Second), now.Add(time.Hour)),
-		record("soft-blocked", SandboxRuntimeBackendNomad, SandboxDesiredStateActive,
+		record("soft-blocked", SandboxDesiredStateActive,
 			now.Add(-2*time.Second), time.Time{}),
-		record("soft-paused", SandboxRuntimeBackendNomad, SandboxDesiredStatePaused,
+		record("soft-paused", SandboxDesiredStatePaused,
 			now.Add(-time.Second), time.Time{}),
-		record("hard-terminating", SandboxRuntimeBackendNomad, SandboxDesiredStateTerminating,
+		record("hard-terminating", SandboxDesiredStateTerminating,
 			time.Time{}, now.Add(-time.Second)),
-		record("hard-kubernetes", SandboxRuntimeBackendKubernetes, SandboxDesiredStateActive,
-			time.Time{}, now.Add(-time.Second)),
-		record("future", SandboxRuntimeBackendNomad, SandboxDesiredStateActive,
+		record("future", SandboxDesiredStateActive,
 			now.Add(time.Second), now.Add(time.Hour)),
 	}
 	for _, candidate := range records {
@@ -52,13 +50,13 @@ func TestListSandboxExpirationCandidatesFiltersBackendStateAndLifecycleIntegrati
 	require.NoError(t, err)
 
 	limited, err := store.ListSandboxExpirationCandidates(
-		ctx, now, SandboxRuntimeBackendNomad, 2,
+		ctx, now, 2,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []string{"hard-active", "hard-paused"}, expirationCandidateIDs(limited))
 
 	candidates, err := store.ListSandboxExpirationCandidates(
-		ctx, now, SandboxRuntimeBackendNomad, 20,
+		ctx, now, 20,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []string{"hard-active", "hard-paused", "soft-active"}, expirationCandidateIDs(candidates))

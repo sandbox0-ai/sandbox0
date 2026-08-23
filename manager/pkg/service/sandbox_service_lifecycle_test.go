@@ -46,5 +46,5 @@ func TestGetSandboxFallsBackToPodWhenRecordIsMissing(t *testing.T) {
 	require.NotNil(t, sandbox)
 	assert.Equal(t, "sandbox-1", sandbox.ID)
 	assert.Equal(t, "team-1", sandbox.TeamID)
-	assert.Equal(t, "pod-1", sandbox.PodName)
+	assert.Equal(t, "pod-1", sandbox.RuntimeID)
 }

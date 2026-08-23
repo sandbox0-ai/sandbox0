@@ -539,7 +539,7 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		ID: options.sandboxID, TeamID: options.teamID, UserID: "user-1",
 		TemplateID: "nomad-poc", TemplateName: "nomad-poc", TemplateNamespace: "default",
 		DesiredState: sandboxstore.SandboxDesiredStateActive, CreatedAt: time.Now().UTC(),
-		CurrentPodNamespace: "nomad", CurrentPodName: runtimeName, RuntimeGeneration: runtimeGeneration,
+		RuntimeNamespace: "nomad", RuntimeID: runtimeName, RuntimeGeneration: runtimeGeneration,
 	}); err != nil {
 		return fmt.Errorf("seed sandbox: %w", err)
 	}
@@ -583,8 +583,8 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		GrantID: options.grantID, SandboxID: options.sandboxID, ClaimID: options.claimID,
 		SlotID: options.slotID, OperationID: options.operationID, RawToken: options.rawToken,
 		BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: binding,
-		NodeUID: options.nodeUID, NodeBootID: options.nodeBootID, PodNamespace: "sandbox0-system",
-		PodName: options.nodeUID + "-writer", PodUID: options.podUID, NodeName: options.nodeUID,
+		NodeUID: options.nodeUID, NodeBootID: options.nodeBootID, RuntimeNamespace: "sandbox0-system",
+		RuntimeID: options.nodeUID + "-writer", RuntimeIncarnationID: options.podUID, NodeName: options.nodeUID,
 		GateParent: options.gateParent, RuntimeGeneration: options.runtimeGeneration,
 		ConsumeExpiresAt:     time.Now().Add(2 * time.Minute),
 		ExpectedFilesystemID: expectedFilesystemID, InitialGenerationID: initialGenerationID,

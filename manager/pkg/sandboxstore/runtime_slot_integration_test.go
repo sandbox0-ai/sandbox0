@@ -125,7 +125,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	consumed, err := store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
-		ConsumerNodeUID: registration.NodeUID, ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateConsumed, consumed.State)
@@ -543,7 +543,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
-		ConsumerNodeUID: registration.NodeUID, ConsumerCtldPodUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `

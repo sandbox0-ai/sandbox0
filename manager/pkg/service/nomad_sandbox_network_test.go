@@ -71,8 +71,8 @@ func TestNomadSandboxNetworkPolicyServiceFencesActiveSlotDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.runtimeSlots["sandbox-a"] = &sandboxstore.RuntimeSlot{
-		ID: "slot-a", SandboxID: "sandbox-a", AllocationID: record.CurrentPodName,
-		AllocationNamespace: record.CurrentPodNamespace, State: sandboxstore.RuntimeSlotStateActive,
+		ID: "slot-a", SandboxID: "sandbox-a", AllocationID: record.RuntimeID,
+		AllocationNamespace: record.RuntimeNamespace, State: sandboxstore.RuntimeSlotStateActive,
 		ClaimNetworkPolicyDigest: protocol.NetworkPolicyDigest(annotation),
 		ProcdInstanceID:          "procd-a", ProcdAddress: "http://192.0.2.2:49983",
 		CommandReadyDigest: make([]byte, sha256.Size), CommandReadyAt: record.UpdatedAt,
@@ -137,7 +137,7 @@ func TestNomadSandboxNetworkPolicyServiceFencesUpdatesAndPublishesPausedCredenti
 		credentialResult.CredentialBindings[0].Ref != "api-auth" {
 		t.Fatalf("credential update result = %+v", credentialResult)
 	}
-	store.records["sandbox-a"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendKubernetes
+	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
 	if _, err := service.GetNetworkPolicy(context.Background(), "sandbox-a"); !apierrors.IsConflict(err) {
 		t.Fatalf("foreign runtime get error = %v", err)
 	}
@@ -344,7 +344,7 @@ func nomadNetworkPolicyTestStore(desiredState string) *memorySandboxStore {
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: desiredState, CurrentPodNamespace: "default", CurrentPodName: "allocation-a",
+				DesiredState: desiredState, RuntimeNamespace: "default", RuntimeID: "allocation-a",
 				TemplateSpec: v1alpha1.SandboxTemplateSpec{Network: &v1alpha1.SandboxNetworkPolicy{
 					Mode:   v1alpha1.NetworkModeBlockAll,
 					Egress: &v1alpha1.NetworkEgressPolicy{AllowedCIDRs: []string{"192.0.2.0/24"}},
@@ -535,8 +535,8 @@ func activeNomadNetworkTestSlot(
 	currentPolicy string,
 ) *sandboxstore.RuntimeSlot {
 	return &sandboxstore.RuntimeSlot{
-		ID: "slot-a", SandboxID: record.ID, AllocationID: record.CurrentPodName,
-		AllocationNamespace: record.CurrentPodNamespace, State: sandboxstore.RuntimeSlotStateActive,
+		ID: "slot-a", SandboxID: record.ID, AllocationID: record.RuntimeID,
+		AllocationNamespace: record.RuntimeNamespace, State: sandboxstore.RuntimeSlotStateActive,
 		Revision: 7, ClusterID: "cluster-a", NodeID: "node-a", NodeUID: "node-uid-a",
 		NodeBootID: "node-boot-a", NetNSIdentity: "netns-a", ClaimID: "claim-a",
 		ClaimNetworkPolicyDigest: protocol.NetworkPolicyDigest(currentPolicy),

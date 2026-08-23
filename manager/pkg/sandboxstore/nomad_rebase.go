@@ -287,8 +287,8 @@ func nomadPausedRebaseRejectionIdentityMatches(
 		lifecycle.SandboxID == record.ID && lifecycle.Kind == SandboxLifecycleKindRebase &&
 		lifecycle.Source == SandboxLifecycleSourceManual && !lifecycle.Cancelable &&
 		lifecycle.CancelRequestedAt.IsZero() && lifecycle.FromGeneration == lifecycle.ToGeneration &&
-		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromPodNamespace == "" &&
-		lifecycle.FromPodName == "" && lifecycle.ToPodNamespace == "" && lifecycle.ToPodName == "" &&
+		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromRuntimeNamespace == "" &&
+		lifecycle.FromRuntimeID == "" && lifecycle.ToRuntimeNamespace == "" && lifecycle.ToRuntimeID == "" &&
 		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
 		lifecycle.TargetGenerationID != "" && lifecycle.ExpectedHeadLayerID != "" &&
 		lifecycle.SourceBaseArtifactDigest != "" &&
@@ -514,7 +514,7 @@ func validateNomadPausedRebaseClaimState(
 ) error {
 	if record == nil || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		!record.DeletedAt.IsZero() ||
-		record.RuntimeGeneration < 0 || record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
+		record.RuntimeGeneration < 0 || record.RuntimeNamespace != "" || record.RuntimeID != "" {
 		return fmt.Errorf("%w: sandbox is not a canonical paused Nomad runtime", ErrNomadSandboxRebaseNotReady)
 	}
 	if claim == nil || claim.OperationID == "" || !claim.LeaseExpiresAt.IsZero() || !claim.CleanedAt.IsZero() {
@@ -678,8 +678,8 @@ func nomadPausedRebaseLifecycleMatches(
 		lifecycle.SandboxID != record.ID || lifecycle.Kind != SandboxLifecycleKindRebase ||
 		lifecycle.Source != SandboxLifecycleSourceManual || lifecycle.Cancelable ||
 		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromGeneration != lifecycle.ToGeneration ||
-		lifecycle.FromGeneration != record.RuntimeGeneration || lifecycle.FromPodNamespace != "" ||
-		lifecycle.FromPodName != "" || lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.FromGeneration != record.RuntimeGeneration || lifecycle.FromRuntimeNamespace != "" ||
+		lifecycle.FromRuntimeID != "" || lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != "" || len(lifecycle.TargetRecordDigest) != 0 ||
 		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.ExpectedHeadLayerID != source.ID ||
 		lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||

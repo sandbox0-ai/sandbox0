@@ -72,25 +72,25 @@ type RootFSWriterGrant struct {
 	// InitialHeadLayerID is the historical column name retained for rolling
 	// compatibility. InitialGenerationID is the canonical opaque durable head
 	// identity and does not imply a rootfs_layers row.
-	InitialHeadLayerID  string
-	InitialGenerationID string
-	BindingVersion      int
-	BindingDigest       []byte
-	NodeUID             string
-	NodeBootID          string
-	PodNamespace        string
-	PodName             string
-	PodUID              string
-	NodeName            string
-	GateParent          string
-	RuntimeGeneration   string
-	// ConsumerNodeUID is durable ownership. ConsumerCtldPodUID records only
+	InitialHeadLayerID   string
+	InitialGenerationID  string
+	BindingVersion       int
+	BindingDigest        []byte
+	NodeUID              string
+	NodeBootID           string
+	RuntimeNamespace     string
+	RuntimeID            string
+	RuntimeIncarnationID string
+	NodeName             string
+	GateParent           string
+	RuntimeGeneration    string
+	// ConsumerNodeUID is durable ownership. ConsumerAgentUID records only
 	// the first authenticated ctld Pod that completed Consume for audit.
-	ConsumerNodeUID    string
-	ConsumerCtldPodUID string
-	ConsumeExpiresAt   time.Time
-	ConsumedAt         time.Time
-	LeaseExpiresAt     time.Time
+	ConsumerNodeUID  string
+	ConsumerAgentUID string
+	ConsumeExpiresAt time.Time
+	ConsumedAt       time.Time
+	LeaseExpiresAt   time.Time
 	// AuthorityObservedAt is PostgreSQL NOW() from the same read that returned
 	// this grant. It is not persisted in the grant row; authority responses use
 	// it to avoid scheduling renewal from an untrusted node clock.
@@ -130,9 +130,9 @@ type IssueRootFSWriterGrantRequest struct {
 	BindingDigest        []byte
 	NodeUID              string
 	NodeBootID           string
-	PodNamespace         string
-	PodName              string
-	PodUID               string
+	RuntimeNamespace     string
+	RuntimeID            string
+	RuntimeIncarnationID string
 	NodeName             string
 	GateParent           string
 	RuntimeGeneration    string
@@ -143,14 +143,14 @@ type IssueRootFSWriterGrantRequest struct {
 }
 
 type ConsumeRootFSWriterGrantRequest struct {
-	GrantID            string
-	WriterEpoch        int64
-	RawToken           string
-	BindingVersion     int
-	BindingDigest      []byte
-	ConsumerNodeUID    string
-	ConsumerCtldPodUID string
-	LeaseTTL           time.Duration
+	GrantID          string
+	WriterEpoch      int64
+	RawToken         string
+	BindingVersion   int
+	BindingDigest    []byte
+	ConsumerNodeUID  string
+	ConsumerAgentUID string
+	LeaseTTL         time.Duration
 }
 
 type CancelRootFSWriterGrantRequest struct {
@@ -629,7 +629,7 @@ func issueRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *Is
 			grant_id, filesystem_id, sandbox_id, claim_id, slot_id,
 			issue_operation_id, writer_epoch, state, initial_head_layer_id, initial_generation_id,
 			binding_version, binding_digest, token_digest, node_uid, node_boot_id,
-			runtime_pod_namespace, runtime_pod_name, runtime_pod_uid,
+			runtime_namespace, runtime_id, runtime_incarnation_id,
 			runtime_node_name, runtime_gate_parent, runtime_generation,
 			consume_expires_at, created_at, updated_at
 		)
@@ -638,7 +638,7 @@ func issueRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *Is
 	`, normalized.GrantID, filesystemID, normalized.SandboxID, normalized.ClaimID, normalized.SlotID,
 		normalized.OperationID, writerEpoch, RootFSWriterGrantStateIssued, normalized.InitialHeadLayerID, normalized.InitialGenerationID,
 		normalized.BindingVersion, normalized.BindingDigest, tokenDigest[:], normalized.NodeUID,
-		normalized.NodeBootID, normalized.PodNamespace, normalized.PodName, normalized.PodUID,
+		normalized.NodeBootID, normalized.RuntimeNamespace, normalized.RuntimeID, normalized.RuntimeIncarnationID,
 		normalized.NodeName, normalized.GateParent, normalized.RuntimeGeneration, normalized.ConsumeExpiresAt)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("insert rootfs writer grant", err)
@@ -701,7 +701,7 @@ func consumeRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *
 		UPDATE manager.rootfs_writer_grants AS g
 		SET state = $2,
 			consumer_node_uid = $3,
-			consumer_ctld_pod_uid = $4,
+			consumer_agent_uid = $4,
 			consumed_at = NOW(),
 			lease_expires_at = NOW() + ($5::bigint * INTERVAL '1 millisecond'),
 			updated_at = NOW()
@@ -717,7 +717,7 @@ func consumeRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
 	`, normalized.GrantID, RootFSWriterGrantStateConsumed, normalized.ConsumerNodeUID,
-		normalized.ConsumerCtldPodUID, normalized.LeaseTTL.Milliseconds(), RootFSWriterGrantStateIssued,
+		normalized.ConsumerAgentUID, normalized.LeaseTTL.Milliseconds(), RootFSWriterGrantStateIssued,
 		normalized.WriterEpoch, tokenDigest[:], normalized.BindingDigest, normalized.BindingVersion)
 	if err != nil {
 		return nil, fmt.Errorf("consume rootfs writer grant: %w", err)
@@ -1138,8 +1138,8 @@ func beginRootFSWriterCrashAbandon(
 	}
 	if lifecycle.CancelRequested ||
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting ||
-		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromPodNamespace) == "" ||
-		strings.TrimSpace(lifecycle.FromPodName) == "" ||
+		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromRuntimeNamespace) == "" ||
+		strings.TrimSpace(lifecycle.FromRuntimeID) == "" ||
 		lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
 		lifecycle.PreparedHeadLayerID != "" {
 		return nil, fmt.Errorf("%w: lifecycle txn %s cannot begin crash abandon",
@@ -1744,8 +1744,8 @@ func completeRootFSWriterCrashAbandon(
 	}
 	if lifecycle.CancelRequested ||
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting ||
-		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromPodNamespace) == "" ||
-		strings.TrimSpace(lifecycle.FromPodName) == "" ||
+		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromRuntimeNamespace) == "" ||
+		strings.TrimSpace(lifecycle.FromRuntimeID) == "" ||
 		lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
 		lifecycle.PreparedHeadLayerID != "" {
 		return nil, fmt.Errorf("%w: lifecycle txn %s cannot abandon a crashed runtime",
@@ -1822,35 +1822,35 @@ func lockRootFSWriterCrashRuntime(
 	lifecycleTxnID string,
 ) (rootFSWriterCrashRuntimeMatch, error) {
 	match := rootFSWriterCrashRuntimeMatch{}
-	var desiredState, currentPodNamespace, currentPodName string
+	var desiredState, currentRuntimeNamespace, currentRuntimeID string
 	var runtimeGeneration int64
 	var deletedAt pgtype.Timestamptz
 	if err := db.QueryRow(ctx, `
-		SELECT desired_state, current_pod_namespace, current_pod_name,
+		SELECT desired_state, runtime_namespace, runtime_id,
 			runtime_generation, deleted_at
 		FROM manager.sandboxes
 		WHERE sandbox_id = $1
 		FOR UPDATE
 	`, record.SandboxID).Scan(
-		&desiredState, &currentPodNamespace, &currentPodName, &runtimeGeneration, &deletedAt,
+		&desiredState, &currentRuntimeNamespace, &currentRuntimeID, &runtimeGeneration, &deletedAt,
 	); err != nil {
 		return match, fmt.Errorf("lock crashed sandbox runtime: %w", err)
 	}
 	match.active = !deletedAt.Valid && desiredState == SandboxDesiredStateActive &&
 		runtimeGeneration == lifecycle.FromGeneration &&
-		currentPodNamespace == lifecycle.FromPodNamespace && currentPodName == lifecycle.FromPodName
+		currentRuntimeNamespace == lifecycle.FromRuntimeNamespace && currentRuntimeID == lifecycle.FromRuntimeID
 	match.terminating = !deletedAt.Valid && desiredState == SandboxDesiredStateTerminating &&
 		runtimeGeneration == lifecycle.FromGeneration &&
-		currentPodNamespace == lifecycle.FromPodNamespace && currentPodName == lifecycle.FromPodName
+		currentRuntimeNamespace == lifecycle.FromRuntimeNamespace && currentRuntimeID == lifecycle.FromRuntimeID
 	precommitResume := !deletedAt.Valid && desiredState == SandboxDesiredStatePaused &&
-		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration >= 0 &&
+		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration >= 0 &&
 		runtimeGeneration+1 == lifecycle.FromGeneration
 	match.failedClaimDeletion = desiredState == SandboxDesiredStateDeleted && deletedAt.Valid &&
-		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration == lifecycle.FromGeneration
+		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration
 	failedClaimCandidate := !deletedAt.Valid &&
 		(desiredState == SandboxDesiredStateActive || desiredState == SandboxDesiredStateTerminating) &&
-		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration == lifecycle.FromGeneration &&
-		lifecycle.FromPodNamespace == record.PodNamespace && lifecycle.FromPodName == record.PodUID
+		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration &&
+		lifecycle.FromRuntimeNamespace == record.RuntimeNamespace && lifecycle.FromRuntimeID == record.RuntimeIncarnationID
 	if failedClaimCandidate {
 		if err := db.QueryRow(ctx, `
 			SELECT EXISTS (
@@ -1952,9 +1952,9 @@ func validateIssueRootFSWriterGrantRequest(req *IssueRootFSWriterGrantRequest) (
 	normalized.OperationID = strings.TrimSpace(req.OperationID)
 	normalized.NodeUID = strings.TrimSpace(req.NodeUID)
 	normalized.NodeBootID = strings.TrimSpace(req.NodeBootID)
-	normalized.PodNamespace = strings.TrimSpace(req.PodNamespace)
-	normalized.PodName = strings.TrimSpace(req.PodName)
-	normalized.PodUID = strings.TrimSpace(req.PodUID)
+	normalized.RuntimeNamespace = strings.TrimSpace(req.RuntimeNamespace)
+	normalized.RuntimeID = strings.TrimSpace(req.RuntimeID)
+	normalized.RuntimeIncarnationID = strings.TrimSpace(req.RuntimeIncarnationID)
 	normalized.NodeName = strings.TrimSpace(req.NodeName)
 	normalized.GateParent = strings.TrimSpace(req.GateParent)
 	normalized.RuntimeGeneration = strings.TrimSpace(req.RuntimeGeneration)
@@ -1977,9 +1977,9 @@ func validateIssueRootFSWriterGrantRequest(req *IssueRootFSWriterGrantRequest) (
 		"grant_id": normalized.GrantID, "sandbox_id": normalized.SandboxID,
 		"claim_id": normalized.ClaimID, "slot_id": normalized.SlotID,
 		"operation_id": normalized.OperationID, "node_uid": normalized.NodeUID,
-		"node_boot_id":  normalized.NodeBootID,
-		"pod_namespace": normalized.PodNamespace, "pod_name": normalized.PodName,
-		"pod_uid": normalized.PodUID, "node_name": normalized.NodeName,
+		"node_boot_id":      normalized.NodeBootID,
+		"runtime_namespace": normalized.RuntimeNamespace, "runtime_id": normalized.RuntimeID,
+		"runtime_incarnation_id": normalized.RuntimeIncarnationID, "node_name": normalized.NodeName,
 		"gate_parent": normalized.GateParent, "runtime_generation": normalized.RuntimeGeneration,
 	} {
 		if value == "" {
@@ -2012,10 +2012,10 @@ func validateConsumeRootFSWriterGrantRequest(req *ConsumeRootFSWriterGrantReques
 	normalized := *req
 	normalized.GrantID = strings.TrimSpace(req.GrantID)
 	normalized.ConsumerNodeUID = strings.TrimSpace(req.ConsumerNodeUID)
-	normalized.ConsumerCtldPodUID = strings.TrimSpace(req.ConsumerCtldPodUID)
+	normalized.ConsumerAgentUID = strings.TrimSpace(req.ConsumerAgentUID)
 	normalized.BindingDigest = append([]byte(nil), req.BindingDigest...)
-	if normalized.GrantID == "" || normalized.ConsumerNodeUID == "" || normalized.ConsumerCtldPodUID == "" {
-		return nil, empty, fmt.Errorf("grant_id, consumer_node_uid, and consumer_ctld_pod_uid are required")
+	if normalized.GrantID == "" || normalized.ConsumerNodeUID == "" || normalized.ConsumerAgentUID == "" {
+		return nil, empty, fmt.Errorf("grant_id, consumer_node_uid, and consumer_agent_uid are required")
 	}
 	if normalized.WriterEpoch <= 0 {
 		return nil, empty, fmt.Errorf("writer_epoch must be positive")
@@ -2372,8 +2372,8 @@ func rootFSWriterGrantMatchesIssue(record *rootFSWriterGrantRecord, req *IssueRo
 		record.ClaimID == req.ClaimID && record.SlotID == req.SlotID &&
 		record.IssueOperationID == req.OperationID && record.WriterEpoch == req.ExpectedWriterEpoch+1 &&
 		record.InitialGenerationID == req.InitialGenerationID && record.NodeUID == req.NodeUID &&
-		record.NodeBootID == req.NodeBootID && record.PodNamespace == req.PodNamespace &&
-		record.PodName == req.PodName && record.PodUID == req.PodUID &&
+		record.NodeBootID == req.NodeBootID && record.RuntimeNamespace == req.RuntimeNamespace &&
+		record.RuntimeID == req.RuntimeID && record.RuntimeIncarnationID == req.RuntimeIncarnationID &&
 		record.NodeName == req.NodeName && record.GateParent == req.GateParent &&
 		record.RuntimeGeneration == req.RuntimeGeneration &&
 		record.ConsumeExpiresAt.Equal(req.ConsumeExpiresAt) &&
@@ -2459,24 +2459,24 @@ func getRootFSWriterGrantForUpdate(ctx context.Context, db rootFSWriterGrantDB, 
 }
 
 type rootFSWriterLifecycleTxnRecord struct {
-	SandboxID           string
-	Kind                string
-	Source              string
-	Phase               string
-	FromGeneration      int64
-	FromPodNamespace    string
-	FromPodName         string
-	ExpectedHeadLayerID string
-	PreparedHeadLayerID string
-	Error               string
-	CancelRequested     bool
+	SandboxID            string
+	Kind                 string
+	Source               string
+	Phase                string
+	FromGeneration       int64
+	FromRuntimeNamespace string
+	FromRuntimeID        string
+	ExpectedHeadLayerID  string
+	PreparedHeadLayerID  string
+	Error                string
+	CancelRequested      bool
 }
 
 func lockRootFSWriterLifecycleTxn(ctx context.Context, db rootFSWriterGrantDB, txnID string) (*rootFSWriterLifecycleTxnRecord, error) {
 	var lifecycle rootFSWriterLifecycleTxnRecord
 	err := db.QueryRow(ctx, `
 		SELECT sandbox_id, kind, source, phase, from_generation,
-			from_pod_namespace, from_pod_name,
+			from_runtime_namespace, from_runtime_id,
 			expected_head_layer_id, prepared_head_layer_id, error,
 			cancel_requested_at IS NOT NULL
 		FROM manager.sandbox_lifecycle_txns
@@ -2484,7 +2484,7 @@ func lockRootFSWriterLifecycleTxn(ctx context.Context, db rootFSWriterGrantDB, t
 		FOR UPDATE
 	`, strings.TrimSpace(txnID)).Scan(
 		&lifecycle.SandboxID, &lifecycle.Kind, &lifecycle.Source, &lifecycle.Phase,
-		&lifecycle.FromGeneration, &lifecycle.FromPodNamespace, &lifecycle.FromPodName,
+		&lifecycle.FromGeneration, &lifecycle.FromRuntimeNamespace, &lifecycle.FromRuntimeID,
 		&lifecycle.ExpectedHeadLayerID, &lifecycle.PreparedHeadLayerID, &lifecycle.Error,
 		&lifecycle.CancelRequested,
 	)
@@ -2551,9 +2551,9 @@ func rootFSWriterGrantSelectSQL() string {
 		SELECT grant_id, filesystem_id, sandbox_id, claim_id, slot_id,
 			issue_operation_id, writer_epoch, state, initial_head_layer_id, initial_generation_id,
 			binding_version, binding_digest, token_digest, node_uid, node_boot_id,
-			runtime_pod_namespace, runtime_pod_name, runtime_pod_uid,
+			runtime_namespace, runtime_id, runtime_incarnation_id,
 			runtime_node_name, runtime_gate_parent, runtime_generation,
-			consumer_node_uid, consumer_ctld_pod_uid, consume_expires_at,
+			consumer_node_uid, consumer_agent_uid, consume_expires_at,
 			consumed_at, lease_expires_at, retire_operation_id, retire_kind,
 			retire_proof_digest, retire_started_at, retired_at, canceled_at,
 			created_at, updated_at, NOW()
@@ -2571,9 +2571,9 @@ func scanRootFSWriterGrant(row rootFSWriterGrantScanner) (*rootFSWriterGrantReco
 		&record.ID, &record.FilesystemID, &record.SandboxID, &record.ClaimID, &record.SlotID,
 		&record.IssueOperationID, &record.WriterEpoch, &record.State, &record.InitialHeadLayerID, &record.InitialGenerationID,
 		&record.BindingVersion, &record.BindingDigest, &record.tokenDigest, &record.NodeUID, &record.NodeBootID,
-		&record.PodNamespace, &record.PodName, &record.PodUID,
+		&record.RuntimeNamespace, &record.RuntimeID, &record.RuntimeIncarnationID,
 		&record.NodeName, &record.GateParent, &record.RuntimeGeneration,
-		&record.ConsumerNodeUID, &record.ConsumerCtldPodUID, &record.ConsumeExpiresAt,
+		&record.ConsumerNodeUID, &record.ConsumerAgentUID, &record.ConsumeExpiresAt,
 		&consumedAt, &leaseExpiresAt, &record.RetireOperationID, &record.RetireKind,
 		&record.RetireProofDigest, &retireStartedAt, &retiredAt, &canceledAt,
 		&record.CreatedAt, &record.UpdatedAt, &record.databaseNow,

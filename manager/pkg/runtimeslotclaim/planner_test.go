@@ -115,7 +115,7 @@ func (f *fakeStore) IssueRootFSWriterGrant(_ context.Context, request *sandboxst
 			InitialHeadLayerID: request.InitialGenerationID, InitialGenerationID: request.InitialGenerationID,
 			BindingVersion: request.BindingVersion, BindingDigest: append([]byte(nil), request.BindingDigest...),
 			NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
-			PodNamespace: request.PodNamespace, PodName: request.PodName, PodUID: request.PodUID,
+			RuntimeNamespace: request.RuntimeNamespace, RuntimeID: request.RuntimeID, RuntimeIncarnationID: request.RuntimeIncarnationID,
 			NodeName: request.NodeName, GateParent: request.GateParent,
 			RuntimeGeneration: request.RuntimeGeneration, ConsumeExpiresAt: request.ConsumeExpiresAt,
 		}

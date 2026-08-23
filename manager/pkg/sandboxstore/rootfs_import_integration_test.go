@@ -32,6 +32,12 @@ func TestRootFSImportMigrationDownAndUpIntegration(t *testing.T) {
 		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
 		migrate.WithSchema(sandboxStoreSchemaName),
 	))
+	assertRootFSImportSchema(t, ctx, pool, true)
+	require.NoError(t, migrate.Down(ctx, pool, ".",
+		migrate.WithBaseFS(storemigrations.FS),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
 	assertRootFSImportSchema(t, ctx, pool, false)
 	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
 	assertRootFSImportSchema(t, ctx, pool, true)

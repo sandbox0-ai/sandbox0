@@ -339,7 +339,7 @@ func (s *PGSandboxStore) CompleteSandboxClaim(ctx context.Context, request *Comp
 		return nil, fmt.Errorf("%w: runtime resource lease has invalid metering values", ErrSandboxClaimReservationConflict)
 	}
 	if claim.Phase == SandboxRuntimeClaimPhaseReady {
-		if record.CurrentPodName != request.AllocationID || record.CurrentPodNamespace != request.AllocationNamespace ||
+		if record.RuntimeID != request.AllocationID || record.RuntimeNamespace != request.AllocationNamespace ||
 			record.ResourceMillicpu != resourceMillicpu || record.ResourceMemoryMiB != resourceMemoryMiB {
 			return nil, fmt.Errorf("%w: ready runtime binding changed", ErrSandboxClaimReservationConflict)
 		}
@@ -350,7 +350,7 @@ func (s *PGSandboxStore) CompleteSandboxClaim(ctx context.Context, request *Comp
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET current_pod_name = $2, current_pod_namespace = $3,
+		SET runtime_id = $2, runtime_namespace = $3,
 			resource_millicpu = $4, resource_memory_mib = $5, updated_at = NOW()
 		WHERE sandbox_id = $1
 	`, request.SandboxID, request.AllocationID, request.AllocationNamespace,
@@ -649,8 +649,8 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 			(lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting) &&
 			lifecycle.PreparedHeadLayerID == "" &&
 			lifecycle.FromGeneration == record.RuntimeGeneration &&
-			lifecycle.FromPodNamespace == record.CurrentPodNamespace &&
-			lifecycle.FromPodName == record.CurrentPodName
+			lifecycle.FromRuntimeNamespace == record.RuntimeNamespace &&
+			lifecycle.FromRuntimeID == record.RuntimeID
 		preservePausedRebaseWorker := lifecycle.Kind == SandboxLifecycleKindRebase &&
 			lifecycle.WorkerClusterID != "" && lifecycle.WorkerNodeID != "" && lifecycle.WorkerNodeUID != ""
 		if preserveTerminalWriter || preservePausedRebaseWorker {
@@ -733,10 +733,9 @@ func lockInboundNomadRunningForkForTargetCleanup(
 		WHERE lifecycle.kind = $1
 			AND lifecycle.phase IN ('preparing', 'barriered', 'publishing', 'committing')
 			AND lifecycle.target_sandbox_id = $2
-			AND source.runtime_backend = $3
 		ORDER BY lifecycle.updated_at DESC
 		LIMIT 1
-	`, SandboxLifecycleKindFork, targetSandboxID, SandboxRuntimeBackendNomad).Scan(
+	`, SandboxLifecycleKindFork, targetSandboxID).Scan(
 		&operationID, &sourceSandboxID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -784,7 +783,7 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 	candidate := &SandboxClaimCleanupCandidate{
 		SandboxID: record.ID, OperationID: claim.OperationID,
 		PhysicalStateRequired: !claim.CompletedAt.IsZero() ||
-			record.CurrentPodName != "" || record.CurrentPodNamespace != "",
+			record.RuntimeID != "" || record.RuntimeNamespace != "",
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE sandbox_id = $1
@@ -800,12 +799,12 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 			(record.ClusterID != "" && slot.ClusterID != record.ClusterID) {
 			return nil, fmt.Errorf("%w: cleanup slot is not bound to the sandbox record", ErrSandboxClaimReservationConflict)
 		}
-		if (record.CurrentPodName == "") != (record.CurrentPodNamespace == "") {
+		if (record.RuntimeID == "") != (record.RuntimeNamespace == "") {
 			return nil, fmt.Errorf("%w: sandbox runtime binding is incomplete", ErrSandboxClaimReservationConflict)
 		}
-		if record.CurrentPodName != "" &&
-			(slot.AllocationID != record.CurrentPodName ||
-				slot.AllocationNamespace != record.CurrentPodNamespace) {
+		if record.RuntimeID != "" &&
+			(slot.AllocationID != record.RuntimeID ||
+				slot.AllocationNamespace != record.RuntimeNamespace) {
 			return nil, fmt.Errorf("%w: cleanup allocation binding changed", ErrSandboxClaimReservationConflict)
 		}
 		candidate.SlotID = slot.ID

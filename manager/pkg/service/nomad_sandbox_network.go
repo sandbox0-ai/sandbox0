@@ -125,7 +125,7 @@ func (s *NomadSandboxNetworkPolicyService) GetNetworkPolicy(
 		projected, projectionErr := projectNomadSandboxSlot(record, nil, sandboxRecordToSandbox(record), slot)
 		if projectionErr != nil || projected.Status != managerapi.SandboxStatusRunning ||
 			slot == nil || slot.SandboxID != sandboxID || slot.State != sandboxstore.RuntimeSlotStateActive ||
-			slot.AllocationID != record.CurrentPodName || slot.AllocationNamespace != record.CurrentPodNamespace ||
+			slot.AllocationID != record.RuntimeID || slot.AllocationNamespace != record.RuntimeNamespace ||
 			slot.ClaimNetworkPolicyDigest != protocol.NetworkPolicyDigest(annotation) {
 			return nil, fmt.Errorf("%w: active Nomad network policy does not match the exact runtime slot", ErrDataPlaneNotReady)
 		}
@@ -343,8 +343,8 @@ func (s *NomadSandboxNetworkPolicyService) enqueueMutation(sandboxID string) {
 
 func activeNomadNetworkSlotMatchesRecord(slot *sandboxstore.RuntimeSlot, record *sandboxstore.SandboxRecord) bool {
 	return slot != nil && record != nil && slot.State == sandboxstore.RuntimeSlotStateActive &&
-		slot.SandboxID == record.ID && slot.AllocationID == record.CurrentPodName &&
-		slot.AllocationNamespace == record.CurrentPodNamespace && slot.ClaimID != "" &&
+		slot.SandboxID == record.ID && slot.AllocationID == record.RuntimeID &&
+		slot.AllocationNamespace == record.RuntimeNamespace && slot.ClaimID != "" &&
 		slot.ClusterID != "" && slot.NodeID != "" && slot.NodeUID != "" &&
 		slot.NodeBootID != "" && slot.NetNSIdentity != ""
 }

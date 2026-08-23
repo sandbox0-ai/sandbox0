@@ -4948,14 +4948,15 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
-        pod_name:
+        runtime_id:
           type: string
+          description: Opaque identifier of the current physical runtime allocation.
         template:
           type: string
         cluster_id:
           type: string
           nullable: true
-      required: [sandbox_id, status, pod_name, template]
+      required: [sandbox_id, status, runtime_id, template]
     SuccessClaimResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4996,8 +4997,9 @@ components:
             $ref: "#/components/schemas/SandboxAppService"
         resources:
           $ref: "#/components/schemas/SandboxResourceConfig"
-        pod_name:
+        runtime_id:
           type: string
+          description: Opaque identifier of the current physical runtime allocation. Empty while paused.
         runtime_generation:
           type: integer
           format: int64
@@ -5030,7 +5032,7 @@ components:
         - status
         - paused
         - auto_resume
-        - pod_name
+        - runtime_id
         - runtime_generation
         - claimed_at
         - created_at
@@ -5103,8 +5105,9 @@ components:
           type: string
         user_id:
           type: string
-        pod_name:
+        runtime_id:
           type: string
+          description: Opaque identifier of the current physical runtime allocation. Empty while paused.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         claimed_at:

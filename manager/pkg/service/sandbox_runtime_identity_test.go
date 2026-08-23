@@ -233,8 +233,8 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	}
 	record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
 	record.DeletedAt = deletedAt
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
 			txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
@@ -393,8 +393,8 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
 		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.CurrentPodNamespace = namespace
-	record.CurrentPodName = podName
+	record.RuntimeNamespace = namespace
+	record.RuntimeID = podName
 	record.DesiredState = sandboxstore.SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
@@ -424,8 +424,8 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
 		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.CurrentPodNamespace = ""
-	record.CurrentPodName = ""
+	record.RuntimeNamespace = ""
+	record.RuntimeID = ""
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
@@ -489,8 +489,8 @@ func (t memorySandboxStoreTx) SetLifecycleTxnRuntime(_ context.Context, txnID, n
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && sandboxLifecyclePhaseActive(txn.Phase) {
-		txn.ToPodNamespace = namespace
-		txn.ToPodName = podName
+		txn.ToRuntimeNamespace = namespace
+		txn.ToRuntimeID = podName
 	}
 	return nil
 }
@@ -669,7 +669,7 @@ func TestGetSandboxProjectsActiveNomadRuntimeSlot(t *testing.T) {
 				ID: "sandbox-a", TeamID: "team-a", UserID: "user-a", TemplateID: "default",
 				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
 				DesiredState:   sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName: "allocation-a", CurrentPodNamespace: "default",
+				RuntimeID:      "allocation-a", RuntimeNamespace: "default",
 			},
 		},
 		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
@@ -689,7 +689,7 @@ func TestGetSandboxProjectsActiveNomadRuntimeSlot(t *testing.T) {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
 	if sandbox.Status != managerapi.SandboxStatusRunning || sandbox.InternalAddr != "http://192.0.2.2:49983" ||
-		sandbox.PodName != "allocation-a" {
+		sandbox.RuntimeID != "allocation-a" {
 		t.Fatalf("Nomad sandbox projection = %+v", sandbox)
 	}
 	listed, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"})
@@ -712,7 +712,7 @@ func TestGetSandboxFailsClosedForMissingCompletedNomadRuntimeSlot(t *testing.T) 
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-			DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-a",
+			DesiredState: sandboxstore.SandboxDesiredStateActive, RuntimeID: "allocation-a",
 		},
 	}}
 	svc := &SandboxService{sandboxStore: store, logger: zap.NewNop()}
@@ -732,7 +732,7 @@ func TestGetSandboxFailsClosedForExpiredNomadRuntimeSlot(t *testing.T) {
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-a",
+				DesiredState: sandboxstore.SandboxDesiredStateActive, RuntimeID: "allocation-a",
 			},
 		},
 		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
@@ -903,17 +903,17 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	indexer := newClaimTestPodIndexer(t, failedPod, idlePod)
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			DesiredState:        sandboxstore.SandboxDesiredStateActive,
-			CurrentPodName:      failedPod.Name,
-			CurrentPodNamespace: failedPod.Namespace,
-			RuntimeGeneration:   3,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
+			RuntimeID:         failedPod.Name,
+			RuntimeNamespace:  failedPod.Namespace,
+			RuntimeGeneration: 3,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
 	client := fake.NewSimpleClientset(failedPod.DeepCopy(), idlePod.DeepCopy())
@@ -973,8 +973,8 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	if record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 		t.Fatalf("desired state = %q, want paused before replacement claim", record.DesiredState)
 	}
-	if record.CurrentPodName != "" || record.CurrentPodNamespace != "" {
-		t.Fatalf("current runtime = %s/%s, want empty", record.CurrentPodNamespace, record.CurrentPodName)
+	if record.RuntimeID != "" || record.RuntimeNamespace != "" {
+		t.Fatalf("current runtime = %s/%s, want empty", record.RuntimeNamespace, record.RuntimeID)
 	}
 	if record.RuntimeGeneration != 3 {
 		t.Fatalf("runtime generation = %d, want 3", record.RuntimeGeneration)
@@ -1015,14 +1015,14 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
-				ID:             "txn-a",
-				SandboxID:      "sandbox-a",
-				Kind:           sandboxstore.SandboxLifecycleKindResume,
-				Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
-				FromGeneration: 3,
-				ToGeneration:   4,
-				ToPodNamespace: "ns-a",
-				ToPodName:      "pod-a",
+				ID:                 "txn-a",
+				SandboxID:          "sandbox-a",
+				Kind:               sandboxstore.SandboxLifecycleKindResume,
+				Phase:              sandboxstore.SandboxLifecyclePhasePreparing,
+				FromGeneration:     3,
+				ToGeneration:       4,
+				ToRuntimeNamespace: "ns-a",
+				ToRuntimeID:        "pod-a",
 			},
 		},
 	}
@@ -1039,8 +1039,8 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 		time.Sleep(2 * sandboxLifecycleWaitInterval)
 		store.mu.Lock()
 		store.lifecycleTxns["txn-a"].Phase = sandboxstore.SandboxLifecyclePhaseCommitted
-		store.records["sandbox-a"].CurrentPodName = "pod-a"
-		store.records["sandbox-a"].CurrentPodNamespace = "ns-a"
+		store.records["sandbox-a"].RuntimeID = "pod-a"
+		store.records["sandbox-a"].RuntimeNamespace = "ns-a"
 		store.records["sandbox-a"].RuntimeGeneration = 4
 		store.mu.Unlock()
 		store.setSandboxDesiredState("sandbox-a", sandboxstore.SandboxDesiredStateActive)
@@ -1073,17 +1073,17 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			DesiredState:        sandboxstore.SandboxDesiredStateActive,
-			CurrentPodName:      "pod-a",
-			CurrentPodNamespace: "ns-a",
-			RuntimeGeneration:   4,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
+			RuntimeID:         "pod-a",
+			RuntimeNamespace:  "ns-a",
+			RuntimeGeneration: 4,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
 	svc := &SandboxService{
@@ -1166,17 +1166,17 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			DesiredState:        sandboxstore.SandboxDesiredStateActive,
-			CurrentPodName:      "pod-a",
-			CurrentPodNamespace: "ns-a",
-			RuntimeGeneration:   4,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
+			RuntimeID:         "pod-a",
+			RuntimeNamespace:  "ns-a",
+			RuntimeGeneration: 4,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -1227,17 +1227,17 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID:                  "sandbox-a",
-				TeamID:              "team-a",
-				UserID:              "user-a",
-				TemplateID:          "default",
-				TemplateName:        "default",
-				TemplateNamespace:   "tpl-default",
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName:      "pod-a",
-				CurrentPodNamespace: "ns-a",
-				RuntimeGeneration:   4,
-				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
+				RuntimeID:         "pod-a",
+				RuntimeNamespace:  "ns-a",
+				RuntimeGeneration: 4,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
 		},
 		lockStarted: lockStarted,
@@ -1368,28 +1368,28 @@ func TestResumePausedSandboxRuntimeWaitsForActivePauseTransaction(t *testing.T) 
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID:                  "sandbox-a",
-				TeamID:              "team-a",
-				UserID:              "user-a",
-				TemplateID:          "default",
-				TemplateName:        "default",
-				TemplateNamespace:   "tpl-default",
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName:      "pod-a",
-				CurrentPodNamespace: "ns-a",
-				RuntimeGeneration:   4,
-				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
+				RuntimeID:         "pod-a",
+				RuntimeNamespace:  "ns-a",
+				RuntimeGeneration: 4,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
-				ID:               "txn-a",
-				SandboxID:        "sandbox-a",
-				Kind:             sandboxstore.SandboxLifecycleKindPause,
-				Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-				FromGeneration:   4,
-				FromPodNamespace: "ns-a",
-				FromPodName:      "pod-a",
+				ID:                   "txn-a",
+				SandboxID:            "sandbox-a",
+				Kind:                 sandboxstore.SandboxLifecycleKindPause,
+				Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+				FromGeneration:       4,
+				FromRuntimeNamespace: "ns-a",
+				FromRuntimeID:        "pod-a",
 			},
 		},
 	}
@@ -1423,30 +1423,30 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID:                  "sandbox-a",
-				TeamID:              "team-a",
-				UserID:              "user-a",
-				TemplateID:          "default",
-				TemplateName:        "default",
-				TemplateNamespace:   "tpl-default",
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName:      "pod-a",
-				CurrentPodNamespace: "ns-a",
-				RuntimeGeneration:   4,
-				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
+				RuntimeID:         "pod-a",
+				RuntimeNamespace:  "ns-a",
+				RuntimeGeneration: 4,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
-				ID:               "txn-a",
-				SandboxID:        "sandbox-a",
-				Kind:             sandboxstore.SandboxLifecycleKindPause,
-				Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-				Source:           sandboxstore.SandboxLifecycleSourceAuto,
-				Cancelable:       true,
-				FromGeneration:   4,
-				FromPodNamespace: "ns-a",
-				FromPodName:      "pod-a",
+				ID:                   "txn-a",
+				SandboxID:            "sandbox-a",
+				Kind:                 sandboxstore.SandboxLifecycleKindPause,
+				Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+				Source:               sandboxstore.SandboxLifecycleSourceAuto,
+				Cancelable:           true,
+				FromGeneration:       4,
+				FromRuntimeNamespace: "ns-a",
+				FromRuntimeID:        "pod-a",
 			},
 		},
 	}
@@ -1522,32 +1522,32 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID:                  "sandbox-a",
-				TeamID:              "team-a",
-				UserID:              "user-a",
-				TemplateID:          "default",
-				TemplateName:        "default",
-				TemplateNamespace:   "tpl-default",
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName:      "pod-a",
-				CurrentPodNamespace: "ns-a",
-				RuntimeGeneration:   4,
-				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
+				RuntimeID:         "pod-a",
+				RuntimeNamespace:  "ns-a",
+				RuntimeGeneration: 4,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
-				ID:                "txn-a",
-				SandboxID:         "sandbox-a",
-				Kind:              sandboxstore.SandboxLifecycleKindPause,
-				Phase:             sandboxstore.SandboxLifecyclePhasePreparing,
-				Source:            sandboxstore.SandboxLifecycleSourceAuto,
-				Cancelable:        true,
-				FromGeneration:    4,
-				FromPodNamespace:  "ns-a",
-				FromPodName:       "pod-a",
-				CancelRequestedAt: time.Now(),
-				CancelReason:      "runtime access arrived during auto pause",
+				ID:                   "txn-a",
+				SandboxID:            "sandbox-a",
+				Kind:                 sandboxstore.SandboxLifecycleKindPause,
+				Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+				Source:               sandboxstore.SandboxLifecycleSourceAuto,
+				Cancelable:           true,
+				FromGeneration:       4,
+				FromRuntimeNamespace: "ns-a",
+				FromRuntimeID:        "pod-a",
+				CancelRequestedAt:    time.Now(),
+				CancelReason:         "runtime access arrived during auto pause",
 			},
 		},
 	}

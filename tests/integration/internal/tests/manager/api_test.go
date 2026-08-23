@@ -517,7 +517,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 	if err != nil {
 		t.Fatalf("get restored sandbox record: %v", err)
 	}
-	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeID != "idle-rootfs" || record.RuntimeGeneration != 4 {
 		t.Fatalf("restored record = %+v", record)
 	}
 }
@@ -1194,8 +1194,8 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.CurrentPodNamespace = namespace
-	record.CurrentPodName = podName
+	record.RuntimeNamespace = namespace
+	record.RuntimeID = podName
 	record.DesiredState = sandboxstore.SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
@@ -1220,8 +1220,8 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.C
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.CurrentPodNamespace = ""
-	record.CurrentPodName = ""
+	record.RuntimeNamespace = ""
+	record.RuntimeID = ""
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
@@ -1278,8 +1278,8 @@ func (t memorySandboxStoreTxForManagerIntegration) BeginLifecycleTxn(_ context.C
 
 func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnRuntime(_ context.Context, txnID, namespace, podName string) error {
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
-		txn.ToPodNamespace = namespace
-		txn.ToPodName = podName
+		txn.ToRuntimeNamespace = namespace
+		txn.ToRuntimeID = podName
 	}
 	return nil
 }

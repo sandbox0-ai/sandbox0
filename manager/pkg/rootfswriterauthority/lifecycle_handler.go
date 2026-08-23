@@ -134,7 +134,7 @@ func serveCrashAbandonComplete(
 		return
 	}
 	record, err := store.GetSandbox(request.Context(), grant.SandboxID)
-	if err != nil || record.CurrentPodName != proof.PodUID {
+	if err != nil || record.RuntimeID != proof.PodUID {
 		http.Error(writer, "crash proof does not match Nomad allocation", http.StatusConflict)
 		return
 	}
@@ -289,14 +289,14 @@ func ensureCrashLifecycle(
 			return fmt.Errorf("another lifecycle transaction %s is active", active.ID)
 		}
 		if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive ||
-			record.RuntimeGeneration != runtimeGeneration || record.CurrentPodNamespace == "" || record.CurrentPodName == "" {
+			record.RuntimeGeneration != runtimeGeneration || record.RuntimeNamespace == "" || record.RuntimeID == "" {
 			return fmt.Errorf("sandbox runtime does not match crashed writer")
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: body.OperationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceCrash,
 			Cancelable: false, FromGeneration: runtimeGeneration,
-			FromPodNamespace: record.CurrentPodNamespace, FromPodName: record.CurrentPodName,
+			FromRuntimeNamespace: record.RuntimeNamespace, FromRuntimeID: record.RuntimeID,
 			ExpectedHeadLayerID: body.ExpectedOldGenerationID,
 		})
 	})
@@ -422,7 +422,7 @@ func preparePlannedPublishLifecycle(
 		active.Kind != sandboxstore.SandboxLifecycleKindPause ||
 		(active.Source != sandboxstore.SandboxLifecycleSourceManual && active.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
 		active.Cancelable || !active.CancelRequestedAt.IsZero() || active.FromGeneration != runtimeGeneration ||
-		active.FromPodNamespace != record.CurrentPodNamespace || active.FromPodName != record.CurrentPodName ||
+		active.FromRuntimeNamespace != record.RuntimeNamespace || active.FromRuntimeID != record.RuntimeID ||
 		active.ExpectedHeadLayerID != expectedHead || active.PreparedHeadLayerID != "" {
 		return fmt.Errorf("pre-existing planned pause lifecycle does not match writer grant")
 	}

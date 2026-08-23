@@ -502,14 +502,14 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 			return err
 		}
 		txn = &sandboxstore.SandboxLifecycleTxn{
-			ID:               uuid.NewString(),
-			SandboxID:        sourceSandboxID,
-			Kind:             kind,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           sandboxstore.SandboxLifecycleSourceManual,
-			FromGeneration:   runtimeGenerationFromPod(pod),
-			FromPodNamespace: pod.Namespace,
-			FromPodName:      pod.Name,
+			ID:                   uuid.NewString(),
+			SandboxID:            sourceSandboxID,
+			Kind:                 kind,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               sandboxstore.SandboxLifecycleSourceManual,
+			FromGeneration:       runtimeGenerationFromPod(pod),
+			FromRuntimeNamespace: pod.Namespace,
+			FromRuntimeID:        pod.Name,
 		}
 		return tx.BeginLifecycleTxn(lockCtx, txn)
 	})
@@ -548,11 +548,11 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 	if generation != txn.FromGeneration {
 		return nil, fmt.Errorf("sandbox runtime generation changed during rootfs checkpoint: txn=%d pod=%d", txn.FromGeneration, generation)
 	}
-	if txn.FromPodName != "" && pod.Name != txn.FromPodName {
-		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("rootfs checkpoint transaction points at runtime pod %s", txn.FromPodName))
+	if txn.FromRuntimeID != "" && pod.Name != txn.FromRuntimeID {
+		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("rootfs checkpoint transaction points at runtime pod %s", txn.FromRuntimeID))
 	}
-	if txn.FromPodNamespace != "" && pod.Namespace != txn.FromPodNamespace {
-		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("rootfs checkpoint transaction points at runtime namespace %s", txn.FromPodNamespace))
+	if txn.FromRuntimeNamespace != "" && pod.Namespace != txn.FromRuntimeNamespace {
+		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("rootfs checkpoint transaction points at runtime namespace %s", txn.FromRuntimeNamespace))
 	}
 	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, sandboxstore.SandboxLifecyclePhaseBarriered); err != nil {
 		return nil, err

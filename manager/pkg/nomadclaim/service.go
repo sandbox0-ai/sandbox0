@@ -440,8 +440,8 @@ func (s *Service) resumeNomadSandbox(
 	if completed == nil || completed.ID != sandboxID ||
 		completed.DesiredState != sandboxstore.SandboxDesiredStateActive ||
 		completed.RuntimeGeneration != candidate.RuntimeGeneration ||
-		completed.CurrentPodName != result.Slot.AllocationID ||
-		completed.CurrentPodNamespace != result.Slot.AllocationNamespace {
+		completed.RuntimeID != result.Slot.AllocationID ||
+		completed.RuntimeNamespace != result.Slot.AllocationNamespace {
 		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
 			fmt.Errorf("committed Nomad resume binding does not match the command-ready slot"))
 	}
@@ -543,8 +543,8 @@ func validateNomadResumeCandidate(
 		return fmt.Errorf("Nomad resume sandbox identity changed before lifecycle reservation")
 	}
 	if candidate.AlreadyActive {
-		if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName == "" ||
-			record.CurrentPodNamespace == "" || candidate.RuntimeGeneration != record.RuntimeGeneration {
+		if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeID == "" ||
+			record.RuntimeNamespace == "" || candidate.RuntimeGeneration != record.RuntimeGeneration {
 			return fmt.Errorf("already-active Nomad resume candidate has no canonical runtime")
 		}
 		return nil
@@ -552,8 +552,8 @@ func validateNomadResumeCandidate(
 	if strings.TrimSpace(candidate.OperationID) != candidate.OperationID || candidate.OperationID == "" ||
 		len(candidate.OperationID) > 512 || candidate.FilesystemID == "" || candidate.SourceGenerationID == "" ||
 		!activeNomadResumePhase(candidate.LifecyclePhase) ||
-		record.DesiredState != sandboxstore.SandboxDesiredStatePaused || record.CurrentPodName != "" ||
-		record.CurrentPodNamespace != "" || candidate.RuntimeGeneration != record.RuntimeGeneration+1 ||
+		record.DesiredState != sandboxstore.SandboxDesiredStatePaused || record.RuntimeID != "" ||
+		record.RuntimeNamespace != "" || candidate.RuntimeGeneration != record.RuntimeGeneration+1 ||
 		candidate.RuntimeGeneration != plan.request.RuntimeGeneration {
 		return fmt.Errorf("Nomad resume candidate does not bind the exact paused generation")
 	}
@@ -621,8 +621,8 @@ func (s *Service) projectResumedNomadSandbox(
 	}
 	procdAddress := ""
 	if result != nil && result.Slot != nil {
-		if result.Slot.AllocationID != record.CurrentPodName ||
-			result.Slot.AllocationNamespace != record.CurrentPodNamespace {
+		if result.Slot.AllocationID != record.RuntimeID ||
+			result.Slot.AllocationNamespace != record.RuntimeNamespace {
 			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, record.ID,
 				fmt.Errorf("resumed runtime projection changed after commit"))
 		}
@@ -635,8 +635,8 @@ func (s *Service) projectResumedNomadSandbox(
 			}
 			return nil, fmt.Errorf("project active Nomad runtime slot: %w", err)
 		}
-		if slot == nil || slot.SandboxID != record.ID || slot.AllocationID != record.CurrentPodName ||
-			slot.AllocationNamespace != record.CurrentPodNamespace || slot.State != sandboxstore.RuntimeSlotStateActive ||
+		if slot == nil || slot.SandboxID != record.ID || slot.AllocationID != record.RuntimeID ||
+			slot.AllocationNamespace != record.RuntimeNamespace || slot.State != sandboxstore.RuntimeSlotStateActive ||
 			slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
 			slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
 			return nil, fmt.Errorf("%w: active Nomad runtime slot is not command-ready",
@@ -661,7 +661,7 @@ func (s *Service) projectResumedNomadSandbox(
 		ID: record.ID, TemplateID: record.TemplateID, TeamID: record.TeamID, UserID: record.UserID,
 		InternalAddr: procdAddress, Status: managerapi.SandboxStatusRunning, Paused: false,
 		AutoResume: autoResume, Resources: resources, Services: services,
-		PodName: record.CurrentPodName, RuntimeGeneration: record.RuntimeGeneration,
+		RuntimeID: record.RuntimeID, RuntimeGeneration: record.RuntimeGeneration,
 		ExpiresAt: optionalNomadTime(record.ExpiresAt), HardExpiresAt: optionalNomadTime(record.HardExpiresAt),
 		ClaimedAt: record.ClaimedAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}, nil
@@ -868,7 +868,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	clusterID = runtimeClass.ClusterID
 	return &service.ClaimResponse{
 		SandboxID: sandboxID, Status: "running", ProcdAddress: result.ProcdAddress,
-		PodName: result.Slot.AllocationID, Template: req.Template, ClusterId: &clusterID,
+		RuntimeID: result.Slot.AllocationID, Template: req.Template, ClusterId: &clusterID,
 		CommandReadyDuration: result.Duration, CommandReadyWithinSLO: result.WithinSLO,
 	}, nil
 }

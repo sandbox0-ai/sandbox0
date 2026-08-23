@@ -21,7 +21,7 @@ func sandboxToAPI(sandbox *mgr.Sandbox, sshInfo *sharedssh.ConnectionInfo) *apis
 		HardExpiresAt:     sandbox.HardExpiresAt,
 		Id:                sandbox.ID,
 		Paused:            sandbox.Paused,
-		PodName:           sandbox.PodName,
+		RuntimeId:         sandbox.RuntimeID,
 		RuntimeGeneration: sandbox.RuntimeGeneration,
 		Status:            apispec.SandboxLifecycleStatus(sandbox.Status),
 		TeamId:            sandbox.TeamID,

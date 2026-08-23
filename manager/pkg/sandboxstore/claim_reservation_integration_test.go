@@ -191,8 +191,8 @@ func TestCompleteSandboxClaimRequiresExactActiveRuntimeSlot(t *testing.T) {
 		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
 	})
 	require.NoError(t, err)
-	require.Equal(t, claimed.AllocationID, completed.CurrentPodName)
-	require.Equal(t, claimed.AllocationNamespace, completed.CurrentPodNamespace)
+	require.Equal(t, claimed.AllocationID, completed.RuntimeID)
+	require.Equal(t, claimed.AllocationNamespace, completed.RuntimeNamespace)
 	require.Equal(t, claimed.ResourceLease.CPUMillicores, completed.ResourceMillicpu)
 	require.Equal(t, (claimed.ResourceLease.MemoryBytes+(1<<20)-1)/(1<<20), completed.ResourceMemoryMiB)
 	wrongLease := &CompleteSandboxClaimRequest{
@@ -317,8 +317,8 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 			ID: "manual-pause-delete-ready", SandboxID: record.ID,
 			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
 			Source: SandboxLifecycleSourceManual, Cancelable: true,
-			FromGeneration:   locked.RuntimeGeneration,
-			FromPodNamespace: locked.CurrentPodNamespace, FromPodName: locked.CurrentPodName,
+			FromGeneration:       locked.RuntimeGeneration,
+			FromRuntimeNamespace: locked.RuntimeNamespace, FromRuntimeID: locked.RuntimeID,
 		})
 	}))
 
@@ -445,8 +445,8 @@ func TestRequestSandboxRuntimeClaimCleanupPreservesMatchingCrashLifecycle(t *tes
 			ID: "crash-delete-ready", SandboxID: record.ID,
 			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
 			Source: SandboxLifecycleSourceCrash, Cancelable: false,
-			FromGeneration:   locked.RuntimeGeneration,
-			FromPodNamespace: locked.CurrentPodNamespace, FromPodName: locked.CurrentPodName,
+			FromGeneration:       locked.RuntimeGeneration,
+			FromRuntimeNamespace: locked.RuntimeNamespace, FromRuntimeID: locked.RuntimeID,
 		})
 	}))
 

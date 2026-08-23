@@ -51,9 +51,9 @@ func TestRootFSWriterGrantIssueConsumeBeginRetireIsIdempotent(t *testing.T) {
 		WriterEpoch:    issued.Grant.WriterEpoch,
 		RawToken:       issueReq.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID:    "node-a",
-		ConsumerCtldPodUID: "snapshotter-pod-a",
-		LeaseTTL:           time.Minute,
+		ConsumerNodeUID:  "node-a",
+		ConsumerAgentUID: "snapshotter-pod-a",
+		LeaseTTL:         time.Minute,
 	}
 	consumed, err := store.ConsumeRootFSWriterGrant(ctx, consumeReq)
 	require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestRootFSWriterGrantRejectsBindingMismatchWithoutConsuming(t *testing.T) {
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: differentBinding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a",
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a",
 		LeaseTTL: time.Minute,
 	})
 	require.ErrorIs(t, err, ErrRootFSWriterGrantConflict)
@@ -192,7 +192,7 @@ func TestRootFSWriterGrantConsumeCancelRaceHasOneWinner(t *testing.T) {
 		_, consumeErr := store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 			GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 			RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-			ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a",
+			ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a",
 			LeaseTTL: time.Minute,
 		})
 		results <- consumeErr
@@ -235,32 +235,32 @@ func TestRootFSWriterGrantConsumeRetrySurvivesCtldPodRestart(t *testing.T) {
 	first, err := store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-pod-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-pod-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 
 	retried, err := store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-pod-b", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-pod-b", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, first.LeaseExpiresAt, retried.LeaseExpiresAt)
-	assert.Equal(t, "ctld-pod-a", retried.ConsumerCtldPodUID)
+	assert.Equal(t, "ctld-pod-a", retried.ConsumerAgentUID)
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-b", ConsumerCtldPodUID: "ctld-pod-c", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-b", ConsumerAgentUID: "ctld-pod-c", LeaseTTL: time.Minute,
 	})
 	require.ErrorIs(t, err, ErrRootFSWriterGrantConflict)
 
-	var auditPodUID string
+	var auditRuntimeIncarnationID string
 	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT consumer_ctld_pod_uid
+		SELECT consumer_agent_uid
 		FROM manager.rootfs_writer_grants
 		WHERE grant_id = $1
-	`, issueReq.GrantID).Scan(&auditPodUID))
-	assert.Equal(t, "ctld-pod-a", auditPodUID)
+	`, issueReq.GrantID).Scan(&auditRuntimeIncarnationID))
+	assert.Equal(t, "ctld-pod-a", auditRuntimeIncarnationID)
 }
 
 func TestRenewRootFSWriterGrantUsesServerPolicyAndPreservesOwnerAudit(t *testing.T) {
@@ -285,7 +285,7 @@ func TestRenewRootFSWriterGrantUsesServerPolicyAndPreservesOwnerAudit(t *testing
 	consumed, err := store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-pod-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-pod-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	renewed, err := store.RenewRootFSWriterGrant(ctx, renewReq, policy)
@@ -293,7 +293,7 @@ func TestRenewRootFSWriterGrantUsesServerPolicyAndPreservesOwnerAudit(t *testing
 	assert.True(t, renewed.LeaseExpiresAt.After(consumed.LeaseExpiresAt))
 	assert.Equal(t, consumed.WriterEpoch, renewed.WriterEpoch)
 	assert.Equal(t, "node-a", renewed.ConsumerNodeUID)
-	assert.Equal(t, "ctld-pod-a", renewed.ConsumerCtldPodUID)
+	assert.Equal(t, "ctld-pod-a", renewed.ConsumerAgentUID)
 
 	wrongNode := *renewReq
 	wrongNode.ConsumerNodeUID = "node-b"
@@ -311,7 +311,7 @@ func TestRenewRootFSWriterGrantUsesServerPolicyAndPreservesOwnerAudit(t *testing
 	stored, err := store.GetRootFSWriterGrant(ctx, issueReq.GrantID)
 	require.NoError(t, err)
 	assert.Equal(t, renewed.LeaseExpiresAt, stored.LeaseExpiresAt)
-	assert.Equal(t, "ctld-pod-a", stored.ConsumerCtldPodUID)
+	assert.Equal(t, "ctld-pod-a", stored.ConsumerAgentUID)
 
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
@@ -346,7 +346,7 @@ func TestRenewRootFSWriterGrantsCommitsValidItemsWhenAnotherGrantIsStale(t *test
 			GrantID: issues[index].GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 			RawToken: issues[index].RawToken, BindingVersion: RootFSWriterBindingVersion,
 			BindingDigest: bindings[index][:], ConsumerNodeUID: "node-a",
-			ConsumerCtldPodUID: "ctld-pod-a", LeaseTTL: time.Minute,
+			ConsumerAgentUID: "ctld-pod-a", LeaseTTL: time.Minute,
 		})
 		require.NoError(t, err)
 		requests[index] = &RenewRootFSWriterGrantRequest{
@@ -385,7 +385,7 @@ func TestRenewRootFSWriterGrantAllowsOnlyBoundedGraceWithoutFencing(t *testing.T
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-pod-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-pod-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	renewReq := &RenewRootFSWriterGrantRequest{
@@ -442,7 +442,7 @@ func TestRootFSWriterGrantBindingVersionIsCheckedAcrossAllTransitions(t *testing
 	consumeReq := &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-pod-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-pod-a", LeaseTTL: time.Minute,
 	}
 	_, err = store.ConsumeRootFSWriterGrant(ctx, consumeReq)
 	require.ErrorIs(t, err, ErrRootFSWriterGrantConflict)
@@ -570,7 +570,7 @@ func TestExpiredRootFSWriterLeaseDoesNotChangeState(t *testing.T) {
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a",
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a",
 		LeaseTTL: time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -588,7 +588,7 @@ func TestExpiredRootFSWriterLeaseDoesNotChangeState(t *testing.T) {
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a",
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a",
 		LeaseTTL: time.Minute,
 	})
 	require.ErrorIs(t, err, ErrRootFSWriterLeaseExpired)
@@ -659,7 +659,7 @@ func TestRootFSWriterPrelaunchAbortRetiresWithoutPublishingHead(t *testing.T) {
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 
@@ -724,7 +724,7 @@ func TestRootFSWriterPrelaunchAbortRetiresWithoutPublishingHead(t *testing.T) {
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: nextIssue.GrantID, WriterEpoch: next.Grant.WriterEpoch,
 		RawToken: nextIssue.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: nextBinding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
@@ -758,7 +758,7 @@ func TestCompleteRootFSWriterRetireAndPublishSharesLifecycleTransaction(t *testi
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a",
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a",
 		LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
@@ -859,7 +859,7 @@ func TestCompleteRootFSWriterRetireAndPublishRejectsStaleHeadAtomically(t *testi
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issueReq.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
 		RawToken: issueReq.RawToken, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "snapshotter-pod-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "snapshotter-pod-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
@@ -993,8 +993,8 @@ func TestRootFSWriterCrashAbandonPreservesDurableGenerationAndAbortsLifecycleAto
 	record, err := fixture.store.GetSandbox(ctx, fixture.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
-	require.Empty(t, record.CurrentPodNamespace)
-	require.Empty(t, record.CurrentPodName)
+	require.Empty(t, record.RuntimeNamespace)
+	require.Empty(t, record.RuntimeID)
 	require.Equal(t, fixture.runtimeGeneration, record.RuntimeGeneration)
 	var lifecyclePhase, lifecycleError, preparedHead string
 	require.NoError(t, fixture.pool.QueryRow(ctx, `
@@ -1066,7 +1066,7 @@ func TestRootFSWriterCrashAbandonCompletesWithRecoveryLifecycleAfterBeginOwnerAb
 			ID: recoveryLifecycleID, SandboxID: fixture.sandboxID,
 			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
 			Source: SandboxLifecycleSourceLost, FromGeneration: fixture.runtimeGeneration,
-			FromPodNamespace: "sandbox0", FromPodName: "sandbox-crash-abandon-pod",
+			FromRuntimeNamespace: "sandbox0", FromRuntimeID: "sandbox-crash-abandon-pod",
 			ExpectedHeadLayerID: fixture.initial.ID,
 		})
 	})
@@ -1093,8 +1093,8 @@ func TestRootFSWriterCrashAbandonCompletesAcceptedPrecommitResumePod(t *testing.
 	_, err := fixture.pool.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
-			current_pod_namespace = '',
-			current_pod_name = '',
+			runtime_namespace = '',
+			runtime_id = '',
 			runtime_generation = $3
 		WHERE sandbox_id = $1
 	`, fixture.sandboxID, SandboxDesiredStatePaused, previousRuntimeGeneration)
@@ -1107,8 +1107,8 @@ func TestRootFSWriterCrashAbandonCompletesAcceptedPrecommitResumePod(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
 	require.Equal(t, previousRuntimeGeneration, record.RuntimeGeneration)
-	require.Empty(t, record.CurrentPodNamespace)
-	require.Empty(t, record.CurrentPodName)
+	require.Empty(t, record.RuntimeNamespace)
+	require.Empty(t, record.RuntimeID)
 	grant, err := fixture.store.GetRootFSWriterGrant(ctx, fixture.issued.Grant.ID)
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateRetired, grant.State)
@@ -1137,8 +1137,8 @@ func TestRootFSWriterCrashAbandonRevokesRenewableTerminatingRuntime(t *testing.T
 	record, err := fixture.store.GetSandbox(ctx, fixture.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateTerminating, record.DesiredState)
-	require.Equal(t, "sandbox0", record.CurrentPodNamespace)
-	require.Equal(t, "sandbox-crash-abandon-pod", record.CurrentPodName)
+	require.Equal(t, "sandbox0", record.RuntimeNamespace)
+	require.Equal(t, "sandbox-crash-abandon-pod", record.RuntimeID)
 }
 
 func TestRootFSWriterCrashAbandonCompletesAcceptedFailedInitialClaim(t *testing.T) {
@@ -1156,7 +1156,7 @@ func TestRootFSWriterCrashAbandonCompletesAcceptedFailedInitialClaim(t *testing.
 			ID: recoveryTxnID, SandboxID: fixture.sandboxID, Kind: SandboxLifecycleKindPause,
 			Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceLost,
 			Cancelable: false, FromGeneration: fixture.runtimeGeneration,
-			FromPodNamespace: "sandbox0", FromPodName: "sandbox-crash-abandon-pod",
+			FromRuntimeNamespace: "sandbox0", FromRuntimeID: "sandbox-crash-abandon-pod",
 			ExpectedHeadLayerID: fixture.initial.ID,
 		})
 	}))
@@ -1176,8 +1176,8 @@ func TestRootFSWriterCrashAbandonCompletesAcceptedFailedInitialClaim(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateDeleted, record.DesiredState)
 	require.True(t, record.DeletedAt.IsZero() == false)
-	require.Empty(t, record.CurrentPodNamespace)
-	require.Empty(t, record.CurrentPodName)
+	require.Empty(t, record.RuntimeNamespace)
+	require.Empty(t, record.RuntimeID)
 	filesystem, err := fixture.store.GetRootFSFilesystem(ctx, fixture.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, fixture.initial.ID, filesystem.HeadGenerationID)
@@ -1229,8 +1229,8 @@ func TestRootFSWriterCrashAbandonRequiresMatureLeaseAndCrashLifecycle(t *testing
 			return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 				ID: crashTxnID, SandboxID: fixture.sandboxID, Kind: SandboxLifecycleKindPause,
 				Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceCrash,
-				FromGeneration: fixture.runtimeGeneration, FromPodNamespace: "sandbox0",
-				FromPodName: "sandbox-crash-abandon-pod", ExpectedHeadLayerID: fixture.initial.ID,
+				FromGeneration: fixture.runtimeGeneration, FromRuntimeNamespace: "sandbox0",
+				FromRuntimeID: "sandbox-crash-abandon-pod", ExpectedHeadLayerID: fixture.initial.ID,
 			})
 		})
 		require.NoError(t, err)
@@ -1416,9 +1416,9 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	issue.InitialGenerationID = generation.ID
 	issue.NodeUID = claimed.NodeUID
 	issue.NodeBootID = claimed.NodeBootID
-	issue.PodNamespace = claimed.AllocationNamespace
-	issue.PodName = "slot"
-	issue.PodUID = claimed.AllocationID
+	issue.RuntimeNamespace = claimed.AllocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = claimed.AllocationID
 	issue.NodeName = claimed.NodeID
 	issue.RuntimeGeneration = "1"
 	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
@@ -1431,7 +1431,7 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: claimed.NodeUID, ConsumerCtldPodUID: "ctld-failed-writer", LeaseTTL: time.Minute,
+		ConsumerNodeUID: claimed.NodeUID, ConsumerAgentUID: "ctld-failed-writer", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
@@ -1453,13 +1453,13 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		tx SandboxStoreTx,
 		locked *SandboxRecord,
 	) error {
-		require.Empty(t, locked.CurrentPodNamespace)
-		require.Empty(t, locked.CurrentPodName)
+		require.Empty(t, locked.RuntimeNamespace)
+		require.Empty(t, locked.RuntimeID)
 		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 			ID: lifecycleID, SandboxID: record.ID, Kind: SandboxLifecycleKindPause,
 			Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceCrash, Cancelable: false,
-			FromGeneration: record.RuntimeGeneration, FromPodNamespace: claimed.AllocationNamespace,
-			FromPodName: claimed.AllocationID, ExpectedHeadLayerID: generation.ID,
+			FromGeneration: record.RuntimeGeneration, FromRuntimeNamespace: claimed.AllocationNamespace,
+			FromRuntimeID: claimed.AllocationID, ExpectedHeadLayerID: generation.ID,
 		})
 	})
 	require.NoError(t, err)
@@ -1496,8 +1496,8 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	stored, err := store.GetSandbox(ctx, record.ID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateActive, stored.DesiredState)
-	require.Empty(t, stored.CurrentPodNamespace)
-	require.Empty(t, stored.CurrentPodName)
+	require.Empty(t, stored.RuntimeNamespace)
+	require.Empty(t, stored.RuntimeID)
 	var claimPhase, lifecyclePhase string
 	require.NoError(t, pool.QueryRow(ctx, `
 		SELECT phase FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
@@ -1579,8 +1579,8 @@ func newRootFSWriterCrashAbandonFixture(
 	runtimeGeneration := int64(7)
 	record := rootFSTestSandboxRecord(sandboxID, "team-a")
 	record.RuntimeGeneration = runtimeGeneration
-	record.CurrentPodNamespace = "sandbox0"
-	record.CurrentPodName = "sandbox-crash-abandon-pod"
+	record.RuntimeNamespace = "sandbox0"
+	record.RuntimeID = "sandbox-crash-abandon-pod"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
@@ -1599,7 +1599,7 @@ func newRootFSWriterCrashAbandonFixture(
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	if matureLease {
@@ -1619,8 +1619,8 @@ func newRootFSWriterCrashAbandonFixture(
 		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 			ID: lifecycleTxnID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
 			Phase: SandboxLifecyclePhasePublishing, Source: lifecycleSource, Cancelable: false,
-			FromGeneration: runtimeGeneration, FromPodNamespace: record.CurrentPodNamespace,
-			FromPodName: record.CurrentPodName, ExpectedHeadLayerID: initial.ID,
+			FromGeneration: runtimeGeneration, FromRuntimeNamespace: record.RuntimeNamespace,
+			FromRuntimeID: record.RuntimeID, ExpectedHeadLayerID: initial.ID,
 		})
 	}))
 	proof := sha256.Sum256([]byte("node-task-container-mount-nbd-writer-zero-proof"))
@@ -1667,8 +1667,8 @@ func (f *rootFSWriterCrashAbandonFixture) assertBeforeComplete(t *testing.T, wan
 	record, err := f.store.GetSandbox(ctx, f.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateActive, record.DesiredState)
-	require.Equal(t, "sandbox0", record.CurrentPodNamespace)
-	require.Equal(t, "sandbox-crash-abandon-pod", record.CurrentPodName)
+	require.Equal(t, "sandbox0", record.RuntimeNamespace)
+	require.Equal(t, "sandbox-crash-abandon-pod", record.RuntimeID)
 	var phase, lifecycleError string
 	require.NoError(t, f.pool.QueryRow(ctx, `
 		SELECT phase, error FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
@@ -1689,14 +1689,14 @@ func rootFSWriterGrantTestIssueRequest(sandboxID, grantID, claimID, slotID strin
 		OperationID:    "issue-" + grantID,
 		RawToken:       "0123456789abcdef0123456789abcdef-" + grantID,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: append([]byte(nil), binding...),
-		NodeUID:           "node-a",
-		NodeBootID:        "boot-a",
-		PodNamespace:      "sandbox0",
-		PodName:           sandboxID + "-pod",
-		PodUID:            sandboxID + "-pod-uid",
-		NodeName:          "node-a",
-		GateParent:        "gate-" + slotID,
-		RuntimeGeneration: "17",
-		ConsumeExpiresAt:  time.Now().Add(time.Minute),
+		NodeUID:              "node-a",
+		NodeBootID:           "boot-a",
+		RuntimeNamespace:     "sandbox0",
+		RuntimeID:            sandboxID + "-pod",
+		RuntimeIncarnationID: sandboxID + "-pod-uid",
+		NodeName:             "node-a",
+		GateParent:           "gate-" + slotID,
+		RuntimeGeneration:    "17",
+		ConsumeExpiresAt:     time.Now().Add(time.Minute),
 	}
 }

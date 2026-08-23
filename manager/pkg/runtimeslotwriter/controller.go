@@ -244,9 +244,9 @@ func (c *Controller) ensureCrashLifecycle(
 			!record.DeletedAt.IsZero() || record.RuntimeGeneration != runtimeGeneration {
 			return errors.New("sandbox runtime does not match the runtime slot writer")
 		}
-		fromPodNamespace := record.CurrentPodNamespace
-		fromPodName := record.CurrentPodName
-		if fromPodNamespace != grant.PodNamespace || fromPodName != grant.PodUID {
+		fromPodNamespace := record.RuntimeNamespace
+		fromPodName := record.RuntimeID
+		if fromPodNamespace != grant.RuntimeNamespace || fromPodName != grant.RuntimeIncarnationID {
 			if fromPodNamespace != "" || fromPodName != "" {
 				return errors.New("sandbox runtime does not match the runtime slot writer")
 			}
@@ -261,15 +261,15 @@ func (c *Controller) ensureCrashLifecycle(
 			if claim == nil || claim.Phase != sandboxstore.SandboxRuntimeClaimPhaseCleanupPending {
 				return errors.New("sandbox runtime does not match the runtime slot writer")
 			}
-			fromPodNamespace = grant.PodNamespace
-			fromPodName = grant.PodUID
+			fromPodNamespace = grant.RuntimeNamespace
+			fromPodName = grant.RuntimeIncarnationID
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: request.OperationID, SandboxID: grant.SandboxID,
 			Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePublishing,
 			Source: sandboxstore.SandboxLifecycleSourceCrash, Cancelable: false,
-			FromGeneration: runtimeGeneration, FromPodNamespace: fromPodNamespace,
-			FromPodName: fromPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+			FromGeneration: runtimeGeneration, FromRuntimeNamespace: fromPodNamespace,
+			FromRuntimeID: fromPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
 		})
 	})
 	if err != nil {
@@ -289,7 +289,7 @@ func crashLifecycleMatches(
 		(active.Phase == sandboxstore.SandboxLifecyclePhasePublishing || active.Phase == sandboxstore.SandboxLifecyclePhaseCommitting) &&
 		active.Source == sandboxstore.SandboxLifecycleSourceCrash && !active.Cancelable &&
 		active.CancelRequestedAt.IsZero() && active.FromGeneration == runtimeGeneration &&
-		active.FromPodNamespace == grant.PodNamespace && active.FromPodName == grant.PodUID &&
+		active.FromRuntimeNamespace == grant.RuntimeNamespace && active.FromRuntimeID == grant.RuntimeIncarnationID &&
 		active.ExpectedHeadLayerID == grant.InitialGenerationID && active.PreparedHeadLayerID == ""
 }
 

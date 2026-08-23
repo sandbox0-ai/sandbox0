@@ -183,7 +183,7 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		}
 		if record == nil || record.TeamID != normalized.TeamID || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
 			record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() ||
-			record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
+			record.RuntimeNamespace != "" || record.RuntimeID != "" {
 			return fmt.Errorf("%w: sandbox %s is not a paused team-owned source", ErrRootFSGenerationConflict, normalized.SandboxID)
 		}
 		lifecycle, lifecycleErr := scanLifecycleTxn(txStore.tx.QueryRow(lockCtx, lifecycleTxnSelectSQL()+`
@@ -891,8 +891,8 @@ func committedNomadPausedRebaseLifecycleMatchesRequest(
 		lifecycle.Kind == SandboxLifecycleKindRebase && lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
 		lifecycle.Source == SandboxLifecycleSourceManual && !lifecycle.Cancelable &&
 		lifecycle.CancelRequestedAt.IsZero() && lifecycle.FromGeneration == lifecycle.ToGeneration &&
-		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromPodNamespace == "" &&
-		lifecycle.FromPodName == "" && lifecycle.ToPodNamespace == "" && lifecycle.ToPodName == "" &&
+		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromRuntimeNamespace == "" &&
+		lifecycle.FromRuntimeID == "" && lifecycle.ToRuntimeNamespace == "" && lifecycle.ToRuntimeID == "" &&
 		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
 		lifecycle.TargetGenerationID == request.Generation.ID &&
 		lifecycle.PreparedHeadLayerID == request.Generation.ID &&

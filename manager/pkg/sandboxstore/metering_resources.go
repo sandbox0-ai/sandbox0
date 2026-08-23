@@ -65,12 +65,11 @@ func backfillNomadMeteringResourceBatch(
 		return 0, fmt.Errorf("lock Nomad metering resource backfill: %w", err)
 	}
 	rows, err := tx.Query(ctx, sandboxRecordSelectSQL()+`
-		WHERE runtime_backend = $1
-			AND (resource_millicpu = 0 OR resource_memory_mib = 0)
+		WHERE resource_millicpu = 0 OR resource_memory_mib = 0
 		ORDER BY sandbox_id
 		FOR UPDATE
-		LIMIT $2
-	`, SandboxRuntimeBackendNomad, nomadMeteringResourceBackfillBatchSize)
+		LIMIT $1
+	`, nomadMeteringResourceBackfillBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("list Nomad metering resource backfill rows: %w", err)
 	}
@@ -103,9 +102,9 @@ func backfillNomadMeteringResourceBatch(
 			SET resource_millicpu = $2,
 				resource_memory_mib = $3,
 				updated_at = NOW()
-			WHERE sandbox_id = $1 AND runtime_backend = $4
+			WHERE sandbox_id = $1
 				AND (resource_millicpu = 0 OR resource_memory_mib = 0)
-		`, record.ID, millicpu, memoryMiB, SandboxRuntimeBackendNomad)
+		`, record.ID, millicpu, memoryMiB)
 		if err != nil {
 			return updated, fmt.Errorf("backfill Nomad metering resources for %s: %w", record.ID, err)
 		}

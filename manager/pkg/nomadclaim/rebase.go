@@ -428,8 +428,8 @@ func validatePendingNomadPausedRebaseLifecycle(lifecycle *sandboxstore.SandboxLi
 		lifecycle.Kind != sandboxstore.SandboxLifecycleKindRebase ||
 		lifecycle.Source != sandboxstore.SandboxLifecycleSourceManual || lifecycle.Cancelable ||
 		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromGeneration != lifecycle.ToGeneration ||
-		lifecycle.FromPodNamespace != "" || lifecycle.FromPodName != "" || lifecycle.ToPodNamespace != "" ||
-		lifecycle.ToPodName != "" || lifecycle.TargetSandboxID != "" || len(lifecycle.TargetRecordDigest) != 0 ||
+		lifecycle.FromRuntimeNamespace != "" || lifecycle.FromRuntimeID != "" || lifecycle.ToRuntimeNamespace != "" ||
+		lifecycle.ToRuntimeID != "" || lifecycle.TargetSandboxID != "" || len(lifecycle.TargetRecordDigest) != 0 ||
 		lifecycle.TargetGenerationID == "" || lifecycle.ExpectedHeadLayerID == "" ||
 		lifecycle.SourceBaseArtifactDigest == "" || lifecycle.TargetBaseArtifactDigest == "" ||
 		lifecycle.WorkerClusterID == "" || lifecycle.WorkerNodeID == "" || lifecycle.WorkerNodeUID == "" ||

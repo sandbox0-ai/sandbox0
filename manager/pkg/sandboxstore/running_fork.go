@@ -162,7 +162,7 @@ func forkRunningRootFSFilesystem(
 	if sourceSandbox.TeamID == "" || targetSandbox.TeamID != sourceSandbox.TeamID || targetSandbox.TeamID != teamID ||
 		targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
-		targetSandbox.CurrentPodName != "" || targetSandbox.CurrentPodNamespace != "" ||
+		targetSandbox.RuntimeID != "" || targetSandbox.RuntimeNamespace != "" ||
 		!targetSandbox.DeletedAt.IsZero() {
 		return nil, fmt.Errorf("%w: target sandbox is not a paused team-owned destination", ErrRootFSFilesystemConflict)
 	}
@@ -177,9 +177,9 @@ func forkRunningRootFSFilesystem(
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
 		lifecycle.FromGeneration != sourceSandbox.RuntimeGeneration ||
 		lifecycle.ToGeneration != sourceSandbox.RuntimeGeneration ||
-		lifecycle.FromPodNamespace != sourceSandbox.CurrentPodNamespace ||
-		lifecycle.FromPodName != sourceSandbox.CurrentPodName ||
-		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.FromRuntimeNamespace != sourceSandbox.RuntimeNamespace ||
+		lifecycle.FromRuntimeID != sourceSandbox.RuntimeID ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != req.TargetSandboxID ||
 		lifecycle.TargetGenerationID != req.Generation.ID ||
 		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID || lifecycle.PreparedHeadLayerID != "" {
@@ -384,7 +384,7 @@ func loadRunningRootFSForkRetry(
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
 		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID ||
 		lifecycle.PreparedHeadLayerID != checkpointGenerationID ||
-		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != req.TargetSandboxID ||
 		lifecycle.TargetGenerationID != checkpointGenerationID {
 		return nil, fmt.Errorf("%w: running fork lifecycle changed", ErrRootFSFilesystemConflict)
@@ -397,7 +397,7 @@ func loadRunningRootFSForkRetry(
 	}
 	if targetSandbox == nil || targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
-		targetSandbox.CurrentPodName != "" || targetSandbox.CurrentPodNamespace != "" ||
+		targetSandbox.RuntimeID != "" || targetSandbox.RuntimeNamespace != "" ||
 		!targetSandbox.DeletedAt.IsZero() {
 		return nil, fmt.Errorf("%w: running fork target sandbox changed", ErrRootFSFilesystemConflict)
 	}

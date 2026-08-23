@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T) {
+func TestRuntimeIdentityCutoverRejectsLiveKubernetesRowsIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPoolThrough(t, "00010")
 
@@ -48,7 +48,11 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	require.NoError(t, migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00045")),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
 
 	type migratedState struct {
 		desiredState   string
@@ -62,7 +66,6 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 		FROM manager.sandboxes
 	`)
 	require.NoError(t, err)
-	defer rows.Close()
 	for rows.Next() {
 		var id string
 		var state migratedState
@@ -70,10 +73,11 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 		migrated[id] = state
 	}
 	require.NoError(t, rows.Err())
+	rows.Close()
 
 	for _, id := range []string{"starting", "running", "failed"} {
 		assert.Equal(t, SandboxDesiredStateActive, migrated[id].desiredState)
-		assert.Equal(t, SandboxRuntimeBackendKubernetes, migrated[id].runtimeBackend)
+		assert.Equal(t, "kubernetes", migrated[id].runtimeBackend)
 		assert.Nil(t, migrated[id].completedAt)
 	}
 	assert.Equal(t, SandboxDesiredStatePaused, migrated["paused"].desiredState)
@@ -82,12 +86,36 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 	assert.Equal(t, SandboxDesiredStateDeleted, migrated["deleted-status"].desiredState)
 	assert.NotNil(t, migrated["deleted-status"].deletedAt)
 
+	err = RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{})
+	require.ErrorContains(t, err, "Nomad-only cutover requires every sandbox runtime_backend to be nomad")
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET desired_state = $1, deleted_at = COALESCE(deleted_at, NOW())
+		WHERE runtime_backend = 'kubernetes'
+	`, SandboxDesiredStateDeleted)
+	require.NoError(t, err)
+	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	assertSandboxStoreColumnExists(t, ctx, pool, "runtime_backend", false)
+	assertSandboxStoreColumnExists(t, ctx, pool, "current_pod_name", false)
+	assertSandboxStoreColumnExists(t, ctx, pool, "current_pod_namespace", false)
+	assertSandboxStoreColumnExists(t, ctx, pool, "runtime_id", true)
+	assertSandboxStoreColumnExists(t, ctx, pool, "runtime_namespace", true)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "sandbox_lifecycle_txns", "from_pod_name", false)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "sandbox_lifecycle_txns", "from_runtime_id", true)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "sandbox_lifecycle_txns", "to_pod_name", false)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "sandbox_lifecycle_txns", "to_runtime_id", true)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "rootfs_writer_grants", "runtime_pod_uid", false)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "rootfs_writer_grants", "runtime_incarnation_id", true)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "rootfs_writer_grants", "consumer_ctld_pod_uid", false)
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "rootfs_writer_grants", "consumer_agent_uid", true)
+
 	_, err = pool.Exec(ctx, `UPDATE manager.sandboxes SET desired_state = 'running' WHERE sandbox_id = 'running'`)
 	require.Error(t, err, "legacy observed status must be rejected after migration")
 
 	active, err := NewPGSandboxStore(pool).CountActiveSandboxes(ctx, "team-1")
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), active)
+	assert.Equal(t, int64(0), active)
 }
 
 func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
@@ -774,6 +802,17 @@ func assertSandboxStoreColumnExists(
 	column string,
 	want bool,
 ) {
+	assertSandboxStoreTableColumnExists(t, ctx, pool, "sandboxes", column, want)
+}
+
+func assertSandboxStoreTableColumnExists(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	table string,
+	column string,
+	want bool,
+) {
 	t.Helper()
 	var exists bool
 	require.NoError(t, pool.QueryRow(ctx, `
@@ -781,11 +820,11 @@ SELECT EXISTS (
     SELECT 1
     FROM information_schema.columns
     WHERE table_schema = 'manager'
-      AND table_name = 'sandboxes'
-      AND column_name = $1
+      AND table_name = $1
+      AND column_name = $2
 )
-`, column).Scan(&exists))
-	require.Equal(t, want, exists, "column %s existence", column)
+`, table, column).Scan(&exists))
+	require.Equal(t, want, exists, "column %s.%s existence", table, column)
 }
 
 func newSandboxStoreIntegrationPoolThrough(t *testing.T, maximumPrefix string) *pgxpool.Pool {

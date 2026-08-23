@@ -366,7 +366,7 @@ func (f *fakeClaimStore) RetryNomadSandboxResume(
 		return nil, false, sandboxstore.ErrSandboxRecordNotFound
 	}
 	if record.DesiredState == sandboxstore.SandboxDesiredStateActive &&
-		record.CurrentPodName != "" && record.CurrentPodNamespace != "" {
+		record.RuntimeID != "" && record.RuntimeNamespace != "" {
 		return &sandboxstore.NomadSandboxResumeCandidate{
 			SandboxID: record.ID, AlreadyActive: true,
 			RuntimeGeneration: record.RuntimeGeneration, Record: cloneClaimRecord(record),
@@ -398,7 +398,7 @@ func (f *fakeClaimStore) RequestNomadSandboxResume(
 		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	if record.DesiredState == sandboxstore.SandboxDesiredStateActive &&
-		record.CurrentPodName != "" && record.CurrentPodNamespace != "" {
+		record.RuntimeID != "" && record.RuntimeNamespace != "" {
 		return &sandboxstore.NomadSandboxResumeCandidate{
 			SandboxID: record.ID, AlreadyActive: true,
 			RuntimeGeneration: record.RuntimeGeneration, Record: cloneClaimRecord(record),
@@ -430,8 +430,8 @@ func (f *fakeClaimStore) CompleteNomadSandboxResume(
 		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.DesiredState = sandboxstore.SandboxDesiredStateActive
-	record.CurrentPodName = request.AllocationID
-	record.CurrentPodNamespace = request.AllocationNamespace
+	record.RuntimeID = request.AllocationID
+	record.RuntimeNamespace = request.AllocationNamespace
 	record.RuntimeGeneration = f.resumeCandidate.RuntimeGeneration
 	f.records[request.SandboxID] = cloneClaimRecord(record)
 	f.activeSlot = &sandboxstore.RuntimeSlot{
@@ -608,8 +608,8 @@ func (f *fakeClaimStore) CompleteSandboxClaim(_ context.Context, request *sandbo
 	if record == nil {
 		return nil, sandboxstore.ErrSandboxClaimReservationConflict
 	}
-	record.CurrentPodName = request.AllocationID
-	record.CurrentPodNamespace = request.AllocationNamespace
+	record.RuntimeID = request.AllocationID
+	record.RuntimeNamespace = request.AllocationNamespace
 	f.records[request.SandboxID] = cloneClaimRecord(record)
 	f.claimPhases[request.SandboxID] = sandboxstore.SandboxRuntimeClaimPhaseReady
 	f.writeCount++
@@ -632,7 +632,7 @@ func (f *fakeClaimStore) RequestSandboxRuntimeClaimCleanup(
 	f.claimPhases[sandboxID] = sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
 	return &sandboxstore.SandboxClaimCleanupCandidate{
 		SandboxID: sandboxID, OperationID: f.operations[sandboxID],
-		PhysicalStateRequired: record.CurrentPodName != "",
+		PhysicalStateRequired: record.RuntimeID != "",
 	}, nil
 }
 
@@ -812,7 +812,7 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.SandboxID != expectedID || response.ProcdAddress != "http://10.0.0.8:49983" ||
-		response.PodName != "allocation-1" || response.ClusterId == nil || *response.ClusterId != "cluster-1" ||
+		response.RuntimeID != "allocation-1" || response.ClusterId == nil || *response.ClusterId != "cluster-1" ||
 		response.CommandReadyDuration != 420*time.Millisecond || !response.CommandReadyWithinSLO {
 		t.Fatalf("response = %+v", response)
 	}
@@ -842,7 +842,7 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 		t.Fatalf("initial RootFS calls = %+v", fixture.store.ensureCalls)
 	}
 	record := fixture.store.records[expectedID]
-	if record == nil || record.CurrentPodName != "allocation-1" || record.CurrentPodNamespace != "default" ||
+	if record == nil || record.RuntimeID != "allocation-1" || record.RuntimeNamespace != "default" ||
 		record.RuntimeGeneration != 1 || record.ExpiresAt.Sub(fixture.now) != time.Hour {
 		t.Fatalf("persisted sandbox = %+v", record)
 	}
@@ -908,8 +908,8 @@ func TestServiceClaimsAndResumesWithExternalCredentialBindings(t *testing.T) {
 	}
 
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	fixture.store.records[response.SandboxID] = record
 	fixture.store.resumeCandidate = &sandboxstore.NomadSandboxResumeCandidate{
 		SandboxID: response.SandboxID, OperationID: "resume-credential", RuntimeGeneration: 2,
@@ -1173,7 +1173,7 @@ func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {
 	}
 	record := fixture.store.records[sandboxID]
 	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeGeneration != 2 ||
-		record.CurrentPodName != "allocation-1" || record.CurrentPodNamespace != "default" {
+		record.RuntimeID != "allocation-1" || record.RuntimeNamespace != "default" {
 		t.Fatalf("resumed record = %+v", record)
 	}
 }
@@ -1187,7 +1187,7 @@ func TestServiceProjectsResumedAndAlreadyActiveNomadRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resumed.ID != sandboxID || resumed.Status != managerapi.SandboxStatusRunning || resumed.Paused ||
-		resumed.InternalAddr != "http://10.0.0.8:49983" || resumed.PodName != "allocation-1" ||
+		resumed.InternalAddr != "http://10.0.0.8:49983" || resumed.RuntimeID != "allocation-1" ||
 		resumed.RuntimeGeneration != 2 {
 		t.Fatalf("resumed projection = %+v", resumed)
 	}
@@ -1518,7 +1518,7 @@ func TestServiceCapturesActiveNomadTemplateThroughExactWriter(t *testing.T) {
 		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
 		RuntimeBackend:    sandboxstore.SandboxRuntimeBackendNomad,
 		DesiredState:      sandboxstore.SandboxDesiredStateActive,
-		RuntimeGeneration: 3, CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+		RuntimeGeneration: 3, RuntimeNamespace: "nomad", RuntimeID: "allocation-1",
 		TemplateSpec: sourceSpec,
 	}
 	snapshotID := templatepkg.BuildSnapshotID("22222222-2222-2222-2222-222222222222")
@@ -1727,7 +1727,7 @@ func TestServiceRunningForkRecoversPublicationAfterNodeResponseLoss(t *testing.T
 		TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 		Slot: &sandboxstore.RuntimeSlot{
 			ID: "slot-fork-source", SandboxID: source.ID, ClusterID: source.ClusterID,
-			AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+			AllocationID: source.RuntimeID, AllocationNamespace: source.RuntimeNamespace,
 			NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
 		},
 		SourceFilesystemID: "filesystem-source", SourceGenerationID: "generation-source",
@@ -1797,8 +1797,8 @@ func TestServicePausedForkCommitsWithoutNodeDispatchAndRetriesAfterSourceResume(
 	}
 	source := fixture.store.records[claimed.SandboxID]
 	source.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	source.CurrentPodName = ""
-	source.CurrentPodNamespace = ""
+	source.RuntimeID = ""
+	source.RuntimeNamespace = ""
 	operationID := "operation-paused-fork-1"
 	ttl := int32(45)
 	request := &service.ForkSandboxRequest{
@@ -1834,8 +1834,8 @@ func TestServicePausedForkCommitsWithoutNodeDispatchAndRetriesAfterSourceResume(
 	// The durable committed operation remains retryable even after the source
 	// has independently resumed into another physical runtime generation.
 	source.DesiredState = sandboxstore.SandboxDesiredStateActive
-	source.CurrentPodName = "allocation-after-paused-fork"
-	source.CurrentPodNamespace = "default"
+	source.RuntimeID = "allocation-after-paused-fork"
+	source.RuntimeNamespace = "default"
 	source.RuntimeGeneration++
 	retry, err := fixture.service.ForkSandbox(
 		t.Context(), source.ID, source.TeamID, "user-paused-fork", request,
@@ -1867,15 +1867,15 @@ func TestServiceForkRecoveryReplaysDurableNodeDispatch(t *testing.T) {
 	target := cloneClaimRecord(source)
 	target.ID = targetID
 	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	target.CurrentPodName = ""
-	target.CurrentPodNamespace = ""
+	target.RuntimeID = ""
+	target.RuntimeNamespace = ""
 	target.RuntimeGeneration = 0
 	fixture.store.records[targetID] = target
 	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
 		source.ID: {
 			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
-			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 			TargetSandboxID:    targetID,
 			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 			UpdatedAt:          fixture.now,
@@ -1886,7 +1886,7 @@ func TestServiceForkRecoveryReplaysDurableNodeDispatch(t *testing.T) {
 		TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 		Slot: &sandboxstore.RuntimeSlot{
 			ID: "slot-fork-recovery", SandboxID: source.ID, ClusterID: source.ClusterID,
-			AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+			AllocationID: source.RuntimeID, AllocationNamespace: source.RuntimeNamespace,
 			NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
 		},
 		SourceFilesystemID: "filesystem-source", SourceGenerationID: "generation-source",
@@ -1922,8 +1922,8 @@ func TestServiceForkRecoveryKeepsStaleExactLiveWriterRetryable(t *testing.T) {
 	target := cloneClaimRecord(source)
 	target.ID = targetID
 	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	target.CurrentPodName = ""
-	target.CurrentPodNamespace = ""
+	target.RuntimeID = ""
+	target.RuntimeNamespace = ""
 	target.RuntimeGeneration = 0
 	targetDigest, err := sandboxstore.NomadSandboxForkTargetRecordDigest(target)
 	if err != nil {
@@ -1935,7 +1935,7 @@ func TestServiceForkRecoveryKeepsStaleExactLiveWriterRetryable(t *testing.T) {
 			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
 			FromGeneration: source.RuntimeGeneration, ToGeneration: source.RuntimeGeneration,
-			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 			TargetSandboxID:    targetID,
 			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 			TargetRecordDigest: targetDigest, ExpectedHeadLayerID: "generation-source",
@@ -1944,7 +1944,7 @@ func TestServiceForkRecoveryKeepsStaleExactLiveWriterRetryable(t *testing.T) {
 	}
 	fixture.store.activeSlot = &sandboxstore.RuntimeSlot{
 		ID: "slot-stale-live-fork", ClusterID: source.ClusterID, SandboxID: source.ID,
-		AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+		AllocationID: source.RuntimeID, AllocationNamespace: source.RuntimeNamespace,
 		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
 		State: sandboxstore.RuntimeSlotStateActive, FilesystemID: "filesystem-source",
 		SourceGenerationID: "generation-source", WriterGrantID: "writer-source",
@@ -1981,15 +1981,15 @@ func TestServiceForkRecoveryDoesNotAbortOnRuntimeSlotReadFailure(t *testing.T) {
 	target := cloneClaimRecord(source)
 	target.ID = targetID
 	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	target.CurrentPodName = ""
-	target.CurrentPodNamespace = ""
+	target.RuntimeID = ""
+	target.RuntimeNamespace = ""
 	target.RuntimeGeneration = 0
 	fixture.store.records[targetID] = target
 	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
 		source.ID: {
 			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
-			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 			TargetSandboxID:    targetID,
 			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 			UpdatedAt:          fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
@@ -2023,15 +2023,15 @@ func TestServiceForkRecoveryAbortsStaleNeverPublishedTarget(t *testing.T) {
 	target := cloneClaimRecord(source)
 	target.ID = targetID
 	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	target.CurrentPodName = ""
-	target.CurrentPodNamespace = ""
+	target.RuntimeID = ""
+	target.RuntimeNamespace = ""
 	target.RuntimeGeneration = 0
 	fixture.store.records[targetID] = target
 	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
 		source.ID: {
 			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
-			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 			TargetSandboxID:    targetID,
 			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
 			UpdatedAt:          fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
@@ -2255,8 +2255,8 @@ func preparePausedNomadRebase(
 	}
 	record := fixture.store.records[claimed.SandboxID]
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	sourceBaseRoot := digest.FromString(operationID + "-source-base").String()
 	sourceHead := digest.FromString(operationID + "-source-head").String()
 	targetBaseRoot := digest.FromString(operationID + "-target-base").String()
@@ -2376,8 +2376,8 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 		t.Fatalf("claimed sandbox %s was not persisted", claimed.SandboxID)
 	}
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	fixture.store.resumeCandidate = &sandboxstore.NomadSandboxResumeCandidate{
 		SandboxID: claimed.SandboxID, OperationID: "nomad-resume-operation-1",
 		LifecyclePhase:    sandboxstore.SandboxLifecyclePhasePreparing,

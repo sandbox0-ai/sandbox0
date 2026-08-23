@@ -120,18 +120,18 @@ func TestCommittedHotClaimResumeSurvivesReservationRecoveryGrace(t *testing.T) {
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "2"
 	record := hotClaimReservationTestRecord(pod)
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	record.RuntimeGeneration = 1
 	txn := &sandboxstore.SandboxLifecycleTxn{
-		ID:             "resume-txn-sandbox-a",
-		SandboxID:      record.ID,
-		Kind:           sandboxstore.SandboxLifecycleKindResume,
-		Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
-		FromGeneration: 1,
-		ToGeneration:   2,
-		ToPodNamespace: pod.Namespace,
-		ToPodName:      pod.Name,
+		ID:                 "resume-txn-sandbox-a",
+		SandboxID:          record.ID,
+		Kind:               sandboxstore.SandboxLifecycleKindResume,
+		Phase:              sandboxstore.SandboxLifecyclePhasePreparing,
+		FromGeneration:     1,
+		ToGeneration:       2,
+		ToRuntimeNamespace: pod.Namespace,
+		ToRuntimeID:        pod.Name,
 	}
 	store := &memorySandboxStore{
 		records:       map[string]*sandboxstore.SandboxRecord{record.ID: record},
@@ -150,8 +150,8 @@ func TestCommittedHotClaimResumeSurvivesReservationRecoveryGrace(t *testing.T) {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
 	if gotRecord.DesiredState != sandboxstore.SandboxDesiredStateActive ||
-		gotRecord.CurrentPodNamespace != pod.Namespace ||
-		gotRecord.CurrentPodName != pod.Name ||
+		gotRecord.RuntimeNamespace != pod.Namespace ||
+		gotRecord.RuntimeID != pod.Name ||
 		gotRecord.RuntimeGeneration != 2 ||
 		!gotRecord.HotClaimCompletedAt.Equal(now) {
 		t.Fatalf("sandbox record = %#v, want committed hot resume with completion marker", gotRecord)
@@ -448,8 +448,8 @@ func TestHotClaimReservationControllerPreservesPausedIdentityOnAbandonedResume(t
 	)
 	record := hotClaimReservationTestRecord(pod)
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
+	record.RuntimeID = ""
+	record.RuntimeNamespace = ""
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{"sandbox-a": record}}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	reconciler := NewHotClaimReservationController(
@@ -549,11 +549,11 @@ func (p *recordingHotClaimDetachmentPacer) Wait(context.Context) error {
 
 func hotClaimReservationTestRecord(pod *corev1.Pod) *sandboxstore.SandboxRecord {
 	return &sandboxstore.SandboxRecord{
-		ID:                  sandboxPodID(pod),
-		DesiredState:        sandboxstore.SandboxDesiredStateActive,
-		CurrentPodNamespace: pod.Namespace,
-		CurrentPodName:      pod.Name,
-		RuntimeGeneration:   runtimeGenerationFromPod(pod),
-		CreatedAt:           pod.CreationTimestamp.Time,
+		ID:                sandboxPodID(pod),
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		RuntimeNamespace:  pod.Namespace,
+		RuntimeID:         pod.Name,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		CreatedAt:         pod.CreationTimestamp.Time,
 	}
 }

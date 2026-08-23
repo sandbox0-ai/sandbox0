@@ -158,8 +158,8 @@ func TestCompleteRootFSWriterRetirePublishesGenerationAndPauseAtomically(t *test
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-pause", "team-1")
 	record.RuntimeGeneration = 7
-	record.CurrentPodNamespace = "sandbox0"
-	record.CurrentPodName = "sandbox-pause"
+	record.RuntimeNamespace = "sandbox0"
+	record.RuntimeID = "sandbox-pause"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
@@ -179,7 +179,7 @@ func TestCompleteRootFSWriterRetirePublishesGenerationAndPauseAtomically(t *test
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:], ConsumerNodeUID: "node-a",
-		ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
@@ -304,7 +304,7 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: issue.BindingDigest,
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: "node-a", ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
@@ -395,8 +395,8 @@ func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.
 	require.Equal(t, targetRecord.ID, activeFork.TargetSandboxID)
 	require.Equal(t, candidate.TargetGenerationID, activeFork.TargetGenerationID)
 	require.Len(t, activeFork.TargetRecordDigest, sha256.Size)
-	require.Empty(t, activeFork.ToPodNamespace)
-	require.Empty(t, activeFork.ToPodName,
+	require.Empty(t, activeFork.ToRuntimeNamespace)
+	require.Empty(t, activeFork.ToRuntimeID,
 		"Nomad target identity must not depend on legacy Kubernetes Pod fields")
 	unpublishedTarget, err := store.GetRootFSFilesystem(ctx, targetRecord.ID)
 	require.NoError(t, err)
@@ -796,8 +796,8 @@ func nomadRunningForkTargetRecord(source *SandboxRecord, targetID string) *Sandb
 	target := *source
 	target.ID = targetID
 	target.DesiredState = SandboxDesiredStatePaused
-	target.CurrentPodName = ""
-	target.CurrentPodNamespace = ""
+	target.RuntimeID = ""
+	target.RuntimeNamespace = ""
 	target.RuntimeGeneration = 0
 	target.LifecycleEpoch = 0
 	target.HotClaimCompletedAt = time.Time{}
@@ -862,8 +862,8 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	targetRecord := rootFSTestSandboxRecord("sandbox-crash-target", "team-1")
 	targetRecord.DesiredState = SandboxDesiredStatePaused
 	targetRecord.RuntimeGeneration = 7
-	targetRecord.CurrentPodNamespace = "nomad"
-	targetRecord.CurrentPodName = "allocation-crashed"
+	targetRecord.RuntimeNamespace = "nomad"
+	targetRecord.RuntimeID = "allocation-crashed"
 	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
 
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
@@ -892,7 +892,7 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: issue.NodeUID, ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: issue.NodeUID, ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
@@ -906,7 +906,7 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 			ID: operationID, SandboxID: target.ID, Kind: SandboxLifecycleKindPause,
 			Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceCrash,
-			FromGeneration: 7, FromPodNamespace: "nomad", FromPodName: "allocation-crashed",
+			FromGeneration: 7, FromRuntimeNamespace: "nomad", FromRuntimeID: "allocation-crashed",
 			ExpectedHeadLayerID: initial.ID,
 		})
 	}))

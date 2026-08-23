@@ -14,25 +14,23 @@ import (
 )
 
 type fakeSandboxExpirationLister struct {
-	mu      sync.Mutex
-	pages   [][]sandboxstore.SandboxExpirationCandidate
-	err     error
-	calls   int
-	now     time.Time
-	backend string
-	limit   int
+	mu    sync.Mutex
+	pages [][]sandboxstore.SandboxExpirationCandidate
+	err   error
+	calls int
+	now   time.Time
+	limit int
 }
 
 func (f *fakeSandboxExpirationLister) ListSandboxExpirationCandidates(
 	_ context.Context,
 	now time.Time,
-	backend string,
 	limit int,
 ) ([]sandboxstore.SandboxExpirationCandidate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	f.now, f.backend, f.limit = now, backend, limit
+	f.now, f.limit = now, limit
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -78,7 +76,7 @@ func TestSandboxTTLControllerProcessesHardExpiryBeforeSoftTTL(t *testing.T) {
 	}
 	controller, err := NewSandboxTTLController(
 		lister, backend, backend,
-		SandboxTTLControllerConfig{RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad},
+		SandboxTTLControllerConfig{},
 		func() time.Time { return now }, zap.NewNop(),
 	)
 	require.NoError(t, err)
@@ -88,7 +86,6 @@ func TestSandboxTTLControllerProcessesHardExpiryBeforeSoftTTL(t *testing.T) {
 	assert.Equal(t, []string{"hard-active", "hard-paused"}, backend.terminations)
 	assert.Equal(t, []string{"soft-active"}, backend.pauses)
 	assert.Equal(t, now, lister.now)
-	assert.Equal(t, sandboxstore.SandboxRuntimeBackendNomad, lister.backend)
 }
 
 func TestSandboxTTLControllerContinuesAfterCandidateFailure(t *testing.T) {
@@ -105,7 +102,7 @@ func TestSandboxTTLControllerContinuesAfterCandidateFailure(t *testing.T) {
 	}
 	controller, err := NewSandboxTTLController(
 		lister, backend, backend,
-		SandboxTTLControllerConfig{RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad},
+		SandboxTTLControllerConfig{},
 		func() time.Time { return now }, zap.NewNop(),
 	)
 	require.NoError(t, err)
@@ -128,7 +125,7 @@ func TestSandboxTTLControllerEscalatesSoftPauseWhenHardTTLWinsRace(t *testing.T)
 	}
 	controller, err := NewSandboxTTLController(
 		lister, backend, backend,
-		SandboxTTLControllerConfig{RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad},
+		SandboxTTLControllerConfig{},
 		func() time.Time { return now }, zap.NewNop(),
 	)
 	require.NoError(t, err)
@@ -158,8 +155,7 @@ func TestSandboxTTLControllerBoundsBatchesAndSkipsDuplicateFailures(t *testing.T
 	controller, err := NewSandboxTTLController(
 		lister, backend, backend,
 		SandboxTTLControllerConfig{
-			RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-			BatchSize:      2, MaxBatchesPerRun: 2,
+			BatchSize: 2, MaxBatchesPerRun: 2,
 		}, func() time.Time { return now }, zap.NewNop(),
 	)
 	require.NoError(t, err)
@@ -179,8 +175,7 @@ func TestSandboxTTLControllerRunScansImmediatelyAndStopsWithContext(t *testing.T
 	controller, err := NewSandboxTTLController(
 		lister, backend, backend,
 		SandboxTTLControllerConfig{
-			RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-			Interval:       time.Hour,
+			Interval: time.Hour,
 		}, time.Now, zap.NewNop(),
 	)
 	require.NoError(t, err)

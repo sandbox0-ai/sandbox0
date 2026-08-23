@@ -43,8 +43,8 @@ func TestRequestNomadSandboxPausePersistsDeterministicIntentIntegration(t *testi
 	require.Equal(t, SandboxLifecycleSourceManual, active.Source)
 	require.False(t, active.Cancelable)
 	require.Equal(t, int64(1), active.FromGeneration)
-	require.Equal(t, fixture.allocationNamespace, active.FromPodNamespace)
-	require.Equal(t, fixture.allocationID, active.FromPodName)
+	require.Equal(t, fixture.allocationNamespace, active.FromRuntimeNamespace)
+	require.Equal(t, fixture.allocationID, active.FromRuntimeID)
 	require.Equal(t, fixture.initialGenerationID, active.ExpectedHeadLayerID)
 
 	var lifecycleCount int
@@ -57,7 +57,7 @@ func TestRequestNomadSandboxPausePersistsDeterministicIntentIntegration(t *testi
 func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "mismatch")
 	_, err := fixture.pool.Exec(fixture.ctx, `
-		UPDATE manager.sandboxes SET current_pod_name = 'another-allocation'
+		UPDATE manager.sandboxes SET runtime_id = 'another-allocation'
 		WHERE sandbox_id = $1
 	`, fixture.sandboxID)
 	require.NoError(t, err)
@@ -284,9 +284,9 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	issue := rootFSWriterGrantTestIssueRequest(sandboxID, "grant-nomad-pause-"+suffix, claimID, slotID, binding)
 	issue.ExpectedFilesystemID = filesystem.ID
 	issue.InitialGenerationID = initial.ID
-	issue.PodNamespace = allocationNamespace
-	issue.PodName = "slot"
-	issue.PodUID = allocationID
+	issue.RuntimeNamespace = allocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = allocationID
 	issue.NodeName = registration.NodeID
 	issue.NodeUID = registration.NodeUID
 	issue.NodeBootID = registration.NodeBootID
@@ -300,7 +300,7 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
-		ConsumerNodeUID: registration.NodeUID, ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-a", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = store.StartRuntimeSlot(ctx, &StartRuntimeSlotRequest{

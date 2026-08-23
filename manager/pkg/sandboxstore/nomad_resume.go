@@ -126,8 +126,8 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return nil, false, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, record.ID)
 	}
-	if record.DesiredState != SandboxDesiredStatePaused || record.CurrentPodName != "" ||
-		record.CurrentPodNamespace != "" || record.RuntimeGeneration < 0 || record.RuntimeGeneration == math.MaxInt64 {
+	if record.DesiredState != SandboxDesiredStatePaused || record.RuntimeID != "" ||
+		record.RuntimeNamespace != "" || record.RuntimeGeneration < 0 || record.RuntimeGeneration == math.MaxInt64 {
 		return nil, false, fmt.Errorf("%w: sandbox is not a canonical paused runtime", ErrNomadSandboxResumeConflict)
 	}
 	if activeLifecycle == nil {
@@ -218,7 +218,7 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 	if record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return nil, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, record.ID)
 	}
-	if record.DesiredState != SandboxDesiredStatePaused || record.CurrentPodName != "" || record.CurrentPodNamespace != "" ||
+	if record.DesiredState != SandboxDesiredStatePaused || record.RuntimeID != "" || record.RuntimeNamespace != "" ||
 		record.RuntimeGeneration < 0 || record.RuntimeGeneration == math.MaxInt64 {
 		return nil, fmt.Errorf("%w: sandbox is not a canonical paused runtime", ErrNomadSandboxResumeConflict)
 	}
@@ -299,8 +299,8 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 	}
 	if lifecycle.Phase == SandboxLifecyclePhaseCommitted {
 		if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedHeadLayerID, true) ||
-			record.DesiredState != SandboxDesiredStateActive || record.CurrentPodName != normalized.AllocationID ||
-			record.CurrentPodNamespace != normalized.AllocationNamespace {
+			record.DesiredState != SandboxDesiredStateActive || record.RuntimeID != normalized.AllocationID ||
+			record.RuntimeNamespace != normalized.AllocationNamespace {
 			return nil, fmt.Errorf("%w: committed resume binding changed", ErrNomadSandboxResumeConflict)
 		}
 		slot, slotErr := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -548,7 +548,7 @@ func reserveNomadResumeQuota(ctx context.Context, tx pgx.Tx, teamID string, limi
 }
 
 func validateAlreadyActiveNomadSandbox(ctx context.Context, tx pgx.Tx, record *SandboxRecord) error {
-	if record == nil || record.CurrentPodName == "" || record.CurrentPodNamespace == "" || record.RuntimeGeneration <= 0 {
+	if record == nil || record.RuntimeID == "" || record.RuntimeNamespace == "" || record.RuntimeGeneration <= 0 {
 		return fmt.Errorf("%w: active sandbox lacks its runtime binding", ErrNomadSandboxResumeNotReady)
 	}
 	var count int
@@ -556,7 +556,7 @@ func validateAlreadyActiveNomadSandbox(ctx context.Context, tx pgx.Tx, record *S
 		SELECT COUNT(*) FROM manager.runtime_slots
 		WHERE sandbox_id = $1 AND allocation_id = $2 AND allocation_namespace = $3
 			AND state = $4 AND heartbeat_expires_at > NOW()
-	`, record.ID, record.CurrentPodName, record.CurrentPodNamespace, RuntimeSlotStateActive).Scan(&count); err != nil {
+	`, record.ID, record.RuntimeID, record.RuntimeNamespace, RuntimeSlotStateActive).Scan(&count); err != nil {
 		return fmt.Errorf("verify active Nomad resume runtime: %w", err)
 	}
 	if count != 1 {
@@ -593,11 +593,11 @@ func nomadResumeLifecycleMatches(
 	}
 	if committed {
 		return lifecycle.Phase == SandboxLifecyclePhaseCommitted && record.RuntimeGeneration == lifecycle.ToGeneration &&
-			lifecycle.ToPodNamespace != "" && lifecycle.ToPodName != "" &&
-			record.CurrentPodNamespace == lifecycle.ToPodNamespace && record.CurrentPodName == lifecycle.ToPodName
+			lifecycle.ToRuntimeNamespace != "" && lifecycle.ToRuntimeID != "" &&
+			record.RuntimeNamespace == lifecycle.ToRuntimeNamespace && record.RuntimeID == lifecycle.ToRuntimeID
 	}
 	return record.DesiredState == SandboxDesiredStatePaused && record.RuntimeGeneration == lifecycle.FromGeneration &&
-		record.CurrentPodNamespace == "" && record.CurrentPodName == "" &&
+		record.RuntimeNamespace == "" && record.RuntimeID == "" &&
 		(lifecycle.Phase == SandboxLifecyclePhasePreparing || lifecycle.Phase == SandboxLifecyclePhaseBarriered ||
 			lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting)
 }

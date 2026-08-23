@@ -273,15 +273,15 @@ func loadNomadMeteringSource(ctx context.Context, tx pgx.Tx, sandboxID string) (
 	err := tx.QueryRow(ctx, `
 		SELECT sandbox.sandbox_id, sandbox.team_id, sandbox.user_id,
 			sandbox.template_id, sandbox.cluster_id, sandbox.desired_state,
-			sandbox.current_pod_namespace, sandbox.owner_kind,
+			sandbox.runtime_namespace, sandbox.owner_kind,
 			sandbox.resource_millicpu, sandbox.resource_memory_mib,
 			sandbox.claimed_at, sandbox.expires_at, sandbox.hard_expires_at,
 			sandbox.deleted_at, claim.completed_at, NOW()
 		FROM manager.sandboxes AS sandbox
 		LEFT JOIN manager.sandbox_runtime_claims AS claim
 			ON claim.sandbox_id = sandbox.sandbox_id
-		WHERE sandbox.sandbox_id = $1 AND sandbox.runtime_backend = $2
-	`, sandboxID, sandboxstore.SandboxRuntimeBackendNomad).Scan(
+		WHERE sandbox.sandbox_id = $1
+	`, sandboxID).Scan(
 		&source.SandboxID, &source.TeamID, &source.UserID,
 		&source.TemplateID, &source.ClusterID, &source.DesiredState,
 		&source.AllocationNamespace, &source.OwnerKind,
@@ -570,7 +570,6 @@ func (p *NomadLifecycleProjector) nomadSandboxEvent(
 
 func nomadClaimEventData(source *nomadSandboxMeteringSource) map[string]any {
 	return map[string]any{
-		"runtime_backend": sandboxstore.SandboxRuntimeBackendNomad,
 		"owner_kind":      source.OwnerKind,
 		"expires_at":      source.ExpiresAt,
 		"hard_expires_at": source.HardExpiresAt,

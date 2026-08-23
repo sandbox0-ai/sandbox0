@@ -24,8 +24,8 @@ func TestNomadLifecycleProjectorCommitsDurableHistoryAndResumesAfterRestartInteg
 		ID: "sandbox-nomad-metering", TeamID: "team-1", UserID: "user-1",
 		TemplateID: "template-1", TemplateName: "template-1", TemplateNamespace: "default",
 		ClusterID: "cluster-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState:   sandboxstore.SandboxDesiredStateActive,
-		CurrentPodName: "allocation-1", CurrentPodNamespace: "default", RuntimeGeneration: 1,
+		DesiredState: sandboxstore.SandboxDesiredStateActive,
+		RuntimeID:    "allocation-1", RuntimeNamespace: "default", RuntimeGeneration: 1,
 		ResourceMillicpu: 1000, ResourceMemoryMiB: 1024,
 		ClaimedAt: claimedAt, CreatedAt: claimedAt,
 	}
@@ -117,7 +117,7 @@ func commitNomadMeteringPause(
 		if err := tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: operationID, SandboxID: sandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
 			Phase:          sandboxstore.SandboxLifecyclePhaseCommitting,
-			FromGeneration: generation, FromPodNamespace: record.CurrentPodNamespace, FromPodName: record.CurrentPodName,
+			FromGeneration: generation, FromRuntimeNamespace: record.RuntimeNamespace, FromRuntimeID: record.RuntimeID,
 		}); err != nil {
 			return err
 		}

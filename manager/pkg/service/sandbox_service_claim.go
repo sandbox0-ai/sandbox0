@@ -241,7 +241,7 @@ type ClaimResponse struct {
 	SandboxID             string        `json:"sandbox_id"`
 	Status                string        `json:"status"`
 	ProcdAddress          string        `json:"procd_address"`
-	PodName               string        `json:"pod_name"`
+	RuntimeID             string        `json:"runtime_id"`
 	Template              string        `json:"template"`
 	ClusterId             *string       `json:"cluster_id,omitempty"`
 	CommandReadyDuration  time.Duration `json:"-"`
@@ -640,7 +640,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		SandboxID:    req.SandboxID,
 		Status:       s.podToSandboxStatus(pod),
 		ProcdAddress: procdAddress,
-		PodName:      pod.Name,
+		RuntimeID:    pod.Name,
 		Template:     req.Template,
 		ClusterId:    template.Spec.ClusterId,
 	}, nil
@@ -663,24 +663,24 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 	}
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	record := &sandboxstore.SandboxRecord{
-		ID:                  sandboxID,
-		TeamID:              req.TeamID,
-		UserID:              req.UserID,
-		TemplateID:          controller.TemplateLogicalID(template),
-		TemplateName:        template.Name,
-		TemplateNamespace:   template.Namespace,
-		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		DesiredState:        sandboxstore.SandboxDesiredStateActive,
-		Config:              cfg,
-		TemplateSpec:        template.Spec,
-		CurrentPodName:      pod.Name,
-		CurrentPodNamespace: pod.Namespace,
-		RuntimeGeneration:   runtimeGenerationFromPod(pod),
-		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
-		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
-		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
-		OwnerKind:           ownerKindFromPod(pod),
-		CreatedAt:           s.clock.Now(),
+		ID:                sandboxID,
+		TeamID:            req.TeamID,
+		UserID:            req.UserID,
+		TemplateID:        controller.TemplateLogicalID(template),
+		TemplateName:      template.Name,
+		TemplateNamespace: template.Namespace,
+		ClusterID:         naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		Config:            cfg,
+		TemplateSpec:      template.Spec,
+		RuntimeID:         pod.Name,
+		RuntimeNamespace:  pod.Namespace,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		ClaimedAt:         parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:         parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:     parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		OwnerKind:         ownerKindFromPod(pod),
+		CreatedAt:         s.clock.Now(),
 	}
 	return record
 }

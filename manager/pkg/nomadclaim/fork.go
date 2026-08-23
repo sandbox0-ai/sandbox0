@@ -52,9 +52,9 @@ func (s *Service) ForkSandbox(
 		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID)
 	}
 	activeSource := source.DesiredState == sandboxstore.SandboxDesiredStateActive &&
-		source.RuntimeGeneration > 0 && source.CurrentPodName != "" && source.CurrentPodNamespace != ""
+		source.RuntimeGeneration > 0 && source.RuntimeID != "" && source.RuntimeNamespace != ""
 	pausedSource := source.DesiredState == sandboxstore.SandboxDesiredStatePaused &&
-		source.RuntimeGeneration >= 0 && source.CurrentPodName == "" && source.CurrentPodNamespace == ""
+		source.RuntimeGeneration >= 0 && source.RuntimeID == "" && source.RuntimeNamespace == ""
 	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
 	if err != nil {
 		return nil, fmt.Errorf("derive Nomad fork target ID: %w", err)
@@ -112,8 +112,8 @@ func (s *Service) ForkSandbox(
 			existingTarget.TemplateID != source.TemplateID || existingTarget.ClusterID != source.ClusterID ||
 			existingTarget.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 			existingTarget.DesiredState != sandboxstore.SandboxDesiredStatePaused ||
-			existingTarget.RuntimeGeneration != 0 || existingTarget.CurrentPodName != "" ||
-			existingTarget.CurrentPodNamespace != "" || !existingTarget.DeletedAt.IsZero() ||
+			existingTarget.RuntimeGeneration != 0 || existingTarget.RuntimeID != "" ||
+			existingTarget.RuntimeNamespace != "" || !existingTarget.DeletedAt.IsZero() ||
 			!nomadForkExplicitTTLMatches(request.Config, &existingTarget.Config) {
 			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID,
 				fmt.Errorf("existing fork target does not match the signed operation"))
@@ -238,8 +238,8 @@ func (s *Service) CompleteSandboxFork(ctx context.Context, sourceSandboxID strin
 	if lifecycle.ID == "" || lifecycle.SandboxID != sourceSandboxID ||
 		lifecycle.Phase != sandboxstore.SandboxLifecyclePhasePublishing ||
 		lifecycle.Source != sandboxstore.SandboxLifecycleSourceManual || lifecycle.Cancelable ||
-		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromPodName == "" ||
-		lifecycle.FromPodNamespace == "" || lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromRuntimeID == "" ||
+		lifecycle.FromRuntimeNamespace == "" || lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID == "" || lifecycle.TargetGenerationID == "" {
 		return fmt.Errorf("active Nomad running-fork lifecycle is not canonical")
 	}
@@ -302,9 +302,9 @@ func nomadRunningForkRecoveryStillExact(
 		lifecycle.Source != sandboxstore.SandboxLifecycleSourceManual || lifecycle.Cancelable ||
 		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromGeneration <= 0 ||
 		lifecycle.ToGeneration != lifecycle.FromGeneration || lifecycle.FromGeneration != source.RuntimeGeneration ||
-		lifecycle.FromPodNamespace == "" || lifecycle.FromPodName == "" ||
-		lifecycle.FromPodNamespace != source.CurrentPodNamespace || lifecycle.FromPodName != source.CurrentPodName ||
-		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" || lifecycle.PreparedHeadLayerID != "" ||
+		lifecycle.FromRuntimeNamespace == "" || lifecycle.FromRuntimeID == "" ||
+		lifecycle.FromRuntimeNamespace != source.RuntimeNamespace || lifecycle.FromRuntimeID != source.RuntimeID ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" || lifecycle.PreparedHeadLayerID != "" ||
 		lifecycle.ExpectedHeadLayerID == "" || lifecycle.TargetSandboxID != target.ID ||
 		lifecycle.TargetGenerationID != sandboxstore.NomadSandboxRunningForkGenerationID(lifecycle.ID, target.ID) ||
 		len(lifecycle.TargetRecordDigest) != sha256.Size ||
@@ -312,12 +312,12 @@ func nomadRunningForkRecoveryStillExact(
 		source.DesiredState != sandboxstore.SandboxDesiredStateActive || !source.DeletedAt.IsZero() ||
 		target.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 		target.DesiredState != sandboxstore.SandboxDesiredStatePaused || target.RuntimeGeneration != 0 ||
-		target.CurrentPodNamespace != "" || target.CurrentPodName != "" || !target.DeletedAt.IsZero() ||
+		target.RuntimeNamespace != "" || target.RuntimeID != "" || !target.DeletedAt.IsZero() ||
 		target.TeamID != source.TeamID || target.ClusterID != source.ClusterID ||
 		nomadForkHardTTLExpired(now, source.HardExpiresAt) || nomadForkHardTTLExpired(now, target.HardExpiresAt) ||
 		slot.State != sandboxstore.RuntimeSlotStateActive || slot.SandboxID != source.ID ||
-		slot.ClusterID != source.ClusterID || slot.AllocationNamespace != lifecycle.FromPodNamespace ||
-		slot.AllocationID != lifecycle.FromPodName || slot.NodeID == "" || slot.NodeUID == "" || slot.NodeBootID == "" ||
+		slot.ClusterID != source.ClusterID || slot.AllocationNamespace != lifecycle.FromRuntimeNamespace ||
+		slot.AllocationID != lifecycle.FromRuntimeID || slot.NodeID == "" || slot.NodeUID == "" || slot.NodeBootID == "" ||
 		slot.FilesystemID == "" || slot.SourceGenerationID != lifecycle.ExpectedHeadLayerID ||
 		slot.WriterGrantID == "" || slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
 		slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {

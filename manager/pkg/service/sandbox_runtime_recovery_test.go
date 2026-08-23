@@ -37,8 +37,8 @@ func TestReconcileSandboxRuntimeCreatesDurableLostRecoveryAfterStrongAbsence(t *
 	assert.Equal(t, sandboxstore.SandboxLifecycleKindPause, txn.Kind)
 	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
 	assert.Equal(t, int64(3), txn.FromGeneration)
-	assert.Equal(t, "default", txn.FromPodNamespace)
-	assert.Equal(t, "pod-1", txn.FromPodName)
+	assert.Equal(t, "default", txn.FromRuntimeNamespace)
+	assert.Equal(t, "pod-1", txn.FromRuntimeID)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 
@@ -94,8 +94,8 @@ func TestReconcileSandboxRuntimeRepairsSameGenerationProjectionFromKubernetes(t 
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
 	record := store.records["sandbox-1"]
-	assert.Equal(t, "pod-new", record.CurrentPodName)
-	assert.Equal(t, "default", record.CurrentPodNamespace)
+	assert.Equal(t, "pod-new", record.RuntimeID)
+	assert.Equal(t, "default", record.RuntimeNamespace)
 	assert.Equal(t, int64(3), record.RuntimeGeneration)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
@@ -112,7 +112,7 @@ func TestReconcileSandboxRuntimeRejectsUnownedNewerGeneration(t *testing.T) {
 
 	err := svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1")
 	require.ErrorContains(t, err, "unowned runtime generation 4")
-	assert.Equal(t, "pod-old", store.records["sandbox-1"].CurrentPodName)
+	assert.Equal(t, "pod-old", store.records["sandbox-1"].RuntimeID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
@@ -129,7 +129,7 @@ func TestReconcileSandboxRuntimeRejectsAmbiguousSameGenerationPods(t *testing.T)
 
 	err := svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1")
 	require.ErrorContains(t, err, "unowned runtime generation 3")
-	assert.Equal(t, "pod-old", store.records["sandbox-1"].CurrentPodName)
+	assert.Equal(t, "pod-old", store.records["sandbox-1"].RuntimeID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
@@ -159,14 +159,14 @@ func TestReconcileLostRuntimeRecoveryRetriesOlderRuntimeDeletion(t *testing.T) {
 	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
-			ID:               "txn-lost",
-			SandboxID:        "sandbox-1",
-			Kind:             sandboxstore.SandboxLifecycleKindPause,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           sandboxstore.SandboxLifecycleSourceLost,
-			FromGeneration:   3,
-			FromPodNamespace: "default",
-			FromPodName:      "pod-missing",
+			ID:                   "txn-lost",
+			SandboxID:            "sandbox-1",
+			Kind:                 sandboxstore.SandboxLifecycleKindPause,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               sandboxstore.SandboxLifecycleSourceLost,
+			FromGeneration:       3,
+			FromRuntimeNamespace: "default",
+			FromRuntimeID:        "pod-missing",
 		},
 	}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -202,14 +202,14 @@ func TestReconcileLostRuntimeRecoveryRejectsUnexpectedSameGenerationPod(t *testi
 	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
-			ID:               "txn-lost",
-			SandboxID:        "sandbox-1",
-			Kind:             sandboxstore.SandboxLifecycleKindPause,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           sandboxstore.SandboxLifecycleSourceLost,
-			FromGeneration:   3,
-			FromPodNamespace: "default",
-			FromPodName:      "pod-missing",
+			ID:                   "txn-lost",
+			SandboxID:            "sandbox-1",
+			Kind:                 sandboxstore.SandboxLifecycleKindPause,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               sandboxstore.SandboxLifecycleSourceLost,
+			FromGeneration:       3,
+			FromRuntimeNamespace: "default",
+			FromRuntimeID:        "pod-missing",
 		},
 	}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -241,7 +241,7 @@ func TestReconcileSandboxRuntimeDoesNotAdoptUnclaimedPod(t *testing.T) {
 	}
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, "pod-missing", store.records["sandbox-1"].CurrentPodName)
+	assert.Equal(t, "pod-missing", store.records["sandbox-1"].RuntimeID)
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
 	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
@@ -362,14 +362,14 @@ func TestReconcileSandboxRuntimeWaitsForFreshSourceCheckpointTransaction(t *test
 	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-snapshot": {
-			ID:               "txn-snapshot",
-			SandboxID:        "sandbox-1",
-			Kind:             sandboxstore.SandboxLifecycleKindSnapshot,
-			Phase:            sandboxstore.SandboxLifecyclePhasePublishing,
-			FromGeneration:   3,
-			FromPodNamespace: "default",
-			FromPodName:      "pod-missing",
-			UpdatedAt:        now,
+			ID:                   "txn-snapshot",
+			SandboxID:            "sandbox-1",
+			Kind:                 sandboxstore.SandboxLifecycleKindSnapshot,
+			Phase:                sandboxstore.SandboxLifecyclePhasePublishing,
+			FromGeneration:       3,
+			FromRuntimeNamespace: "default",
+			FromRuntimeID:        "pod-missing",
+			UpdatedAt:            now,
 		},
 	}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -394,14 +394,14 @@ func TestReconcileSandboxRuntimeRecoversAfterStaleSourceCheckpointTransaction(t 
 	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-fork": {
-			ID:               "txn-fork",
-			SandboxID:        "sandbox-1",
-			Kind:             sandboxstore.SandboxLifecycleKindFork,
-			Phase:            sandboxstore.SandboxLifecyclePhasePublishing,
-			FromGeneration:   3,
-			FromPodNamespace: "default",
-			FromPodName:      "pod-missing",
-			UpdatedAt:        now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
+			ID:                   "txn-fork",
+			SandboxID:            "sandbox-1",
+			Kind:                 sandboxstore.SandboxLifecycleKindFork,
+			Phase:                sandboxstore.SandboxLifecyclePhasePublishing,
+			FromGeneration:       3,
+			FromRuntimeNamespace: "default",
+			FromRuntimeID:        "pod-missing",
+			UpdatedAt:            now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
 		},
 	}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -458,14 +458,14 @@ func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.
 	}
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
-			ID:               "txn-lost",
-			SandboxID:        "sandbox-1",
-			Kind:             sandboxstore.SandboxLifecycleKindPause,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           sandboxstore.SandboxLifecycleSourceLost,
-			FromGeneration:   3,
-			FromPodNamespace: "default",
-			FromPodName:      "pod-1",
+			ID:                   "txn-lost",
+			SandboxID:            "sandbox-1",
+			Kind:                 sandboxstore.SandboxLifecycleKindPause,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               sandboxstore.SandboxLifecycleSourceLost,
+			FromGeneration:       3,
+			FromRuntimeNamespace: "default",
+			FromRuntimeID:        "pod-1",
 		},
 	}
 	svc := &SandboxService{
@@ -513,11 +513,11 @@ func TestTerminateActiveSandboxCompletesWithoutSynchronousWebhookDelivery(t *tes
 
 func TestSandboxRecordDeletionScopeRequiresDurableDeleteIntent(t *testing.T) {
 	record := &sandboxstore.SandboxRecord{
-		ID:                  "sandbox-1",
-		DesiredState:        sandboxstore.SandboxDesiredStateActive,
-		CurrentPodNamespace: "default",
-		CurrentPodName:      "pod-1",
-		RuntimeGeneration:   3,
+		ID:                "sandbox-1",
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		RuntimeNamespace:  "default",
+		RuntimeID:         "pod-1",
+		RuntimeGeneration: 3,
 	}
 	assert.True(t, SandboxRecordDeletionIsRuntimeOnly(record, "default", "pod-1", 3))
 	record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
@@ -617,14 +617,14 @@ func runtimeRecoveryStore(sandboxID, podName string, generation int64, desiredSt
 	}
 	return &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		sandboxID: {
-			ID:                  sandboxID,
-			TeamID:              "team-1",
-			UserID:              "user-1",
-			ClusterID:           "cluster-a",
-			DesiredState:        desiredState,
-			CurrentPodNamespace: namespace,
-			CurrentPodName:      podName,
-			RuntimeGeneration:   generation,
+			ID:                sandboxID,
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			ClusterID:         "cluster-a",
+			DesiredState:      desiredState,
+			RuntimeNamespace:  namespace,
+			RuntimeID:         podName,
+			RuntimeGeneration: generation,
 		},
 	}}
 }

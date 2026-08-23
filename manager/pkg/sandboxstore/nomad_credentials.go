@@ -105,12 +105,10 @@ func (t sandboxStoreTx) ReplaceNomadSandboxCredentialBindings(
 		WHERE claim.sandbox_id = $1
 			AND sandbox.sandbox_id = claim.sandbox_id
 			AND sandbox.team_id = $2
-			AND sandbox.runtime_backend = $4
-			AND sandbox.desired_state = $5
+			AND sandbox.desired_state = $4
 			AND sandbox.deleted_at IS NULL
-			AND claim.phase = $6
-	`, sandboxID, teamID, digest, SandboxRuntimeBackendNomad,
-		SandboxDesiredStatePaused, SandboxRuntimeClaimPhaseReady)
+			AND claim.phase = $5
+	`, sandboxID, teamID, digest, SandboxDesiredStatePaused, SandboxRuntimeClaimPhaseReady)
 	if err != nil {
 		return "", fmt.Errorf("bind paused sandbox credential digest: %w", err)
 	}

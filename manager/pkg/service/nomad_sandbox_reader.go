@@ -147,7 +147,7 @@ func (r *NomadSandboxReader) projectActive(
 	slot, err := r.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
-			if record.CurrentPodName != "" {
+			if record.RuntimeID != "" {
 				projected.Status = managerapi.SandboxStatusFailed
 			}
 			return projected, nil
@@ -166,7 +166,7 @@ func projectNomadSandboxSlot(
 	if slot == nil || slot.SandboxID != record.ID {
 		return nil, fmt.Errorf("Nomad runtime slot projection does not match sandbox %s", record.ID)
 	}
-	projected.PodName = slot.AllocationID
+	projected.RuntimeID = slot.AllocationID
 	switch slot.State {
 	case sandboxstore.RuntimeSlotStateActive:
 		if slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
@@ -197,7 +197,7 @@ func sandboxStatusResponse(sandbox *managerapi.Sandbox) map[string]any {
 	return map[string]any{
 		"sandbox_id": sandbox.ID, "template_id": sandbox.TemplateID,
 		"team_id": sandbox.TeamID, "user_id": sandbox.UserID,
-		"pod_name": sandbox.PodName, "status": sandbox.Status,
+		"runtime_id": sandbox.RuntimeID, "status": sandbox.Status,
 		"claimed_at": sandbox.ClaimedAt.Format(time.RFC3339),
 		"expires_at": sandbox.ExpiresAt, "hard_expires_at": sandbox.HardExpiresAt,
 		"created_at": sandbox.CreatedAt.Format(time.RFC3339),

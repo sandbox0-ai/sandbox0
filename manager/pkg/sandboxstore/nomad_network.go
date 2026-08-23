@@ -365,10 +365,10 @@ func (s *PGSandboxStore) CommitNomadSandboxNetworkMutation(
 		UPDATE manager.sandboxes
 		SET config = jsonb_set(config, '{network}', $2::jsonb, TRUE),
 			updated_at = NOW()
-		WHERE sandbox_id = $1 AND runtime_backend = $3
-			AND desired_state = $4 AND deleted_at IS NULL
+		WHERE sandbox_id = $1
+			AND desired_state = $3 AND deleted_at IS NULL
 	`, sandboxID, string(mustMarshalNetworkPolicy(mutation.RequestPolicy)),
-		SandboxRuntimeBackendNomad, SandboxDesiredStateActive)
+		SandboxDesiredStateActive)
 	if err != nil {
 		return nil, fmt.Errorf("publish Nomad sandbox network config: %w", err)
 	}
@@ -456,7 +456,7 @@ func (s *PGSandboxStore) GetNomadSandboxNetworkMutation(
 }
 
 func lockActiveNomadSandboxNetworkSlot(ctx context.Context, tx pgx.Tx, record *SandboxRecord) (*RuntimeSlot, error) {
-	if record == nil || record.CurrentPodName == "" || record.CurrentPodNamespace == "" {
+	if record == nil || record.RuntimeID == "" || record.RuntimeNamespace == "" {
 		return nil, fmt.Errorf("%w: active sandbox allocation is missing", ErrNomadSandboxNetworkMutationNotReady)
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -487,8 +487,8 @@ func lockRuntimeSlotByID(ctx context.Context, tx pgx.Tx, slotID string) (*Runtim
 
 func nomadSandboxNetworkSlotMatchesRecord(slot *RuntimeSlot, record *SandboxRecord) bool {
 	return slot != nil && record != nil && slot.State == RuntimeSlotStateActive &&
-		slot.SandboxID == record.ID && slot.AllocationID == record.CurrentPodName &&
-		slot.AllocationNamespace == record.CurrentPodNamespace && slot.ClaimID != "" &&
+		slot.SandboxID == record.ID && slot.AllocationID == record.RuntimeID &&
+		slot.AllocationNamespace == record.RuntimeNamespace && slot.ClaimID != "" &&
 		slot.ClusterID != "" && slot.NodeID != "" && slot.NodeUID != "" &&
 		slot.NodeBootID != "" && slot.NetNSIdentity != ""
 }

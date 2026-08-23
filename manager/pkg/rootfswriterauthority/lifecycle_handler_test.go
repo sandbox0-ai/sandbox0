@@ -139,14 +139,14 @@ func TestLifecycleHandlerRejectsUnknownRequestFields(t *testing.T) {
 
 func TestPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T) {
 	record := &sandboxstore.SandboxRecord{
-		ID: "sandbox-1", CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+		ID: "sandbox-1", RuntimeNamespace: "nomad", RuntimeID: "allocation-1",
 	}
 	grant := &sandboxstore.RootFSWriterGrant{ID: "grant-1", SandboxID: record.ID}
 	tx := &plannedPublishLifecycleTx{active: &sandboxstore.SandboxLifecycleTxn{
 		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceAuto,
-		FromGeneration: 7, FromPodNamespace: record.CurrentPodNamespace,
-		FromPodName: record.CurrentPodName, ExpectedHeadLayerID: "generation-1",
+		FromGeneration: 7, FromRuntimeNamespace: record.RuntimeNamespace,
+		FromRuntimeID: record.RuntimeID, ExpectedHeadLayerID: "generation-1",
 	}}
 
 	err := preparePlannedPublishLifecycle(
@@ -159,14 +159,14 @@ func TestPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T) {
 
 func TestPreparePlannedPublishLifecycleRejectsAnotherRuntime(t *testing.T) {
 	record := &sandboxstore.SandboxRecord{
-		ID: "sandbox-1", CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+		ID: "sandbox-1", RuntimeNamespace: "nomad", RuntimeID: "allocation-1",
 	}
 	grant := &sandboxstore.RootFSWriterGrant{ID: "grant-1", SandboxID: record.ID}
 	tx := &plannedPublishLifecycleTx{active: &sandboxstore.SandboxLifecycleTxn{
 		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceManual,
-		FromGeneration: 7, FromPodNamespace: record.CurrentPodNamespace,
-		FromPodName: "another-allocation", ExpectedHeadLayerID: "generation-1",
+		FromGeneration: 7, FromRuntimeNamespace: record.RuntimeNamespace,
+		FromRuntimeID: "another-allocation", ExpectedHeadLayerID: "generation-1",
 	}}
 
 	err := preparePlannedPublishLifecycle(

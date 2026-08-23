@@ -19,7 +19,7 @@ func TestNomadSandboxReaderProjectsRuntimeSlotAndLifecycleFence(t *testing.T) {
 				ID: "sandbox-a", TeamID: "team-a", TemplateID: "default",
 				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
 				DesiredState:   sandboxstore.SandboxDesiredStateActive,
-				CurrentPodName: "allocation-a", CreatedAt: now,
+				RuntimeID:      "allocation-a", CreatedAt: now,
 			},
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
@@ -46,7 +46,7 @@ func TestNomadSandboxReaderProjectsRuntimeSlotAndLifecycleFence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if sandbox.Status != managerapi.SandboxStatusRunning || sandbox.PodName != "allocation-a" || sandbox.InternalAddr != "" {
+	if sandbox.Status != managerapi.SandboxStatusRunning || sandbox.RuntimeID != "allocation-a" || sandbox.InternalAddr != "" {
 		t.Fatalf("fenced sandbox projection = %+v", sandbox)
 	}
 	listed, err := reader.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"})
@@ -66,7 +66,7 @@ func TestNomadSandboxReaderFailsClosedForMissingOrForeignRecords(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"kubernetes-a": {
 			ID: "kubernetes-a", TeamID: "team-a",
-			RuntimeBackend: sandboxstore.SandboxRuntimeBackendKubernetes,
+			RuntimeBackend: "kubernetes",
 			DesiredState:   sandboxstore.SandboxDesiredStateActive,
 		},
 	}}

@@ -147,7 +147,7 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 func validateNomadPausedForkSource(source *SandboxRecord) error {
 	if source == nil || source.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		source.DesiredState != SandboxDesiredStatePaused || !source.DeletedAt.IsZero() ||
-		source.RuntimeGeneration < 0 || source.CurrentPodName != "" || source.CurrentPodNamespace != "" {
+		source.RuntimeGeneration < 0 || source.RuntimeID != "" || source.RuntimeNamespace != "" {
 		return fmt.Errorf("%w: source is not a canonical paused Nomad sandbox", ErrNomadSandboxForkNotReady)
 	}
 	return nil
@@ -160,7 +160,7 @@ func loadCompletedNomadPausedFork(
 	lifecycle *SandboxLifecycleTxn,
 	request *NomadSandboxForkRequest,
 ) (*SandboxRecord, error) {
-	if lifecycle != nil && (lifecycle.FromPodNamespace != "" || lifecycle.FromPodName != "") {
+	if lifecycle != nil && (lifecycle.FromRuntimeNamespace != "" || lifecycle.FromRuntimeID != "") {
 		return nil, ErrNomadSandboxRunningForkRequired
 	}
 	var runningForkRecorded bool
@@ -175,8 +175,8 @@ func loadCompletedNomadPausedFork(
 	if lifecycle.SandboxID != source.ID || lifecycle.Kind != SandboxLifecycleKindFork ||
 		lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.Source != SandboxLifecycleSourceManual ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
-		lifecycle.FromPodNamespace != "" || lifecycle.FromPodName != "" ||
-		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.FromRuntimeNamespace != "" || lifecycle.FromRuntimeID != "" ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != request.Target.ID ||
 		lifecycle.TargetGenerationID != lifecycle.PreparedHeadLayerID ||
 		!bytes.Equal(lifecycle.TargetRecordDigest, request.TargetRecordDigest) ||

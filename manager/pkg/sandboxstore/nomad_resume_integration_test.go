@@ -95,9 +95,9 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	issue.ExpectedFilesystemID = requested.FilesystemID
 	issue.InitialGenerationID = requested.SourceGenerationID
 	issue.ExpectedWriterEpoch = fixture.writerEpoch
-	issue.PodNamespace = registration.AllocationNamespace
-	issue.PodName = "slot"
-	issue.PodUID = registration.AllocationID
+	issue.RuntimeNamespace = registration.AllocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = registration.AllocationID
 	issue.NodeName = registration.NodeID
 	issue.NodeUID = registration.NodeUID
 	issue.NodeBootID = registration.NodeBootID
@@ -111,7 +111,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	_, err = fixture.store.ConsumeRootFSWriterGrant(fixture.ctx, &ConsumeRootFSWriterGrantRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
-		ConsumerNodeUID: registration.NodeUID, ConsumerCtldPodUID: "ctld-resume", LeaseTTL: time.Minute,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-resume", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
 	_, err = fixture.store.StartRuntimeSlot(fixture.ctx, &StartRuntimeSlotRequest{
@@ -141,8 +141,8 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateActive, completed.DesiredState)
 	require.Equal(t, requested.RuntimeGeneration, completed.RuntimeGeneration)
-	require.Equal(t, registration.AllocationID, completed.CurrentPodName)
-	require.Equal(t, registration.AllocationNamespace, completed.CurrentPodNamespace)
+	require.Equal(t, registration.AllocationID, completed.RuntimeID)
+	require.Equal(t, registration.AllocationNamespace, completed.RuntimeNamespace)
 	require.Equal(t, claimed.ResourceLease.CPUMillicores, completed.ResourceMillicpu)
 	require.Equal(t, (claimed.ResourceLease.MemoryBytes+(1<<20)-1)/(1<<20), completed.ResourceMemoryMiB)
 	wrongLease := *completeRequest
@@ -152,7 +152,7 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 
 	completedRetry, err := fixture.store.CompleteNomadSandboxResume(fixture.ctx, completeRequest)
 	require.NoError(t, err)
-	require.Equal(t, completed.CurrentPodName, completedRetry.CurrentPodName)
+	require.Equal(t, completed.RuntimeID, completedRetry.RuntimeID)
 	claimedRetry, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
 	require.NoError(t, err)
 	require.Equal(t, claimed.ID, claimedRetry.ID)

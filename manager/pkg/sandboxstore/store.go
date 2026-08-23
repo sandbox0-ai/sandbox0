@@ -29,30 +29,29 @@ const (
 )
 
 const (
-	SandboxRuntimeBackendKubernetes = "kubernetes"
-	SandboxRuntimeBackendNomad      = "nomad"
+	SandboxRuntimeBackendNomad = "nomad"
 )
 
 // SandboxRecord is the durable runtime-neutral sandbox identity, desired
 // lifecycle state, and configuration. Physical runtime registries own
 // observed readiness and failure state.
 type SandboxRecord struct {
-	ID                  string
-	TeamID              string
-	UserID              string
-	TemplateID          string
-	TemplateName        string
-	TemplateNamespace   string
-	ClusterID           string
-	RuntimeBackend      string
-	DesiredState        string
-	Config              SandboxConfig
-	TemplateSpec        v1alpha1.SandboxTemplateSpec
-	CurrentPodName      string
-	CurrentPodNamespace string
-	RuntimeGeneration   int64
-	LifecycleEpoch      int64
-	OwnerKind           string
+	ID                string
+	TeamID            string
+	UserID            string
+	TemplateID        string
+	TemplateName      string
+	TemplateNamespace string
+	ClusterID         string
+	RuntimeBackend    string
+	DesiredState      string
+	Config            SandboxConfig
+	TemplateSpec      v1alpha1.SandboxTemplateSpec
+	RuntimeID         string
+	RuntimeNamespace  string
+	RuntimeGeneration int64
+	LifecycleEpoch    int64
+	OwnerKind         string
 	// Resource fields are excluded from the legacy fork-record digest. Fork
 	// validation binds them explicitly while preserving rolling retries.
 	ResourceMillicpu    int64 `json:"-"`
@@ -164,10 +163,10 @@ type SandboxLifecycleTxn struct {
 	Epoch                    int64
 	FromGeneration           int64
 	ToGeneration             int64
-	FromPodNamespace         string
-	FromPodName              string
-	ToPodNamespace           string
-	ToPodName                string
+	FromRuntimeNamespace     string
+	FromRuntimeID            string
+	ToRuntimeNamespace       string
+	ToRuntimeID              string
 	TargetSandboxID          string
 	TargetGenerationID       string
 	TargetRecordDigest       []byte
@@ -293,8 +292,8 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			desired_state = EXCLUDED.desired_state,
 			config = EXCLUDED.config,
 			template_spec = EXCLUDED.template_spec,
-			current_pod_name = EXCLUDED.current_pod_name,
-			current_pod_namespace = EXCLUDED.current_pod_namespace,
+			runtime_id = EXCLUDED.runtime_id,
+			runtime_namespace = EXCLUDED.runtime_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
 			owner_kind = EXCLUDED.owner_kind,
@@ -307,7 +306,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($25, $26)
+			AND manager.sandboxes.desired_state NOT IN ($24, $25)
 	`, args...)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -318,12 +317,12 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 const sandboxRecordInsertSQL = `
 	INSERT INTO manager.sandboxes (
 		sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-		cluster_id, runtime_backend, desired_state, config, template_spec,
-		current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+		cluster_id, desired_state, config, template_spec,
+		runtime_id, runtime_namespace, runtime_generation, lifecycle_epoch,
 		owner_kind, resource_millicpu, resource_memory_mib, hot_claim_completed_at,
 		claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, COALESCE($24, NOW()), NOW())`
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())`
 
 func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	if record == nil {
@@ -338,9 +337,9 @@ func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	}
 	runtimeBackend := strings.TrimSpace(record.RuntimeBackend)
 	if runtimeBackend == "" {
-		runtimeBackend = SandboxRuntimeBackendKubernetes
+		runtimeBackend = SandboxRuntimeBackendNomad
 	}
-	if runtimeBackend != SandboxRuntimeBackendKubernetes && runtimeBackend != SandboxRuntimeBackendNomad {
+	if runtimeBackend != SandboxRuntimeBackendNomad {
 		return nil, fmt.Errorf("unsupported sandbox runtime backend %q", runtimeBackend)
 	}
 	if record.ResourceMillicpu < 0 || record.ResourceMemoryMiB < 0 {
@@ -348,8 +347,8 @@ func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	}
 	return []any{
 		record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, runtimeBackend, record.DesiredState, configJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
+		record.ClusterID, record.DesiredState, configJSON, specJSON,
+		record.RuntimeID, record.RuntimeNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
 		strings.TrimSpace(record.OwnerKind), record.ResourceMillicpu, record.ResourceMemoryMiB,
 		nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt),
@@ -509,8 +508,8 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		limit = 500
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT sandbox_id, runtime_backend, desired_state,
-			current_pod_namespace, current_pod_name, runtime_generation
+		SELECT sandbox_id, desired_state,
+			runtime_namespace, runtime_id, runtime_generation
 		FROM manager.sandboxes
 		WHERE deleted_at IS NULL
 			AND (
@@ -537,7 +536,6 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		var candidate SandboxRuntimeReconcileCandidate
 		if err := rows.Scan(
 			&candidate.SandboxID,
-			&candidate.RuntimeBackend,
 			&candidate.DesiredState,
 			&candidate.PodNamespace,
 			&candidate.PodName,
@@ -545,6 +543,7 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		); err != nil {
 			return nil, fmt.Errorf("scan sandbox runtime reconcile candidate: %w", err)
 		}
+		candidate.RuntimeBackend = SandboxRuntimeBackendNomad
 		candidates = append(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
@@ -610,14 +609,13 @@ func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.
 	return records, nil
 }
 
-// ListSandboxExpirationCandidates returns selected-backend sandboxes that
-// need a durable hard-delete request or an automatic pause request. Active
+// ListSandboxExpirationCandidates returns sandboxes that need a durable
+// hard-delete request or an automatic pause request. Active
 // lifecycle transactions suppress only soft expiry; hard expiry must be able
 // to preempt a pause, fork, or rebase in progress.
 func (s *PGSandboxStore) ListSandboxExpirationCandidates(
 	ctx context.Context,
 	now time.Time,
-	runtimeBackend string,
 	limit int,
 ) ([]SandboxExpirationCandidate, error) {
 	if s == nil || s.pool == nil {
@@ -625,10 +623,6 @@ func (s *PGSandboxStore) ListSandboxExpirationCandidates(
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
-	}
-	runtimeBackend = strings.TrimSpace(runtimeBackend)
-	if runtimeBackend != SandboxRuntimeBackendKubernetes && runtimeBackend != SandboxRuntimeBackendNomad {
-		return nil, fmt.Errorf("runtime backend must be kubernetes or nomad")
 	}
 	if limit <= 0 {
 		limit = 500
@@ -639,8 +633,7 @@ func (s *PGSandboxStore) ListSandboxExpirationCandidates(
 				0 AS priority, hard_expires_at AS deadline
 			FROM manager.sandboxes
 			WHERE deleted_at IS NULL
-				AND runtime_backend = $2
-				AND desired_state IN ($3, $4)
+				AND desired_state IN ($2, $3)
 				AND hard_expires_at IS NOT NULL
 				AND hard_expires_at <= $1
 			UNION ALL
@@ -648,8 +641,7 @@ func (s *PGSandboxStore) ListSandboxExpirationCandidates(
 				1 AS priority, expires_at AS deadline
 			FROM manager.sandboxes AS sandbox
 			WHERE sandbox.deleted_at IS NULL
-				AND sandbox.runtime_backend = $2
-				AND sandbox.desired_state = $3
+				AND sandbox.desired_state = $2
 				AND sandbox.expires_at IS NOT NULL
 				AND sandbox.expires_at <= $1
 				AND (sandbox.hard_expires_at IS NULL OR sandbox.hard_expires_at > $1)
@@ -663,8 +655,8 @@ func (s *PGSandboxStore) ListSandboxExpirationCandidates(
 		SELECT sandbox_id, desired_state, expires_at, hard_expires_at
 		FROM expiration_candidates
 		ORDER BY priority, deadline, sandbox_id
-		LIMIT $5
-	`, now.UTC(), runtimeBackend, SandboxDesiredStateActive, SandboxDesiredStatePaused, limit)
+		LIMIT $4
+	`, now.UTC(), SandboxDesiredStateActive, SandboxDesiredStatePaused, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sandbox expiration candidates: %w", err)
 	}
@@ -771,8 +763,8 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
-			current_pod_name = '',
-			current_pod_namespace = '',
+			runtime_id = '',
+			runtime_namespace = '',
 			deleted_at = $3,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
@@ -1088,8 +1080,8 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
-			current_pod_namespace = $3,
-			current_pod_name = $4,
+			runtime_namespace = $3,
+			runtime_id = $4,
 			runtime_generation = $5,
 			expires_at = $6,
 			hard_expires_at = $7,
@@ -1138,8 +1130,8 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
-			current_pod_namespace = '',
-			current_pod_name = '',
+			runtime_namespace = '',
+			runtime_id = '',
 			runtime_generation = GREATEST(runtime_generation, $3),
 			expires_at = NULL,
 			updated_at = NOW()
@@ -1233,8 +1225,8 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 		INSERT INTO manager.sandbox_lifecycle_txns (
 			txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
 			from_generation, to_generation,
-			from_pod_namespace, from_pod_name,
-			to_pod_namespace, to_pod_name,
+			from_runtime_namespace, from_runtime_id,
+			to_runtime_namespace, to_runtime_id,
 			target_sandbox_id, target_generation_id, target_record_digest,
 			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
 			worker_cluster_id, worker_node_id, worker_node_uid, worker_proof_digest,
@@ -1246,8 +1238,8 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			COALESCE($23, ''::bytea), $24, $25, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
-		txn.FromPodNamespace, txn.FromPodName,
-		txn.ToPodNamespace, txn.ToPodName,
+		txn.FromRuntimeNamespace, txn.FromRuntimeID,
+		txn.ToRuntimeNamespace, txn.ToRuntimeID,
 		txn.TargetSandboxID, txn.TargetGenerationID, txn.TargetRecordDigest,
 		txn.SourceBaseArtifactDigest, txn.TargetBaseArtifactDigest, nullableTime(txn.RollbackExpiresAt),
 		txn.WorkerClusterID, txn.WorkerNodeID, txn.WorkerNodeUID, txn.WorkerProofDigest,
@@ -1267,8 +1259,8 @@ func (t sandboxStoreTx) SetLifecycleTxnRuntime(ctx context.Context, txnID, names
 	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandbox_lifecycle_txns
-		SET to_pod_namespace = $2,
-			to_pod_name = $3,
+		SET to_runtime_namespace = $2,
+			to_runtime_id = $3,
 			updated_at = NOW()
 		WHERE txn_id = $1
 			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
@@ -1407,8 +1399,8 @@ func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, runtime_backend, desired_state, config, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			cluster_id, desired_state, config, template_spec,
+			runtime_id, runtime_namespace, runtime_generation, lifecycle_epoch,
 			owner_kind, resource_millicpu, resource_memory_mib, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
@@ -1418,8 +1410,8 @@ func lifecycleTxnSelectSQL() string {
 	return `
 		SELECT txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
 			from_generation, to_generation,
-			from_pod_namespace, from_pod_name,
-			to_pod_namespace, to_pod_name,
+			from_runtime_namespace, from_runtime_id,
+			to_runtime_namespace, to_runtime_id,
 			target_sandbox_id, target_generation_id, target_record_digest,
 			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
 			worker_cluster_id, worker_node_id, worker_node_uid, worker_proof_digest, worker_acknowledged_at,
@@ -1810,13 +1802,14 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	var hotClaimCompletedAt, claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.RuntimeBackend, &record.DesiredState, &configJSON, &specJSON,
-		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
+		&record.ClusterID, &record.DesiredState, &configJSON, &specJSON,
+		&record.RuntimeID, &record.RuntimeNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
 		&record.OwnerKind, &record.ResourceMillicpu, &record.ResourceMemoryMiB, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
+	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	if err := json.Unmarshal(configJSON, &record.Config); err != nil {
 		return nil, fmt.Errorf("unmarshal sandbox config: %w", err)
 	}
@@ -1852,8 +1845,8 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 	if err := scanner.Scan(
 		&txn.ID, &txn.SandboxID, &txn.Kind, &txn.Phase, &txn.Source, &txn.Cancelable, &txn.Epoch,
 		&txn.FromGeneration, &txn.ToGeneration,
-		&txn.FromPodNamespace, &txn.FromPodName,
-		&txn.ToPodNamespace, &txn.ToPodName,
+		&txn.FromRuntimeNamespace, &txn.FromRuntimeID,
+		&txn.ToRuntimeNamespace, &txn.ToRuntimeID,
 		&txn.TargetSandboxID, &txn.TargetGenerationID, &txn.TargetRecordDigest,
 		&txn.SourceBaseArtifactDigest, &txn.TargetBaseArtifactDigest, &rollbackExpiresAt,
 		&txn.WorkerClusterID, &txn.WorkerNodeID, &txn.WorkerNodeUID, &txn.WorkerProofDigest, &workerAcknowledgedAt,

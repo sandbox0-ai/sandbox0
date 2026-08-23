@@ -564,14 +564,14 @@ func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": {
-				ID:                  "sandbox-1",
-				TeamID:              "team-1",
-				UserID:              "user-1",
-				TemplateID:          "template-1",
-				CurrentPodName:      "pod-1",
-				CurrentPodNamespace: "default",
-				RuntimeGeneration:   3,
-				DesiredState:        sandboxstore.SandboxDesiredStateActive,
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				UserID:            "user-1",
+				TemplateID:        "template-1",
+				RuntimeID:         "pod-1",
+				RuntimeNamespace:  "default",
+				RuntimeGeneration: 3,
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
 			},
 		},
 	}
@@ -591,7 +591,7 @@ func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	assert.Equal(t, managerapi.SandboxStatusRunning, sandbox.Status)
 	assert.False(t, sandbox.Paused)
 	assert.Empty(t, sandbox.InternalAddr)
-	assert.Equal(t, "pod-1", sandbox.PodName)
+	assert.Equal(t, "pod-1", sandbox.RuntimeID)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeRuntimeActivation(t *testing.T) {
@@ -954,14 +954,14 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 
 	require.NoError(t, err)
 	txn := &sandboxstore.SandboxLifecycleTxn{
-		ID:             "resume-txn-sandbox-1",
-		SandboxID:      "sandbox-1",
-		Kind:           sandboxstore.SandboxLifecycleKindResume,
-		Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
-		FromGeneration: 3,
-		ToGeneration:   runtimeGenerationFromPod(restoredPod),
-		ToPodNamespace: restoredPod.Namespace,
-		ToPodName:      restoredPod.Name,
+		ID:                 "resume-txn-sandbox-1",
+		SandboxID:          "sandbox-1",
+		Kind:               sandboxstore.SandboxLifecycleKindResume,
+		Phase:              sandboxstore.SandboxLifecyclePhasePreparing,
+		FromGeneration:     3,
+		ToGeneration:       runtimeGenerationFromPod(restoredPod),
+		ToRuntimeNamespace: restoredPod.Namespace,
+		ToRuntimeID:        restoredPod.Name,
 	}
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{txn.ID: txn}
 	require.NoError(t, svc.commitResumedSandboxRuntime(context.Background(), restoredPod, record, txn))
@@ -969,7 +969,7 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 	assert.Equal(t, "pod-current", applyTargets[0])
 	assert.NotEqual(t, "pod-current", applyTargets[1])
 	assert.Equal(t, "docker.io/library/busybox@"+checkpointDigest, fallbackImage)
-	assert.Equal(t, applyTargets[1], store.records["sandbox-1"].CurrentPodName)
+	assert.Equal(t, applyTargets[1], store.records["sandbox-1"].RuntimeID)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
@@ -1096,19 +1096,19 @@ func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase str
 		store.lifecycleTxns = make(map[string]*sandboxstore.SandboxLifecycleTxn)
 	}
 	store.lifecycleTxns[txnID] = &sandboxstore.SandboxLifecycleTxn{
-		ID:               txnID,
-		SandboxID:        sandboxID,
-		Kind:             sandboxstore.SandboxLifecycleKindPause,
-		Phase:            phase,
-		Epoch:            1,
-		FromGeneration:   runtimeGenerationFromPod(pod),
-		FromPodNamespace: pod.Namespace,
-		FromPodName:      pod.Name,
+		ID:                   txnID,
+		SandboxID:            sandboxID,
+		Kind:                 sandboxstore.SandboxLifecycleKindPause,
+		Phase:                phase,
+		Epoch:                1,
+		FromGeneration:       runtimeGenerationFromPod(pod),
+		FromRuntimeNamespace: pod.Namespace,
+		FromRuntimeID:        pod.Name,
 	}
 	if record := store.records[sandboxID]; record != nil {
 		record.DesiredState = sandboxstore.SandboxDesiredStateActive
-		record.CurrentPodNamespace = pod.Namespace
-		record.CurrentPodName = pod.Name
+		record.RuntimeNamespace = pod.Namespace
+		record.RuntimeID = pod.Name
 		record.RuntimeGeneration = runtimeGenerationFromPod(pod)
 		record.LifecycleEpoch = 1
 	}

@@ -178,15 +178,15 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			source = sandboxstore.SandboxLifecycleSourceManual
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
-			ID:               uuid.NewString(),
-			SandboxID:        sandboxID,
-			Kind:             sandboxstore.SandboxLifecycleKindPause,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           source,
-			Cancelable:       opts.cancelable,
-			FromGeneration:   generation,
-			FromPodNamespace: pod.Namespace,
-			FromPodName:      pod.Name,
+			ID:                   uuid.NewString(),
+			SandboxID:            sandboxID,
+			Kind:                 sandboxstore.SandboxLifecycleKindPause,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               source,
+			Cancelable:           opts.cancelable,
+			FromGeneration:       generation,
+			FromRuntimeNamespace: pod.Namespace,
+			FromRuntimeID:        pod.Name,
 		})
 	})
 	if err != nil {
@@ -413,11 +413,11 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if generation != txn.FromGeneration {
 		return fmt.Errorf("sandbox runtime generation changed during pause: txn=%d pod=%d", txn.FromGeneration, generation)
 	}
-	if txn.FromPodName != "" && pod.Name != txn.FromPodName {
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pause transaction points at runtime pod %s", txn.FromPodName))
+	if txn.FromRuntimeID != "" && pod.Name != txn.FromRuntimeID {
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pause transaction points at runtime pod %s", txn.FromRuntimeID))
 	}
-	if txn.FromPodNamespace != "" && pod.Namespace != txn.FromPodNamespace {
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pause transaction points at runtime namespace %s", txn.FromPodNamespace))
+	if txn.FromRuntimeNamespace != "" && pod.Namespace != txn.FromRuntimeNamespace {
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pause transaction points at runtime namespace %s", txn.FromRuntimeNamespace))
 	}
 	if crashRecovery && pod.DeletionTimestamp != nil {
 		_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, "runtime deletion requested during crash recovery")
@@ -872,7 +872,7 @@ func (s *SandboxService) projectNomadSandboxRecord(
 	slot, err := store.GetRuntimeSlotBySandboxID(ctx, record.ID)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
-			if record.CurrentPodName != "" {
+			if record.RuntimeID != "" {
 				projected.Status = managerapi.SandboxStatusFailed
 			}
 			return projected, nil
@@ -1205,24 +1205,24 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		return nil
 	}
 	record := &sandboxstore.SandboxRecord{
-		ID:                  sandboxID,
-		TeamID:              pod.Annotations[controller.AnnotationTeamID],
-		UserID:              pod.Annotations[controller.AnnotationUserID],
-		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
-		TemplateName:        template.Name,
-		TemplateNamespace:   template.Namespace,
-		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		DesiredState:        sandboxstore.SandboxDesiredStateActive,
-		Config:              parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
-		TemplateSpec:        template.Spec,
-		CurrentPodName:      pod.Name,
-		CurrentPodNamespace: pod.Namespace,
-		RuntimeGeneration:   runtimeGenerationFromPod(pod),
-		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
-		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
-		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
-		OwnerKind:           ownerKindFromPod(pod),
-		CreatedAt:           pod.CreationTimestamp.Time,
+		ID:                sandboxID,
+		TeamID:            pod.Annotations[controller.AnnotationTeamID],
+		UserID:            pod.Annotations[controller.AnnotationUserID],
+		TemplateID:        sandboxTemplateIDFromLabels(pod.Labels),
+		TemplateName:      template.Name,
+		TemplateNamespace: template.Namespace,
+		ClusterID:         naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		Config:            parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
+		TemplateSpec:      template.Spec,
+		RuntimeID:         pod.Name,
+		RuntimeNamespace:  pod.Namespace,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		ClaimedAt:         parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:         parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:     parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		OwnerKind:         ownerKindFromPod(pod),
+		CreatedAt:         pod.CreationTimestamp.Time,
 	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
 		if locked.DesiredState == sandboxstore.SandboxDesiredStatePaused || locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
@@ -1239,8 +1239,8 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		if podGeneration < locked.RuntimeGeneration || podGeneration > locked.RuntimeGeneration {
 			return nil
 		}
-		if strings.TrimSpace(locked.CurrentPodName) != "" &&
-			(locked.CurrentPodName != pod.Name || locked.CurrentPodNamespace != pod.Namespace) {
+		if strings.TrimSpace(locked.RuntimeID) != "" &&
+			(locked.RuntimeID != pod.Name || locked.RuntimeNamespace != pod.Namespace) {
 			return nil
 		}
 		return tx.SaveSandbox(lockCtx, record)
@@ -1343,7 +1343,7 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *manage
 		AutoResume:        autoResume,
 		Resources:         cloneSandboxResourceConfig(cfg.Resources),
 		Services:          cfg.Services,
-		PodName:           pod.Name,
+		RuntimeID:         pod.Name,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
 		ExpiresAt:         optionalTime(expiresAt),
 		HardExpiresAt:     optionalTime(hardExpiresAt),
@@ -1375,7 +1375,7 @@ func sandboxRecordToSandbox(record *sandboxstore.SandboxRecord) *managerapi.Sand
 		AutoResume:        autoResume,
 		Resources:         cloneSandboxResourceConfig(record.Config.Resources),
 		Services:          record.Config.Services,
-		PodName:           record.CurrentPodName,
+		RuntimeID:         record.RuntimeID,
 		RuntimeGeneration: record.RuntimeGeneration,
 		ExpiresAt:         optionalTime(record.ExpiresAt),
 		HardExpiresAt:     optionalTime(record.HardExpiresAt),
@@ -1451,8 +1451,8 @@ func sandboxLifecycleInfoFromRecord(record *sandboxstore.SandboxRecord) SandboxL
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace:         record.CurrentPodNamespace,
-		PodName:           record.CurrentPodName,
+		Namespace:         record.RuntimeNamespace,
+		PodName:           record.RuntimeID,
 		SandboxID:         record.ID,
 		TeamID:            record.TeamID,
 		UserID:            record.UserID,

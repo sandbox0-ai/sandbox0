@@ -228,7 +228,7 @@ func TestHandlerDerivesConsumerAndLeasePolicy(t *testing.T) {
 	require.NoError(t, observation.Validate())
 	require.Equal(t, "projected-token", verifier.token)
 	require.Equal(t, "node-uid", store.request.ConsumerNodeUID)
-	require.Equal(t, "ctld-pod-uid", store.request.ConsumerCtldPodUID)
+	require.Equal(t, "ctld-pod-uid", store.request.ConsumerAgentUID)
 	require.Equal(t, 5*time.Minute, store.request.LeaseTTL)
 	require.Equal(t, 1, store.request.BindingVersion)
 }

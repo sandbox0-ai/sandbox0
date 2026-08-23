@@ -467,8 +467,8 @@ func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *sandboxstore.Sand
 		return false
 	}
 	if record.ID != sandboxPodID(pod) ||
-		record.CurrentPodNamespace != pod.Namespace ||
-		record.CurrentPodName != pod.Name {
+		record.RuntimeNamespace != pod.Namespace ||
+		record.RuntimeID != pod.Name {
 		return false
 	}
 	podGeneration := runtimeGenerationFromPod(pod)

@@ -17,13 +17,11 @@ const (
 	defaultSandboxTTLMaxBatchesPerRun = 4
 )
 
-// SandboxExpirationLister returns durable expiration candidates for one
-// selected physical runtime backend.
+// SandboxExpirationLister returns durable expiration candidates.
 type SandboxExpirationLister interface {
 	ListSandboxExpirationCandidates(
 		context.Context,
 		time.Time,
-		string,
 		int,
 	) ([]sandboxstore.SandboxExpirationCandidate, error)
 }
@@ -37,7 +35,6 @@ type SandboxHardExpiryTerminator interface {
 // SandboxTTLControllerConfig bounds each scan independently from the number
 // of expired sandboxes in a region.
 type SandboxTTLControllerConfig struct {
-	RuntimeBackend   string
 	Interval         time.Duration
 	BatchSize        int
 	MaxBatchesPerRun int
@@ -49,7 +46,6 @@ type SandboxTTLController struct {
 	lister           SandboxExpirationLister
 	pauser           SandboxAutoPauser
 	terminator       SandboxHardExpiryTerminator
-	runtimeBackend   string
 	interval         time.Duration
 	batchSize        int
 	maxBatchesPerRun int
@@ -68,11 +64,6 @@ func NewSandboxTTLController(
 	if lister == nil || pauser == nil || terminator == nil {
 		return nil, fmt.Errorf("sandbox expiration lister, pauser, and hard-expiry terminator are required")
 	}
-	config.RuntimeBackend = strings.TrimSpace(config.RuntimeBackend)
-	if config.RuntimeBackend != sandboxstore.SandboxRuntimeBackendKubernetes &&
-		config.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, fmt.Errorf("sandbox TTL runtime backend must be kubernetes or nomad")
-	}
 	if config.Interval <= 0 {
 		config.Interval = defaultSandboxTTLInterval
 	}
@@ -90,8 +81,7 @@ func NewSandboxTTLController(
 	}
 	return &SandboxTTLController{
 		lister: lister, pauser: pauser, terminator: terminator,
-		runtimeBackend: config.RuntimeBackend,
-		interval:       config.Interval, batchSize: config.BatchSize,
+		interval: config.Interval, batchSize: config.BatchSize,
 		maxBatchesPerRun: config.MaxBatchesPerRun,
 		now:              now, logger: logger,
 	}, nil
@@ -104,7 +94,6 @@ func (c *SandboxTTLController) Run(ctx context.Context) error {
 		return nil
 	}
 	c.logger.Info("Starting sandbox TTL controller",
-		zap.String("runtimeBackend", c.runtimeBackend),
 		zap.Duration("interval", c.interval),
 		zap.Int("batchSize", c.batchSize),
 		zap.Int("maxBatchesPerRun", c.maxBatchesPerRun),
@@ -135,7 +124,7 @@ func (c *SandboxTTLController) runOnce(ctx context.Context) error {
 			return err
 		}
 		candidates, err := c.lister.ListSandboxExpirationCandidates(
-			ctx, now, c.runtimeBackend, c.batchSize,
+			ctx, now, c.batchSize,
 		)
 		if err != nil {
 			return err

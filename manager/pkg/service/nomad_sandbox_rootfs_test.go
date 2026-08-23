@@ -84,7 +84,7 @@ func TestNomadSandboxRootFSServiceFailsClosed(t *testing.T) {
 		t.Fatalf("lifecycle snapshot error = %v", err)
 	}
 	delete(store.lifecycleTxns, "resume-a")
-	store.records["sandbox-a"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendKubernetes
+	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
 	if _, err := service.ListSandboxRootFSSnapshots(context.Background(), "sandbox-a", "team-a"); !apierrors.IsConflict(err) {
 		t.Fatalf("foreign runtime list error = %v", err)
 	}

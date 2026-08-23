@@ -93,8 +93,8 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 							case generation > activeTxn.FromGeneration:
 								return runtimeReconcileConflict(sandboxID, "a newer runtime exists during lost-runtime recovery")
 							case generation == activeTxn.FromGeneration:
-								if activeTxn.FromPodName != "" &&
-									(pod.Name != activeTxn.FromPodName || pod.Namespace != activeTxn.FromPodNamespace) {
+								if activeTxn.FromRuntimeID != "" &&
+									(pod.Name != activeTxn.FromRuntimeID || pod.Namespace != activeTxn.FromRuntimeNamespace) {
 									return runtimeReconcileConflict(sandboxID, "an unexpected runtime owns the lost generation")
 								}
 								cleanupLostRuntime = false
@@ -235,7 +235,7 @@ func (s *SandboxService) recoverStaleResumeTransaction(ctx context.Context, reco
 		if pod == nil || runtimeGenerationFromPod(pod) != txn.ToGeneration {
 			continue
 		}
-		if txn.ToPodName != "" && (pod.Name != txn.ToPodName || pod.Namespace != txn.ToPodNamespace) {
+		if txn.ToRuntimeID != "" && (pod.Name != txn.ToRuntimeID || pod.Namespace != txn.ToRuntimeNamespace) {
 			continue
 		}
 		if target != nil {
@@ -251,12 +251,12 @@ func (s *SandboxService) recoverStaleResumeTransaction(ctx context.Context, reco
 		_, err := s.ResumePausedSandboxRuntime(ctx, record.ID)
 		return err
 	}
-	if txn.ToPodName == "" {
+	if txn.ToRuntimeID == "" {
 		if err := s.recordResumeLifecycleRuntime(ctx, record.ID, txn, target); err != nil {
 			return err
 		}
-		txn.ToPodNamespace = target.Namespace
-		txn.ToPodName = target.Name
+		txn.ToRuntimeNamespace = target.Namespace
+		txn.ToRuntimeID = target.Name
 	}
 	restored, err := s.finishRestoredSandboxRuntime(ctx, target, record, "recovery")
 	if err != nil {
@@ -347,7 +347,7 @@ func sandboxSourceRuntimeTxnPodAvailable(txn *sandboxstore.SandboxLifecycleTxn, 
 		if pod == nil || pod.DeletionTimestamp != nil || runtimeGenerationFromPod(pod) != txn.FromGeneration {
 			continue
 		}
-		if txn.FromPodName != "" && (pod.Name != txn.FromPodName || pod.Namespace != txn.FromPodNamespace) {
+		if txn.FromRuntimeID != "" && (pod.Name != txn.FromRuntimeID || pod.Namespace != txn.FromRuntimeNamespace) {
 			continue
 		}
 		return true
@@ -360,15 +360,15 @@ func beginLostRuntimeRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxSto
 		return nil
 	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
-		ID:               uuid.NewString(),
-		SandboxID:        record.ID,
-		Kind:             sandboxstore.SandboxLifecycleKindPause,
-		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-		Source:           sandboxstore.SandboxLifecycleSourceLost,
-		Cancelable:       false,
-		FromGeneration:   record.RuntimeGeneration,
-		FromPodNamespace: record.CurrentPodNamespace,
-		FromPodName:      record.CurrentPodName,
+		ID:                   uuid.NewString(),
+		SandboxID:            record.ID,
+		Kind:                 sandboxstore.SandboxLifecycleKindPause,
+		Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:               sandboxstore.SandboxLifecycleSourceLost,
+		Cancelable:           false,
+		FromGeneration:       record.RuntimeGeneration,
+		FromRuntimeNamespace: record.RuntimeNamespace,
+		FromRuntimeID:        record.RuntimeID,
 	})
 }
 

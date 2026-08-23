@@ -643,17 +643,17 @@ func lockRuntimeSlotClaimAdmission(
 	tx pgx.Tx,
 	request *AcquireRuntimeSlotRequest,
 ) (bool, error) {
-	var runtimeBackend, desiredState, currentPodName, currentPodNamespace string
+	var desiredState, runtimeID, runtimeNamespace string
 	var runtimeGeneration int64
 	var live bool
 	if err := tx.QueryRow(ctx, `
-		SELECT runtime_backend, desired_state, deleted_at IS NULL,
-			runtime_generation, current_pod_name, current_pod_namespace
+		SELECT desired_state, deleted_at IS NULL,
+			runtime_generation, runtime_id, runtime_namespace
 		FROM manager.sandboxes
 		WHERE sandbox_id = $1
 		FOR SHARE
 	`, request.SandboxID).Scan(
-		&runtimeBackend, &desiredState, &live, &runtimeGeneration, &currentPodName, &currentPodNamespace,
+		&desiredState, &live, &runtimeGeneration, &runtimeID, &runtimeNamespace,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("%w: sandbox record is missing", ErrRuntimeSlotConflict)
@@ -663,13 +663,6 @@ func lockRuntimeSlotClaimAdmission(
 	if !live {
 		return false, fmt.Errorf("%w: sandbox does not accept a runtime claim", ErrRuntimeSlotConflict)
 	}
-	if runtimeBackend != SandboxRuntimeBackendNomad {
-		if desiredState != SandboxDesiredStateActive {
-			return false, fmt.Errorf("%w: sandbox does not accept a runtime claim", ErrRuntimeSlotConflict)
-		}
-		return true, nil
-	}
-
 	var operationID, phase string
 	var leaseLive bool
 	if err := tx.QueryRow(ctx, `
@@ -722,14 +715,14 @@ func lockRuntimeSlotClaimAdmission(
 	case SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
 		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting:
 		if desiredState != SandboxDesiredStatePaused || runtimeGeneration != lifecycle.FromGeneration ||
-			currentPodName != "" || currentPodNamespace != "" {
+			runtimeID != "" || runtimeNamespace != "" {
 			return false, fmt.Errorf("%w: paused Nomad resume admission changed", ErrRuntimeSlotConflict)
 		}
 		return true, nil
 	case SandboxLifecyclePhaseCommitted:
 		if desiredState != SandboxDesiredStateActive || runtimeGeneration != lifecycle.ToGeneration ||
-			currentPodName != lifecycle.ToPodName || currentPodNamespace != lifecycle.ToPodNamespace ||
-			currentPodName == "" || currentPodNamespace == "" {
+			runtimeID != lifecycle.ToRuntimeID || runtimeNamespace != lifecycle.ToRuntimeNamespace ||
+			runtimeID == "" || runtimeNamespace == "" {
 			return false, fmt.Errorf("%w: committed Nomad resume binding changed", ErrRuntimeSlotConflict)
 		}
 		return false, nil

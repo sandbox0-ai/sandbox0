@@ -118,7 +118,7 @@ func TestNomadSandboxUpdaterFailsClosed(t *testing.T) {
 		t.Fatalf("non-mutable state error = %v", err)
 	}
 	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStateActive
-	store.records["sandbox-a"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendKubernetes
+	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
 	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); err == nil {
 		t.Fatal("foreign runtime record was accepted")
 	}
@@ -195,7 +195,7 @@ func newNomadSandboxUpdaterTestStore(now time.Time, desiredState string) *memory
 			"sandbox-a": {
 				ID: "sandbox-a", TeamID: "team-a", TemplateID: "default",
 				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState:   desiredState, CurrentPodName: "allocation-a",
+				DesiredState:   desiredState, RuntimeID: "allocation-a",
 				Config: sandboxstore.SandboxConfig{
 					TTL: &ttl, HardTTL: &hardTTL, AutoResume: &autoResume,
 					EnvVars: map[string]string{"OLD": "value"},

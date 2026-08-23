@@ -159,7 +159,7 @@ func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 		Kind: SandboxLifecycleKindSnapshot, Phase: SandboxLifecyclePhasePublishing,
 		Source: SandboxLifecycleSourceManual, Cancelable: false,
 		FromGeneration: source.RuntimeGeneration, ToGeneration: source.RuntimeGeneration,
-		FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+		FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 		TargetSandboxID: targetFilesystemID, TargetGenerationID: targetGenerationID,
 		TargetRecordDigest: requestDigest, ExpectedHeadLayerID: writer.generation.ID,
 	}
@@ -368,7 +368,7 @@ func nomadTemplateCaptureLifecycleMatches(
 		lifecycle.Kind != SandboxLifecycleKindSnapshot || lifecycle.Source != SandboxLifecycleSourceManual ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
 		lifecycle.FromGeneration != lifecycle.ToGeneration ||
-		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != intent.TargetFilesystemID ||
 		lifecycle.TargetGenerationID != intent.CheckpointGeneration ||
 		lifecycle.ExpectedHeadLayerID != intent.SourceGenerationID ||
@@ -381,8 +381,8 @@ func nomadTemplateCaptureLifecycleMatches(
 	}
 	return lifecycle.Phase == SandboxLifecyclePhasePublishing && lifecycle.PreparedHeadLayerID == "" &&
 		lifecycle.FromGeneration == source.RuntimeGeneration &&
-		lifecycle.FromPodNamespace == source.CurrentPodNamespace &&
-		lifecycle.FromPodName == source.CurrentPodName
+		lifecycle.FromRuntimeNamespace == source.RuntimeNamespace &&
+		lifecycle.FromRuntimeID == source.RuntimeID
 }
 
 // DeleteTemplateBuildRootFSCapture cancels an unpublished exact-writer

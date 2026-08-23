@@ -548,8 +548,7 @@ func main() {
 			sandboxBackend,
 			hardExpiryTerminator,
 			service.SandboxTTLControllerConfig{
-				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				Interval:       cfg.CleanupInterval.Duration,
+				Interval: cfg.CleanupInterval.Duration,
 			},
 			clk.Now,
 			logger,

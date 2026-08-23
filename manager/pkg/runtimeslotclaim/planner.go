@@ -454,8 +454,8 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		OperationID: ids.issueOperationID, RawToken: ids.rawToken,
 		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: append([]byte(nil), bindingDigest[:]...),
 		NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
-		PodNamespace: slot.AllocationNamespace, PodName: protocol.NomadTaskName,
-		PodUID: slot.AllocationID, NodeName: slot.NodeID, GateParent: ids.parent,
+		RuntimeNamespace: slot.AllocationNamespace, RuntimeID: protocol.NomadTaskName,
+		RuntimeIncarnationID: slot.AllocationID, NodeName: slot.NodeID, GateParent: ids.parent,
 		RuntimeGeneration:   strconv.FormatInt(normalized.Runtime.RuntimeGeneration, 10),
 		InitialGenerationID: generation.ID, ExpectedWriterEpoch: expectedWriterEpoch,
 		ConsumeExpiresAt: slot.ClaimLeaseExpiresAt,
@@ -786,8 +786,8 @@ func grantMatchesStage(grant *sandboxstore.RootFSWriterGrant, stage rootfshandof
 		grant.IssueOperationID == ids.issueOperationID && grant.WriterEpoch == stage.Identity.WriterEpoch &&
 		grant.InitialGenerationID == stage.InitialGeneration && grant.BindingVersion == stage.BindingVersion &&
 		hmac.Equal(grant.BindingDigest, binding) && grant.NodeUID == stage.Identity.NodeUID &&
-		grant.NodeBootID == stage.Identity.BootID && grant.PodNamespace == slot.AllocationNamespace &&
-		grant.PodName == protocol.NomadTaskName && grant.PodUID == stage.Identity.PodUID &&
+		grant.NodeBootID == stage.Identity.BootID && grant.RuntimeNamespace == slot.AllocationNamespace &&
+		grant.RuntimeID == protocol.NomadTaskName && grant.RuntimeIncarnationID == stage.Identity.PodUID &&
 		grant.NodeName == slot.NodeID && grant.GateParent == stage.Parent &&
 		grant.RuntimeGeneration == stage.Identity.RuntimeGeneration &&
 		grant.ConsumeExpiresAt.Equal(slot.ClaimLeaseExpiresAt)

@@ -76,7 +76,7 @@ func (s *Service) EnsureTemplateBuildCapture(
 			return s.nomadTemplateCaptureMetadata(ctx, store, sandboxID, teamID, snapshot, desiredSpec)
 		}
 		if record.DesiredState != sandboxstore.SandboxDesiredStatePaused ||
-			record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
+			record.RuntimeNamespace != "" || record.RuntimeID != "" {
 			return nil, templatepkg.ErrTemplateSourceNotReady
 		}
 		created, createErr := store.CreateRootFSSnapshot(ctx, &sandboxstore.CreateRootFSSnapshotRequest{

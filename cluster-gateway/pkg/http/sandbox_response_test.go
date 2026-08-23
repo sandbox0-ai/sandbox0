@@ -16,7 +16,7 @@ func TestSandboxToAPIPreservesPublicDetailFields(t *testing.T) {
 		TeamID:        "team-1",
 		UserID:        "user-1",
 		Status:        "running",
-		PodName:       "pod-1",
+		RuntimeID:     "allocation-1",
 		AutoResume:    true,
 		Paused:        false,
 		Resources:     &mgr.SandboxResourceConfig{Memory: "512Mi"},

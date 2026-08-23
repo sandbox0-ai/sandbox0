@@ -49,8 +49,8 @@ func TestRecoverTerminatedSandboxRuntimeStartsDurableCrashPause(t *testing.T) {
 	assert.Equal(t, sandboxstore.SandboxLifecycleSourceCrash, txn.Source)
 	assert.False(t, txn.Cancelable)
 	assert.Equal(t, int64(3), txn.FromGeneration)
-	assert.Equal(t, pod.Namespace, txn.FromPodNamespace)
-	assert.Equal(t, pod.Name, txn.FromPodName)
+	assert.Equal(t, pod.Namespace, txn.FromRuntimeNamespace)
+	assert.Equal(t, pod.Name, txn.FromRuntimeID)
 	assert.Equal(t, []string{"sandbox-1", "sandbox-1"}, enqueuer.recoveryCalls)
 	assert.Empty(t, enqueuer.calls)
 }
@@ -132,7 +132,7 @@ func TestRecoverUnhealthySandboxRuntimeIgnoresAutoResumeAccessPolicy(t *testing.
 func TestRecoverTerminatedSandboxRuntimeIgnoresStalePod(t *testing.T) {
 	pod := crashRecoveryTestPod(corev1.PodFailed, 2, "Error")
 	store := crashRecoveryTestStore(pod)
-	store.records["sandbox-1"].CurrentPodName = "new-runtime"
+	store.records["sandbox-1"].RuntimeID = "new-runtime"
 	store.records["sandbox-1"].RuntimeGeneration = 4
 	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
@@ -769,13 +769,13 @@ func crashRecoveryTestPod(phase corev1.PodPhase, exitCode int32, reason string) 
 func crashRecoveryTestStore(pod *corev1.Pod) *memorySandboxStore {
 	return &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
-			ID:                  "sandbox-1",
-			TeamID:              "team-1",
-			UserID:              "user-1",
-			DesiredState:        sandboxstore.SandboxDesiredStateActive,
-			CurrentPodNamespace: pod.Namespace,
-			CurrentPodName:      pod.Name,
-			RuntimeGeneration:   runtimeGenerationFromPod(pod),
+			ID:                "sandbox-1",
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
+			RuntimeNamespace:  pod.Namespace,
+			RuntimeID:         pod.Name,
+			RuntimeGeneration: runtimeGenerationFromPod(pod),
 		},
 	}}
 }

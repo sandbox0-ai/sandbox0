@@ -862,8 +862,10 @@ type ClaimRequest struct {
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	ClusterId *string                `json:"cluster_id"`
-	PodName   string                 `json:"pod_name"`
+	ClusterId *string `json:"cluster_id"`
+
+	// RuntimeId Opaque identifier of the current physical runtime allocation.
+	RuntimeId string                 `json:"runtime_id"`
 	SandboxId string                 `json:"sandbox_id"`
 	Status    SandboxLifecycleStatus `json:"status"`
 	Template  string                 `json:"template"`
@@ -1959,21 +1961,23 @@ type Sandbox struct {
 	Id            string     `json:"id"`
 
 	// Paused True when status is paused.
-	Paused  bool   `json:"paused"`
-	PodName string `json:"pod_name"`
+	Paused bool `json:"paused"`
 
 	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
-	RuntimeGeneration int64                  `json:"runtime_generation"`
-	Services          *[]SandboxAppService   `json:"services,omitempty"`
-	Ssh               *SandboxSSHConnection  `json:"ssh,omitempty"`
-	Status            SandboxLifecycleStatus `json:"status"`
-	TeamId            string                 `json:"team_id"`
-	TemplateId        string                 `json:"template_id"`
-	UpdatedAt         time.Time              `json:"updated_at"`
-	UserId            *string                `json:"user_id,omitempty"`
+	RuntimeGeneration int64 `json:"runtime_generation"`
+
+	// RuntimeId Opaque identifier of the current physical runtime allocation. Empty while paused.
+	RuntimeId  string                 `json:"runtime_id"`
+	Services   *[]SandboxAppService   `json:"services,omitempty"`
+	Ssh        *SandboxSSHConnection  `json:"ssh,omitempty"`
+	Status     SandboxLifecycleStatus `json:"status"`
+	TeamId     string                 `json:"team_id"`
+	TemplateId string                 `json:"template_id"`
+	UpdatedAt  time.Time              `json:"updated_at"`
+	UserId     *string                `json:"user_id,omitempty"`
 }
 
 // SandboxAppService Canonical service model for sandbox exposure.
@@ -2493,16 +2497,18 @@ type SandboxServicesUpdateRequest struct {
 
 // SandboxStatus defines model for SandboxStatus.
 type SandboxStatus struct {
-	ClaimedAt     *string                 `json:"claimed_at,omitempty"`
-	CreatedAt     *string                 `json:"created_at,omitempty"`
-	ExpiresAt     *time.Time              `json:"expires_at"`
-	HardExpiresAt *time.Time              `json:"hard_expires_at"`
-	PodName       *string                 `json:"pod_name,omitempty"`
-	SandboxId     *string                 `json:"sandbox_id,omitempty"`
-	Status        *SandboxLifecycleStatus `json:"status,omitempty"`
-	TeamId        *string                 `json:"team_id,omitempty"`
-	TemplateId    *string                 `json:"template_id,omitempty"`
-	UserId        *string                 `json:"user_id,omitempty"`
+	ClaimedAt     *string    `json:"claimed_at,omitempty"`
+	CreatedAt     *string    `json:"created_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at"`
+	HardExpiresAt *time.Time `json:"hard_expires_at"`
+
+	// RuntimeId Opaque identifier of the current physical runtime allocation. Empty while paused.
+	RuntimeId  *string                 `json:"runtime_id,omitempty"`
+	SandboxId  *string                 `json:"sandbox_id,omitempty"`
+	Status     *SandboxLifecycleStatus `json:"status,omitempty"`
+	TeamId     *string                 `json:"team_id,omitempty"`
+	TemplateId *string                 `json:"template_id,omitempty"`
+	UserId     *string                 `json:"user_id,omitempty"`
 }
 
 // SandboxSummary defines model for SandboxSummary.

@@ -48,7 +48,11 @@ type DockerResolverConfig struct {
 // NewDockerResolver creates a registry resolver with exact-host credentials
 // and an explicit allowlist for plaintext development registries.
 func NewDockerResolver(config DockerResolverConfig) (remotes.Resolver, error) {
-	credentials, err := loadDockerCredentials(config.CredentialsFile)
+	return newDockerResolverOwnedBy(config, 0)
+}
+
+func newDockerResolverOwnedBy(config DockerResolverConfig, expectedUID uint32) (remotes.Resolver, error) {
+	credentials, err := loadDockerCredentialsOwnedBy(config.CredentialsFile, expectedUID)
 	if err != nil {
 		return nil, err
 	}
@@ -95,10 +99,6 @@ type dockerAuthEntry struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Auth     string `json:"auth"`
-}
-
-func loadDockerCredentials(path string) (map[string]dockerCredential, error) {
-	return loadDockerCredentialsOwnedBy(path, 0)
 }
 
 func loadDockerCredentialsOwnedBy(path string, expectedUID uint32) (map[string]dockerCredential, error) {

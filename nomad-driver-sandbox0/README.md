@@ -219,6 +219,11 @@ go test ./internal/driver \
   -run TestPrivilegedRuntimeGoldenCorpus -count=1 -v -timeout=3m
 ```
 
+Each lane has a 45-second fail-closed runtime deadline. Software-emulated
+local VMs may set `SANDBOX0_RUNTIME_CORPUS_LANE_TIMEOUT` to a duration no
+greater than 10 minutes and must also raise the outer `go test -timeout`;
+production-like hardware should retain the default.
+
 The required common result covers open/read/write/stat/readdir/fsync,
 mmap/msync, xattrs, hardlinks, symlinks, rename with a retained directory file
 descriptor, sparse files, truncate, inotify, arbitrary chown, SCM_RIGHTS, and

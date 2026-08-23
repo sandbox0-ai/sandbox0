@@ -26,6 +26,9 @@ const (
 	runtimeCorpusEnabledEnv = "SANDBOX0_RUN_PRIVILEGED_RUNTIME_CORPUS"
 	runtimeCorpusRootFSEnv  = "SANDBOX0_RUNTIME_CORPUS_ROOTFS"
 	runtimeCorpusPayloadEnv = "SANDBOX0_RUNTIME_CORPUS_PAYLOAD"
+	runtimeCorpusTimeoutEnv = "SANDBOX0_RUNTIME_CORPUS_LANE_TIMEOUT"
+	runtimeCorpusTimeout    = 45 * time.Second
+	maxRuntimeCorpusTimeout = 10 * time.Minute
 )
 
 type runtimeCorpusReport struct {
@@ -60,6 +63,10 @@ func TestPrivilegedRuntimeGoldenCorpus(t *testing.T) {
 	}
 	if os.Geteuid() != 0 {
 		t.Fatalf("%s requires root", t.Name())
+	}
+	laneTimeout, err := parseRuntimeCorpusLaneTimeout(os.Getenv(runtimeCorpusTimeoutEnv))
+	if err != nil {
+		t.Fatalf("%s: %v", runtimeCorpusTimeoutEnv, err)
 	}
 	baseRoot := strings.TrimSpace(os.Getenv(runtimeCorpusRootFSEnv))
 	if !filepath.IsAbs(baseRoot) || filepath.Clean(baseRoot) == "/" {
@@ -116,7 +123,9 @@ func TestPrivilegedRuntimeGoldenCorpus(t *testing.T) {
 	allPassed := true
 	for _, lane := range lanes {
 		if !t.Run(lane.name, func(t *testing.T) {
-			reports[lane.name] = runPrivilegedRuntimeCorpusLane(t, lane.runtime, lane.directFS, baseRoot, testBinary, hostSecret)
+			reports[lane.name] = runPrivilegedRuntimeCorpusLane(
+				t, lane.runtime, lane.directFS, baseRoot, testBinary, hostSecret, laneTimeout,
+			)
 		}) {
 			allPassed = false
 		}
@@ -139,6 +148,7 @@ func runPrivilegedRuntimeCorpusLane(
 	baseRoot string,
 	testBinary string,
 	hostSecret string,
+	laneTimeout time.Duration,
 ) runtimeCorpusReport {
 	t.Helper()
 	root := t.TempDir()
@@ -181,7 +191,7 @@ func runPrivilegedRuntimeCorpusLane(
 		t.Fatalf("write runtime corpus OCI spec: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), laneTimeout)
 	defer cancel()
 	containerID := "s0-corpus-" + strings.ReplaceAll(t.Name(), "/", "-")
 	var runtimeErr error
@@ -244,6 +254,50 @@ func runPrivilegedRuntimeCorpusLane(
 	}
 	mounted = false
 	return report
+}
+
+func parseRuntimeCorpusLaneTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return runtimeCorpusTimeout, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse duration %q: %w", value, err)
+	}
+	if timeout <= 0 || timeout > maxRuntimeCorpusTimeout {
+		return 0, fmt.Errorf("must be within (0, %s]", maxRuntimeCorpusTimeout)
+	}
+	return timeout, nil
+}
+
+func TestRuntimeCorpusLaneTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "default", want: runtimeCorpusTimeout},
+		{name: "software emulation", value: "8m", want: 8 * time.Minute},
+		{name: "invalid", value: "not-a-duration", wantErr: true},
+		{name: "zero", value: "0s", wantErr: true},
+		{name: "over maximum", value: "11m", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actual, err := parseRuntimeCorpusLaneTimeout(test.value)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("parseRuntimeCorpusLaneTimeout(%q) unexpectedly succeeded", test.value)
+				}
+				return
+			}
+			if err != nil || actual != test.want {
+				t.Fatalf("parseRuntimeCorpusLaneTimeout(%q) = %s, %v; want %s", test.value, actual, err, test.want)
+			}
+		})
+	}
 }
 
 func runtimeCorpusSpec(rootfs, hostSecret string) specs.Spec {

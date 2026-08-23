@@ -329,6 +329,7 @@ type RootFSImporterConfig struct {
 	Disabled          bool            `yaml:"disabled" json:"-"`
 	WorkerID          string          `yaml:"worker_id" json:"-"`
 	Interval          metav1.Duration `yaml:"interval" json:"-"`
+	BuildTimeout      metav1.Duration `yaml:"build_timeout" json:"-"`
 	LeaseTTL          metav1.Duration `yaml:"lease_ttl" json:"-"`
 	LeaseRenewal      metav1.Duration `yaml:"lease_renewal" json:"-"`
 	MaxAttempts       int             `yaml:"max_attempts" json:"-"`
@@ -815,6 +816,9 @@ func applyRootFSImporterDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSImporter.Interval.Duration == 0 {
 		cfg.RootFSImporter.Interval = metav1.Duration{Duration: time.Second}
+	}
+	if cfg.RootFSImporter.BuildTimeout.Duration == 0 {
+		cfg.RootFSImporter.BuildTimeout = metav1.Duration{Duration: 2 * time.Hour}
 	}
 	if cfg.RootFSImporter.LeaseTTL.Duration == 0 {
 		cfg.RootFSImporter.LeaseTTL = metav1.Duration{Duration: 2 * time.Minute}

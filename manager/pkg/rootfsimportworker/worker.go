@@ -32,6 +32,7 @@ import (
 
 const (
 	DefaultInterval          = time.Second
+	DefaultBuildTimeout      = 2 * time.Hour
 	DefaultLeaseTTL          = 2 * time.Minute
 	DefaultLeaseRenewal      = 30 * time.Second
 	DefaultMaxAttempts       = 5
@@ -77,6 +78,7 @@ type Config struct {
 	Builder           OperationBuilder
 	WorkerID          string
 	Interval          time.Duration
+	BuildTimeout      time.Duration
 	LeaseTTL          time.Duration
 	LeaseRenewal      time.Duration
 	MaxAttempts       int
@@ -107,6 +109,7 @@ type Result struct {
 const (
 	failureIncompatible = "incompatible_contract"
 	failureBuild        = "build_failed"
+	failureBuildTimeout = "build_timeout"
 	failureLease        = "lease_uncertain"
 	failurePublication  = "ready_publication_failed"
 )
@@ -132,6 +135,7 @@ type Worker struct {
 	builder           OperationBuilder
 	workerID          string
 	interval          time.Duration
+	buildTimeout      time.Duration
 	leaseTTL          time.Duration
 	leaseRenewal      time.Duration
 	maxAttempts       int
@@ -158,6 +162,9 @@ func New(config Config) (*Worker, error) {
 	if config.Interval == 0 {
 		config.Interval = DefaultInterval
 	}
+	if config.BuildTimeout == 0 {
+		config.BuildTimeout = DefaultBuildTimeout
+	}
 	if config.LeaseTTL == 0 {
 		config.LeaseTTL = DefaultLeaseTTL
 	}
@@ -178,6 +185,10 @@ func New(config Config) (*Worker, error) {
 	}
 	if config.Interval < 10*time.Millisecond || config.Interval > time.Minute || config.Interval%time.Millisecond != 0 {
 		return nil, fmt.Errorf("rootfs import interval must be whole milliseconds within 10ms..1m")
+	}
+	if config.BuildTimeout < 10*time.Millisecond || config.BuildTimeout > 24*time.Hour ||
+		config.BuildTimeout%time.Millisecond != 0 {
+		return nil, fmt.Errorf("rootfs import build timeout must be whole milliseconds within 10ms..24h")
 	}
 	if config.LeaseTTL < sandboxstore.MinRootFSImportLeaseTTL ||
 		config.LeaseTTL > sandboxstore.MaxRootFSImportLeaseTTL || config.LeaseTTL%time.Millisecond != 0 {
@@ -211,7 +222,8 @@ func New(config Config) (*Worker, error) {
 	}
 	return &Worker{
 		store: config.Store, builder: config.Builder, workerID: workerID,
-		interval: config.Interval, leaseTTL: config.LeaseTTL, leaseRenewal: config.LeaseRenewal,
+		interval: config.Interval, buildTimeout: config.BuildTimeout,
+		leaseTTL: config.LeaseTTL, leaseRenewal: config.LeaseRenewal,
 		maxAttempts: config.MaxAttempts, garbageInterval: config.GarbageInterval,
 		terminalRetention: config.TerminalRetention, garbageLimit: config.GarbageLimit,
 		procdProtocol: config.ProcdProtocol, procdDigest: parsedProcdDigest.String(),
@@ -252,9 +264,10 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 		return w.abandon(ctx, result, lease, failureBuild, "build retry budget was exhausted")
 	}
 
-	buildCtx, cancelBuild := context.WithCancel(ctx)
+	buildCtx, cancelBuild := context.WithTimeout(ctx, w.buildTimeout)
 	keeper := w.startLeaseKeeper(buildCtx, cancelBuild, lease)
 	built, buildErr := w.builder.Build(buildCtx, operation, lease)
+	buildContextErr := buildCtx.Err()
 	cancelBuild()
 	leaseErr := keeper.wait()
 	if leaseErr != nil {
@@ -266,11 +279,18 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
+	if buildErr == nil && buildContextErr != nil {
+		buildErr = buildContextErr
+	}
 	if buildErr != nil {
-		if operation.AttemptCount >= w.maxAttempts {
-			return w.abandon(ctx, result, lease, failureBuild, "build retry budget was exhausted")
+		category := failureBuild
+		if errors.Is(buildErr, context.DeadlineExceeded) || errors.Is(buildContextErr, context.DeadlineExceeded) {
+			category = failureBuildTimeout
 		}
-		return w.release(ctx, result, lease, failureBuild)
+		if operation.AttemptCount >= w.maxAttempts {
+			return w.abandon(ctx, result, lease, category, "build retry budget was exhausted")
+		}
+		return w.release(ctx, result, lease, category)
 	}
 
 	// Stop periodic renewal before the final CAS, then acquire a fresh complete

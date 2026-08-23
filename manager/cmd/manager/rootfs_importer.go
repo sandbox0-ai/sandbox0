@@ -34,8 +34,8 @@ func configureRootFSImportWorker(
 		return nil, fmt.Errorf("Nomad RootFS importer requires PostgreSQL")
 	}
 	conditional, ok := objects.(objectstore.ConditionalStore)
-	if !ok || !objectstore.SupportsConditionalCreate(objects) {
-		return nil, fmt.Errorf("Nomad RootFS importer requires conditional object storage")
+	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
+		return nil, fmt.Errorf("Nomad RootFS importer requires contextual conditional object storage")
 	}
 	procdDigest, err := digest.Parse(cfg.RootFSImporter.ProcdDigest)
 	if err != nil {
@@ -76,7 +76,7 @@ func configureRootFSImportWorker(
 	}
 	worker, err := rootfsimportworker.New(rootfsimportworker.Config{
 		Store: store, Builder: builder, WorkerID: workerID,
-		Interval: cfg.RootFSImporter.Interval.Duration,
+		Interval: cfg.RootFSImporter.Interval.Duration, BuildTimeout: cfg.RootFSImporter.BuildTimeout.Duration,
 		LeaseTTL: cfg.RootFSImporter.LeaseTTL.Duration, LeaseRenewal: cfg.RootFSImporter.LeaseRenewal.Duration,
 		MaxAttempts:       cfg.RootFSImporter.MaxAttempts,
 		GarbageInterval:   cfg.RootFSImporter.GarbageInterval.Duration,

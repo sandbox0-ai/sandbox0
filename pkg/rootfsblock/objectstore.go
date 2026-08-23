@@ -20,17 +20,21 @@ func (p ObjectStorePublisher) PutImmutable(ctx context.Context, key string, payl
 	if p.Store == nil {
 		return fmt.Errorf("conditional object store is required")
 	}
+	store, ok := p.Store.(objectstore.ContextConditionalStore)
+	if !ok || !objectstore.SupportsContextConditionalCreate(p.Store) {
+		return fmt.Errorf("contextual conditional object store is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	created, err := p.Store.PutIfAbsent(key, bytes.NewReader(payload))
+	created, err := store.PutIfAbsentContext(ctx, key, bytes.NewReader(payload))
 	if err != nil || created {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	body, err := p.Store.Get(key, 0, int64(len(payload))+1)
+	body, err := store.GetContext(ctx, key, 0, int64(len(payload))+1)
 	if err != nil {
 		return fmt.Errorf("read existing immutable object: %w", err)
 	}

@@ -70,8 +70,20 @@ type ConditionalStore interface {
 	PutIfAbsent(key string, in io.Reader) (created bool, err error)
 }
 
+// ContextConditionalStore is required by bounded workers whose object reads
+// and immutable writes must stop when their operation context is canceled.
+type ContextConditionalStore interface {
+	ConditionalStore
+	GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error)
+	PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (created bool, err error)
+}
+
 type conditionalCreateCapability interface {
 	supportsConditionalCreate() bool
+}
+
+type contextConditionalCreateCapability interface {
+	supportsContextConditionalCreate() bool
 }
 
 // SupportsConditionalCreate follows wrappers instead of relying only on their
@@ -86,6 +98,60 @@ func SupportsConditionalCreate(store Store) bool {
 	}
 	_, ok := store.(ConditionalStore)
 	return ok
+}
+
+// SupportsContextConditionalCreate follows wrappers and verifies that
+// cancellation reaches both collision reads and conditional writes.
+func SupportsContextConditionalCreate(store Store) bool {
+	if store == nil || !SupportsConditionalCreate(store) {
+		return false
+	}
+	if capability, ok := store.(contextConditionalCreateCapability); ok {
+		return capability.supportsContextConditionalCreate()
+	}
+	_, ok := store.(ContextConditionalStore)
+	return ok
+}
+
+type contextObjectReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func withObjectReadContext(ctx context.Context, reader io.Reader) io.Reader {
+	if reader == nil {
+		return nil
+	}
+	contextual := contextObjectReader{ctx: ctx, reader: reader}
+	if seeker, ok := reader.(io.Seeker); ok {
+		return contextObjectReadSeeker{contextObjectReader: contextual, seeker: seeker}
+	}
+	return contextual
+}
+
+func (r contextObjectReader) Read(payload []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	read, err := r.reader.Read(payload)
+	if read == 0 && err == nil {
+		if contextErr := r.ctx.Err(); contextErr != nil {
+			return 0, contextErr
+		}
+	}
+	return read, err
+}
+
+type contextObjectReadSeeker struct {
+	contextObjectReader
+	seeker io.Seeker
+}
+
+func (r contextObjectReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.seeker.Seek(offset, whence)
 }
 
 func NormalizeType(raw string) string {
@@ -278,6 +344,16 @@ func (s *s3Store) Create() error {
 }
 
 func (s *s3Store) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	return s.GetContext(context.Background(), key, off, limit)
+}
+
+func (s *s3Store) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("object read context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(strings.TrimLeft(key, "/")),
@@ -292,7 +368,7 @@ func (s *s3Store) Get(key string, off, limit int64) (io.ReadCloser, error) {
 			input.Range = aws.String(fmt.Sprintf("bytes=%d-%d", off, off+limit-1))
 		}
 	}
-	resp, err := s.client.GetObject(context.Background(), input)
+	resp, err := s.client.GetObject(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -309,8 +385,19 @@ func (s *s3Store) Put(key string, in io.Reader) error {
 }
 
 func (s *s3Store) PutIfAbsent(key string, in io.Reader) (bool, error) {
-	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket), Key: aws.String(strings.TrimLeft(key, "/")), Body: in,
+	return s.PutIfAbsentContext(context.Background(), key, in)
+}
+
+func (s *s3Store) PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("conditional object write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(strings.TrimLeft(key, "/")),
+		Body:        withObjectReadContext(ctx, in),
 		IfNoneMatch: aws.String("*"),
 	})
 	if isConditionalCreateConflict(err) {
@@ -457,10 +544,20 @@ func (s *gcsStore) Create() error {
 }
 
 func (s *gcsStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	return s.GetContext(context.Background(), key, off, limit)
+}
+
+func (s *gcsStore) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("object read context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if limit == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, s.objectURL(gcsObjectName(key), "alt", "media"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.objectURL(gcsObjectName(key), "alt", "media"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -493,12 +590,22 @@ func (s *gcsStore) Put(key string, in io.Reader) error {
 }
 
 func (s *gcsStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	return s.PutIfAbsentContext(context.Background(), key, in)
+}
+
+func (s *gcsStore) PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("conditional object write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	values := url.Values{}
 	values.Set("uploadType", "media")
 	values.Set("name", gcsObjectName(key))
 	values.Set("ifGenerationMatch", "0")
 	rawURL := strings.TrimRight(s.baseURL, "/") + "/upload/storage/v1/b/" + url.PathEscape(s.bucket) + "/o?" + values.Encode()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, rawURL, in)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, withObjectReadContext(ctx, in))
 	if err != nil {
 		return false, err
 	}
@@ -725,6 +832,14 @@ func (s *prefixedStore) Get(key string, off, limit int64) (io.ReadCloser, error)
 	return s.store.Get(s.prefixed(key), off, limit)
 }
 
+func (s *prefixedStore) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	contextual, ok := s.store.(ContextConditionalStore)
+	if !ok || !SupportsContextConditionalCreate(s.store) {
+		return nil, fmt.Errorf("underlying object store does not support contextual conditional access")
+	}
+	return contextual.GetContext(ctx, s.prefixed(key), off, limit)
+}
+
 func (s *prefixedStore) Put(key string, in io.Reader) error {
 	return s.store.Put(s.prefixed(key), in)
 }
@@ -737,8 +852,20 @@ func (s *prefixedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
 	return conditional.PutIfAbsent(s.prefixed(key), in)
 }
 
+func (s *prefixedStore) PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (bool, error) {
+	contextual, ok := s.store.(ContextConditionalStore)
+	if !ok || !SupportsContextConditionalCreate(s.store) {
+		return false, fmt.Errorf("underlying object store does not support contextual conditional access")
+	}
+	return contextual.PutIfAbsentContext(ctx, s.prefixed(key), in)
+}
+
 func (s *prefixedStore) supportsConditionalCreate() bool {
 	return s != nil && SupportsConditionalCreate(s.store)
+}
+
+func (s *prefixedStore) supportsContextConditionalCreate() bool {
+	return s != nil && SupportsContextConditionalCreate(s.store)
 }
 
 func (s *prefixedStore) Delete(key string) error {
@@ -803,6 +930,16 @@ func (s *memoryStore) Create() error {
 }
 
 func (s *memoryStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	return s.GetContext(context.Background(), key, off, limit)
+}
+
+func (s *memoryStore) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("object read context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.state.mu.RLock()
 	defer s.state.mu.RUnlock()
 	payload, ok := s.state.objects[strings.TrimLeft(key, "/")]
@@ -817,6 +954,9 @@ func (s *memoryStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 		end = off + limit
 	}
 	copyPayload := append([]byte(nil), payload[off:end]...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return io.NopCloser(bytes.NewReader(copyPayload)), nil
 }
 
@@ -832,8 +972,21 @@ func (s *memoryStore) Put(key string, in io.Reader) error {
 }
 
 func (s *memoryStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
-	payload, err := io.ReadAll(in)
+	return s.PutIfAbsentContext(context.Background(), key, in)
+}
+
+func (s *memoryStore) PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("conditional object write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	payload, err := io.ReadAll(withObjectReadContext(ctx, in))
 	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	s.state.mu.Lock()
@@ -928,6 +1081,13 @@ func (s *memoryStore) List(prefix, startAfter, token, delimiter string, limit in
 	}
 	return objects[:max], hasMore, nextToken, nil
 }
+
+var (
+	_ ContextConditionalStore = (*s3Store)(nil)
+	_ ContextConditionalStore = (*gcsStore)(nil)
+	_ ContextConditionalStore = (*prefixedStore)(nil)
+	_ ContextConditionalStore = (*memoryStore)(nil)
+)
 
 func sortInfos(values []Info) {
 	sort.Slice(values, func(i, j int) bool {

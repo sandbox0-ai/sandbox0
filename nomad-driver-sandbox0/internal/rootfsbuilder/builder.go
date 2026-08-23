@@ -46,8 +46,8 @@ type Options struct {
 // Build creates an XFS base artifact, publishes its block objects, and returns
 // a durable GenerationDescriptor suitable for rootfssession.Manager.Ensure.
 func Build(ctx context.Context, store objectstore.ConditionalStore, options Options) (rootfshandoff.GenerationDescriptor, error) {
-	if store == nil {
-		return rootfshandoff.GenerationDescriptor{}, fmt.Errorf("conditional object store is required")
+	if store == nil || !objectstore.SupportsContextConditionalCreate(store) {
+		return rootfshandoff.GenerationDescriptor{}, fmt.Errorf("contextual conditional object store is required")
 	}
 	options.RootFSID = strings.TrimSpace(options.RootFSID)
 	options.ObjectPrefix = strings.Trim(strings.TrimSpace(options.ObjectPrefix), "/")

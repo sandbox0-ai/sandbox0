@@ -3,6 +3,7 @@ package objectstore
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -45,6 +46,8 @@ type encryptedObjectHeader struct {
 	NoncePrefix []byte `json:"nonce_prefix"`
 	ChunkSize   int64  `json:"chunk_size"`
 }
+
+var _ ContextConditionalStore = (*encryptedStore)(nil)
 
 // Encrypting wraps a Store with streaming object encryption when enabled.
 func Encrypting(store Store, cfg EncryptionConfig) Store {
@@ -105,22 +108,43 @@ func (s *encryptedStore) Create() error {
 }
 
 func (s *encryptedStore) Put(key string, in io.Reader) error {
-	_, err := s.put(key, in, false)
+	_, err := s.put(context.Background(), key, in, false, false)
 	return err
 }
 
 func (s *encryptedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
-	return s.put(key, in, true)
+	return s.put(context.Background(), key, in, true, false)
+}
+
+func (s *encryptedStore) PutIfAbsentContext(ctx context.Context, key string, in io.Reader) (bool, error) {
+	return s.put(ctx, key, in, true, true)
 }
 
 func (s *encryptedStore) supportsConditionalCreate() bool {
 	return s != nil && SupportsConditionalCreate(s.store)
 }
 
-func (s *encryptedStore) put(key string, in io.Reader, conditional bool) (bool, error) {
+func (s *encryptedStore) supportsContextConditionalCreate() bool {
+	return s != nil && SupportsContextConditionalCreate(s.store)
+}
+
+func (s *encryptedStore) put(
+	ctx context.Context,
+	key string,
+	in io.Reader,
+	conditional bool,
+	requireContext bool,
+) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("object write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if in == nil {
 		in = bytes.NewReader(nil)
 	}
+	in = withObjectReadContext(ctx, in)
 	tmp, err := os.CreateTemp("", "s0-object-encrypted-*")
 	if err != nil {
 		return false, fmt.Errorf("create encrypted object temp file: %w", err)
@@ -132,11 +156,21 @@ func (s *encryptedStore) put(key string, in io.Reader, conditional bool) (bool, 
 	if err := s.encryptTo(tmp, key, in); err != nil {
 		return false, err
 	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return false, fmt.Errorf("seek encrypted object temp file: %w", err)
 	}
 	if !conditional {
 		return true, s.store.Put(key, tmp)
+	}
+	if requireContext {
+		store, ok := s.store.(ContextConditionalStore)
+		if !ok || !SupportsContextConditionalCreate(s.store) {
+			return false, fmt.Errorf("underlying object store does not support contextual conditional access")
+		}
+		return store.PutIfAbsentContext(ctx, key, tmp)
 	}
 	store, ok := s.store.(ConditionalStore)
 	if !ok {
@@ -146,17 +180,46 @@ func (s *encryptedStore) put(key string, in io.Reader, conditional bool) (bool, 
 }
 
 func (s *encryptedStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	return s.getContext(context.Background(), key, off, limit, false)
+}
+
+func (s *encryptedStore) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	return s.getContext(ctx, key, off, limit, true)
+}
+
+func (s *encryptedStore) getContext(
+	ctx context.Context,
+	key string,
+	off, limit int64,
+	requireContext bool,
+) (io.ReadCloser, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("object read context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if limit == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	reader, err := s.store.Get(key, 0, -1)
+	var reader io.ReadCloser
+	var err error
+	if requireContext {
+		store, ok := s.store.(ContextConditionalStore)
+		if !ok || !SupportsContextConditionalCreate(s.store) {
+			return nil, fmt.Errorf("underlying object store does not support contextual conditional access")
+		}
+		reader, err = store.GetContext(ctx, key, 0, -1)
+	} else {
+		reader, err = s.store.Get(key, 0, -1)
+	}
 	if err != nil {
 		return nil, err
 	}
 	pr, pw := io.Pipe()
 	go func() {
 		defer reader.Close()
-		err := s.decryptTo(pw, key, reader, off, limit)
+		err := s.decryptTo(pw, key, withObjectReadContext(ctx, reader), off, limit)
 		_ = pw.CloseWithError(err)
 	}()
 	return pr, nil

@@ -207,6 +207,26 @@ func TestWorkerReleasesTransientBuildWithoutLoggingCause(t *testing.T) {
 	}
 }
 
+func TestWorkerBoundsBuildAndRejectsLateSuccess(t *testing.T) {
+	store := &fakeStore{operation: testOperation(1)}
+	builder := OperationBuilderFunc(func(
+		ctx context.Context,
+		_ *sandboxstore.RootFSImportOperation,
+		_ sandboxstore.RootFSImportLease,
+	) (rootfsimporter.BuildResult, error) {
+		<-ctx.Done()
+		return rootfsimporter.BuildResult{}, nil
+	})
+	result, err := newTestWorker(t, store, builder, func(config *Config) {
+		config.BuildTimeout = 30 * time.Millisecond
+	}).RunOnce(context.Background())
+	if err == nil || result.Released != 1 || result.FailureCategory != failureBuildTimeout ||
+		store.releaseCalls != 1 || store.publishCalls != 0 {
+		t.Fatalf("result=%#v release=%d publish=%d err=%v",
+			result, store.releaseCalls, store.publishCalls, err)
+	}
+}
+
 func TestWorkerAbandonsExhaustedBuildWithBoundedReason(t *testing.T) {
 	store := &fakeStore{operation: testOperation(3)}
 	builder := OperationBuilderFunc(func(
@@ -311,11 +331,12 @@ func TestNewWorkerRejectsUnsafeLeaseAndExecutableContracts(t *testing.T) {
 		return rootfsimporter.BuildResult{}, nil
 	})
 	for name, mutate := range map[string]func(*Config){
-		"worker":   func(c *Config) { c.WorkerID = "manager worker" },
-		"renewal":  func(c *Config) { c.LeaseRenewal = c.LeaseTTL },
-		"attempts": func(c *Config) { c.MaxAttempts = 101 },
-		"protocol": func(c *Config) { c.ProcdProtocol = "bad protocol" },
-		"digest":   func(c *Config) { c.ProcdDigest = "sha256:bad" },
+		"worker":        func(c *Config) { c.WorkerID = "manager worker" },
+		"build timeout": func(c *Config) { c.BuildTimeout = 24*time.Hour + time.Millisecond },
+		"renewal":       func(c *Config) { c.LeaseRenewal = c.LeaseTTL },
+		"attempts":      func(c *Config) { c.MaxAttempts = 101 },
+		"protocol":      func(c *Config) { c.ProcdProtocol = "bad protocol" },
+		"digest":        func(c *Config) { c.ProcdDigest = "sha256:bad" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := Config{

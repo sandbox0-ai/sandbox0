@@ -286,6 +286,7 @@ func TestRootFSImporterDefaultsAreBounded(t *testing.T) {
 	cfg := &ManagerConfig{}
 	applyRootFSImporterDefaults(cfg)
 	if cfg.RootFSImporter.Interval.Duration != time.Second ||
+		cfg.RootFSImporter.BuildTimeout.Duration != 2*time.Hour ||
 		cfg.RootFSImporter.LeaseTTL.Duration != 2*time.Minute ||
 		cfg.RootFSImporter.LeaseRenewal.Duration != 30*time.Second ||
 		cfg.RootFSImporter.MaxAttempts != 5 ||
@@ -302,6 +303,8 @@ rootfs_importer:
   worker_id: manager.rootfs.import.test
   interval:
     duration: 2s
+  build_timeout:
+    duration: 3h
   lease_ttl:
     duration: 3m
   lease_renewal:
@@ -325,6 +328,7 @@ rootfs_importer:
 	}
 	importer := cfg.RootFSImporter
 	if importer.WorkerID != "manager.rootfs.import.test" || importer.Interval.Duration != 2*time.Second ||
+		importer.BuildTimeout.Duration != 3*time.Hour ||
 		importer.LeaseTTL.Duration != 3*time.Minute || importer.LeaseRenewal.Duration != 45*time.Second ||
 		importer.MaxAttempts != 7 || importer.GarbageInterval.Duration != 2*time.Minute ||
 		importer.TerminalRetention.Duration != 48*time.Hour || importer.GarbageLimit != 75 ||

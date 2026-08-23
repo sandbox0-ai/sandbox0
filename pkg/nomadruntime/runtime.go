@@ -291,8 +291,8 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		})
 	}
 	conditional, ok := store.(objectstore.ConditionalStore)
-	if !ok {
-		return nil, fmt.Errorf("RootFS object store %s does not support conditional create", store)
+	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
+		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", store)
 	}
 	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "alreadyownedbyyou") {
 		return nil, fmt.Errorf("create RootFS bucket: %w", err)

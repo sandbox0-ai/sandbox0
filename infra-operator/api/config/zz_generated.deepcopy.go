@@ -730,6 +730,7 @@ func (in *RegistryHarborConfig) DeepCopy() *RegistryHarborConfig {
 func (in *RootFSImporterConfig) DeepCopyInto(out *RootFSImporterConfig) {
 	*out = *in
 	out.Interval = in.Interval
+	out.BuildTimeout = in.BuildTimeout
 	out.LeaseTTL = in.LeaseTTL
 	out.LeaseRenewal = in.LeaseRenewal
 	out.GarbageInterval = in.GarbageInterval

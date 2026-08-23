@@ -605,9 +605,9 @@ func openRuntime(ctx context.Context, opts options, endpoint string) (*runtimeSt
 		return nil, fmt.Errorf("create RustFS client: %w", err)
 	}
 	conditional, ok := objects.(objectstore.ConditionalStore)
-	if !ok || !objectstore.SupportsConditionalCreate(objects) {
+	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
 		pool.Close()
-		return nil, fmt.Errorf("RustFS client lacks conditional create")
+		return nil, fmt.Errorf("RustFS client lacks contextual conditional access")
 	}
 	store := sandboxstore.NewPGSandboxStore(pool)
 	worker, err := rootfsmaterializer.New(rootfsmaterializer.Config{
@@ -957,8 +957,8 @@ func ensureMaterializerObjectIdentity(
 		return fmt.Errorf("create dedicated RustFS bucket: %w", err)
 	}
 	conditional, ok := store.(objectstore.ConditionalStore)
-	if !ok {
-		return fmt.Errorf("RustFS soak identity requires conditional create")
+	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
+		return fmt.Errorf("RustFS soak identity requires contextual conditional access")
 	}
 	payload, err := json.Marshal(map[string]any{
 		"version": materializerSoakStateVersion, "run_id": runID,

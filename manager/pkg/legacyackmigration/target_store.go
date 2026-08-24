@@ -106,9 +106,14 @@ func (s *TargetStore) EnsureSchema(ctx context.Context) error {
 			source_catalog_digest TEXT NOT NULL CHECK (source_catalog_digest ~ '^sha256:[0-9a-f]{64}$'),
 			target_cluster_id TEXT NOT NULL CHECK (octet_length(target_cluster_id) BETWEEN 1 AND 512),
 			state TEXT NOT NULL CHECK (state IN ('prepared', 'importing', 'committed')),
+			commit_digest TEXT CHECK (commit_digest IS NULL OR commit_digest ~ '^sha256:[0-9a-f]{64}$'),
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			committed_at TIMESTAMPTZ
+			committed_at TIMESTAMPTZ,
+			CHECK (
+				(state IN ('prepared', 'importing') AND commit_digest IS NULL AND committed_at IS NULL)
+				OR (state = 'committed' AND commit_digest IS NOT NULL AND committed_at IS NOT NULL)
+			)
 		);
 		CREATE TABLE IF NOT EXISTS legacy_ack_migration.builds (
 			build_id TEXT PRIMARY KEY CHECK (octet_length(build_id) BETWEEN 1 AND 128),

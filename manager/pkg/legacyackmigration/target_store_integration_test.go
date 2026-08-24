@@ -83,6 +83,53 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	if retried.State != targetBuildStateReady || retried.Result == nil {
 		t.Fatalf("retried operation = %#v", retried)
 	}
+	normalized := targetStoreIntegrationCatalog(build)
+	committed, err := store.CommitCatalog(ctx, "migration-session", normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Sandboxes != 1 || committed.Filesystems != 1 || committed.Generations != 2 ||
+		committed.Snapshots != 1 || committed.CommitDigest == "" {
+		t.Fatalf("commit result = %#v", committed)
+	}
+	committedRetry, err := store.CommitCatalog(ctx, "migration-session", normalized)
+	if err != nil {
+		t.Fatalf("exact CommitCatalog() retry: %v", err)
+	}
+	if *committedRetry != *committed {
+		t.Fatalf("commit retry = %#v, want %#v", committedRetry, committed)
+	}
+	var runtimeID, runtimeNamespace, durability string
+	var writerEpoch int64
+	if err := pool.QueryRow(ctx, `
+		SELECT sandbox.runtime_id, sandbox.runtime_namespace,
+			filesystem.writer_epoch, generation.durability_state
+		FROM manager.sandboxes sandbox
+		JOIN manager.sandbox_rootfs_bindings binding USING (sandbox_id)
+		JOIN manager.rootfs_filesystems filesystem USING (filesystem_id)
+		JOIN manager.rootfs_generations generation
+			ON generation.generation_id = filesystem.head_generation_id
+		WHERE sandbox.sandbox_id = 'sandbox-1'
+	`).Scan(&runtimeID, &runtimeNamespace, &writerEpoch, &durability); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeID != "" || runtimeNamespace != "" || writerEpoch != 1 || durability != "s3_materialized" {
+		t.Fatalf("committed paused graph = runtime %q/%q epoch %d durability %q",
+			runtimeNamespace, runtimeID, writerEpoch, durability)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE manager.sandboxes SET template_name = 'tampered' WHERE sandbox_id = 'sandbox-1'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitCatalog(ctx, "migration-session", normalized); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("CommitCatalog() after product tamper error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE manager.sandboxes SET template_name = 'template-1' WHERE sandbox_id = 'sandbox-1'
+	`); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := pool.Exec(ctx, `
 		UPDATE legacy_ack_migration.builds SET input_digest = $2 WHERE build_id = $1
@@ -91,6 +138,41 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	}
 	if _, err := store.GetBuild(ctx, build.ID); !errors.Is(err, ErrTargetMigrationConflict) {
 		t.Fatalf("GetBuild() after durable input tamper error = %v", err)
+	}
+}
+
+func targetStoreIntegrationCatalog(build MaterializedBuild) *NormalizedCatalog {
+	createdAt := time.Date(2026, 8, 25, 0, 0, 0, 123000000, time.UTC)
+	updatedAt := createdAt.Add(time.Minute)
+	return &NormalizedCatalog{
+		MaterializedBuilds: []MaterializedBuild{build},
+		Sandboxes: []NormalizedSandbox{{
+			FilesystemID: "filesystem-1",
+			Record: sandboxstore.SandboxRecord{
+				ID: "sandbox-1", TeamID: "team-1", UserID: "user-1",
+				TemplateID: "template-1", TemplateName: "template-1", TemplateNamespace: "default",
+				ClusterID: "ali-ue1-nomad", DesiredState: sandboxstore.SandboxDesiredStatePaused,
+				RuntimeGeneration: 7, LifecycleEpoch: 3, OwnerKind: "claimed",
+				ResourceMillicpu: 1000, ResourceMemoryMiB: 2048,
+				CreatedAt: createdAt, UpdatedAt: updatedAt,
+			},
+		}},
+		Filesystems: []NormalizedFilesystem{{
+			Record: Filesystem{
+				ID: "filesystem-1", TeamID: "team-1", HeadLayerID: build.HeadLayerID,
+				BaseImageDigest: build.SourceOCIDigest, CreatedAt: createdAt, UpdatedAt: updatedAt,
+			},
+			LogicalSizeBytes: build.LogicalSizeBytes, HeadBuildID: build.ID,
+			BuildIDByLayer: map[string]string{build.HeadLayerID: build.ID},
+		}},
+		Snapshots: []NormalizedSnapshot{{
+			Record: Snapshot{
+				ID: "snapshot-1", TeamID: "team-1", SourceSandboxID: "sandbox-1",
+				HeadLayerID: build.HeadLayerID, FilesystemID: "filesystem-1",
+				Name: "snapshot", Description: "migrated", CreatedAt: updatedAt,
+			},
+			BuildID: build.ID,
+		}},
 	}
 }
 

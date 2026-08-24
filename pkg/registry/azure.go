@@ -3,16 +3,15 @@ package registry
 import (
 	"context"
 	"fmt"
-	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 type azureProvider struct {
-	cfg     config.RegistryAzureConfig
-	secrets secretReader
+	cfg config.RegistryAzureConfig
 }
 
 func (p *azureProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
@@ -21,30 +20,28 @@ func (p *azureProvider) GetPushCredentials(ctx context.Context, req PushCredenti
 	if registry == "" {
 		return nil, fmt.Errorf("azure registry is required")
 	}
-	tenantID := strings.TrimSpace(p.cfg.TenantID)
-	clientID := strings.TrimSpace(p.cfg.ClientID)
-	clientSecret := strings.TrimSpace(p.cfg.ClientSecret)
-	if tenantID == "" || clientID == "" || clientSecret == "" {
-		if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
-			return nil, fmt.Errorf("azure credentials secret is required")
-		}
-
-		var err error
-		tenantID, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.TenantIDKey, "tenantId", "azure tenant id")
-		if err != nil {
-			return nil, err
-		}
-		clientID, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.ClientIDKey, "clientId", "azure client id")
-		if err != nil {
-			return nil, err
-		}
-		clientSecret, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.ClientSecretKey, "clientSecret", "azure client secret")
-		if err != nil {
-			return nil, err
-		}
+	tenantID, err := credentialValue(p.cfg.TenantID, p.cfg.TenantIDFile, "azure tenant id")
+	if err != nil {
+		return nil, err
+	}
+	clientID, err := credentialValue(p.cfg.ClientID, p.cfg.ClientIDFile, "azure client id")
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := credentialValue(p.cfg.ClientSecret, p.cfg.ClientSecretFile, "azure client secret")
+	if err != nil {
+		return nil, err
 	}
 
-	credential, err := azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
+	var credential azcore.TokenCredential
+	if tenantID == "" && clientID == "" && clientSecret == "" {
+		credential, err = azidentity.NewDefaultAzureCredential(nil)
+	} else {
+		if tenantID == "" || clientID == "" || clientSecret == "" {
+			return nil, fmt.Errorf("azure tenant id, client id, and client secret must be configured together")
+		}
+		credential, err = azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create azure credential: %w", err)
 	}

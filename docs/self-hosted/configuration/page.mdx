@@ -1,601 +1,289 @@
 # Configuration
 
-This page explains how to think about `Sandbox0Infra` configuration and includes a generated field reference sourced from the operator CRD.
+Sandbox0 configuration is split across direct service YAML, root-owned
+credential/identity files, Nomad client configuration, and the warm-carrier
+job. Keep these inputs under versioned infrastructure management and pin them
+to one tested release.
 
-The goal is to keep the page readable for operators while still exposing the full supported config surface.
+## Configure In This Order
 
-## How to Read `Sandbox0Infra`
+1. region and cluster identity;
+2. PostgreSQL writer and RootFS object storage;
+3. manager node authority and active-active terminal reconciliation;
+4. dedicated node identity and truthful capacity;
+5. immutable runtime-class catalog;
+6. resource-neutral carrier count;
+7. gateway identity, routing, registry, network, quota, and telemetry; and
+8. rollout and acceptance policy.
 
-A `Sandbox0Infra` spec is easier to reason about when you split it into six layers:
+## Region And Cluster Identity
 
-| Layer | Main fields | What it controls |
-|---|---|---|
-| Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
-| Core dependencies | `spec.database`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, rootfs object storage, gateway rate-limit Redis, registry integration |
-| Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
-| Data-plane runtimes | `spec.services.manager.config`, `spec.services.ctld.config`, `spec.network`, `spec.sandboxNodePlacement` | Rootfs lifecycle, node-local networking, and placement |
-| Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
-| Runtime bootstrap | `spec.builtinTemplates`, `spec.initUser` | Default templates, warm pools, initial admin bootstrap |
+A provider/region has one independent PostgreSQL and S3 boundary. Several
+data-plane clusters may share it.
 
-## Recommended Reading Order
+Use stable values for:
 
-1. Pick your topology with `spec.services.*`.
-2. Decide whether database/storage/Redis/registry stay `builtin` or move external.
-3. Configure public exposure and cluster identity.
-4. Seed templates and initial admin user.
-5. Only then tune service and data-plane runtime configuration.
+- `region_id` on regional and data-plane services;
+- `cluster_id`/`default_cluster_id` for each data plane;
+- Nomad server cluster identity;
+- exact Nomad client node IDs;
+- a durable node UID that survives reboot; and
+- a new boot ID for every host boot.
 
-`spec.initUser` is consumed by the gateway runtime, not created by the operator itself.
-In local-password mode it bootstraps the first admin credentials; in OIDC-only mode it pre-creates the admin user and initial team so the first OIDC login with the same email lands on the intended admin account.
+`global-gateway` routes teams to regions only. It must not contain a region's
+Nomad or data-plane cluster topology.
 
-When `spec.builtinTemplates` is omitted, infra-operator seeds public builtin templates for `default`, `openclaw`, `hermes`, `browser`, and `coding-agent`. Set `spec.builtinTemplates` explicitly when you want to pin images, adjust pools, disable one of the builtins, or provide a full template `spec` for a runtime-specific setup. Set it to `[]` to remove all operator-managed builtin templates.
+For one data-plane cluster, run cluster-gateway in full mode and omit
+scheduler. For several clusters, regional-gateway calls scheduler, and
+scheduler selects a cluster from live PostgreSQL capacity for new claims.
 
-## Pin Builtin Images for Predictable Startup
+## PostgreSQL
 
-The self-hosted `openclaw`, `hermes`, and `browser` presets use upstream mutable `latest` tags by default. Sandbox0 sets the effective main-container pull policy to `IfNotPresent` unless a system template overrides it. A claim on a node that already has the image does not download it again, but a new or cache-miss node resolves the tag and pulls the current image. That pull can add substantial cold-start latency for large images, and different nodes can keep different digests for the same mutable tag.
+All replicas in one region use the same PostgreSQL writer endpoint. Manager,
+scheduler, and gateways must not point at independently maintained lifecycle
+stores.
 
-For production self-hosted deployments, replace the complete builtin template list and pin each mutable image to a reviewed digest:
+Manager validates that new and pooled connections are read-write. During a
+failover, readiness and new capacity-changing work fail closed until the writer
+endpoint resolves to the new primary.
 
-```yaml
-spec:
-    builtinTemplates:
-        - templateId: default
-        - templateId: openclaw
-          image: ghcr.io/openclaw/openclaw@sha256:<openclaw-digest>
-        - templateId: hermes
-          image: nousresearch/hermes-agent@sha256:<hermes-digest>
-        - templateId: browser
-          image: ghcr.io/steel-dev/steel-browser@sha256:<browser-digest>
-```
+PostgreSQL is authoritative for:
 
-`spec.builtinTemplates` has replacement semantics, so omitting an entry removes that operator-managed builtin. A version tag is easier to read than a digest but remains mutable if its publisher retags it. A digest is the immutable choice.
+- sandbox/template lifecycle and runtime generations;
+- node capacity, carrier slots, and exact resource leases;
+- RootFS heads, writer epochs, snapshots, forks, imports, and deletion queues;
+- network and credential policy state; and
+- metering projection state and transactional outbox.
 
-Pinning makes the runtime version deterministic; it does not eliminate the first pull on an empty node. If image-pull latency is part of your cold-start budget, preload the pinned digests into node images or use a node-level pre-puller before admitting sandbox workloads.
+## RootFS Object Storage
 
-Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-region configuration pins these images by digest and rolls upstream digest changes through deployment automation. Cloud users therefore do not maintain these pins themselves. A genuinely cold node can still need a missing pinned image, but cache and prewarming operations remain the managed platform's responsibility rather than part of the customer template configuration.
-
-## Supported Topologies
-
-| Topology | Typical fields | Use when |
-|---|---|---|
-| Single-cluster fullmode | `storage`, `network`, `registry`, `services.clusterGateway`, `services.manager` | You deploy one complete data-plane cluster |
-| Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
-| Multi-cluster data plane | `controlPlane`, `cluster`, `storage`, `network`, `services.clusterGateway`, `services.manager` | You attach a complete data-plane cluster to an external control plane |
-
-The single-cluster sample is always fullmode. `manager` hosts lifecycle control and rootfs metadata. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence and the network runtime, and the standby takes over after promotion. Configure the rootfs object store under `spec.storage`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
-
-## Sandbox Claim Admission
-
-Team Quota is the claim admission boundary. The `sandbox_claims` rate policy controls sustained claim rate and immediate burst at the external regional or full-mode gateway, while `active_sandboxes` limits the number of running sandboxes for a team. Manager does not maintain a separate cluster-wide claim-start budget.
-
-After quota admission, manager claims a ready idle pod or creates a cold pod directly. Warm-pool ReplicaSets also scale directly to each template's configured `minIdle`. In multi-cluster mode, scheduler routing prefers ready idle capacity, then estimated cluster headroom, configured weight, and deterministic fallback order.
-
-## Metering Boundary
-
-Metering is disabled by default. Set `spec.metering.enabled: true` and configure `spec.clickHouse.type` as `builtin` or `external` to enable the region usage ledger.
-
-| Component | Responsibility |
-|-----------|----------------|
-| PostgreSQL | Transactional producer state and an ordered delivery outbox; rootfs storage observations enqueue usage in the same business transaction |
-| Manager projector | Retries the oldest stable, idempotent operation batch until ClickHouse accepts it |
-| ClickHouse | Long-term usage ledger and the only metering query and export backend |
-| Billing system | Consumes exported windows and watermarks, then applies pricing outside the open-source data plane |
-
-Metering export is eventually consistent:
-
-| Producer | Normal additional delay |
-|----------|-------------------------|
-| Manager lifecycle and rootfs observations | Projector poll, about two seconds |
-| ctld network byte windows | `meteringReportInterval`, 10 seconds by default |
-| Periodic storage byte-hour windows | Up to one minute |
-
-A ClickHouse outage increases the delay without discarding committed outbox operations. After projection-state bootstrap, producers can also restart while ClickHouse is unavailable.
-
-Export and upgrade rules:
-
-- `complete_before` is the greatest globally ordered producer watermark delivered to ClickHouse; every older committed batch has also been delivered
-- new rows expose their PostgreSQL outbox sequence; rows created before that column use `sequence: 0`
-- cursor pagination is the canonical export contract across upgrades
-- signed Unix nanosecond timestamps preserve `DateTime64(9)` boundaries and cursor precision
-
-Monitor `manager_metering_outbox_pending_operations` and `manager_metering_outbox_oldest_pending_age_seconds` for delivery backlog.
-
-Sandbox compute uses a serverless-style contract:
-
-| Window type | Unit | Meaning |
-|---|---|---|
-| `sandbox.runtime_mib_milliseconds` | `mib_milliseconds` | Active sandbox runtime and team-owned warm pool runtime multiplied by allocated memory |
-| `sandbox.egress_bytes` | `bytes` | Egress traffic observed by the ctld network runtime |
-| `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by the ctld network runtime |
-| `sandbox.rootfs_byte_hours` | `byte_hours` | Persisted sandbox rootfs COW object storage over time |
-| `sandbox.object_store_get_requests` | `count` | Successful GetRequest-class OSS HTTP attempts for platform-owned rootfs storage |
-| `sandbox.object_store_put_requests` | `count` | Successful PutRequest-class OSS HTTP attempts for platform-owned rootfs storage, including ListObjectsV2 |
-
-Public template idle pools are platform cost. Team-owned template warm pools are attributed to the owning team with `subject_type=template`.
-
-Object-store request windows are usage facts; Sandbox0 does not attach prices.
-
-- manager and ctld aggregate provider HTTP attempts for one minute before writing them to the PostgreSQL outbox
-- rootfs requests are attributed from `sandbox-rootfs/<team_id>/<sandbox_id>`
-- window `data` records `provider`, `bucket`, `billing_item`, `operation`, `cost_scope`, and `prefix_class`
-
-Reconcile these windows with provider access and metering logs before using them for cost reporting.
-
-## Platform Observability
-
-Sandbox0 separates three data paths:
-
-| Data path | Configuration | Purpose |
-|-----------|---------------|---------|
-| Platform telemetry | `spec.observability` | Export service logs, metrics, and traces to your observability stack |
-| Per-sandbox history | `spec.clickHouse`, `spec.sandboxObservability` | Retain sandbox metrics, logs, and signed audit events |
-| Metering | `spec.clickHouse`, `spec.metering` | Maintain usage truth and region-scoped exports |
-
-See [Self-hosted Observability](/docs/sandbox/self-hosted/observability) for collector setup, ClickHouse examples, audit persistence, retention, key management, and monitoring. See [Sandbox Observability](/docs/sandbox/observability) for the user-facing query and watch APIs.
-
-For cold-start diagnosis, collect `manager_pod_lifecycle_stage_duration_seconds`. Use kubelet `kubelet_runtime_operations_duration_seconds{operation_type=~"run_podsandbox|create_container|start_container"}` when you need individual CRI operation latency.
-
-## What Usually Changes First
-
-### External PostgreSQL
-
-Move `spec.database.type` from `builtin` to `external` when you want managed PostgreSQL durability, backup policy, and operational separation.
+Configure `rootfs_object_storage` on every manager and ctld with one regional
+bucket and endpoint. Use conditional object creation and keep credentials
+private.
 
 ```yaml
-spec:
-    database:
-        type: external
-        external:
-            host: your-db.rds.amazonaws.com
-            port: 5432
-            database: sandbox0
-            username: sandbox0
-            passwordSecret:
-                name: db-credentials
-                key: password
+rootfs_object_storage:
+    type: s3
+    bucket: sandbox0-rootfs
+    region: us-east-1
+    endpoint: https://s3.internal.example.com
+    access_key: ${SANDBOX0_S3_ACCESS_KEY}
+    secret_key: ${SANDBOX0_S3_SECRET_KEY}
+    object_encryption_enabled: true
+    object_encryption_key_path: /etc/sandbox0/rootfs/object-key
 ```
 
-### S3 or OSS Backing Storage
+The object-encryption key is installation state. Losing it loses access to
+encrypted RootFS objects; changing it without a migration makes existing
+objects unreadable.
 
-Configure the rootfs object-storage backend under `spec.storage`. Persisted rootfs objects are application-encrypted by default.
+Set dirty-tail and materializer limits from measured storage latency and node
+disk headroom. The regional composite-tail backlog is bounded: an S3 outage
+must apply backpressure instead of growing unbounded local or PostgreSQL data.
+Do not release a writer or delete its local branch before immutable publication
+or an explicit crash-abandon terminal transaction.
+
+## Durable OCI Importer
+
+Manager's RootFS importer is required for the Nomad runtime. Configure:
 
 ```yaml
-spec:
-    storage:
-        type: s3
-        s3:
-            bucket: sandbox0-prod
-            region: us-east-1
-            endpoint: https://s3.amazonaws.com
-            credentialsSecret:
-                name: aws-credentials
-                accessKeyKey: accessKeyId
-                secretKeyKey: secretAccessKey
+rootfs_importer:
+    work_root: /var/lib/sandbox0/rootfs-importer
+    procd_path: /usr/local/bin/procd
+    procd_protocol: <pinned-protocol>
+    procd_digest: sha256:<pinned-digest>
+    discovery_interval: 5s
+    discovery_page_size: 100
 ```
 
-### Sandbox RuntimeClass
+The work root must have enough space for bounded OCI extraction and block-image
+construction. Use `registry.pull_credentials_file` for private source images.
+All manager replicas run bounded template discovery and may run the importer.
+The discovery cursor is expendable; deterministic PostgreSQL import operations
+are the durable authority. PostgreSQL leases and conditional object publication
+provide active-active ownership and retry safety. The importer identity includes
+the image digest, OCI platform, block format, exact RootFS size, and pinned
+`procd` protocol and digest.
 
-Use `services.manager.config.sandboxRuntimeClassName` when sandbox Pods should run with a non-default runtime such as `runc`, `gvisor`, or a custom `gvisor-rootfs` handler.
+## Manager Node Authority
 
-```yaml
-spec:
-    services:
-        manager:
-            config:
-                sandboxRuntimeClassName: gvisor-rootfs
+Use the manager example in `deploy/nomad/control/manager.yaml.example` as the
+field reference. Production requires `node_authority.enabled: true` and the
+plugin-independent terminal worker enabled.
+
+Every manager replica needs identical:
+
+- server certificate/key and node client CA;
+- certificate-CN to cluster/node/node-UID/agent-UID mappings;
+- 32-byte writer-token key;
+- runtime-class catalog;
+- trusted Nomad endpoint catalog and referenced credentials; and
+- claim/heartbeat/writer lease policies.
+
+Node channels use mTLS and exact identities. Bind the authority endpoint to a
+private address and configure exact DNS/SPIFFE SANs. Do not permit redirects,
+ambient HTTP proxies, wildcard node identity, or an unpinned Nomad client
+endpoint.
+
+The terminal worker must remain independent of the task-driver process. It
+owns exact Nomad stop and client GC, node cleanup requests, physical absence
+observation, RootFS fencing, and the final PostgreSQL capacity release.
+
+## Runtime Classes
+
+The catalog file uses outer version `3`; each compatibility record uses version
+`2`. Start from
+`nomad-driver-sandbox0/example/runtime-classes.example.json`.
+
+A class contains only immutable execution properties:
+
+- artifact OS/architecture and host architecture;
+- driver and stock runsc versions;
+- gVisor platform;
+- overlay, file-access, and DirectFS modes;
+- `/procd`, its fixed port, and static runtime control mode; and
+- security class or immutable device requirements.
+
+Configure `procd_internal_jwt_public_key_file` with the region data-plane
+Ed25519 public key. The driver bind-mounts that public key read-only at
+`/config/internal_jwt_public.key`; it must not be baked into a base image or
+copied into an immutable RootFS artifact because regional key rotation is
+independent of image import.
+
+Never include CPU quota, CPU weight, cpuset, memory, PIDs, or template memory in
+the compatibility digest. Those values belong to the exact claim-time resource
+lease.
+
+Until an explicit public class selector exists, configure exactly one class
+for each requested cluster. Ambiguous or missing class selection fails closed.
+
+## Dedicated Node Capacity
+
+Configure the Nomad client with:
+
+- `client.node_pool = "sandbox0"`; and
+- node metadata `sandbox0_dedicated=true`.
+
+The `SANDBOX0_RESOURCE_*` values in `ctld.env` describe allocatable sandbox
+capacity after host, Nomad, ctld, NBD, and network overhead is reserved:
+
+```sh
+SANDBOX0_RESOURCE_CPU_MILLICORES=8000
+SANDBOX0_RESOURCE_MEMORY_BYTES=17179869184
+SANDBOX0_RESOURCE_CPUSET_CPUS=0-7
+SANDBOX0_RESOURCE_CPUSET_MEMS=0
 ```
 
-This field only controls the `runtimeClassName` written onto sandbox Pods. The named Kubernetes `RuntimeClass` must already exist, and its `handler` must already be configured in the node CRI runtime on every eligible sandbox node.
+Use only CPUs truly dedicated to this node pool. Do not advertise SMT threads
+as independent physical-core acceptance capacity. Carrier-job resources are
+small overhead reservations and must not be copied into these values.
 
-`infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
+`ctld-resource-cgroup-setup` provisions `/sys/fs/cgroup/sandbox0` and enables
+`cpu`, `cpuset`, `memory`, and `pids` for per-lease children. Existing active
+lease children survive ctld A/B restart. A lease returns to capacity only after
+its cgroup and all other runtime state are physically absent.
 
-### Procd Binary Image Volume
+## NBD And Local Disk
 
-Sandbox Pods mount Sandbox0 `procd` binaries from a small OCI artifact image at `/procd-image` by default. This avoids a per-Pod init container on the sandbox startup path.
+`nomad_runtime.nbd_devices` is the actual concurrent RootFS attachment bound.
+The kernel's `nbds_max` alone does not make devices available to ctld. Keep the
+configured list wider than the largest synchronized claim batch plus
+replacement/retirement headroom.
 
-When `procdBinImageRef` is omitted, `infra-operator` derives it from the deployed infra image tag by appending `-procd-bin`. For example, `sandbox0ai/infra:v0.8.0` uses `sandbox0ai/infra:v0.8.0-procd-bin`.
+`state_path`, `runtime_slot_journal_path`, and branch state under
+`/var/lib/sandbox0/ctld` must survive process restarts. Runtime mounts and
+control sockets under `/run/sandbox0` are boot-scoped. On reboot, only the
+new authenticated boot for the same durable node UID may reconcile old state,
+and only after proving the old runtime absent.
 
-Set `procdBinImageRef` only when you publish the procd binary artifact image separately:
+## Network Runtime
 
-```yaml
-spec:
-    services:
-        manager:
-            config:
-                procdBinImageRef: registry.example.com/sandbox0/procd-bin:v0.8.0
+Run ctld A/B directly in host mount, network, cgroup, and device namespaces.
+The primary owns warm default-deny, claim-time policy compilation, TPROXY/ipset
+state, and the exact network-namespace incarnation. The standby follows durable
+state and takes over after promotion.
+
+Configure cluster DNS and platform-allowed CIDRs narrowly. Sandbox policy is
+applied before runsc creation, and manager exposes the generation only after
+the applied policy digest is part of the launch proof.
+
+Never enable a second task-driver-local network-policy path. The driver consumes
+ctld's durable policy proof; it does not install namespace-local fallback
+rules.
+
+## Warm Carrier Job
+
+`nomad-driver-sandbox0/example/warm-slot.nomad` is the resource-neutral carrier
+job. Adjust `count` for burst width and keep:
+
+```hcl
+restart {
+    attempts = 0
+    mode     = "fail"
+}
 ```
 
-Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupported runtimes fail sandbox Pod startup instead of falling back inside the Pod. Sandbox0 mounts the whole image volume and starts `/procd-image/usr/local/bin/procd`, so clusters do not need container-runtime support for image volume `subPath`.
+Each carrier is one-shot. Nomad replaces the allocation after consumption.
+Pool width, node capacity, and NBD count are independent constraints and should
+be monitored together.
 
-### Sandbox Memory Limits
+## Gateway Identity And Routing
 
-Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `16Gi`. The same maximum is enforced for template creation and updates, sandbox claims and updates, resumes, and forks. Manager derives CPU from the configured memory-per-CPU ratio and enforces a minimum CPU limit of `150m` for claimed sandboxes.
+For self-hosted regional-gateway, configure:
 
-The minimum applies when a sandbox is claimed, resumed, or resized. Upgrading manager does not resize sandbox pods that were already running before the upgrade.
+- `edition: self-hosted` and `auth_mode: self_hosted`;
+- asymmetric JWT signing keys in files;
+- built-in auth and/or OIDC;
+- one stable `region_id` and external `base_url`;
+- the default cluster-gateway URL for single-cluster mode; or
+- scheduler URL and license inputs for multi-cluster mode.
 
-Use `services.manager.config.sandboxMaxMemory` to lower or raise the platform maximum:
+Keep internal service endpoints private and use internal signed tokens for
+regional-to-cluster and cluster-to-manager calls. Team-owned runtime access
+routes directly through the regional endpoint; global-gateway is not in that
+path.
 
-```yaml
-spec:
-    services:
-        manager:
-            config:
-                sandboxMaxMemory: 16Gi
-```
+## Registry Credentials
 
-Sandbox0 derives CPU from memory using `services.manager.config.teamTemplateMemoryPerCpu`, so callers do not set CPU directly on a sandbox claim or update.
+Registry providers are configured directly on regional-gateway/manager. Prefer
+root-owned file fields over inline secret values. Manager's durable importer
+uses a Docker credential file for private pulls; runtime allocations receive no
+registry credentials.
 
-For `gVisor` rootfs checkpoint and restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
+Configure different `push_registry`, `pull_registry`, and `internal_registry`
+endpoints when public CI and private regional traffic require different routes.
+Use the pull image reference returned by the credentials API.
 
-```toml
-# /etc/containerd/config.toml
-version = 2
+## Quotas And Metering
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
-    runtime_type = "io.containerd.runsc.v1"
+Manager's `default_team_quotas` declaratively reconciles regional defaults.
+Team-specific PostgreSQL policy overrides the same dimension. The claim
+transaction checks concurrency and resource dimensions before leasing capacity.
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
-    TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
-```
+Metering records the actual resource lease rather than deriving CPU/memory from
+a static carrier or compatibility profile. Enable the PostgreSQL producer even
+when ClickHouse is temporarily unavailable; ClickHouse consumers replay the
+transactional outbox.
 
-```toml
-# /etc/containerd/runsc-rootfs.toml
-[runsc_config]
-    overlay2 = "none"
-    file-access = "shared"
-```
+See [Quotas](/docs/self-hosted/quotas) and
+[Observability](/docs/self-hosted/observability).
 
-```yaml
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-    name: gvisor-rootfs
-handler: gvisor-rootfs
-```
+## Rollouts
 
-`sandboxRuntimeClassName` applies only to sandbox Pods. Ctld is a node-local host component and must use a runtime that supports its required `hostNetwork`, `hostPath`, FUSE, and network-programming access; do not run ctld under `gvisor`, `gvisor-rootfs`, or `kata`.
+Use `deploy/nomad/ctld/rollout-node.sh` to restart B then A and wait for each
+instance to become primary-ready or synchronized-standby-ready before touching
+its peer. Drain and roll nodes one at a time when changing runsc, driver,
+compatibility digest, RootFS format, NBD pool, or network policy format.
 
-`ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same path so rootfs pause/resume can use the overlayfs fast path:
-
-```yaml
-spec:
-    services:
-        ctld:
-            containerdHostDataRoot: /var/lib/containerd/sandbox0
-```
-
-`ctld` also keeps a disposable node-local rootfs object cache under its host data directory. This cache accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
-
-```yaml
-spec:
-    services:
-        ctld:
-            rootfsObjectCacheMaxBytes: 20Gi
-            rootfsObjectCacheMinFreeBytes: 5Gi
-            rootfsObjectCacheMaxAge: 24h
-            rootfsObjectCacheSweepInterval: 1m
-```
-
-Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
-
-### Shared Redis Rate Limiting
-
-Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` so `api_requests` and network bandwidth Team Quotas share admission state across gateway replicas, ctld nodes, and data-plane clusters in the region.
-
-```yaml
-spec:
-    redis:
-        type: builtin
-        builtin:
-            enabled: true
-```
-
-For an external Redis instance, store the URL in a Secret and reference it from `spec.redis`.
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-    name: redis-url
-    namespace: sandbox0-system
-stringData:
-    url: rediss://:password@redis.example:6379/0
----
-apiVersion: infra.sandbox0.ai/v1alpha1
-kind: Sandbox0Infra
-metadata:
-    name: fullmode
-    namespace: sandbox0-system
-spec:
-    redis:
-        type: external
-        external:
-            urlSecret:
-                name: redis-url
-                key: url
-        keyPrefix: sandbox0:ratelimit:prod
-        operationTimeout: 100ms
-        failOpen: true
-```
-
-### Credential Source Storage
-
-Credential sources are stored in encrypted PostgreSQL by default. `infra-operator` creates and mounts a stable per-installation encryption key for manager. During upgrade, legacy plaintext rows remain readable and are not rewritten automatically.
-
-Configure `spec.credentialVault` when new credential source material should live in a Vault-compatible backend. Builtin mode installs OpenBao:
-
-```yaml
-spec:
-    credentialVault:
-        type: builtin
-        builtin:
-            enabled: true
-            mount: secret
-```
-
-External mode connects manager to an existing HashiCorp Vault-compatible endpoint:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-    name: sandbox0-vault-token
-    namespace: sandbox0-system
-stringData:
-    token: <vault-token>
----
-apiVersion: infra.sandbox0.ai/v1alpha1
-kind: Sandbox0Infra
-metadata:
-    name: fullmode
-    namespace: sandbox0-system
-spec:
-    credentialVault:
-        type: external
-        external:
-            address: https://vault.example.com
-            tokenSecret:
-                name: sandbox0-vault-token
-                key: token
-            mount: secret
-            allowedPathPrefixes:
-                - sandbox0/credential-sources/{{teamID}}/
-```
-
-When `spec.credentialVault` is enabled, manager stores newly written credential sources in the configured Vault backend. Existing rows keep their recorded storage backend.
-
-### Egress Auth Resolve TTL
-
-The ctld network runtime caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. Credential source rotation actively invalidates affected ctld cache entries, so already-claimed sandboxes normally use the rotated source on their next matching egress resolve. The default lifetime is 5 minutes, and the TTL remains the fallback consistency bound if realtime invalidation delivery is interrupted.
-
-Set `spec.services.manager.config.egressAuthDefaultResolveTtl` when you want a different platform default. Individual bindings can override it with `network.credentialBindings[*].cachePolicy.ttl`.
-
-```yaml
-spec:
-    services:
-        manager:
-            config:
-                egressAuthDefaultResolveTtl: 1m
-```
-
-### Public Routing and Region Identity
-
-`spec.publicExposure` decides the public host pattern used for sandbox URLs. Keep it consistent with your region and DNS plan.
-
-```yaml
-spec:
-    publicExposure:
-            enabled: true
-            rootDomain: sandbox0.example.com
-            regionId: aws-us-east-1
-```
-
-### SSH Gateway
-
-Enable `spec.services.sshGateway` when you want a region-scoped SSH entrypoint that bridges standard `ssh` and `scp` clients into sandbox `procd` sessions.
-
-The routing model is intentionally simple:
-
-- One `ssh-gateway` per region
-- One fixed DNS-only host or TCP proxy address per region, for example `aws-us-east-1.ssh.sandbox0.app`
-- SSH username is the target sandbox ID
-- User authentication uses SSH public keys uploaded to the gateway API
-
-In Kubernetes terms, `spec.services.sshGateway.service.port` is the Kubernetes Service port and `spec.services.sshGateway.config.sshPort` is the container listen port. You usually keep the internal port at `2222` and expose `22` or a NodePort externally.
-
-When an external load balancer listens on a different public port than the Kubernetes Service or NodePort, set `spec.services.sshGateway.endpointPort` to the public port that clients should use.
-
-The operator also manages a persistent Ed25519 host key Secret for the service. As long as that Secret is retained, clients continue to see the same SSH host identity across pod restarts.
-
-```yaml
-spec:
-    services:
-        sshGateway:
-            enabled: true
-            replicas: 1
-            service:
-                type: LoadBalancer
-                port: 22
-            config:
-                sshPort: 2222
-```
-
-For local labs or kind-style environments, a `NodePort` is often simpler:
-
-```yaml
-spec:
-    services:
-        sshGateway:
-            enabled: true
-            replicas: 1
-            service:
-                type: NodePort
-                port: 30222
-            endpointPort: 22
-```
-
-After exposing the service through DNS or a load balancer, users can upload SSH public keys with `POST /users/me/ssh-keys` and connect with standard clients. See [SSH](/docs/sandbox/ssh) for the user-facing flow.
-
-### AWS LoadBalancer TLS
-
-When you expose `regionalGateway` or `globalGateway` through a cloud load balancer instead of Kubernetes `Ingress`, declare provider-specific Service annotations under `spec.services.<service>.service.annotations`. On AWS, this is the supported place to attach ACM certificates and choose the load balancer mode.
-
-Also set `spec.services.<service>.config.baseUrl` to the final browser-facing URL. That keeps auth callbacks, generated links, and projected status endpoints aligned with the hostname you put behind Cloudflare.
-
-```yaml
-spec:
-    services:
-        regionalGateway:
-            enabled: true
-            service:
-                type: LoadBalancer
-                port: 443
-                annotations:
-                    service.beta.kubernetes.io/aws-load-balancer-type: nlb
-                    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-                    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: <acm-certificate-arn>
-                    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
-            config:
-                baseUrl: https://your-gateway.example.com
-```
-
-### Multi-Cluster Data Plane Registration
-
-Data-plane clusters need control-plane connection details and a stable cluster identity.
-
-```yaml
-spec:
-    controlPlane:
-        url: https://api.sandbox0.example.com
-        internalAuthPublicKeySecret:
-            name: control-plane-public-key
-            key: public.key
-    cluster:
-        id: cluster-001
-        name: production-use1-a
-    services:
-        clusterGateway:
-            enabled: true
-            config:
-                authMode: internal
-        manager:
-            enabled: true
-```
-
-## Service and Runtime Config
-
-Use `spec.services.<service>.config` for deployable services and `spec.network.config` for the network runtime in ctld.
-
-Examples:
-
-- `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
-- `services.manager.config.autoscaler.*` is a legacy compatibility surface and is currently ignored; manager keeps each warm pool fixed at the template's `minIdle`
-- `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
-- `services.manager.config.sandboxMaxMemory` caps template defaults and every sandbox lifecycle operation; the default is `16Gi`
-- `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods
-- `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
-- `services.manager.config.autoscalerSafeToEvictAnnotationKeys` lists the platform autoscaler's pod annotation keys; manager writes `true` on idle pods and `false` on claimed pods without embedding a vendor-specific key
-- `services.manager.config.podTeardown.*` bounds warm-pool rollout and repair work per node and across the cluster
-- `services.ctld.config.rootfsObjectCache*` tunes the bounded node-local cache for encrypted rootfs objects
-- `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
-- `services.manager.config.defaultTeamQuotas` configures region-wide capacity, API request, and network bandwidth defaults; see [Team Quotas](/docs/sandbox/self-hosted/quotas)
-- `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
-
-For autoscaled sandbox node pools, configure the annotation contract and teardown budgets together:
-
-```yaml
-spec:
-    services:
-        manager:
-            config:
-                autoscalerSafeToEvictAnnotationKeys:
-                    - cluster-autoscaler.kubernetes.io/safe-to-evict
-                podTeardown:
-                    maxConcurrentPerNode: 4
-                    maxConcurrentPerDegradedNode: 1
-                    maxConcurrentReplacements: 40
-```
-
-`maxConcurrentPerNode` is applied independently to each healthy node, so cleanup can progress in parallel across nodes. A Ready node reporting memory, disk, PID, or network pressure uses `maxConcurrentPerDegradedNode`. Manager starts no new teardown on a `NotReady` or `Unknown` node, but stale force-deletes still make bounded progress with the degraded-node limit. All templates and cleanup paths share the same cluster-wide replacement budget.
-
-Manager also creates a PodDisruptionBudget for each idle pool. It protects ready capacity from autoscalers that use the Eviction API, while the node-aware manager budget controls direct rollout and repair deletes.
-
-```yaml
-spec:
-    redis:
-        type: builtin
-        builtin:
-            enabled: true
-    network:
-        config:
-            egressBandwidthBytesPerSecond: 10485760
-            ingressBandwidthBytesPerSecond: 10485760
-            bandwidthBurstBytes: 10485760
-    services:
-        manager:
-            config:
-                defaultTeamQuotas:
-                    - dimension: network_egress_bytes
-                      limitValue: 104857600
-                      intervalMs: 1000
-                      burstValue: 104857600
-                    - dimension: network_ingress_bytes
-                      limitValue: 104857600
-                      intervalMs: 1000
-                      burstValue: 104857600
-```
-
-Use `spec.sandboxNodePlacement.nodeSelector` and `tolerations` for the hard placement shared by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.
-
-`preferredNodeSelector` is different: it is a soft preference used only for manager-created sandbox Pods. The manager also uses the same selector when a hot claim chooses among already scheduled idle Pods. This lets a fixed-capacity pool absorb claims first while preserving an autoscaled pool as fallback:
-
-```yaml
-spec:
-    sandboxNodePlacement:
-        nodeSelector:
-            sandbox0.ai/node-role: sandbox
-        preferredNodeSelector:
-            sandbox0.ai/capacity-type: fixed
-        tolerations:
-            - key: sandbox0.ai/sandbox
-              operator: Equal
-              value: "true"
-              effect: NoSchedule
-```
-
-Do not put a fallback capacity label such as `sandbox0.ai/capacity-type: fixed` in `nodeSelector`; that would turn the preference into a hard requirement and prevent scheduling onto burst nodes.
-
-<Callout variant="info">
-Use the generated reference below for exact field names, defaults, enums, and required flags. Use the sample manifests for operator-friendly starting points.
-</Callout>
-
-<Callout variant="warning">
-Not every operational rule is expressible in CRD schema. Some defaults are applied inside manager and ctld, and some validations are conditional. Examples include network runtime defaults and storage encryption requiring a key path.
-</Callout>
-
-## Full Reference
-
-The reference below is generated from the `Sandbox0Infra` CRD schema produced by `controller-gen`, not manually maintained MDX.
-
-<Sandbox0InfraReference />
-
-## Practical Rules
-
-- Pin the `infra-operator` chart version in production instead of relying on floating tags.
-- Prefer external PostgreSQL and external object storage for serious deployments.
-- Configure `spec.storage` as the object-storage backend for rootfs checkpoints and named rootfs snapshots.
-- Configure `spec.network` for sandbox network policy; enforcement runs in the active ctld process on Linux nodes.
-- Use `sandboxNodePlacement.nodeSelector` and `tolerations` to keep sandbox workloads and the node-local ctld pair on the same node set. Use `preferredNodeSelector` only for soft sandbox-Pod placement and hot-claim ordering.
-- Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.
-- If sandbox workloads use `gvisor` or `kata`, keep ctld on a host-compatible runtime such as the cluster default runtime.
-- `services.manager.config.sandboxRuntimeClassName` references an existing Kubernetes `RuntimeClass`; it does not install the node-level containerd handler.
-- Keep control-plane and data-plane components in the same storage and latency domain for a given region.
+Never downgrade across an on-disk journal version unsupported by the previous
+binary. Keep the prior tested binary/config set for rollback and preserve
+writer-token and encryption keys across ordinary rollouts.
 
 ## Next Steps
 
 <CardGroup>
-  <Card title="Overview" href="/docs/sandbox/get-started" cta="Continue">
-    Start with the product shape, core services, and where each API surface fits.
+  <Card title="Observability" href="/docs/self-hosted/observability" cta="Continue">
+    Monitor claims, leases, node channels, RootFS, and metering projections.
   </Card>
 </CardGroup>

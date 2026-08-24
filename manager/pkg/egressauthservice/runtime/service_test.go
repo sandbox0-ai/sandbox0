@@ -548,6 +548,7 @@ func TestResolveReturnsSSHProxyDirective(t *testing.T) {
 	directive := resp.Directives[0].SSHProxy
 	if directive == nil {
 		t.Fatal("expected ssh proxy directive")
+		return
 	}
 	if directive.UpstreamUsername != "git" {
 		t.Fatalf("upstream username = %q, want git", directive.UpstreamUsername)

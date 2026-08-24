@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 func TestAllowEgressL4AllowAll(t *testing.T) {
@@ -249,15 +249,15 @@ func TestPlatformDenyOverridesUserAllow(t *testing.T) {
 	}
 }
 
-func TestSandboxPodDenyBlocksPeerButNotSelf(t *testing.T) {
+func TestSandboxPeerDenyBlocksPeerButNotSelf(t *testing.T) {
 	p := &CompiledPolicy{
 		Mode: v1alpha1.NetworkModeAllowAll,
 		Platform: &PlatformPolicy{
-			SandboxPodIPs: map[string]struct{}{
+			SandboxIPs: map[string]struct{}{
 				"10.0.0.2": {},
 				"10.0.0.3": {},
 			},
-			SourcePodIP: "10.0.0.2",
+			SourceIP: "10.0.0.2",
 		},
 	}
 	if AllowEgressL4(p, net.ParseIP("10.0.0.3"), 443, "tcp") != false {

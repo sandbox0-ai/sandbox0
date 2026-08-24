@@ -11,10 +11,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestHTTPAdapterDeniesBlockedHTTPRequest(t *testing.T) {
@@ -34,7 +33,7 @@ func TestHTTPAdapterDeniesBlockedHTTPRequest(t *testing.T) {
 
 	compiled := compileHTTPProxyTestPolicy(t)
 	server := &Server{
-		cfg:    &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second}},
+		cfg:    &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second}},
 		logger: zap.NewNop(),
 	}
 
@@ -108,7 +107,7 @@ func TestHTTPAdapterAllowsHTTPProtocolRequest(t *testing.T) {
 
 	compiled := compileHTTPProxyTestPolicy(t)
 	server := &Server{
-		cfg:    &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second}},
+		cfg:    &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second}},
 		logger: zap.NewNop(),
 	}
 

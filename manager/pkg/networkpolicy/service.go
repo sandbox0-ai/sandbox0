@@ -1,11 +1,12 @@
 package networkpolicy
 
 import (
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 )
 
-// NetworkPolicyService builds network policy specs for pod annotations.
+// NetworkPolicyService builds canonical node-runtime network policy specs.
 type NetworkPolicyService struct {
 	logger *zap.Logger
 }
@@ -59,14 +60,18 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 		mergedBindings = nil
 	}
 
+	policySpec := &v1alpha1.NetworkPolicySpec{
+		Version:   "v1",
+		SandboxID: req.SandboxID,
+		TeamID:    req.TeamID,
+		Mode:      mergedSpec.Mode,
+		Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
+	}
+	if len(mergedBindings) > 0 {
+		policySpec.CredentialBindingDigest = credentialbinding.DigestPublic(mergedBindings)
+	}
 	return &BuildNetworkPolicyResult{
-		PolicySpec: &v1alpha1.NetworkPolicySpec{
-			Version:   "v1",
-			SandboxID: req.SandboxID,
-			TeamID:    req.TeamID,
-			Mode:      mergedSpec.Mode,
-			Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
-		},
+		PolicySpec:         policySpec,
 		CredentialBindings: mergedBindings,
 	}
 }

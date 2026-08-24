@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"go.uber.org/zap"
 )

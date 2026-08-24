@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -408,7 +408,7 @@ func (s *Server) forgetDNSHostCache(sandboxIP string) {
 	s.dnsCache.ForgetSandbox(sandboxIP)
 }
 
-// ForgetSandboxDNS removes DNS host associations for a sandbox pod IP.
+// ForgetSandboxDNS removes DNS host associations for a sandbox source IP.
 func (s *Server) ForgetSandboxDNS(sandboxIP string) {
 	s.forgetDNSHostCache(sandboxIP)
 }

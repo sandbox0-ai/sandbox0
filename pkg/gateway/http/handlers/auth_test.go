@@ -518,6 +518,7 @@ func TestAuthHandler_OIDCLogin_ReturnsNotFoundWithoutOIDCManager(t *testing.T) {
 	}
 	if apiErr == nil {
 		t.Fatalf("expected api error")
+		return
 	}
 	if apiErr.Code != spec.CodeNotFound {
 		t.Fatalf("expected code %q, got %q", spec.CodeNotFound, apiErr.Code)

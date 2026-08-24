@@ -94,7 +94,7 @@
 // # Security Considerations
 //
 //  1. Key Management:
-//     - Private key must be stored securely (environment variables, K8s secrets, Vault)
+//     - Private key must be stored securely (root-only files or a secret manager)
 //     - Private key should only be on trusted services (cluster-gateway)
 //     - Public key can be embedded in untrusted service images or mounted as config
 //     - Rotate keys regularly (recommend 90 days)

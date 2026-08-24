@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"go.uber.org/zap"
 )
 
@@ -75,58 +74,25 @@ func TestReadyReflectsSynchronizedRuntimeState(t *testing.T) {
 	}
 }
 
-func TestNewCopiesRuntimeWatchTCPPorts(t *testing.T) {
-	ports := []int{8096}
+func TestNewCopiesRuntimeSlotNetworkPaths(t *testing.T) {
 	d := New(&apiconfig.NetworkRuntimeConfig{}, zap.NewNop(), nil, Options{
-		RuntimeWatchTCPPorts: ports,
+		RuntimeSlotStatePath:     "/var/lib/sandbox0/ctld/runtime-slot-network.db",
+		RuntimeSlotControlSocket: "/host-run/sandbox0/ctld-runtime-slot-network.sock",
+		RuntimeSlotNetNSRoot:     "/host-run/netns",
 	})
-	ports[0] = 1
-
-	if len(d.runtimeWatchTCPPorts) != 1 || d.runtimeWatchTCPPorts[0] != 8096 {
-		t.Fatalf("runtime watch ports = %#v, want [8096]", d.runtimeWatchTCPPorts)
+	if d.runtimeSlotStatePath != "/var/lib/sandbox0/ctld/runtime-slot-network.db" ||
+		d.runtimeSlotControlSocket != "/host-run/sandbox0/ctld-runtime-slot-network.sock" ||
+		d.runtimeSlotNetNSRoot != "/host-run/netns" {
+		t.Fatalf("runtime slot network paths = %q, %q, %q", d.runtimeSlotStatePath, d.runtimeSlotControlSocket, d.runtimeSlotNetNSRoot)
 	}
 }
 
-func TestRedirectBypassCIDRsIncludesClusterDNSCIDRs(t *testing.T) {
+func TestRedirectBypassCIDRsCombinesConfiguredRanges(t *testing.T) {
 	got := redirectBypassCIDRs(
 		[]string{"10.96.0.10", "10.244.0.53"},
-		[]string{"10.96.0.20/32"},
-		[]string{"192.168.1.1"},
+		[]string{"10.96.0.20/32", "192.168.1.1"},
 	)
 	want := []string{"10.96.0.10", "10.244.0.53", "10.96.0.20/32", "192.168.1.1"}
-	if len(got) != len(want) {
-		t.Fatalf("cidrs = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("cidrs = %#v, want %#v", got, want)
-		}
-	}
-}
-
-func TestClusterDNSCIDRsIncludesServiceAndEndpointIPs(t *testing.T) {
-	got := clusterDNSCIDRs(
-		"10.96.0.10",
-		[]*watcher.ServiceInfo{{
-			Namespace: "kube-system",
-			Name:      "kube-dns",
-			ClusterIP: "10.96.0.10",
-		}, {
-			Namespace: "sandbox0-system",
-			Name:      "fullmode-manager",
-			ClusterIP: "10.96.0.20",
-		}},
-		[]*watcher.EndpointsInfo{{
-			Namespace: "kube-system",
-			Name:      "kube-dns",
-			Addresses: []string{"10.244.0.53", "10.244.1.53"},
-		}, {
-			Namespace: "sandbox0-system",
-			Name:      "fullmode-manager",
-			Addresses: []string{"10.244.0.20"},
-		}},
-	)
-	want := []string{"10.96.0.10", "10.96.0.10", "10.244.0.53", "10.244.1.53"}
 	if len(got) != len(want) {
 		t.Fatalf("cidrs = %#v, want %#v", got, want)
 	}

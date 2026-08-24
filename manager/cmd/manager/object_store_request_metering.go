@@ -23,7 +23,13 @@ func startManagerObjectStoreRequestMetering(
 	if repo == nil {
 		return nil
 	}
-	instance := strings.TrimSpace(os.Getenv("POD_NAME"))
+	instance := strings.TrimSpace(os.Getenv("SANDBOX0_INSTANCE_ID"))
+	if instance == "" {
+		hostname, err := os.Hostname()
+		if err == nil {
+			instance = strings.TrimSpace(hostname)
+		}
+	}
 	if instance == "" {
 		instance = strings.TrimSpace(clusterID)
 	}

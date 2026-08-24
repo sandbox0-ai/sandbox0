@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 type stubEgressAuthResolver struct {
@@ -127,6 +127,25 @@ func TestMemoryEgressAuthCacheRejectsStaleResolvedMaterialAfterInvalidation(t *t
 	}
 	if _, ok := cache.Get(key); !ok {
 		t.Fatal("current source version should survive older duplicate invalidation")
+	}
+}
+
+func TestMemoryEgressAuthCacheSeparatesBindingDigests(t *testing.T) {
+	cache := newMemoryEgressAuthCache()
+	oldKey := egressAuthCacheKey{
+		SandboxID: "sandbox-a", BindingDigest: "sha256:old", AuthRef: "api-auth",
+		Destination: "api.example.com", DestinationPort: 443, Transport: "tcp", Protocol: "https",
+	}
+	newKey := oldKey
+	newKey.BindingDigest = "sha256:new"
+	cache.Put(oldKey, resolvedHeaderResponse(
+		"api-auth", "old", "team-1", "source", 1, 1, time.Now().Add(time.Minute).UTC(),
+	))
+	if _, ok := cache.Get(newKey); ok {
+		t.Fatal("new credential binding digest reused old resolved material")
+	}
+	if _, ok := cache.Get(oldKey); !ok {
+		t.Fatal("old credential binding digest entry disappeared")
 	}
 }
 

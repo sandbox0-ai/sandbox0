@@ -58,3 +58,30 @@ func TestStatsReturnsProcdErrorMessage(t *testing.T) {
 		t.Fatalf("Stats() error = %v", err)
 	}
 }
+
+func TestProbeCommandReadyReturnsProcessAndRawResponseDigest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != CommandReadyProbePath {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Internal-Token"); got != "probe-token" {
+			t.Fatalf("X-Internal-Token = %q", got)
+		}
+		if err := spec.WriteSuccess(w, http.StatusOK, CommandReadyProbeResponse{
+			InstanceID: "procd-instance-1", Status: "ready",
+		}); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewProcdClient(ProcdClientConfig{}).ProbeCommandReady(
+		context.Background(), server.URL, "probe-token",
+	)
+	if err != nil {
+		t.Fatalf("ProbeCommandReady() error = %v", err)
+	}
+	if result.InstanceID != "procd-instance-1" || result.Status != "ready" || len(result.ResponseBodyDigest) != 64 {
+		t.Fatalf("result = %+v", result)
+	}
+}

@@ -6,170 +6,73 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
 	policypkg "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-func TestPlatformServiceAllowlistExcludesLegacyStorageProxy(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		want bool
-	}{
-		{name: "cluster-gateway", want: true},
-		{name: "manager", want: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			service := &watcher.ServiceInfo{
-				Namespace: "sandbox0-system",
-				Name:      "fullmode-" + tc.name,
-				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "sandbox0infra-operator",
-					"app.kubernetes.io/name":       tc.name,
-				},
-			}
-			if got := isPlatformService(service); got != tc.want {
-				t.Fatalf("isPlatformService() = %t, want %t", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestPlatformPolicyStateTracksSandboxPodIPs(t *testing.T) {
+func TestPlatformPolicyStateTracksSandboxSourceIPs(t *testing.T) {
 	store := policypkg.NewStore(zap.NewNop())
-	source := &watcher.SandboxInfo{
-		Namespace: "default",
-		Name:      "sandbox-a",
-		PodIP:     "10.0.0.2",
-	}
-	peer := &watcher.SandboxInfo{
-		Namespace: "default",
-		Name:      "sandbox-b",
-		PodIP:     "10.0.0.3",
-	}
-	if got := store.ReconcileSandboxes([]*watcher.SandboxInfo{source}).Upserted; got != 1 {
+	source := &model.SandboxInfo{Scope: "runtime-slots", Name: "slot-a", SourceIP: "10.0.0.2"}
+	peer := &model.SandboxInfo{Scope: "runtime-slots", Name: "slot-b", SourceIP: "10.0.0.3"}
+	if got := store.ReconcileSandboxes([]*model.SandboxInfo{source}).Upserted; got != 1 {
 		t.Fatalf("initial sandbox policy upserts = %d, want 1", got)
 	}
 
-	state := newPlatformPolicyState(&apiconfig.NetworkRuntimeConfig{}, store, zap.NewNop())
-	state.Reconcile([]*watcher.SandboxInfo{source, peer}, nil, nil)
-
-	compiled := store.GetByIP(source.PodIP)
+	state := newPlatformPolicyState(&config.NetworkRuntimeConfig{}, store, zap.NewNop())
+	state.Reconcile([]*model.SandboxInfo{source, peer})
+	compiled := store.GetByIP(source.SourceIP)
 	if compiled == nil || compiled.Platform == nil {
-		t.Fatalf("expected platform policy to be attached")
+		t.Fatal("expected platform policy to be attached")
 	}
-	if policypkg.AllowEgressL4(compiled, net.ParseIP(peer.PodIP), 443, "tcp") {
-		t.Fatalf("expected peer sandbox pod to be denied")
+	if policypkg.AllowEgressL4(compiled, net.ParseIP(peer.SourceIP), 443, "tcp") {
+		t.Fatal("expected peer sandbox to be denied")
 	}
-	if !policypkg.AllowEgressL4(compiled, net.ParseIP(source.PodIP), 443, "tcp") {
-		t.Fatalf("expected self sandbox pod ip to remain allowed")
+	if !policypkg.AllowEgressL4(compiled, net.ParseIP(source.SourceIP), 443, "tcp") {
+		t.Fatal("expected the source sandbox address to remain allowed")
 	}
 
-	state.Reconcile([]*watcher.SandboxInfo{source}, nil, nil)
-
-	compiled = store.GetByIP(source.PodIP)
-	if compiled == nil || compiled.Platform == nil {
-		t.Fatalf("expected platform policy to remain attached")
-	}
-	if !policypkg.AllowEgressL4(compiled, net.ParseIP(peer.PodIP), 443, "tcp") {
-		t.Fatalf("expected peer ip to be allowed after sandbox delete")
+	state.Reconcile([]*model.SandboxInfo{source})
+	compiled = store.GetByIP(source.SourceIP)
+	if !policypkg.AllowEgressL4(compiled, net.ParseIP(peer.SourceIP), 443, "tcp") {
+		t.Fatal("expected retired peer address to be allowed")
 	}
 }
 
-func TestPlatformPolicyStateAllowsClusterDNSService(t *testing.T) {
+func TestPlatformPolicyStateUsesExplicitRegionalServiceConfiguration(t *testing.T) {
 	store := policypkg.NewStore(zap.NewNop())
-	source := &watcher.SandboxInfo{
-		Namespace: "default",
-		Name:      "sandbox-a",
-		PodIP:     "10.0.0.2",
-	}
-	if got := store.ReconcileSandboxes([]*watcher.SandboxInfo{source}).Upserted; got != 1 {
-		t.Fatalf("initial sandbox policy upserts = %d, want 1", got)
-	}
+	source := &model.SandboxInfo{Scope: "runtime-slots", Name: "slot-a", SourceIP: "10.0.0.2"}
+	store.ReconcileSandboxes([]*model.SandboxInfo{source})
+	state := newPlatformPolicyState(&config.NetworkRuntimeConfig{
+		PlatformAllowedCIDRs: []string{"10.96.0.10", "2001:db8::53"},
+	}, store, zap.NewNop())
+	state.Reconcile([]*model.SandboxInfo{source})
 
-	state := newPlatformPolicyState(&apiconfig.NetworkRuntimeConfig{}, store, zap.NewNop())
-	service := &watcher.ServiceInfo{
-		Namespace: "kube-system",
-		Name:      "kube-dns",
-		ClusterIP: "10.96.0.10",
-	}
-	endpoints := &watcher.EndpointsInfo{
-		Namespace: "kube-system",
-		Name:      "kube-dns",
-		Addresses: []string{"10.244.0.53"},
-	}
-	state.Reconcile([]*watcher.SandboxInfo{source}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
-
-	compiled := store.GetByIP(source.PodIP)
-	if compiled == nil || compiled.Platform == nil {
-		t.Fatalf("expected platform policy to be attached")
-	}
-	if !policypkg.AllowEgressL4(compiled, net.ParseIP("10.96.0.10"), 53, "udp") {
-		t.Fatalf("expected kube-dns service ip to be allowed")
-	}
-	if !policypkg.AllowEgressL4(compiled, net.ParseIP("10.244.0.53"), 53, "udp") {
-		t.Fatalf("expected kube-dns endpoint ip to be allowed")
+	compiled := store.GetByIP(source.SourceIP)
+	for _, address := range []string{"10.96.0.10", "2001:db8::53"} {
+		if !policypkg.AllowEgressL4(compiled, net.ParseIP(address), 53, "udp") {
+			t.Fatalf("expected configured service address %s to be allowed", address)
+		}
 	}
 }
 
 func TestPlatformPolicyStateLogsOnlyWhenEffectivePolicyChanges(t *testing.T) {
 	store := policypkg.NewStore(zap.NewNop())
 	var logBuffer bytes.Buffer
-	core := zapcore.NewCore(
+	logger := zap.New(zapcore.NewCore(
 		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
-		zapcore.AddSync(&logBuffer),
-		zap.InfoLevel,
-	)
-	logger := zap.New(core)
-	state := newPlatformPolicyState(&apiconfig.NetworkRuntimeConfig{}, store, logger)
-	const logPattern = "\"msg\":\"Platform policy updated\""
-	initialLogs := strings.Count(logBuffer.String(), logPattern)
+		zapcore.AddSync(&logBuffer), zap.InfoLevel,
+	))
+	state := newPlatformPolicyState(&config.NetworkRuntimeConfig{}, store, logger)
+	const pattern = `"msg":"Platform policy updated"`
+	initial := strings.Count(logBuffer.String(), pattern)
+	sandbox := &model.SandboxInfo{Scope: "runtime-slots", Name: "slot-a", SourceIP: "10.0.0.2"}
 
-	sandbox := &watcher.SandboxInfo{
-		Namespace: "default",
-		Name:      "sandbox-a",
-		PodIP:     "10.0.0.2",
-	}
-	service := &watcher.ServiceInfo{
-		Namespace: "kube-system",
-		Name:      "kube-dns",
-		ClusterIP: "10.96.0.10",
-	}
-	endpoints := &watcher.EndpointsInfo{
-		Namespace: "kube-system",
-		Name:      "kube-dns",
-		Addresses: []string{"10.244.0.53"},
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, nil, nil)
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
-		t.Fatalf("log count after sandbox upsert = %d, want 1", got)
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, nil, nil)
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
-		t.Fatalf("log count after duplicate sandbox upsert = %d, want 1", got)
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, nil)
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
-		t.Fatalf("log count after service upsert = %d, want 2", got)
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, nil)
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
-		t.Fatalf("log count after duplicate service upsert = %d, want 2", got)
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
-		t.Fatalf("log count after endpoints upsert = %d, want 3", got)
-	}
-
-	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
-	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
-		t.Fatalf("log count after duplicate endpoints upsert = %d, want 3", got)
+	state.Reconcile([]*model.SandboxInfo{sandbox})
+	state.Reconcile([]*model.SandboxInfo{sandbox})
+	if got := strings.Count(logBuffer.String(), pattern) - initial; got != 1 {
+		t.Fatalf("effective update log count = %d, want 1", got)
 	}
 }

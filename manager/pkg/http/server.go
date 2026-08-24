@@ -11,17 +11,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -32,16 +33,23 @@ import (
 // Server represents the HTTP server
 type Server struct {
 	router                  *gin.Engine
-	sandboxService          *service.SandboxService
+	sandboxReader           SandboxReader
+	sandboxUpdater          SandboxUpdater
+	sandboxNetworkPolicy    SandboxNetworkPolicyService
+	sandboxRootFS           SandboxRootFSService
+	sandboxSourceResolver   templatehttp.SandboxTemplateSourceResolver
+	sandboxClaimer          service.SandboxClaimer
+	sandboxTerminator       service.SandboxTerminator
+	sandboxPauser           service.SandboxPauser
+	sandboxResumer          service.SandboxResumer
+	sandboxForker           service.SandboxForker
+	sandboxRootFSRebaser    service.SandboxRootFSRebaser
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
-	templateService         *templateservice.TemplateService
 	registryService         *registryservice.RegistryService
 	templateStore           store.TemplateStore
-	templateReconciler      TemplateReconciler
 	templateStoreEnabled    bool
 	templateHandler         *templatehttp.Handler
-	clusterService          *clusterservice.ClusterService
 	quotaRepo               *quota.Repository
 	authValidator           *internalauth.Validator
 	logger                  *zap.Logger
@@ -50,6 +58,7 @@ type Server struct {
 	// Public exposure config
 	publicRootDomain string
 	publicRegionID   string
+	readinessProbe   func(context.Context) error
 }
 
 type claimSandboxCapabilityRequest struct {
@@ -66,25 +75,59 @@ type updateSandboxCapabilityRequest struct {
 
 type capabilityBodyInspector func(target any) bool
 
-// TemplateReconciler exposes minimal reconcile controls for template syncing.
-type TemplateReconciler interface {
-	TriggerReconcile(ctx context.Context)
+// SandboxReader owns the durable public sandbox projections consumed by the
+// manager HTTP API. Implementations must use durable runtime-slot state.
+type SandboxReader interface {
+	ListSandboxes(context.Context, *sandboxstore.ListSandboxesRequest) (*service.ListSandboxesResponse, error)
+	GetSandbox(context.Context, string) (*managerapi.Sandbox, error)
+	GetSandboxStatus(context.Context, string) (map[string]any, error)
+}
+
+// SandboxUpdater owns public mutations that do not create a new runtime
+// identity. Runtime-specific orchestration remains behind this interface.
+type SandboxUpdater interface {
+	UpdateSandbox(context.Context, string, *service.SandboxUpdateConfig) (*managerapi.Sandbox, error)
+	RefreshSandbox(context.Context, string, *service.RefreshRequest) (*service.RefreshResponse, error)
+}
+
+// SandboxNetworkPolicyService owns the durable network-policy API.
+type SandboxNetworkPolicyService interface {
+	SupportsNetworkPolicy() bool
+	GetNetworkPolicy(context.Context, string) (*v1alpha1.SandboxNetworkPolicy, error)
+	UpdateNetworkPolicy(context.Context, string, *v1alpha1.SandboxNetworkPolicy) (*v1alpha1.SandboxNetworkPolicy, error)
+}
+
+// SandboxRootFSService owns public named snapshot and restore operations.
+type SandboxRootFSService interface {
+	CreateSandboxRootFSSnapshot(context.Context, string, string, *service.CreateSandboxRootFSSnapshotRequest) (*service.SandboxRootFSSnapshot, error)
+	ListSandboxRootFSSnapshots(context.Context, string, string) (*service.ListSandboxRootFSSnapshotsResponse, error)
+	GetSandboxRootFSSnapshot(context.Context, string, string) (*service.SandboxRootFSSnapshot, error)
+	DeleteSandboxRootFSSnapshot(context.Context, string, string) error
+	RestoreSandboxRootFS(context.Context, string, string, *service.RestoreSandboxRootFSRequest) (*service.RestoreSandboxRootFSResponse, error)
 }
 
 // ServerDependencies names the manager capabilities exposed over HTTP. Using
 // this struct keeps composition changes local and avoids order-dependent
 // constructor calls as features are added or removed.
 type ServerDependencies struct {
-	SandboxService          *service.SandboxService
+	SandboxReader           SandboxReader
+	SandboxUpdater          SandboxUpdater
+	SandboxNetworkPolicy    SandboxNetworkPolicyService
+	SandboxRootFS           SandboxRootFSService
+	SandboxSourceResolver   templatehttp.SandboxTemplateSourceResolver
+	SandboxClaimer          service.SandboxClaimer
+	SandboxTerminator       service.SandboxTerminator
+	SandboxPauser           service.SandboxPauser
+	SandboxResumer          service.SandboxResumer
+	SandboxForker           service.SandboxForker
+	SandboxRootFSRebaser    service.SandboxRootFSRebaser
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
-	TemplateService         *templateservice.TemplateService
+	PrivateRegistryHosts    []string
 	RegistryService         *registryservice.RegistryService
 	TemplateStore           store.TemplateStore
-	TemplateReconciler      TemplateReconciler
 	TemplateStoreEnabled    bool
 	TemplateResourcePolicy  template.ResourcePolicy
-	ClusterService          *clusterservice.ClusterService
 	QuotaRepository         *quota.Repository
 	AuthValidator           *internalauth.Validator
 	Logger                  *zap.Logger
@@ -92,6 +135,7 @@ type ServerDependencies struct {
 	ObservabilityProvider   *observability.Provider
 	PublicRootDomain        string
 	PublicRegionID          string
+	ReadinessProbe          func(context.Context) error
 }
 
 // NewServerWithDependencies creates a manager HTTP server from named
@@ -105,17 +149,39 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(deps.Logger))
 
+	if deps.SandboxTerminator == nil {
+		deps.SandboxTerminator, _ = deps.SandboxClaimer.(service.SandboxTerminator)
+	}
+	if deps.SandboxPauser == nil {
+		deps.SandboxPauser, _ = deps.SandboxClaimer.(service.SandboxPauser)
+	}
+	if deps.SandboxResumer == nil {
+		deps.SandboxResumer, _ = deps.SandboxClaimer.(service.SandboxResumer)
+	}
+	if deps.SandboxForker == nil {
+		deps.SandboxForker, _ = deps.SandboxClaimer.(service.SandboxForker)
+	}
+	if deps.SandboxRootFSRebaser == nil {
+		deps.SandboxRootFSRebaser, _ = deps.SandboxClaimer.(service.SandboxRootFSRebaser)
+	}
 	server := &Server{
 		router:                  router,
-		sandboxService:          deps.SandboxService,
+		sandboxReader:           deps.SandboxReader,
+		sandboxUpdater:          deps.SandboxUpdater,
+		sandboxNetworkPolicy:    deps.SandboxNetworkPolicy,
+		sandboxRootFS:           deps.SandboxRootFS,
+		sandboxSourceResolver:   deps.SandboxSourceResolver,
+		sandboxClaimer:          deps.SandboxClaimer,
+		sandboxTerminator:       deps.SandboxTerminator,
+		sandboxPauser:           deps.SandboxPauser,
+		sandboxResumer:          deps.SandboxResumer,
+		sandboxForker:           deps.SandboxForker,
+		sandboxRootFSRebaser:    deps.SandboxRootFSRebaser,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
-		templateService:         deps.TemplateService,
 		registryService:         deps.RegistryService,
 		templateStore:           deps.TemplateStore,
-		templateReconciler:      deps.TemplateReconciler,
 		templateStoreEnabled:    deps.TemplateStoreEnabled,
-		clusterService:          deps.ClusterService,
 		quotaRepo:               deps.QuotaRepository,
 		authValidator:           deps.AuthValidator,
 		logger:                  deps.Logger,
@@ -123,19 +189,15 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		obsProvider:             deps.ObservabilityProvider,
 		publicRootDomain:        deps.PublicRootDomain,
 		publicRegionID:          deps.PublicRegionID,
+		readinessProbe:          deps.ReadinessProbe,
 	}
 	if deps.TemplateStoreEnabled {
-		registryHosts := []string(nil)
-		if deps.TemplateService != nil {
-			registryHosts = deps.TemplateService.RegistryHosts()
-		}
+		registryHosts := append([]string(nil), deps.PrivateRegistryHosts...)
 		buildStore, _ := deps.TemplateStore.(store.TemplateBuildStore)
 		server.templateHandler = &templatehttp.Handler{
 			Store:                deps.TemplateStore,
 			BuildStore:           buildStore,
-			SourceResolver:       deps.SandboxService,
-			Reconciler:           deps.TemplateReconciler,
-			StatsProvider:        &clusterTemplateStatsProvider{clusterService: deps.ClusterService},
+			SourceResolver:       deps.SandboxSourceResolver,
 			ResourcePolicy:       deps.TemplateResourcePolicy,
 			PrivateRegistryHosts: registryHosts,
 			Logger:               deps.Logger,
@@ -174,6 +236,7 @@ func (s *Server) setupRoutes() {
 			sandboxes.POST("/:id/snapshots", s.createSandboxRootFSSnapshot)
 			sandboxes.GET("/:id/snapshots", s.listSandboxRootFSSnapshots)
 			sandboxes.POST("/:id/rootfs/restore", s.restoreSandboxRootFS)
+			sandboxes.PUT("/:id/rootfs/rebase", s.rebaseSandboxRootFS)
 			sandboxes.POST("/:id/fork", s.forkSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)
 			sandboxes.DELETE("/:id", s.terminateSandbox)
@@ -225,23 +288,6 @@ func (s *Server) setupRoutes() {
 		{
 			internalSandboxes.GET("/:id", s.getSandboxInternal)
 			internalSandboxes.GET("/:id/template-source", s.getSandboxTemplateSourceInternal)
-		}
-
-		// Template management (scheduler sync)
-		internalTemplates := internal.Group("/templates")
-		{
-			internalTemplates.GET("", s.listTemplatesLegacy)
-			internalTemplates.GET("/stats", s.getTemplateStats)
-			internalTemplates.GET("/:id", s.getTemplateLegacy)
-			internalTemplates.POST("", s.createTemplateLegacy)
-			internalTemplates.PUT("/:id", s.updateTemplateLegacy)
-			internalTemplates.DELETE("/:id", s.deleteTemplateLegacy)
-		}
-
-		// Cluster management
-		internalCluster := internal.Group("/cluster")
-		{
-			internalCluster.GET("/summary", s.getClusterSummary)
 		}
 
 		internalEgressAuth := internal.Group("/egress-auth")
@@ -297,6 +343,14 @@ func (s *Server) healthCheck(c *gin.Context) {
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
+	if s.readinessProbe != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
+		defer cancel()
+		if err := s.readinessProbe(ctx); err != nil {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager dependencies are unavailable")
+			return
+		}
+	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"status": "ready",
 	})
@@ -398,7 +452,7 @@ func (s *Server) extractAuthToken(r *http.Request) string {
 
 func (s *Server) requireNetworkPolicyCapability() gin.HandlerFunc {
 	return s.requireCapability(func() bool {
-		return s.sandboxService != nil && s.sandboxService.SupportsNetworkPolicy()
+		return s.sandboxNetworkPolicy != nil && s.sandboxNetworkPolicy.SupportsNetworkPolicy()
 	}, "network policy is unavailable in this deployment")
 }
 
@@ -406,7 +460,7 @@ func (s *Server) requireNetworkPolicyInBody(newRequest func() any) gin.HandlerFu
 	return s.requireCapabilityInBody(
 		newRequest,
 		func(target any) bool { return requestContainsNetworkPolicy(target, nil) },
-		func() bool { return s.sandboxService != nil && s.sandboxService.SupportsNetworkPolicy() },
+		func() bool { return s.sandboxNetworkPolicy != nil && s.sandboxNetworkPolicy.SupportsNetworkPolicy() },
 		"network policy is unavailable in this deployment",
 	)
 }

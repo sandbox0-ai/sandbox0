@@ -6,9 +6,10 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 )
 
@@ -26,8 +27,20 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	networkPolicy, err := s.sandboxService.GetNetworkPolicy(c.Request.Context(), sandboxID)
+	if s.sandboxNetworkPolicy == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox network policy service is not configured")
+		return
+	}
+	networkPolicy, err := s.sandboxNetworkPolicy.GetNetworkPolicy(c.Request.Context(), sandboxID)
 	if err != nil {
+		if errors.Is(err, service.ErrDataPlaneNotReady) {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
+		if apierror.IsConflict(err) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+			return
+		}
 		s.logger.Error("Failed to get network policy",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -64,10 +77,21 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	updated, err := s.sandboxService.UpdateNetworkPolicy(c.Request.Context(), sandboxID, &req)
+	if s.sandboxNetworkPolicy == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox network policy service is not configured")
+		return
+	}
+	updated, err := s.sandboxNetworkPolicy.UpdateNetworkPolicy(c.Request.Context(), sandboxID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrInvalidNetworkPolicy) {
+		switch {
+		case errors.Is(err, service.ErrInvalidNetworkPolicy):
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		case errors.Is(err, service.ErrSandboxRuntimeUpdateUnavailable), errors.Is(err, service.ErrDataPlaneNotReady):
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		case apierror.IsConflict(err):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
 		s.logger.Error("Failed to update network policy",

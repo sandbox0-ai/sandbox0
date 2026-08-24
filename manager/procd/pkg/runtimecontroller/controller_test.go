@@ -11,61 +11,43 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestControllerTransitionsStandbyWaitingAndReady(t *testing.T) {
+func TestControllerActivatesImmutableAssignment(t *testing.T) {
 	controller := newTestController(t)
-	var observations []runtimecontrol.Observation
-	report := func(observation runtimecontrol.Observation) error {
-		observations = append(observations, observation)
-		return nil
-	}
-
-	if err := controller.HandleSnapshot(context.Background(), runtimecontrol.Snapshot{
-		State: runtimecontrol.DesiredStandby,
-	}, report); err != nil {
-		t.Fatalf("standby HandleSnapshot() error = %v", err)
-	}
-	if result := controller.Probe(sandboxprobe.KindReadiness); result.Status != sandboxprobe.StatusPassed {
-		t.Fatalf("standby readiness = %#v", result)
+	if result := controller.Probe(sandboxprobe.KindReadiness); result.Status != sandboxprobe.StatusSuspended {
+		t.Fatalf("pending readiness = %#v", result)
 	}
 	if ready, _ := controller.CanServe(); ready {
-		t.Fatal("standby runtime was externally serveable")
+		t.Fatal("pending runtime was externally serveable")
 	}
 
 	assignment := runtimecontrol.Assignment{
 		SandboxID:         "sandbox-1",
 		RuntimeGeneration: 2,
-		EnvVars:           map[string]string{"MODE": "test"},
+		EnvVars:           map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
+	}
+	if err := controller.Activate(context.Background(), assignment); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	if ready, reason := controller.CanServe(); !ready {
+		t.Fatalf("active runtime is not serveable: %s", reason)
+	}
+	if result := controller.Probe(sandboxprobe.KindReadiness); result.Status != sandboxprobe.StatusPassed {
+		t.Fatalf("active readiness = %#v", result)
 	}
 	revision, err := assignment.Revision()
 	if err != nil {
 		t.Fatal(err)
 	}
-	waiting := runtimecontrol.Snapshot{
-		State:      runtimecontrol.DesiredWaitingRootFS,
-		Revision:   revision,
-		Assignment: &assignment,
+	state := controller.State()
+	if state.Phase != PhaseReady || state.Revision != revision || state.RuntimeGeneration != 2 {
+		t.Fatalf("state = %#v", state)
 	}
-	if err := controller.HandleSnapshot(context.Background(), waiting, report); err != nil {
-		t.Fatalf("waiting HandleSnapshot() error = %v", err)
+	if err := controller.Activate(context.Background(), assignment); err != nil {
+		t.Fatalf("idempotent Activate() error = %v", err)
 	}
-	if result := controller.Probe(sandboxprobe.KindReadiness); result.Status != sandboxprobe.StatusSuspended {
-		t.Fatalf("waiting readiness = %#v", result)
-	}
-	if result := controller.Probe(sandboxprobe.KindLiveness); result.Status != sandboxprobe.StatusPassed {
-		t.Fatalf("waiting liveness = %#v", result)
-	}
-
-	active := waiting
-	active.State = runtimecontrol.DesiredActive
-	if err := controller.HandleSnapshot(context.Background(), active, report); err != nil {
-		t.Fatalf("active HandleSnapshot() error = %v", err)
-	}
-	if ready, reason := controller.CanServe(); !ready {
-		t.Fatalf("active runtime is not serveable: %s", reason)
-	}
-	if got := observations[len(observations)-1]; got.State != runtimecontrol.ObservedReady ||
-		got.Revision != revision || got.RuntimeGeneration != 2 {
-		t.Fatalf("last observation = %#v", got)
+	assignment.RuntimeGeneration++
+	if err := controller.Activate(context.Background(), assignment); err == nil {
+		t.Fatal("Activate() accepted a changed assignment")
 	}
 }
 
@@ -89,24 +71,8 @@ func TestControllerFailsClosedOnCopiedSessionStateWithoutExplicitReset(t *testin
 		SandboxID:         "target-sandbox",
 		RuntimeGeneration: 1,
 	}
-	revision, err := assignment.Revision()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var last runtimecontrol.Observation
-	err = controller.HandleSnapshot(context.Background(), runtimecontrol.Snapshot{
-		State:      runtimecontrol.DesiredActive,
-		Revision:   revision,
-		Assignment: &assignment,
-	}, func(observation runtimecontrol.Observation) error {
-		last = observation
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("HandleSnapshot() error = %v", err)
-	}
-	if last.State != runtimecontrol.ObservedFailed {
-		t.Fatalf("last observation = %#v", last)
+	if err := controller.Activate(context.Background(), assignment); err == nil {
+		t.Fatal("Activate() accepted copied state without an explicit reset")
 	}
 	if ready, _ := controller.CanServe(); ready {
 		t.Fatal("failed copied state was serveable")
@@ -119,20 +85,11 @@ func TestControllerFailsClosedOnCopiedSessionStateWithoutExplicitReset(t *testin
 	}
 }
 
-func TestFreshProcdRecoversActiveManifestWithoutExternalRequest(t *testing.T) {
+func TestFreshProcdRecoversImmutableAssignmentWithoutExternalRequest(t *testing.T) {
 	stateDir := t.TempDir()
 	assignment := runtimecontrol.Assignment{
 		SandboxID:         "sandbox-1",
 		RuntimeGeneration: 4,
-	}
-	revision, err := assignment.Revision()
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := runtimecontrol.Snapshot{
-		State:      runtimecontrol.DesiredActive,
-		Revision:   revision,
-		Assignment: &assignment,
 	}
 
 	activate := func() {
@@ -145,15 +102,11 @@ func TestFreshProcdRecoversActiveManifestWithoutExternalRequest(t *testing.T) {
 			t.Fatal(supervisorErr)
 		}
 		controller := New(ctxpkg.NewManagerWithSupervisor(supervisor), supervisor, nil, nil, 49983, zap.NewNop())
-		var last runtimecontrol.Observation
-		if handleErr := controller.HandleSnapshot(context.Background(), snapshot, func(observation runtimecontrol.Observation) error {
-			last = observation
-			return nil
-		}); handleErr != nil {
-			t.Fatal(handleErr)
+		if activateErr := controller.Activate(context.Background(), assignment); activateErr != nil {
+			t.Fatal(activateErr)
 		}
-		if last.State != runtimecontrol.ObservedReady {
-			t.Fatalf("last observation = %#v, want ready", last)
+		if controller.State().Phase != PhaseReady {
+			t.Fatalf("state = %#v, want ready", controller.State())
 		}
 		if closeErr := supervisor.Close(); closeErr != nil {
 			t.Fatal(closeErr)

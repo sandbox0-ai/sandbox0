@@ -79,7 +79,7 @@ func Enqueue(ctx context.Context, tx pgx.Tx, sandboxID, teamID, targetURL, secre
 		SandboxID: sandboxID,
 		TeamID:    teamID,
 		Payload: sandboxDeletedWebhookPayload{
-			Reason: "pod_deleted",
+			Reason: "runtime_deleted",
 		},
 	}
 	payload, err := json.Marshal(event)

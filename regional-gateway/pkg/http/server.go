@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -112,7 +112,7 @@ func NewServer(
 	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
 	identityRepo := identity.NewRepository(pool)
 	apiKeyRepo := apikey.NewRepository(pool, apikey.WithLocalTeamValidation(selfHostedAuthEnabled))
-	registryProvider, err := registryprovider.NewProvider(cfg.Registry, nil, logger)
+	registryProvider, err := registryprovider.NewProvider(cfg.Registry, logger)
 	if err != nil {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
@@ -295,6 +295,7 @@ func (s *Server) outboundHTTPClient() *http.Client {
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
+	s.router.Use(captureSandboxClaimIngress(time.Now))
 	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
@@ -499,6 +500,11 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	c.Set("auth_context", authCtx)
 	ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
 	c.Request = c.Request.WithContext(ctx)
+	// NoRoute handlers do not execute the /api group middleware chain. Apply
+	// the same bounded request correlation before minting the delegated token
+	// so single-cluster fallback and scheduler-backed routes have identical
+	// audit identity.
+	ensureAuditCorrelation(c, authCtx)
 
 	s.rateLimiter.RateLimit()(c)
 	if c.IsAborted() {
@@ -513,7 +519,11 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 			return true
 		}
 	}
-	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
+	token, err := s.generateInternalTokenWithIngress(
+		authCtx,
+		"cluster-gateway",
+		sandboxClaimIngressStartedAt(c),
+	)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
@@ -561,7 +571,7 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 		}
 
 		// Generate internal token for the target service
-		token, err := s.generateInternalToken(authCtx, target)
+		token, err := s.generateInternalTokenWithIngress(authCtx, target, sandboxClaimIngressStartedAt(c))
 		if err != nil {
 			s.logger.Error("Failed to generate internal token",
 				zap.String("target", target),

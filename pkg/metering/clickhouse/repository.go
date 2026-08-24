@@ -781,7 +781,7 @@ SELECT
     sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
     owner_kind, resource_millicpu, resource_memory_mib,
     claimed_at, active_since, paused, paused_at, terminated_at,
-    last_observed_at, last_resource_version
+    last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch
 FROM %s FINAL
 WHERE sandbox_id = ?
 LIMIT 1
@@ -789,7 +789,7 @@ LIMIT 1
 		&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
 		&state.OwnerKind, &state.ResourceMillicpu, &state.ResourceMemoryMiB,
 		&claimedAt, &activeSince, &paused, &pausedAt, &terminatedAt,
-		&state.LastObservedAt, &state.LastResourceVer,
+		&state.LastObservedAt, &state.LastResourceVer, &state.SourceRevision, &state.SourceLifecycleEpoch,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -813,7 +813,7 @@ SELECT
     sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
     owner_kind, resource_millicpu, resource_memory_mib,
     claimed_at, active_since, paused, paused_at, terminated_at,
-    last_observed_at, last_resource_version
+    last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch
 FROM %s FINAL
 WHERE terminated_at IS NULL
 `, qualified(r.cfg.Database, r.cfg.SandboxStateTable)))
@@ -830,7 +830,7 @@ WHERE terminated_at IS NULL
 			&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
 			&state.OwnerKind, &state.ResourceMillicpu, &state.ResourceMemoryMiB,
 			&claimedAt, &activeSince, &paused, &pausedAt, &terminatedAt,
-			&state.LastObservedAt, &state.LastResourceVer,
+			&state.LastObservedAt, &state.LastResourceVer, &state.SourceRevision, &state.SourceLifecycleEpoch,
 		); err != nil {
 			return nil, fmt.Errorf("scan active sandbox projection state: %w", err)
 		}
@@ -869,9 +869,9 @@ func (r *Repository) upsertSandboxProjectionStates(ctx context.Context, states [
     sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
     owner_kind, resource_millicpu, resource_memory_mib,
     claimed_at, active_since, paused, paused_at, terminated_at,
-    last_observed_at, last_resource_version, version`,
+    last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch, version`,
 		placeholders: fmt.Sprintf(
-			"(?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, %s, %s, %s, ?, ?)",
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, %s, %s, %s, ?, ?, ?, ?)",
 			nullableDateTime64NanoPlaceholder,
 			nullableDateTime64NanoPlaceholder,
 			nullableDateTime64NanoPlaceholder,
@@ -907,7 +907,8 @@ func (r *Repository) sandboxStateInsertValues(state *metering.SandboxProjectionS
 		boolUInt8(state.Paused),
 		pausedAtPresent, pausedAtNanos,
 		terminatedAtPresent, terminatedAtNanos,
-		dateTime64NanoArg(state.LastObservedAt), state.LastResourceVer, versionFrom(state.LastObservedAt),
+		dateTime64NanoArg(state.LastObservedAt), state.LastResourceVer,
+		state.SourceRevision, state.SourceLifecycleEpoch, versionFrom(state.LastObservedAt),
 	}, nil
 }
 

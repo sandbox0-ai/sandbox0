@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type blockingEgressAuthResolver struct {
@@ -163,7 +162,7 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		tlsAuthority:      mitmAuthority,
@@ -324,7 +323,7 @@ func TestTLSAdapterDefersHTTPSHeaderResolutionUntilAfterDownstreamHandshake(t *t
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
 			EgressAuthEnabled:    true,
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		tlsAuthority:      mitmAuthority,
@@ -519,7 +518,7 @@ func testTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T, upstr
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		tlsAuthority:      mitmAuthority,
@@ -674,7 +673,7 @@ func TestHTTP2DownstreamProxyRequiresHTTP2UpstreamForGRPC(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool},
@@ -773,7 +772,7 @@ func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 3 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		tlsAuthority:      mitmAuthority,
@@ -896,7 +895,7 @@ func TestTLSAdapterFailOpenRelaysRawTLSWhenMITMCAIsMissing(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -975,7 +974,7 @@ func TestTLSAdapterFailOpenRelaysRawTLSWhenMITMCAIsMissing(t *testing.T) {
 func TestTLSAdapterReturnsErrorWhenMITMCAIsMissing(t *testing.T) {
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -1087,7 +1086,7 @@ func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 3 * time.Second},
 		},
 		logger:            zap.NewNop(),
 		tlsAuthority:      mitmAuthority,

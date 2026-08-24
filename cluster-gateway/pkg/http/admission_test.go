@@ -13,7 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"

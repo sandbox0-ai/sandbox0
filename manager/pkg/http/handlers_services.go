@@ -71,7 +71,11 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 		return
 	}
 
-	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, &service.SandboxUpdateConfig{
+	if s.sandboxUpdater == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox update service is not configured")
+		return
+	}
+	updated, err := s.sandboxUpdater.UpdateSandbox(c.Request.Context(), sandboxID, &service.SandboxUpdateConfig{
 		Services: services,
 	})
 	if err != nil {

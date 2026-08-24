@@ -113,7 +113,6 @@ func (r *Repository) blockingQueries() []countQuery {
 	sshKeys := tableRef("", "user_ssh_public_keys")
 
 	schedulerTemplates := tableRef(r.schemas.Scheduler, "scheduler_templates")
-	schedulerAllocations := tableRef(r.schemas.Scheduler, "scheduler_template_allocations")
 	schedulerTemplateBuilds := tableRef(r.schemas.Scheduler, "scheduler_template_builds")
 	credentialSources := tableRef(r.schemas.Scheduler, "credential_sources")
 	credentialSourceVersions := tableRef(r.schemas.Scheduler, "credential_source_versions")
@@ -121,13 +120,12 @@ func (r *Repository) blockingQueries() []countQuery {
 
 	managerSandboxes := tableRef(r.schemas.Manager, "sandboxes")
 	managerLifecycleTxns := tableRef(r.schemas.Manager, "sandbox_lifecycle_txns")
-	managerRootFSStates := tableRef(r.schemas.Manager, "sandbox_rootfs_states")
-	managerRootFSHeads := tableRef(r.schemas.Manager, "sandbox_rootfs_heads")
 	managerRootFSBindings := tableRef(r.schemas.Manager, "sandbox_rootfs_bindings")
 	managerRootFSFilesystems := tableRef(r.schemas.Manager, "rootfs_filesystems")
 	managerRootFSSnapshots := tableRef(r.schemas.Manager, "rootfs_snapshots")
-	managerRootFSLayers := tableRef(r.schemas.Manager, "rootfs_layers")
-	managerRootFSObjects := tableRef(r.schemas.Manager, "rootfs_objects")
+	managerRootFSGenerations := tableRef(r.schemas.Manager, "rootfs_generations")
+	managerRootFSMaterializationObjects := tableRef(r.schemas.Manager, "rootfs_materialization_objects")
+	managerRootFSGenerationObjects := tableRef(r.schemas.Manager, "rootfs_generation_materialization_objects")
 	managerRootFSObjectDeletions := tableRef(r.schemas.Manager, "rootfs_object_deletions")
 
 	quotaLimits := tableRef(r.schemas.Quota, "team_quota_limits")
@@ -147,11 +145,6 @@ func (r *Repository) blockingQueries() []countQuery {
 			category: "scheduler_templates",
 			table:    schedulerTemplates,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE scope = 'team' AND team_id = $1`, schedulerTemplates),
-		},
-		{
-			category: "scheduler_template_allocations",
-			table:    schedulerAllocations,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE scope = 'team' AND team_id = $1`, schedulerAllocations),
 		},
 		{
 			category: "scheduler_template_builds",
@@ -195,16 +188,6 @@ func (r *Repository) blockingQueries() []countQuery {
 			`, managerLifecycleTxns, managerSandboxes),
 		},
 		{
-			category: "sandbox_rootfs_states",
-			table:    managerRootFSStates,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSStates),
-		},
-		{
-			category: "sandbox_rootfs_heads",
-			table:    managerRootFSHeads,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSHeads),
-		},
-		{
 			category: "sandbox_rootfs_bindings",
 			table:    managerRootFSBindings,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSBindings),
@@ -220,14 +203,27 @@ func (r *Repository) blockingQueries() []countQuery {
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSSnapshots),
 		},
 		{
-			category: "rootfs_layers",
-			table:    managerRootFSLayers,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSLayers),
+			category: "rootfs_generations",
+			table:    managerRootFSGenerations,
+			sql: fmt.Sprintf(`
+				SELECT COUNT(*)
+				FROM %s generation
+				JOIN %s filesystem ON filesystem.filesystem_id = generation.filesystem_id
+				WHERE filesystem.team_id = $1
+			`, managerRootFSGenerations, managerRootFSFilesystems),
 		},
 		{
-			category: "rootfs_objects",
-			table:    managerRootFSObjects,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1 AND deleted_at IS NULL`, managerRootFSObjects),
+			category: "rootfs_materialization_objects",
+			table:    managerRootFSMaterializationObjects,
+			sql: fmt.Sprintf(`
+				SELECT COUNT(DISTINCT object.object_key)
+				FROM %s object
+				JOIN %s locator ON locator.object_key = object.object_key
+				JOIN %s generation ON generation.generation_id = locator.generation_id
+				JOIN %s filesystem ON filesystem.filesystem_id = generation.filesystem_id
+				WHERE filesystem.team_id = $1
+			`, managerRootFSMaterializationObjects, managerRootFSGenerationObjects,
+				managerRootFSGenerations, managerRootFSFilesystems),
 		},
 		{
 			category: "rootfs_object_deletions",

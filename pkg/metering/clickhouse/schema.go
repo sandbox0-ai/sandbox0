@@ -113,10 +113,14 @@ CREATE TABLE IF NOT EXISTS %s (
     terminated_at Nullable(DateTime64(9, 'UTC')),
     last_observed_at DateTime64(9, 'UTC'),
     last_resource_version String,
+    source_revision Int64,
+    source_lifecycle_epoch Int64,
     version UInt64
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY (sandbox_id)
 `, sandboxState),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_revision Int64 DEFAULT 0", sandboxState),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_lifecycle_epoch Int64 DEFAULT 0", sandboxState),
 		fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     subject_type String,

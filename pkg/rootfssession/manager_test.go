@@ -1,0 +1,1865 @@
+package session
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/stretchr/testify/require"
+)
+
+func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "lifecycle")
+	mount, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "bind", mount.Type)
+	require.Equal(t, []string{"rbind", "rw", "nosuid", "nodev"}, mount.Options)
+	require.Equal(t, []string{"attach", "mount-xfs", "mount-overlay"}, runtime.callsSnapshot())
+
+	retry, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, mount, retry)
+	resolved, err := manager.Resolve(request.Parent, request.WithoutWriterGrantToken())
+	require.NoError(t, err)
+	require.Equal(t, mount, resolved)
+	require.Equal(t, []string{"attach", "mount-xfs", "mount-overlay"}, runtime.callsSnapshot())
+
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	require.Equal(t, []string{
+		"attach", "mount-xfs", "mount-overlay", "unmount-overlay", "unmount-xfs", "close-device",
+	}, runtime.callsSnapshot())
+	require.Equal(t, []bool{false, false}, runtime.unmountSyncSnapshot(), "crash cleanup must not claim a filesystem barrier")
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerReleaseRecoversAfterTerminalDeviceCloseError(t *testing.T) {
+	manager, runtime, first := newTestManager(t, "terminal-close-error")
+	runtime.deviceCloseErr = syscall.EBUSY
+	_, err := manager.Ensure(t.Context(), first)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, "retire-terminal-close-error"))
+
+	err = manager.Release(t.Context(), first.Identity)
+	require.ErrorIs(t, err, syscall.EBUSY)
+	manager.mu.Lock()
+	_, live := manager.live[first.Parent]
+	manager.mu.Unlock()
+	require.False(t, live, "a terminal Device.Close result must not retain closed handles")
+
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	_, err = manager.RetireResult(first.Parent, first.Identity, "retire-terminal-close-error")
+	require.NoError(t, err)
+	require.Equal(t, 1, runtime.orphanRecoveries)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
+
+	// Reopening the first WAL must rejoin its retirement group. Reclaiming it
+	// then releases the node-wide reserve for an unrelated writer.
+	runtime.deviceCloseErr = nil
+	second := testStageRequest(t, runtime.source, "after-terminal-close-error")
+	_, err = manager.Ensure(t.Context(), second)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(second.Parent, second.Identity, "retire-after-terminal-close-error"))
+	require.NoError(t, manager.Release(t.Context(), second.Identity))
+}
+
+func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1"}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: rootfsblock.LogicalBlockSize,
+		Source: objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	request := testStageRequest(t, objects, "dirty-tail-cap")
+
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x41}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0x42}, rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("session pressure did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	require.Equal(t, request.WithoutWriterGrantToken(), pressures[0].Stage)
+	require.Equal(t, "session", pressures[0].Pressure.Scope)
+	expectedOperation := rootfshandoff.PlannedRetireOperationID(
+		request.Parent, request.Identity.WriterGrantID, request.Identity.WriterEpoch,
+	)
+	pressuredRecord, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.NotNil(t, pressuredRecord.DirtyTailPressure)
+	require.Equal(t, expectedOperation, pressuredRecord.DirtyTailPressure.OperationID)
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.Equal(t, expectedOperation, recovery[0].PressureOperationID,
+		"restart recovery must not crash-abandon a regionally pending pressure pause")
+	require.ErrorIs(t, manager.Release(t.Context(), request.Identity), errdefs.ErrFailedPrecondition,
+		"pressure pending is not regional retirement authority")
+	stillReady, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateReady, stillReady.State)
+
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, expectedOperation))
+	require.NoError(t, branch.BeginRetirement())
+	require.NoError(t, <-writeDone)
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	result, err := manager.RetireResult(request.Parent, request.Identity, expectedOperation)
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)
+	sealed, err := rootfsblock.DecodeDescriptor(result.Descriptor)
+	require.NoError(t, err)
+	require.NotNil(t, sealed.CompositeTail)
+
+	_, err = New(Config{MaxDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
+	require.ErrorContains(t, err, "non-negative")
+	_, err = New(Config{MaxNodeDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
+	require.ErrorContains(t, err, "node dirty tail")
+	_, err = New(Config{
+		StatePath:  filepath.Join(base, "invalid", "sessions.db"),
+		BranchRoot: filepath.Join(base, "invalid-branches"), MountRoot: filepath.Join(base, "invalid-mounts"),
+		MaxNodeDirtyTailBytes:           rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: 2 * rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
+	})
+	require.ErrorContains(t, err, "retirement reserve")
+}
+
+func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1"}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		MaxNodeDirtyTailBytes:           4 * rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	first := testStageRequestWithBlocks(t, objects, "node-dirty-first", 4)
+	second := testStageRequestWithBlocks(t, objects, "node-dirty-second", 4)
+	require.NoError(t, manager.Reserve(first))
+	require.NoError(t, manager.Reserve(second))
+	_, err = manager.Ensure(t.Context(), first)
+	require.NoError(t, err)
+	_, err = manager.Ensure(t.Context(), second)
+	require.NoError(t, err)
+
+	manager.mu.Lock()
+	firstBranch := manager.live[first.Parent].branch
+	secondBranch := manager.live[second.Parent].branch
+	manager.mu.Unlock()
+	_, err = firstBranch.WriteAt(bytes.Repeat([]byte{0x51}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = secondBranch.WriteAt(bytes.Repeat([]byte{0x52}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = secondBranch.WriteAt([]byte{0x53}, rootfsblock.LogicalBlockSize)
+	require.NoError(t, err)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := firstBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("node pressure did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	require.Equal(t, "node", pressures[0].Pressure.Scope)
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes:     3 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      4 * rootfsblock.LogicalBlockSize,
+		Owners:        2,
+	}, manager.NodeDirtyTailUsage())
+
+	firstRetireOperation := rootfshandoff.PlannedRetireOperationID(
+		first.Parent, first.Identity.WriterGrantID, first.Identity.WriterEpoch,
+	)
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, firstRetireOperation))
+	require.NoError(t, firstBranch.BeginRetirement())
+	require.NoError(t, <-writeDone)
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	require.Equal(t, int64(4*rootfsblock.LogicalBlockSize), manager.NodeDirtyTailUsage().UsedBytes,
+		"local tail remains charged until regional terminal acknowledgement")
+	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
+	_, err = secondBranch.WriteAt(
+		bytes.Repeat([]byte{0x56}, rootfsblock.LogicalBlockSize),
+		2*rootfsblock.LogicalBlockSize,
+	)
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes:     3 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      4 * rootfsblock.LogicalBlockSize,
+		Owners:        1,
+	}, manager.NodeDirtyTailUsage())
+}
+
+func TestManagerPreloadsRecoveredNodeDirtyTailAboveLoweredLimit(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		MaxNodeDirtyTailBytes:           4 * rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
+	}
+	manager, err := New(config)
+	require.NoError(t, err)
+	request := testStageRequestWithBlocks(t, objects, "node-dirty-restart", 4)
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x61}, 2*rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, manager.Close())
+
+	config.MaxNodeDirtyTailBytes = rootfsblock.LogicalBlockSize
+	restarted, err := New(config)
+	require.NoError(t, err, "lowering the cap must not prevent recovery and retirement")
+	defer restarted.Close()
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes:     2 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      rootfsblock.LogicalBlockSize,
+		Owners:        1,
+	}, restarted.NodeDirtyTailUsage())
+}
+
+func TestManagerReservePersistsTokenlessIndependentRecoveryBinding(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "durable-recovery")
+	require.NoError(t, manager.Reserve(request))
+	require.Empty(t, runtime.callsSnapshot())
+
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, sessionSchemaVersion, stored.Version)
+	require.NotNil(t, stored.Stage)
+	require.Empty(t, stored.Stage.Identity.WriterGrantToken)
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.NotContains(t, string(payload), request.Identity.WriterGrantToken)
+
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.Equal(t, RecoveryCrashAbandon, recovery[0].Kind)
+	require.Equal(t, stateReserved, recovery[0].State)
+	require.False(t, recovery[0].Live)
+	require.Equal(t, request.WithoutWriterGrantToken(), recovery[0].Stage)
+
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	consumer := ConsumerRegistration{
+		LeaseID: "consumer-lease-a", ActiveKey: "nomad-task-a", ContainerID: "runsc-a",
+		StableMount: "/var/lib/nomad/tasks/a/rootfs", HostMountNamespace: "mnt:[4026531841]",
+		LeaseExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	require.NoError(t, manager.RegisterConsumer(request.Parent, request.Identity, consumer))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.True(t, recovery[0].Live)
+	require.Equal(t, stateReady, recovery[0].State)
+	require.Equal(t, &consumer, recovery[0].Consumer)
+
+	replacement := consumer
+	replacement.LeaseID = "consumer-lease-b"
+	replacement.LeaseExpiresAt = time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.RegisterConsumer(request.Parent, request.Identity, replacement))
+	err = manager.RenewConsumer(request.Parent, request.Identity, consumer.LeaseID, time.Now().Add(time.Minute))
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.RenewConsumer(
+		request.Parent, request.Identity, replacement.LeaseID, time.Now().Add(3*time.Minute),
+	))
+	conflict := replacement
+	conflict.ContainerID = "runsc-b"
+	err = manager.RegisterConsumer(request.Parent, request.Identity, conflict)
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-recovery"))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Equal(t, RecoveryPlannedRetire, recovery[0].Kind)
+	require.Equal(t, "retire-recovery", recovery[0].RetireOperationID)
+}
+
+func TestManagerPreconsumeReservationCanBeFencedAndForgotten(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "preconsume-cancel")
+	require.NoError(t, manager.Reserve(request))
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	observation, err := manager.CrashFence(request.WithoutWriterGrantToken(), "preconsume-abort")
+	require.NoError(t, err)
+	require.NoError(t, observation.Validate())
+	require.True(t, observation.NBDPoolAbsent)
+	require.Equal(t, 1, runtime.preAttachmentFenceInspections)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerCrashFenceIsDurableAndOperationBound(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "crash-fence")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	result, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.FileExists(t, stored.BranchPath)
+	require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(stored.XFSRoot), "leftover"), 0o750))
+	require.DirExists(t, filepath.Dir(stored.XFSRoot))
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoFileExists(t, stored.BranchPath)
+	require.NoDirExists(t, filepath.Dir(stored.XFSRoot))
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	path, err := runtime.ReserveDevice("replacement-allocation")
+	require.NoError(t, err)
+	retry, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.Equal(t, result, retry)
+	require.Equal(t, "replacement-allocation", runtime.reservationOwner(path))
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "different-operation")
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+	require.Equal(t, 1, runtime.fenceInspections)
+}
+
+func TestManagerExternalCrashFenceCannotBeAdoptedByLocalAuthority(t *testing.T) {
+	manager, _, request := newTestManager(t, "external-crash-fence")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	result, err := manager.CrashFenceExternal(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.True(t, recovery[0].ExternalCrash)
+	require.Equal(t, "regional-writer-operation", recovery[0].CrashOperationID)
+	require.False(t, recovery[0].CrashRequestedAt.IsZero())
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	retry, err := manager.CrashFenceExternal(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.NoError(t, err)
+	require.Equal(t, result, retry)
+}
+
+func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.T) {
+	manager, _, request := newTestManager(t, "external-replaces-planned")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "local-planned-operation"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	planned, err := manager.RetireResult(request.Parent, request.Identity, "local-planned-operation")
+	require.NoError(t, err)
+	require.NotEmpty(t, planned.Descriptor)
+	require.NotEmpty(t, planned.DetachProof)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "regional-crash-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "local-planned-operation", stored.RetireOperationID)
+
+	observation, err := manager.CrashFenceExternal(
+		request.WithoutWriterGrantToken(), "regional-crash-operation",
+	)
+	require.NoError(t, err)
+	require.NoError(t, observation.Validate())
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.RetireOperationID)
+	require.Empty(t, stored.SealedDescriptor)
+	require.Empty(t, stored.SealedBlockHead)
+	require.Empty(t, stored.SealedDurability)
+	require.Empty(t, stored.DetachProof)
+	require.NotNil(t, stored.CrashFence)
+	require.True(t, stored.CrashFence.External)
+	require.NotNil(t, stored.CrashFence.Result)
+	require.True(t, stored.BranchRemoved)
+	terminal, err := terminalDeviceProof(stored)
+	require.NoError(t, err)
+	require.True(t, terminal)
+
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Empty(t, recovery, "retained external proof must leave the hot recovery scan")
+
+	stored.CrashFence.RequestedAt = time.Now().Add(-ExternalTerminalProofRetention - time.Minute).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.save(stored))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1, "expired external proof must re-enter recovery for final verification")
+	require.True(t, recovery[0].ExternalCrash)
+	require.Equal(t, "regional-crash-operation", recovery[0].CrashOperationID)
+
+	config := Config{
+		StatePath: manager.db.Path(), BranchRoot: manager.branchRoot, MountRoot: manager.mountRoot,
+		Source: manager.source, Publisher: manager.publisher, Runtime: manager.runtime,
+		MaxDirtyTailBytes: manager.maxDirty, MaxNodeDirtyTailBytes: manager.nodeDirty.Usage().MaxBytes,
+		DirtyTailRetirementReserveBytes: manager.retirementReserve,
+	}
+	require.NoError(t, manager.Close())
+	restarted, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restarted.Close()) })
+	recovery, err = restarted.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1, "restart must rebuild the due-proof recovery index")
+}
+
+func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {
+	manager, _, request := newTestManager(t, "forget-planned")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-forget"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	err = manager.ForgetVerifiedTerminal(request.Parent, request.Identity)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, _, err = manager.findIdentity(request.Identity.RootFSID, request.Identity.WriterEpoch)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+}
+
+func TestManagerForgetsRegionallyVerifiedCrashTerminal(t *testing.T) {
+	manager, _, request := newTestManager(t, "forget-crash")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "crash-forget")
+	require.NoError(t, err)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerTerminalForgetReusesBoltPagesAcrossChurn(t *testing.T) {
+	manager, _, _ := newTestManager(t, "forget-churn")
+	forget := func(index int) {
+		parent := digest.FromString(fmt.Sprintf("forget-parent-%d", index)).String()
+		identity := rootfshandoff.Identity{RootFSID: fmt.Sprintf("forget-rootfs-%d", index), WriterEpoch: 1}
+		paths := sessionPaths(manager.branchRoot, manager.mountRoot, parent)
+		require.NoError(t, manager.saveNew(record{
+			Version: sessionSchemaVersion, Parent: parent, RootFSID: identity.RootFSID,
+			WriterEpoch: identity.WriterEpoch, BranchPath: paths.branch, XFSRoot: paths.xfs,
+			MergedRoot: paths.merged, State: stateTombstoned, RetireOperationID: "retire-forget",
+			SealedDescriptor: []byte("descriptor"), SealedBlockHead: digest.FromString("head").String(),
+			DetachProof: strings.Repeat("01", sha256.Size), BranchRemoved: true,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}))
+		require.NoError(t, manager.ForgetVerifiedTerminal(parent, identity))
+	}
+	for index := range 100 {
+		forget(index)
+	}
+	require.NoError(t, manager.db.Sync())
+	warm, err := os.Stat(manager.db.Path())
+	require.NoError(t, err)
+	for index := 100; index < 10_000; index++ {
+		forget(index)
+	}
+	require.NoError(t, manager.db.Sync())
+	final, err := os.Stat(manager.db.Path())
+	require.NoError(t, err)
+	require.LessOrEqual(t, final.Size(), warm.Size(), "terminal churn must reuse freed Bolt pages")
+}
+
+func TestManagerCrashFenceFailsClosedUntilNBDIsDetached(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "crash-fence-nbd")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	runtime.fenceObservation.NBDPID = 42
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	runtime.fenceObservation.NBDPID = 0
+	result, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+}
+
+func TestManagerCrashFenceFailsClosedWhileSessionMountRemains(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "crash-fence-mount")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	runtime.fenceObservation.MergedMountAbsent = false
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
+func TestManagerCrashFenceProvesPreAttachmentSessionWithEmptyDevicePool(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "crash-fence-pre-attachment")
+	binding, err := request.WithoutWriterGrantToken().BindingDigest()
+	require.NoError(t, err)
+	paths := sessionPaths(manager.branchRoot, manager.mountRoot, request.Parent)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.saveNew(record{
+		Version: legacySessionSchemaVersion, Parent: request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+		RootFSID: request.Identity.RootFSID, WriterEpoch: request.Identity.WriterEpoch,
+		GenerationID: request.InitialGeneration, BranchPath: paths.branch,
+		XFSRoot: paths.xfs, MergedRoot: paths.merged, State: stateTombstoned,
+		CreatedAt: now, UpdatedAt: now,
+	}))
+
+	result, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	require.False(t, result.DeviceBound)
+	require.Empty(t, result.DevicePath)
+	require.True(t, result.NBDPoolAbsent)
+	require.Equal(t, 1, runtime.unattachedFenceInspections)
+}
+
+func TestManagerCrashFenceRejectsPreAttachmentSessionWhenDevicePoolIsBusy(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "crash-fence-pre-attachment-busy")
+	binding, err := request.WithoutWriterGrantToken().BindingDigest()
+	require.NoError(t, err)
+	paths := sessionPaths(manager.branchRoot, manager.mountRoot, request.Parent)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.saveNew(record{
+		Version: legacySessionSchemaVersion, Parent: request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+		RootFSID: request.Identity.RootFSID, WriterEpoch: request.Identity.WriterEpoch,
+		GenerationID: request.InitialGeneration, BranchPath: paths.branch,
+		XFSRoot: paths.xfs, MergedRoot: paths.merged, State: stateTombstoned,
+		CreatedAt: now, UpdatedAt: now,
+	}))
+	runtime.fenceObservation.NBDPID = 42
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
+func TestManagerPersistsExactDeviceReservationBeforeAttach(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "device-reservation-before-attach")
+	var reserved record
+	runtime.beforeAttach = func(devicePath, allocationID string) {
+		stored, err := manager.load(request.Parent)
+		require.NoError(t, err)
+		require.Equal(t, devicePath, stored.DevicePath)
+		require.Equal(t, allocationID, stored.DeviceAllocationID)
+		reserved = stored
+	}
+
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, stateDeviceReserved, reserved.State)
+	require.Equal(t, "/dev/fake0", reserved.DevicePath)
+	require.NotEmpty(t, reserved.DeviceAllocationID)
+	require.False(t, reserved.DeviceReservationReleased)
+}
+
+func TestManagerFailedAttachKeepsExactReservationUntilCrashFenceProof(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "failed-attach-reservation")
+	runtime.failAt = "attach"
+
+	_, err := manager.Ensure(t.Context(), request)
+	require.ErrorContains(t, err, "attach block device")
+	stored, loadErr := manager.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateFailed, stored.State)
+	require.Equal(t, "/dev/fake0", stored.DevicePath)
+	require.NotEmpty(t, stored.DeviceAllocationID)
+	require.Equal(t, stored.DeviceAllocationID, runtime.reservationOwner(stored.DevicePath))
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+
+	_, err = runtime.ReserveDevice("competing-allocation")
+	require.ErrorContains(t, err, "no usable NBD device")
+	result, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	require.Equal(t, 2, runtime.fenceInspections)
+	require.Zero(t, runtime.unattachedFenceInspections)
+	require.Empty(t, runtime.reservationOwner(stored.DevicePath))
+
+	path, err := runtime.ReserveDevice("next-allocation")
+	require.NoError(t, err)
+	require.Equal(t, stored.DevicePath, path)
+	runtime.ReleaseDeviceReservation(path, "next-allocation")
+}
+
+func TestManagerReconcileAdoptsOutstandingDeviceReservation(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	request := testStageRequest(t, objects, "adopt-device-reservation")
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects,
+	}
+	firstRuntime := newFakeHostRuntime(objects)
+	config.Runtime = firstRuntime
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, first.Release(t.Context(), request.Identity))
+	stored, err := first.load(request.Parent)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	secondRuntime := newFakeHostRuntime(objects)
+	config.Runtime = secondRuntime
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	require.NoError(t, second.ReconcileReleases(t.Context()))
+	require.Equal(t, stored.DeviceAllocationID, secondRuntime.reservationOwner(stored.DevicePath))
+	_, err = secondRuntime.ReserveDevice("competing-allocation")
+	require.ErrorContains(t, err, "no usable NBD device")
+
+	_, err = second.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	path, err := secondRuntime.ReserveDevice("next-allocation")
+	require.NoError(t, err)
+	require.Equal(t, stored.DevicePath, path)
+	secondRuntime.ReleaseDeviceReservation(path, "next-allocation")
+}
+
+func TestManagerRestartDisconnectsExactOrphanBeforeTombstone(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	request := testStageRequest(t, objects, "restart-orphan-disconnect")
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects,
+	}
+	firstRuntime := newFakeHostRuntime(objects)
+	config.Runtime = firstRuntime
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	secondRuntime := newFakeHostRuntime(objects)
+	config.Runtime = secondRuntime
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	require.NoError(t, second.ReconcileReleases(t.Context()))
+	require.NoError(t, second.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	require.Equal(t, 1, secondRuntime.orphanRecoveries)
+	require.Equal(t, []string{"unmount-overlay", "unmount-xfs", "recover-orphan-device"}, secondRuntime.callsSnapshot())
+	stored, err := second.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateTombstoned, stored.State)
+	require.Equal(t, stored.DeviceAllocationID, secondRuntime.reservationOwner(stored.DevicePath))
+
+	_, err = second.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.Empty(t, secondRuntime.reservationOwner(stored.DevicePath))
+}
+
+func TestManagerRestartKeepsReservationWhenOrphanDisconnectFails(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	request := testStageRequest(t, objects, "restart-orphan-disconnect-failure")
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects,
+	}
+	firstRuntime := newFakeHostRuntime(objects)
+	config.Runtime = firstRuntime
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	secondRuntime := newFakeHostRuntime(objects)
+	secondRuntime.orphanRecoveryErr = fmt.Errorf("injected orphan disconnect failure")
+	config.Runtime = secondRuntime
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	require.NoError(t, second.ReconcileReleases(t.Context()))
+	err = second.ReleaseParent(t.Context(), request.Parent, request.Identity)
+	require.ErrorContains(t, err, "injected orphan disconnect failure")
+	stored, loadErr := second.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateReleasing, stored.State)
+	require.Equal(t, stored.DeviceAllocationID, secondRuntime.reservationOwner(stored.DevicePath))
+}
+
+func TestManagerLegacyReconcileDoesNotReclaimReusedPathForHistoricalTombstone(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	readyRequest := testStageRequest(t, objects, "legacy-live")
+	tombstoneRequest := testStageRequest(t, objects, "legacy-tombstone")
+	for _, candidate := range []struct {
+		request rootfshandoff.StageRequest
+		state   string
+	}{
+		{request: readyRequest, state: stateReady},
+		{request: tombstoneRequest, state: stateTombstoned},
+	} {
+		binding, digestErr := candidate.request.WithoutWriterGrantToken().BindingDigest()
+		require.NoError(t, digestErr)
+		paths := sessionPaths(manager.branchRoot, manager.mountRoot, candidate.request.Parent)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		var crashFence *crashFenceRecord
+		if candidate.state == stateTombstoned {
+			// Version 2 proofs did not establish pool-wide absence for an
+			// unattached session. Revalidating this historical proof under the
+			// version 3 contract would incorrectly block startup while another
+			// session legitimately owns the reused device path.
+			crashFence = &crashFenceRecord{OperationID: "legacy-crash", Result: &rootfshandoff.CrashFenceSessionObservation{
+				Parent: candidate.request.Parent, RootFSID: candidate.request.Identity.RootFSID,
+				WriterEpoch: candidate.request.Identity.WriterEpoch, OperationID: "legacy-crash",
+				BindingDigest: fmt.Sprintf("%x", binding), SessionState: stateTombstoned,
+				BranchPath: paths.branch, DeviceBound: false, NBDPoolAbsent: false,
+				LiveSessionAbsent: true, MergedMountAbsent: true, XFSMountAbsent: true, ObservedAt: now,
+			}}
+		}
+		require.NoError(t, manager.saveNew(record{
+			Version: legacySessionSchemaVersion, Parent: candidate.request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+			RootFSID: candidate.request.Identity.RootFSID, WriterEpoch: candidate.request.Identity.WriterEpoch,
+			GenerationID: candidate.request.InitialGeneration, BranchPath: paths.branch, DevicePath: "/dev/fake0",
+			XFSRoot: paths.xfs, MergedRoot: paths.merged, State: candidate.state, CrashFence: crashFence,
+			CreatedAt: now, UpdatedAt: now,
+		}))
+	}
+
+	require.NoError(t, manager.ReconcileReleases(t.Context()))
+	ready, err := manager.load(readyRequest.Parent)
+	require.NoError(t, err)
+	require.Equal(t, allocationSessionSchemaVersion, ready.Version)
+	require.NotEmpty(t, ready.DeviceAllocationID)
+	require.Equal(t, ready.DeviceAllocationID, runtime.reservationOwner("/dev/fake0"))
+	tombstone, err := manager.load(tombstoneRequest.Parent)
+	require.NoError(t, err)
+	require.Equal(t, legacySessionSchemaVersion, tombstone.Version)
+	require.Empty(t, tombstone.DeviceAllocationID)
+}
+
+func TestManagerReconcileRejectsUnsupportedSessionSchema(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "unsupported-session-schema")
+	binding, err := request.WithoutWriterGrantToken().BindingDigest()
+	require.NoError(t, err)
+	paths := sessionPaths(manager.branchRoot, manager.mountRoot, request.Parent)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.saveNew(record{
+		Version: sessionSchemaVersion + 1, Parent: request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+		RootFSID: request.Identity.RootFSID, WriterEpoch: request.Identity.WriterEpoch,
+		GenerationID: request.InitialGeneration, BranchPath: paths.branch,
+		XFSRoot: paths.xfs, MergedRoot: paths.merged, State: stateReserved,
+		CreatedAt: now, UpdatedAt: now,
+	}))
+
+	err = manager.ReconcileReleases(t.Context())
+	require.ErrorContains(t, err, "unsupported schema version")
+	require.Empty(t, runtime.reservationOwner("/dev/fake0"))
+}
+
+func TestManagerReconcileRejectsDuplicateLiveDeviceReservations(t *testing.T) {
+	manager, runtime, first := newTestManager(t, "duplicate-live-device-first")
+	second := testStageRequest(t, newSessionObjectStore(), "duplicate-live-device-second")
+	for index, request := range []rootfshandoff.StageRequest{first, second} {
+		binding, err := request.WithoutWriterGrantToken().BindingDigest()
+		require.NoError(t, err)
+		paths := sessionPaths(manager.branchRoot, manager.mountRoot, request.Parent)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		require.NoError(t, manager.saveNew(record{
+			Version: sessionSchemaVersion, Parent: request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+			RootFSID: request.Identity.RootFSID, WriterEpoch: request.Identity.WriterEpoch,
+			GenerationID: request.InitialGeneration, BranchPath: paths.branch, DevicePath: "/dev/fake0",
+			DeviceAllocationID: fmt.Sprintf("duplicate-allocation-%d", index),
+			XFSRoot:            paths.xfs, MergedRoot: paths.merged, State: stateReady,
+			CreatedAt: now, UpdatedAt: now,
+		}))
+	}
+
+	err := manager.ReconcileReleases(t.Context())
+	require.ErrorContains(t, err, "reserved by both")
+	require.Empty(t, runtime.reservationOwner("/dev/fake0"))
+}
+
+func TestManagerCurrentSchemaPreAttachmentProofDoesNotScanSharedDevicePool(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "current-pre-attachment")
+	binding, err := request.WithoutWriterGrantToken().BindingDigest()
+	require.NoError(t, err)
+	paths := sessionPaths(manager.branchRoot, manager.mountRoot, request.Parent)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.saveNew(record{
+		Version: sessionSchemaVersion, Parent: request.Parent, BindingDigest: fmt.Sprintf("%x", binding),
+		RootFSID: request.Identity.RootFSID, WriterEpoch: request.Identity.WriterEpoch,
+		GenerationID: request.InitialGeneration, BranchPath: paths.branch, DeviceAllocationID: "allocation-pre-attach",
+		XFSRoot: paths.xfs, MergedRoot: paths.merged, State: stateTombstoned,
+		CreatedAt: now, UpdatedAt: now,
+	}))
+	runtime.fenceObservation.NBDPID = 42
+
+	result, err := manager.CrashFence(request.WithoutWriterGrantToken(), "crash-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	require.False(t, result.DeviceBound)
+	require.True(t, result.NBDPoolAbsent)
+	require.Equal(t, 1, runtime.preAttachmentFenceInspections)
+	require.Zero(t, runtime.unattachedFenceInspections)
+}
+
+func TestManagerConcurrentExactEnsureCreatesOnePhysicalSession(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "concurrent")
+	const workers = 32
+	errorsByWorker := make(chan error, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := manager.Ensure(t.Context(), request)
+			errorsByWorker <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsByWorker)
+	for err := range errorsByWorker {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, runtime.count("attach"))
+	require.Equal(t, 1, runtime.count("mount-xfs"))
+	require.Equal(t, 1, runtime.count("mount-overlay"))
+}
+
+func TestManagerReleaseBeforeEnsurePermanentlyFencesLateAttach(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "release-before-ensure")
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	_, err := manager.Ensure(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+	require.Empty(t, runtime.callsSnapshot())
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerConcurrentReleaseAndEnsureNeverLeavesALiveSession(t *testing.T) {
+	for iteration := range 50 {
+		manager, runtime, request := newTestManager(t, fmt.Sprintf("release-race-%d", iteration))
+		start := make(chan struct{})
+		result := make(chan error, 2)
+		go func() {
+			<-start
+			_, err := manager.Ensure(t.Context(), request)
+			result <- err
+		}()
+		go func() {
+			<-start
+			result <- manager.ReleaseParent(t.Context(), request.Parent, request.Identity)
+		}()
+		close(start)
+		first, second := <-result, <-result
+		require.True(t, first == nil || errdefs.IsAlreadyExists(first), "unexpected result: %v", first)
+		require.True(t, second == nil || errdefs.IsAlreadyExists(second), "unexpected result: %v", second)
+		require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+		stored, err := manager.load(request.Parent)
+		require.NoError(t, err)
+		require.Equal(t, stateTombstoned, stored.State)
+		require.LessOrEqual(t, runtime.count("attach"), 1)
+	}
+}
+
+func TestManagerPlannedRetireSealsCompositeGenerationAfterWriterRevocation(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "planned-retire")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	written := bytes.Repeat([]byte{0xa5}, rootfsblock.LogicalBlockSize)
+	_, err = branch.WriteAt(written, rootfsblock.LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+
+	operationID := "retire-planned"
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, operationID))
+	_, err = manager.RetireResult(request.Parent, request.Identity, operationID)
+	require.ErrorIs(t, err, errdefs.ErrUnavailable)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	require.Equal(t, []bool{true, true}, runtime.unmountSyncSnapshot(), "planned retire must require both filesystem barriers")
+
+	result, err := manager.RetireResult(request.Parent, request.Identity, operationID)
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)
+	require.Len(t, result.DetachProof, 32)
+	sealed, err := rootfsblock.DecodeDescriptor(result.Descriptor)
+	require.NoError(t, err)
+	require.Equal(t, request.Generation.CurrentBlockHead, result.CurrentBlockHead)
+	updates, _, err := rootfsblock.DecodeCompositeTail(*sealed.CompositeTail, uint64(sealed.LogicalSizeBytes/rootfsblock.LogicalBlockSize))
+	require.NoError(t, err)
+	require.Len(t, updates, 1)
+	require.Equal(t, uint64(1), updates[0].Block)
+	require.Equal(t, written, updates[0].Data)
+
+	resultRetry, err := manager.RetireResult(request.Parent, request.Identity, operationID)
+	require.NoError(t, err)
+	require.Equal(t, result, resultRetry)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.FileExists(t, stored.BranchPath)
+	require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(stored.XFSRoot), "leftover"), 0o750))
+	require.DirExists(t, filepath.Dir(stored.XFSRoot))
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoFileExists(t, stored.BranchPath)
+	require.NoDirExists(t, filepath.Dir(stored.XFSRoot))
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.True(t, stored.BranchRemoved)
+	resultRetry, err = manager.RetireResult(request.Parent, request.Identity, operationID)
+	require.NoError(t, err)
+	require.Equal(t, result, resultRetry)
+	path, err := runtime.ReserveDevice("post-retire-allocation")
+	require.NoError(t, err)
+	require.Equal(t, "/dev/fake0", path)
+}
+
+func TestManagerPlannedRetireMaterializesTailThatExceedsPostgresLimit(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "materialized-retire", 16)
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	require.NoError(t, branch.Flush())
+
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-materialized"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	result, err := manager.RetireResult(request.Parent, request.Identity, "retire-materialized")
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
+	require.NotEqual(t, request.Generation.CurrentBlockHead, result.CurrentBlockHead)
+	sealed, err := rootfsblock.DecodeDescriptor(result.Descriptor)
+	require.NoError(t, err)
+	require.Nil(t, sealed.CompositeTail)
+	reader, err := rootfsblock.NewReader(objects, sealed, rootfsblock.DefaultReadCacheBytes)
+	require.NoError(t, err)
+	for block := range 12 {
+		actual := make([]byte, rootfsblock.LogicalBlockSize)
+		_, err = reader.ReadAt(actual, int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+		require.Equal(t, byte(block+1), actual[0])
+	}
+}
+
+func TestManagerPlannedRetireRetriesMaterializationAfterRestart(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "materialized-restart", 16)
+	publisher := &failOncePublisher{next: objects}
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	}
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	first.mu.Lock()
+	branch := first.live[request.Parent].branch
+	first.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{0x80 + byte(block)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	require.NoError(t, branch.Flush())
+	require.NoError(t, first.BeginRetire(request.Parent, request.Identity, "retire-restart-materialized"))
+	err = first.ReleaseParent(t.Context(), request.Parent, request.Identity)
+	require.ErrorContains(t, err, "injected immutable publication failure")
+	stored, loadErr := first.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateReleasing, stored.State)
+	require.NoError(t, first.Close())
+
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	require.NoError(t, second.ReconcileReleases(t.Context()))
+	result, err := second.RetireResult(request.Parent, request.Identity, "retire-restart-materialized")
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
+}
+
+func TestManagerPressureRetirementSurvivesObjectStoreOutage(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "pressure-s3-outage", 16)
+	publisher := &failOncePublisher{next: objects}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 12 * rootfsblock.LogicalBlockSize,
+		Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(
+			bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize),
+			int64(block*rootfsblock.LogicalBlockSize),
+		)
+		require.NoError(t, err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0xee}, 12*rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("pressure retirement did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		request.Parent, request.Identity.WriterGrantID, request.Identity.WriterEpoch,
+	)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, operationID))
+	require.NoError(t, branch.BeginRetirement())
+	require.NoError(t, <-writeDone)
+
+	err = manager.Release(t.Context(), request.Identity)
+	require.ErrorContains(t, err, "injected immutable publication failure")
+	interrupted, loadErr := manager.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateReleasing, interrupted.State)
+	require.Nil(t, interrupted.DirtyTailPressure)
+	require.Equal(t, operationID, interrupted.RetireOperationID)
+	require.NoError(t, manager.ReconcileReleases(t.Context()))
+	result, err := manager.RetireResult(request.Parent, request.Identity, operationID)
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
+}
+
+func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "running-fork", 16)
+	publisher := &blockingPublisher{
+		next: objects, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(
+			bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize),
+			int64(block*rootfsblock.LogicalBlockSize),
+		)
+		require.NoError(t, err)
+	}
+
+	type captureResult struct {
+		value rootfshandoff.RunningForkCheckpointResult
+		err   error
+	}
+	forkRequest := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork-running", SourceSandboxID: request.Identity.AllocationID,
+		TargetSandboxID: "running-fork-target", TargetGenerationID: "running-fork-generation",
+	}
+	done := make(chan captureResult, 1)
+	go func() {
+		value, captureErr := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
+		done <- captureResult{value: value, err: captureErr}
+	}()
+	select {
+	case <-publisher.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("running fork did not reach immutable publication")
+	}
+	calls := runtime.callsSnapshot()
+	freezeIndex, thawIndex := -1, -1
+	for index, call := range calls {
+		if call == "freeze-xfs" {
+			freezeIndex = index
+		}
+		if call == "thaw-xfs" {
+			thawIndex = index
+		}
+	}
+	require.Greater(t, freezeIndex, -1)
+	require.Greater(t, thawIndex, freezeIndex, "XFS must be thawed before object publication can block")
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
+	require.ErrorIs(t, err, errdefs.ErrUnavailable, "a concurrent exact retry must not capture a second boundary")
+	require.Equal(t, 1, runtime.count("freeze-xfs"))
+	later := bytes.Repeat([]byte{0xf0}, rootfsblock.LogicalBlockSize)
+	_, err = branch.WriteAt(later, 0)
+	require.NoError(t, err, "source writes must continue while the checkpoint publishes")
+	close(publisher.release)
+	result := <-done
+	require.NoError(t, result.err)
+	require.NoError(t, result.value.Validate())
+	require.Equal(t, uint64(12), result.value.Proof.CheckpointSequence)
+	require.Equal(t, rootfsblock.DurabilityS3, result.value.Generation.DurabilityState)
+
+	descriptor, err := rootfsblock.DecodeDescriptor(result.value.Generation.Descriptor)
+	require.NoError(t, err)
+	reader, err := rootfsblock.NewReader(objects, descriptor, rootfsblock.DefaultReadCacheBytes)
+	require.NoError(t, err)
+	captured := make([]byte, rootfsblock.LogicalBlockSize)
+	_, err = reader.ReadAt(captured, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(1), captured[0], "later source writes must not mutate the fork checkpoint")
+	live := make([]byte, rootfsblock.LogicalBlockSize)
+	_, err = branch.ReadAt(live, 0)
+	require.NoError(t, err)
+	require.Equal(t, later, live)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.NotNil(t, stored.RunningForkResult)
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+
+	retry, err := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
+	require.NoError(t, err)
+	require.Equal(t, result.value, retry)
+	require.Equal(t, 1, runtime.count("freeze-xfs"), "an exact operation retry must reuse its durable checkpoint")
+	changed := forkRequest
+	changed.TargetSandboxID = "different-target"
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), changed)
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+	err = manager.AcknowledgeRunningFork(request.WithoutWriterGrantToken(), forkRequest.OperationID, strings.Repeat("0", 64))
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.AcknowledgeRunningFork(
+		request.WithoutWriterGrantToken(), forkRequest.OperationID, result.value.ProofDigest,
+	))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
+}
+
+func TestManagerReconcileFreezesKeepsIntentUntilThawSucceeds(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "freeze-recovery")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	stored.FreezeOperationID = "interrupted-fork"
+	require.NoError(t, manager.save(stored))
+	runtime.failAt = "thaw-xfs"
+	err = manager.ReconcileFreezes(t.Context())
+	require.ErrorContains(t, err, "injected XFS thaw failure")
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "interrupted-fork", stored.FreezeOperationID)
+
+	runtime.failAt = ""
+	require.NoError(t, manager.ReconcileFreezes(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.Equal(t, 2, runtime.count("thaw-xfs"))
+}
+
+func TestManagerRunningForkFreezeFailureClearsDurableIntent(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "freeze-failure")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	runtime.failAt = "freeze-xfs"
+
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "failed-freeze", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	})
+	require.ErrorContains(t, err, "injected XFS freeze failure")
+	require.Equal(t, 1, runtime.count("freeze-xfs"))
+	require.Equal(t, 1, runtime.count("thaw-xfs"), "a partially successful freeze must be undone")
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.Equal(t, sessionSchemaVersion, stored.Version)
+	require.Nil(t, stored.RunningForkRequest)
+}
+
+func TestManagerRunningForkThawFailureRetainsIntentWithoutPublication(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "thaw-failure", 16)
+	publisher := &blockingPublisher{next: objects, started: make(chan struct{}), release: make(chan struct{})}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	runtime.failAt = "thaw-xfs"
+
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "failed-thaw", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	})
+	require.ErrorContains(t, err, "injected XFS thaw failure")
+	select {
+	case <-publisher.started:
+		t.Fatal("a checkpoint must not publish while its source remains frozen")
+	default:
+	}
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "failed-thaw", stored.FreezeOperationID)
+	require.NotNil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
+
+	runtime.failAt = ""
+	require.NoError(t, manager.ReconcileFreezes(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+}
+
+func TestManagerRunningForkPublicationFailureReleasesPendingSlot(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "fork-publication-retry", 16)
+	publisher := &failOncePublisher{next: objects}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "publication-retry", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	}
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), fork)
+	require.ErrorContains(t, err, "injected immutable publication failure")
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
+
+	result, err := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), fork)
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	require.Equal(t, 2, runtime.count("freeze-xfs"))
+}
+
+func TestManagerPlannedRetireRecoversBranchAfterProcessRestart(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequest(t, objects, "retire-restart")
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects, Runtime: runtime,
+	}
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	first.mu.Lock()
+	branch := first.live[request.Parent].branch
+	first.mu.Unlock()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x42}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, first.BeginRetire(request.Parent, request.Identity, "retire-restart"))
+	require.NoError(t, first.Close())
+
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	require.NoError(t, second.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	result, err := second.RetireResult(request.Parent, request.Identity, "retire-restart")
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)
+}
+
+func TestManagerPlannedRetireRejectsOperationReplacement(t *testing.T) {
+	manager, _, request := newTestManager(t, "retire-conflict")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-a"))
+	err = manager.BeginRetire(request.Parent, request.Identity, "retire-b")
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+}
+
+func TestManagerWriterIdentityCannotBindTwoParents(t *testing.T) {
+	manager, runtime, first := newTestManager(t, "writer-first")
+	second := testStageRequest(t, runtime.source, "writer-second")
+	second.Identity.RootFSID = first.Identity.RootFSID
+	second.Identity.WriterEpoch = first.Identity.WriterEpoch
+	second.Generation.FilesystemID = first.Generation.FilesystemID
+	second.Generation.WriterEpoch = first.Identity.WriterEpoch - 1
+	require.NoError(t, first.WithoutWriterGrantToken().ValidateDurableBinding())
+	require.NoError(t, second.WithoutWriterGrantToken().ValidateDurableBinding())
+
+	errorsByRequest := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, request := range []rootfshandoff.StageRequest{first, second} {
+		request := request
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := manager.Ensure(t.Context(), request)
+			errorsByRequest <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsByRequest)
+	successes := 0
+	conflicts := 0
+	for err := range errorsByRequest {
+		if err == nil {
+			successes++
+		} else if errdefs.IsAlreadyExists(err) {
+			conflicts++
+		} else {
+			require.NoError(t, err)
+		}
+	}
+	require.Equal(t, 1, successes)
+	require.Equal(t, 1, conflicts)
+	require.Equal(t, 1, runtime.count("attach"))
+}
+
+func TestManagerMountFailureIsDurableAndReleasable(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "mount-failure")
+	runtime.failAt = "mount-xfs"
+	_, err := manager.Ensure(t.Context(), request)
+	require.ErrorContains(t, err, "mount XFS")
+	stored, loadErr := manager.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateFailed, stored.State)
+	require.Equal(t, []string{"attach", "mount-xfs", "close-device"}, runtime.callsSnapshot())
+
+	_, err = manager.Ensure(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	stored, loadErr = manager.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerMountFailurePreservesDeviceError(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "mount-device-failure")
+	runtime.failAt = "mount-xfs"
+	runtime.deviceCloseErr = fmt.Errorf("NBD read offset 0: object range checksum mismatch")
+
+	_, err := manager.Ensure(t.Context(), request)
+	require.ErrorContains(t, err, "mount XFS")
+	require.ErrorContains(t, err, "object range checksum mismatch")
+}
+
+func TestManagerRestartNeverTreatsJournalAsLiveDevice(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequest(t, objects, "restart")
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects, Runtime: runtime,
+	}
+	first, err := New(config)
+	require.NoError(t, err)
+	_, err = first.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	second, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+	_, err = second.Ensure(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	_, err = second.Resolve(request.Parent, request.WithoutWriterGrantToken())
+	require.ErrorIs(t, err, errdefs.ErrUnavailable)
+	require.NoError(t, second.Release(t.Context(), request.Identity))
+	stored, err := second.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerRejectsSymlinkStatePath(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.WriteFile(target, nil, 0o600))
+	state := filepath.Join(base, "state.db")
+	require.NoError(t, os.Symlink(target, state))
+	_, err := New(Config{
+		StatePath: state, BranchRoot: filepath.Join(base, "branches"), MountRoot: filepath.Join(base, "mounts"),
+		Source: newSessionObjectStore(), Publisher: newSessionObjectStore(), Runtime: &fakeHostRuntime{},
+	})
+	require.ErrorContains(t, err, "symlink")
+}
+
+func newTestManager(t *testing.T, name string) (*Manager, *fakeHostRuntime, rootfshandoff.StageRequest) {
+	t.Helper()
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	return manager, runtime, testStageRequest(t, objects, name)
+}
+
+func testStageRequest(t *testing.T, objects *sessionObjectStore, name string) rootfshandoff.StageRequest {
+	return testStageRequestWithBlocks(t, objects, name, 3)
+}
+
+func testStageRequestWithBlocks(t *testing.T, objects *sessionObjectStore, name string, blocks int) rootfshandoff.StageRequest {
+	t.Helper()
+	logical := bytes.Repeat([]byte{byte(len(name) + 1)}, blocks*rootfsblock.LogicalBlockSize)
+	built, err := rootfsblock.BuildMaterializedGeneration(
+		t.Context(), bytes.NewReader(logical), int64(len(logical)), objects, rootfsblock.BuildOptions{},
+	)
+	require.NoError(t, err)
+	request := rootfshandoff.StageRequest{
+		BindingVersion:    rootfshandoff.WriterBindingVersion,
+		Parent:            digest.FromString("parent-" + name).String(),
+		InitialGeneration: "generation-" + name,
+		Identity: rootfshandoff.Identity{
+			NodeUID: "node", BootID: "boot", RuntimeGeneration: "runtime", AllocationID: "pod-" + name,
+			NetworkIncarnationID: "sandbox-" + name, TaskName: "app", SourceOCIDigest: "gate-" + name,
+			RootFSDriver: "sandbox0-rootfs", RuntimeClass: "io.containerd.runsc.v1", SlotNonce: "slot-" + name,
+			ClaimID: "claim-" + name, LaunchAttempt: "attempt-" + name, RootFSID: "rootfs-" + name,
+			WriterEpoch: 1, WriterGrantID: "grant-" + name, WriterGrantToken: "token-" + name,
+		},
+	}
+	request.Identity.WriterGrantTokenDigest = rootfshandoff.WriterGrantTokenDigest(request.Identity.WriterGrantToken)
+	request.ExpectedPolicyToken = rootfshandoff.NetworkPolicyToken{
+		AllocationID: request.Identity.AllocationID, NetworkIncarnationID: request.Identity.NetworkIncarnationID,
+		ClaimID: request.Identity.ClaimID, NetworkEpoch: request.Identity.WriterEpoch,
+		PolicyDigest: "policy-" + name, SourceIP: "10.0.0.2", CtldGeneration: "ctld",
+		NetNSIdentity: "netns-" + name,
+	}
+	request.Generation = &rootfshandoff.GenerationDescriptor{
+		Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: request.InitialGeneration,
+		FilesystemID: request.Identity.RootFSID, SourceOCIDigest: digest.FromString("oci-" + name).String(),
+		BaseArtifactDigest: digest.FromString("artifact-" + name).String(),
+		BaseBlockRoot:      built.Descriptor.MappingRoot.RootDigest, CurrentBlockHead: built.Descriptor.MappingRoot.RootDigest,
+		WriterEpoch: 0, FormatGeneration: 1, DurabilityState: "s3_materialized", LocatorVersion: 1,
+		Descriptor: built.Payload,
+	}
+	require.NoError(t, request.Validate())
+	return request
+}
+
+type failOncePublisher struct {
+	mu   sync.Mutex
+	next rootfsblock.ImmutableObjectPublisher
+	fail bool
+}
+
+type blockingPublisher struct {
+	next    rootfsblock.ImmutableObjectPublisher
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingPublisher) PutImmutable(ctx context.Context, key string, payload []byte) error {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.release:
+	}
+	return p.next.PutImmutable(ctx, key, payload)
+}
+
+func (p *failOncePublisher) PutImmutable(ctx context.Context, key string, payload []byte) error {
+	p.mu.Lock()
+	if !p.fail {
+		p.fail = true
+		p.mu.Unlock()
+		return fmt.Errorf("injected immutable publication failure")
+	}
+	p.mu.Unlock()
+	return p.next.PutImmutable(ctx, key, payload)
+}
+
+type sessionObjectStore struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+}
+
+func newSessionObjectStore() *sessionObjectStore {
+	return &sessionObjectStore{objects: make(map[string][]byte)}
+}
+
+func (s *sessionObjectStore) PutImmutable(_ context.Context, key string, payload []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, found := s.objects[key]; found && !bytes.Equal(existing, payload) {
+		return fmt.Errorf("immutable object conflict")
+	}
+	s.objects[key] = append([]byte(nil), payload...)
+	return nil
+}
+
+func (s *sessionObjectStore) Get(key string, offset, length int64) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payload, found := s.objects[key]
+	if !found || offset < 0 || length < 0 || offset+length > int64(len(payload)) {
+		return nil, fmt.Errorf("range not found")
+	}
+	return io.NopCloser(bytes.NewReader(payload[offset : offset+length])), nil
+}
+
+type fakeHostRuntime struct {
+	mu                            sync.Mutex
+	calls                         []string
+	unmountSync                   []bool
+	failAt                        string
+	source                        *sessionObjectStore
+	deviceCloseErr                error
+	fenceObservation              CrashFenceHostObservation
+	fenceErr                      error
+	fenceInspections              int
+	unattachedFenceInspections    int
+	preAttachmentFenceInspections int
+	orphanRecoveries              int
+	orphanRecoveryErr             error
+	reservations                  map[string]string
+	devicePaths                   []string
+	beforeAttach                  func(string, string)
+}
+
+func newFakeHostRuntime(objects *sessionObjectStore) *fakeHostRuntime {
+	return &fakeHostRuntime{
+		source: objects, devicePaths: []string{"/dev/fake0"}, reservations: make(map[string]string),
+		fenceObservation: CrashFenceHostObservation{MergedMountAbsent: true, XFSMountAbsent: true},
+	}
+}
+
+func (r *fakeHostRuntime) InspectCrashFence(_, _, _ string) (CrashFenceHostObservation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fenceInspections++
+	return r.fenceObservation, r.fenceErr
+}
+
+func (r *fakeHostRuntime) InspectUnattachedCrashFence(_, _ string) (CrashFenceHostObservation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unattachedFenceInspections++
+	observation := r.fenceObservation
+	if observation.NBDPID != 0 || len(observation.NBDHolders) != 0 {
+		return observation, fmt.Errorf("NBD pool remains owned: %w", errdefs.ErrFailedPrecondition)
+	}
+	observation.NBDPoolAbsent = true
+	return observation, r.fenceErr
+}
+
+func (r *fakeHostRuntime) InspectPreAttachmentCrashFence(_, _ string) (CrashFenceHostObservation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preAttachmentFenceInspections++
+	return CrashFenceHostObservation{
+		NBDPoolAbsent: true, MergedMountAbsent: true, XFSMountAbsent: true,
+	}, r.fenceErr
+}
+
+func (r *fakeHostRuntime) ReserveDevice(allocationID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureReservationsLocked()
+	for path, owner := range r.reservations {
+		if owner == allocationID {
+			return path, nil
+		}
+	}
+	for _, path := range r.devicePaths {
+		if r.reservations[path] == "" {
+			r.reservations[path] = allocationID
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("no usable NBD device is available")
+}
+
+func (r *fakeHostRuntime) AdoptDeviceReservation(devicePath, allocationID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureReservationsLocked()
+	if owner := r.reservations[devicePath]; owner != "" && owner != allocationID {
+		return fmt.Errorf("device already reserved")
+	}
+	r.reservations[devicePath] = allocationID
+	return nil
+}
+
+func (r *fakeHostRuntime) ReleaseDeviceReservation(devicePath, allocationID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureReservationsLocked()
+	if r.reservations[devicePath] == allocationID {
+		delete(r.reservations, devicePath)
+	}
+}
+
+func (r *fakeHostRuntime) RecoverOrphanDevice(_ context.Context, devicePath, allocationID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureReservationsLocked()
+	if r.reservations[devicePath] != allocationID || allocationID == "" {
+		return fmt.Errorf("device is not reserved by allocation")
+	}
+	r.orphanRecoveries++
+	r.calls = append(r.calls, "recover-orphan-device")
+	return r.orphanRecoveryErr
+}
+
+func (r *fakeHostRuntime) reservationOwner(devicePath string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureReservationsLocked()
+	return r.reservations[devicePath]
+}
+
+func (r *fakeHostRuntime) ensureReservationsLocked() {
+	if r.reservations == nil {
+		r.reservations = make(map[string]string)
+	}
+	if len(r.devicePaths) == 0 {
+		r.devicePaths = []string{"/dev/fake0"}
+	}
+}
+
+func (r *fakeHostRuntime) AttachDevice(
+	lifetime, readyContext context.Context,
+	devicePath, allocationID string,
+	_ rootfsblock.WritableBlockDevice,
+) (Device, error) {
+	if lifetime == nil || readyContext == nil {
+		return nil, fmt.Errorf("contexts are required")
+	}
+	r.mu.Lock()
+	r.ensureReservationsLocked()
+	owner := r.reservations[devicePath]
+	beforeAttach := r.beforeAttach
+	r.mu.Unlock()
+	if owner != allocationID || owner == "" {
+		return nil, fmt.Errorf("device is not reserved by allocation")
+	}
+	if beforeAttach != nil {
+		beforeAttach(devicePath, allocationID)
+	}
+	r.record("attach")
+	if r.failAt == "attach" {
+		return nil, fmt.Errorf("injected attach failure")
+	}
+	return &fakeDevice{path: devicePath, runtime: r, closeErr: r.deviceCloseErr}, nil
+}
+
+func (r *fakeHostRuntime) MountXFS(_, _ string) error {
+	r.record("mount-xfs")
+	if r.failAt == "mount-xfs" {
+		return fmt.Errorf("injected XFS mount failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) FreezeXFS(_ string) error {
+	r.record("freeze-xfs")
+	if r.failAt == "freeze-xfs" {
+		return fmt.Errorf("injected XFS freeze failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) ThawXFS(_ string) error {
+	r.record("thaw-xfs")
+	if r.failAt == "thaw-xfs" {
+		return fmt.Errorf("injected XFS thaw failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) MountOverlay(_, _ string) error {
+	r.record("mount-overlay")
+	if r.failAt == "mount-overlay" {
+		return fmt.Errorf("injected OverlayFS mount failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) UnmountOverlay(_ string, requireSync bool) error {
+	r.record("unmount-overlay")
+	r.recordUnmountSync(requireSync)
+	return nil
+}
+
+func (r *fakeHostRuntime) UnmountXFS(_ string, requireSync bool) error {
+	r.record("unmount-xfs")
+	r.recordUnmountSync(requireSync)
+	return nil
+}
+
+func (r *fakeHostRuntime) recordUnmountSync(requireSync bool) {
+	r.mu.Lock()
+	r.unmountSync = append(r.unmountSync, requireSync)
+	r.mu.Unlock()
+}
+
+func (r *fakeHostRuntime) record(call string) {
+	r.mu.Lock()
+	r.calls = append(r.calls, call)
+	r.mu.Unlock()
+}
+
+func (r *fakeHostRuntime) callsSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.calls...)
+}
+
+func (r *fakeHostRuntime) unmountSyncSnapshot() []bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]bool(nil), r.unmountSync...)
+}
+
+func (r *fakeHostRuntime) count(call string) int {
+	count := 0
+	for _, current := range r.callsSnapshot() {
+		if current == call {
+			count++
+		}
+	}
+	return count
+}
+
+type fakeDevice struct {
+	path     string
+	runtime  *fakeHostRuntime
+	closeErr error
+	once     sync.Once
+}
+
+func (d *fakeDevice) Path() string { return d.path }
+
+func (d *fakeDevice) Close() error {
+	d.once.Do(func() { d.runtime.record("close-device") })
+	return d.closeErr
+}

@@ -20,7 +20,7 @@ type SandboxProcessLogEvent struct {
 }
 
 func ParseSandboxProcessLogLine(line []byte) (SandboxProcessLogEvent, time.Time, bool) {
-	timestamp, payload := splitKubernetesLogTimestamp(line)
+	timestamp, payload := splitRuntimeLogTimestamp(line)
 	payload = bytes.TrimSpace(payload)
 	if len(payload) == 0 {
 		return SandboxProcessLogEvent{}, time.Time{}, false
@@ -49,7 +49,7 @@ func ParseSandboxProcessLogLine(line []byte) (SandboxProcessLogEvent, time.Time,
 	}
 }
 
-func splitKubernetesLogTimestamp(line []byte) (time.Time, []byte) {
+func splitRuntimeLogTimestamp(line []byte) (time.Time, []byte) {
 	trimmed := bytes.TrimLeft(line, " \t")
 	if bytes.HasPrefix(trimmed, []byte("{")) {
 		return time.Time{}, trimmed

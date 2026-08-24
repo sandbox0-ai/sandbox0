@@ -8,9 +8,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type bandwidthPolicyStore struct {
@@ -167,7 +166,7 @@ func TestTeamBandwidthQuotaDropsDatagramWithoutTokens(t *testing.T) {
 func TestTeamBandwidthQuotaFailsClosedWhenRedisIsUnavailable(t *testing.T) {
 	_, err := newQuotaTeamBandwidthLimiter(context.Background(), &config.NetworkRuntimeConfig{
 		RedisURL:      "redis://127.0.0.1:1/0",
-		RedisTimeout:  metav1.Duration{Duration: time.Millisecond},
+		RedisTimeout:  config.Duration{Duration: time.Millisecond},
 		RedisFailOpen: true,
 	}, bandwidthPolicyStore{})
 	if err == nil {
@@ -180,7 +179,7 @@ func newTestTeamLimiter(t *testing.T, redisServer *miniredis.Miniredis, clusterI
 	team, err := newQuotaTeamBandwidthLimiter(context.Background(), &config.NetworkRuntimeConfig{
 		RedisURL:       "redis://" + redisServer.Addr() + "/0",
 		RedisKeyPrefix: "test",
-		RedisTimeout:   metav1.Duration{Duration: time.Second},
+		RedisTimeout:   config.Duration{Duration: time.Second},
 		RegionID:       "region-1",
 		ClusterID:      clusterID,
 	}, policies)

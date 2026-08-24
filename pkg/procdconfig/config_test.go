@@ -9,18 +9,41 @@ import (
 )
 
 func TestApplyDefaultsRestoresEmptySessionStateDir(t *testing.T) {
-	cfg := Config{SessionStateDir: "  "}
+	cfg := Config{WebhookOutboxDir: "  ", SessionStateDir: "  "}
 	cfg.ApplyDefaults()
+	if cfg.HTTPPort != DefaultHTTPPort || cfg.LogLevel != DefaultLogLevel || cfg.RootPath != DefaultRootPath {
+		t.Fatalf("process defaults = port %d level %q root %q", cfg.HTTPPort, cfg.LogLevel, cfg.RootPath)
+	}
+	if cfg.ContextCleanupInterval.Duration != DefaultContextCleanupInterval ||
+		cfg.WebhookQueueSize != DefaultWebhookQueueSize ||
+		cfg.WebhookRequestTimeout.Duration != DefaultWebhookRequestTimeout ||
+		cfg.WebhookMaxRetries != DefaultWebhookMaxRetries ||
+		cfg.WebhookBaseBackoff.Duration != DefaultWebhookBaseBackoff {
+		t.Fatalf("runtime defaults = %+v", cfg)
+	}
+	if cfg.WebhookOutboxDir != DefaultWebhookOutboxDir {
+		t.Fatalf("webhook outbox dir = %q, want %q", cfg.WebhookOutboxDir, DefaultWebhookOutboxDir)
+	}
 	if cfg.SessionStateDir != DefaultSessionStateDir {
 		t.Fatalf("session state dir = %q, want %q", cfg.SessionStateDir, DefaultSessionStateDir)
 	}
 }
 
 func TestApplyDefaultsPreservesCustomSessionStateDir(t *testing.T) {
-	cfg := Config{SessionStateDir: "/custom/procd/sessions"}
+	cfg := Config{
+		HTTPPort: 49984, LogLevel: "debug", RootPath: "/custom/workspace",
+		ContextCleanupInterval: Duration{Duration: time.Minute},
+		WebhookQueueSize:       12, WebhookRequestTimeout: Duration{Duration: 2 * time.Second},
+		WebhookMaxRetries: 7, WebhookBaseBackoff: Duration{Duration: time.Second},
+		WebhookOutboxDir: "/custom/procd/outbox", SessionStateDir: "/custom/procd/sessions",
+	}
 	cfg.ApplyDefaults()
-	if cfg.SessionStateDir != "/custom/procd/sessions" {
-		t.Fatalf("session state dir = %q, want custom path", cfg.SessionStateDir)
+	if cfg.HTTPPort != 49984 || cfg.LogLevel != "debug" || cfg.RootPath != "/custom/workspace" ||
+		cfg.ContextCleanupInterval.Duration != time.Minute || cfg.WebhookQueueSize != 12 ||
+		cfg.WebhookRequestTimeout.Duration != 2*time.Second || cfg.WebhookMaxRetries != 7 ||
+		cfg.WebhookBaseBackoff.Duration != time.Second || cfg.WebhookOutboxDir != "/custom/procd/outbox" ||
+		cfg.SessionStateDir != "/custom/procd/sessions" {
+		t.Fatalf("custom configuration changed: %+v", cfg)
 	}
 }
 

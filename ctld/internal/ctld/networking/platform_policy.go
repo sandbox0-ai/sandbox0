@@ -3,141 +3,69 @@ package networking
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"go.uber.org/zap"
 )
 
-var platformServiceNames = map[string]struct{}{
-	"cluster-gateway": {},
-	"manager":         {},
-}
-
-var clusterDNSServiceNames = map[string]struct{}{
-	"kube-dns": {},
-	"coredns":  {},
-}
-
 type platformPolicyState struct {
-	cfg       *config.NetworkRuntimeConfig
-	store     *policy.Store
-	logger    *zap.Logger
-	mu        sync.RWMutex
-	sandboxes map[string]*watcher.SandboxInfo
-	services  map[string]*watcher.ServiceInfo
-	endpoints map[string]*watcher.EndpointsInfo
-	lastHash  string
+	cfg      *config.NetworkRuntimeConfig
+	store    *policy.Store
+	logger   *zap.Logger
+	mu       sync.Mutex
+	lastHash string
 }
 
 func newPlatformPolicyState(cfg *config.NetworkRuntimeConfig, store *policy.Store, logger *zap.Logger) *platformPolicyState {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	state := &platformPolicyState{
-		cfg:       cfg,
-		store:     store,
-		logger:    logger,
-		sandboxes: make(map[string]*watcher.SandboxInfo),
-		services:  make(map[string]*watcher.ServiceInfo),
-		endpoints: make(map[string]*watcher.EndpointsInfo),
-	}
-	state.rebuild()
+	state := &platformPolicyState{cfg: cfg, store: store, logger: logger}
+	state.Reconcile(nil)
 	return state
 }
 
-func (s *platformPolicyState) Reconcile(
-	sandboxes []*watcher.SandboxInfo,
-	services []*watcher.ServiceInfo,
-	endpoints []*watcher.EndpointsInfo,
-) {
-	s.mu.Lock()
-	s.sandboxes = make(map[string]*watcher.SandboxInfo, len(sandboxes))
-	for _, info := range sandboxes {
-		if info == nil {
-			continue
-		}
-		s.sandboxes[info.Namespace+"/"+info.Name] = info
-	}
-	s.services = make(map[string]*watcher.ServiceInfo, len(services))
-	for _, info := range services {
-		if info == nil {
-			continue
-		}
-		s.services[info.Namespace+"/"+info.Name] = info
-	}
-	s.endpoints = make(map[string]*watcher.EndpointsInfo, len(endpoints))
-	for _, info := range endpoints {
-		if info == nil {
-			continue
-		}
-		s.endpoints[info.Namespace+"/"+info.Name] = info
-	}
-	s.mu.Unlock()
-	s.rebuild()
-}
-
-func (s *platformPolicyState) rebuild() {
-	if s.store == nil {
+// Reconcile rebuilds the platform boundary from runtime-slot identities and
+// explicit regional service allow/deny configuration. Service discovery is a
+// control-plane responsibility; ctld never watches an orchestrator catalog.
+func (s *platformPolicyState) Reconcile(sandboxes []*model.SandboxInfo) {
+	if s == nil || s.store == nil {
 		return
 	}
-	sandboxes, services, endpoints := s.snapshot()
-	allowedCIDRs := make([]string, 0, len(services))
-	allowedDomains := []string{}
-	sandboxPodIPs := make(map[string]struct{}, len(sandboxes))
-	matchedServices := make([]string, 0, len(services))
+	sandboxIPs := make(map[string]struct{}, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		if sandbox == nil {
 			continue
 		}
-		if ip := strings.TrimSpace(sandbox.PodIP); ip != "" {
-			sandboxPodIPs[ip] = struct{}{}
-		}
-	}
-	for key, svc := range services {
-		if !isPlatformService(svc) {
-			continue
-		}
-		matchedServices = append(matchedServices, key)
-		if svc.ClusterIP != "" && strings.ToLower(svc.ClusterIP) != "none" {
-			allowedCIDRs = append(allowedCIDRs, svc.ClusterIP)
-		}
-		allowedDomains = append(allowedDomains, platformServiceDomains(svc)...)
-		if ep := endpoints[key]; ep != nil {
-			allowedCIDRs = append(allowedCIDRs, ep.Addresses...)
+		if ip := strings.TrimSpace(sandbox.SourceIP); ip != "" {
+			sandboxIPs[ip] = struct{}{}
 		}
 	}
 
-	platformAllowedCIDRs := []string{}
-	platformDeniedCIDRs := []string{}
-	platformAllowedDomains := []string{}
-	platformDeniedDomains := []string{}
+	var allowedCIDRs, deniedCIDRs, allowedDomains, deniedDomains []string
 	if s.cfg != nil {
-		platformAllowedCIDRs = s.cfg.PlatformAllowedCIDRs
-		platformDeniedCIDRs = s.cfg.PlatformDeniedCIDRs
-		platformAllowedDomains = s.cfg.PlatformAllowedDomains
-		platformDeniedDomains = s.cfg.PlatformDeniedDomains
+		allowedCIDRs = normalizeCIDRInputs(s.cfg.PlatformAllowedCIDRs, s.logger)
+		deniedCIDRs = normalizeCIDRInputs(s.cfg.PlatformDeniedCIDRs, s.logger)
+		allowedDomains = normalizeDomainInputs(s.cfg.PlatformAllowedDomains)
+		deniedDomains = normalizeDomainInputs(s.cfg.PlatformDeniedDomains)
 	}
-	allowedCIDRs = normalizeCIDRInputs(append(allowedCIDRs, platformAllowedCIDRs...), s.logger)
-	allowedDomains = normalizeDomainInputs(append(allowedDomains, platformAllowedDomains...))
-	deniedCIDRs := normalizeCIDRInputs(platformDeniedCIDRs, s.logger)
-	deniedDomains := normalizeDomainInputs(platformDeniedDomains)
-	sort.Strings(matchedServices)
 	sort.Strings(allowedCIDRs)
-	sort.Strings(allowedDomains)
 	sort.Strings(deniedCIDRs)
+	sort.Strings(allowedDomains)
 	sort.Strings(deniedDomains)
-	sandboxPodIPList := make([]string, 0, len(sandboxPodIPs))
-	for ip := range sandboxPodIPs {
-		sandboxPodIPList = append(sandboxPodIPList, ip)
+	sandboxIPList := make([]string, 0, len(sandboxIPs))
+	for ip := range sandboxIPs {
+		sandboxIPList = append(sandboxIPList, ip)
 	}
-	sort.Strings(sandboxPodIPList)
-	nextHash := hashPlatformPolicyInputs(sandboxPodIPList, matchedServices, allowedCIDRs, deniedCIDRs, allowedDomains, deniedDomains)
+	sort.Strings(sandboxIPList)
+	nextHash := hashPlatformPolicyInputs(sandboxIPList, allowedCIDRs, deniedCIDRs, allowedDomains, deniedDomains)
 	s.mu.Lock()
 	if s.lastHash == nextHash {
 		s.mu.Unlock()
@@ -146,30 +74,20 @@ func (s *platformPolicyState) rebuild() {
 	s.lastHash = nextHash
 	s.mu.Unlock()
 
-	policyRules, err := policy.BuildPlatformPolicy(
-		allowedCIDRs,
-		deniedCIDRs,
-		allowedDomains,
-		deniedDomains,
-	)
+	rules, err := policy.BuildPlatformPolicy(allowedCIDRs, deniedCIDRs, allowedDomains, deniedDomains)
 	if err != nil {
 		s.logger.Warn("Failed to build platform policy", zap.Error(err))
 		return
 	}
-	policyRules.SandboxPodIPs = sandboxPodIPs
-	s.store.SetPlatformPolicy(policyRules)
-	s.logger.Info(
-		"Platform policy updated",
+	rules.SandboxIPs = sandboxIPs
+	s.store.SetPlatformPolicy(rules)
+	s.logger.Info("Platform policy updated",
 		zap.Int("sandboxes_total", len(sandboxes)),
-		zap.Int("sandbox_pod_ips", len(sandboxPodIPs)),
-		zap.Int("services_total", len(services)),
-		zap.Int("services_matched", len(matchedServices)),
-		zap.Int("endpoints_total", len(endpoints)),
+		zap.Int("sandbox_ips", len(sandboxIPs)),
 		zap.Int("allowed_cidrs", len(allowedCIDRs)),
 		zap.Int("denied_cidrs", len(deniedCIDRs)),
 		zap.Int("allowed_domains", len(allowedDomains)),
 		zap.Int("denied_domains", len(deniedDomains)),
-		zap.Strings("matched_services", matchedServices),
 	)
 }
 
@@ -183,71 +101,6 @@ func hashPlatformPolicyInputs(parts ...[]string) string {
 		_, _ = hash.Write([]byte{1})
 	}
 	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func (s *platformPolicyState) snapshot() (map[string]*watcher.SandboxInfo, map[string]*watcher.ServiceInfo, map[string]*watcher.EndpointsInfo) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sandboxes := make(map[string]*watcher.SandboxInfo, len(s.sandboxes))
-	for key, info := range s.sandboxes {
-		sandboxes[key] = info
-	}
-	services := make(map[string]*watcher.ServiceInfo, len(s.services))
-	for key, info := range s.services {
-		services[key] = info
-	}
-	endpoints := make(map[string]*watcher.EndpointsInfo, len(s.endpoints))
-	for key, info := range s.endpoints {
-		endpoints[key] = info
-	}
-	return sandboxes, services, endpoints
-}
-
-func isPlatformService(info *watcher.ServiceInfo) bool {
-	if info == nil || info.Labels == nil {
-		return isClusterDNSService(info)
-	}
-	if isClusterDNSService(info) {
-		return true
-	}
-	if info.Labels["app.kubernetes.io/managed-by"] != "sandbox0infra-operator" {
-		return false
-	}
-	name := info.Labels["app.kubernetes.io/name"]
-	for platformName := range platformServiceNames {
-		if name == platformName || strings.HasSuffix(name, "-"+platformName) {
-			return true
-		}
-	}
-	return false
-}
-
-func isClusterDNSService(info *watcher.ServiceInfo) bool {
-	if info == nil {
-		return false
-	}
-	if info.Namespace != "kube-system" {
-		return false
-	}
-	_, ok := clusterDNSServiceNames[info.Name]
-	return ok
-}
-
-func platformServiceDomains(info *watcher.ServiceInfo) []string {
-	if info == nil {
-		return nil
-	}
-	name := strings.TrimSpace(info.Name)
-	namespace := strings.TrimSpace(info.Namespace)
-	if name == "" || namespace == "" {
-		return nil
-	}
-	return []string{
-		name,
-		name + "." + namespace,
-		name + "." + namespace + ".svc",
-		name + "." + namespace + ".svc.cluster.local",
-	}
 }
 
 func normalizeCIDRInputs(values []string, logger *zap.Logger) []string {
@@ -264,7 +117,11 @@ func normalizeCIDRInputs(values []string, logger *zap.Logger) []string {
 		var cidr string
 		if !strings.Contains(value, "/") {
 			if ip := net.ParseIP(value); ip != nil {
-				cidr = ip.String() + "/32"
+				bits := 128
+				if ip.To4() != nil {
+					bits = 32
+				}
+				cidr = ip.String() + "/" + fmt.Sprint(bits)
 			} else {
 				if logger != nil {
 					logger.Warn("Ignoring invalid platform CIDR", zap.String("value", value))

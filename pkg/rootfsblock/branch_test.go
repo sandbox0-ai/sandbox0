@@ -1,0 +1,651 @@
+package rootfsblock
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/opencontainers/go-digest"
+	"github.com/stretchr/testify/require"
+)
+
+func TestBranchPartialWriteFlushAndRestart(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt([]byte("sandbox0"), LogicalBlockSize+17)
+	require.NoError(t, err)
+	require.NoError(t, branch.WriteZeroes(2*LogicalBlockSize, LogicalBlockSize))
+	require.NoError(t, branch.Flush())
+	require.Equal(t, []uint64{1, 2}, branch.DirtyBlocks())
+	require.NoError(t, branch.Close())
+
+	reopened, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	defer reopened.Close()
+	payload := make([]byte, len(base))
+	_, err = reopened.ReadAt(payload, 0)
+	require.NoError(t, err)
+	require.Equal(t, base[:LogicalBlockSize], payload[:LogicalBlockSize])
+	require.Equal(t, []byte("sandbox0"), payload[LogicalBlockSize+17:LogicalBlockSize+25])
+	require.Equal(t, make([]byte, LogicalBlockSize), payload[2*LogicalBlockSize:])
+}
+
+func TestBranchWriteZeroesPreservesAdjacentBytesAcrossMappingBlocks(t *testing.T) {
+	base := bytes.Repeat([]byte{0x5a}, 3*LogicalBlockSize)
+	branch, err := OpenBranch(
+		filepath.Join(t.TempDir(), "branch.log"),
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	offset := int64(LogicalBlockSize - NBDDeviceSectorSize)
+	length := int64(LogicalBlockSize + 2*NBDDeviceSectorSize)
+	require.NoError(t, branch.WriteZeroes(offset, length))
+
+	actual := make([]byte, len(base))
+	_, err = branch.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, base[:offset], actual[:offset])
+	require.Equal(t, make([]byte, length), actual[offset:offset+length])
+	require.Equal(t, base[offset+length:], actual[offset+length:])
+	require.Equal(t, []uint64{0, 1, 2}, branch.DirtyBlocks())
+}
+
+func TestBranchWriteZeroesValidatesRange(t *testing.T) {
+	base := bytes.Repeat([]byte{0x5a}, LogicalBlockSize)
+	branch, err := OpenBranch(
+		filepath.Join(t.TempDir(), "branch.log"),
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	require.NoError(t, branch.WriteZeroes(LogicalBlockSize, 0))
+	require.ErrorContains(t, branch.WriteZeroes(-1, 1), "within")
+	require.ErrorContains(t, branch.WriteZeroes(LogicalBlockSize, 1), "within")
+}
+
+func TestBranchTrimIsAdvisoryAndDoesNotGrowDirtyTail(t *testing.T) {
+	base := bytes.Repeat([]byte{0x5a}, 2*LogicalBlockSize)
+	branch, err := OpenBranch(
+		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))), bytes.NewReader(base),
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	require.NoError(t, branch.Trim(0, int64(len(base))))
+	require.Zero(t, branch.DirtyTailUsage().DirtyBytes)
+	actual := make([]byte, len(base))
+	_, err = branch.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, base, actual)
+	require.ErrorContains(t, branch.Trim(-1, 1), "within")
+	require.NoError(t, branch.Close())
+	require.ErrorIs(t, branch.Trim(0, LogicalBlockSize), os.ErrClosed)
+}
+
+func TestBranchRecoversIncompleteTailButRejectsCorruption(t *testing.T) {
+	base := make([]byte, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{1}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, branch.Close())
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	_, err = file.Write(bytes.Repeat([]byte{0xaa}, 31))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	recovered, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	require.NoError(t, recovered.Close())
+
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	contents[len(contents)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(path, contents, 0o600))
+	_, err = OpenBranch(path, identity, bytes.NewReader(base))
+	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+func TestBranchRecoveryIgnoresIncompleteMappingRecord(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	committed := bytes.Repeat([]byte{0x22}, LogicalBlockSize)
+	_, err = branch.WriteAt(committed, 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, branch.Close())
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte{0x33}, LogicalBlockSize)
+	header := make([]byte, 64)
+	copy(header[:8], branchRecordMagic[:])
+	binary.BigEndian.PutUint64(header[8:16], 2)
+	binary.BigEndian.PutUint64(header[16:24], 0)
+	binary.BigEndian.PutUint32(header[24:28], LogicalBlockSize)
+	checksum := branchRecordChecksum(header[8:32], payload)
+	copy(header[32:64], checksum[:])
+	_, err = file.Write(append(header, payload[:NBDDeviceSectorSize]...))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	recovered, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	defer recovered.Close()
+	actual := make([]byte, LogicalBlockSize)
+	_, err = recovered.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, committed, actual)
+	require.Equal(t, []uint64{0}, recovered.DirtyBlocks())
+}
+
+func TestBranchRejectsDifferentWriterBinding(t *testing.T) {
+	base := make([]byte, LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+	identity.WriterEpoch++
+	_, err = OpenBranch(path, identity, bytes.NewReader(base))
+	require.ErrorContains(t, err, "different immutable writer binding")
+}
+
+func TestBranchRejectsRecordMetadataCorruption(t *testing.T) {
+	base := make([]byte, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{1}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, branch.Close())
+
+	file, err := os.Open(path)
+	require.NoError(t, err)
+	_, headerEnd, err := readBranchHeader(file)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	contents[headerEnd+23] = 1 // Change block 0 to the still-in-range block 1.
+	require.NoError(t, os.WriteFile(path, contents, 0o600))
+	_, err = OpenBranch(path, identity, bytes.NewReader(base))
+	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+func TestBranchConcurrentBlockWrites(t *testing.T) {
+	const blocks = 32
+	base := make([]byte, blocks*LogicalBlockSize)
+	branch, err := OpenBranch(filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))), bytes.NewReader(base))
+	require.NoError(t, err)
+	defer branch.Close()
+	var wait sync.WaitGroup
+	for block := range blocks {
+		block := block
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, writeErr := branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, LogicalBlockSize), int64(block*LogicalBlockSize))
+			require.NoError(t, writeErr)
+		}()
+	}
+	wait.Wait()
+	require.NoError(t, branch.Flush())
+	for block := range blocks {
+		payload := make([]byte, LogicalBlockSize)
+		_, err := branch.ReadAt(payload, int64(block*LogicalBlockSize))
+		require.NoError(t, err)
+		require.Equal(t, byte(block+1), payload[0])
+	}
+}
+
+func TestBranchDirtyTailCapacityRejectsWholeRequestAndSurvivesRestart(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 4*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	options := BranchOptions{MaxDirtyTailBytes: 2 * LogicalBlockSize}
+	branch, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x22}, LogicalBlockSize)
+	_, err = branch.WriteAt(first, 0)
+	require.NoError(t, err)
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	// This request spans two mapping blocks, but only one record remains. The
+	// capacity error must not leave the first half appended.
+	n, err := branch.WriteAt(bytes.Repeat([]byte{0x33}, 2*LogicalBlockSize), LogicalBlockSize)
+	require.Zero(t, n)
+	var exhausted *DirtyTailCapacityError
+	require.ErrorAs(t, err, &exhausted)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.Equal(t, int64(LogicalBlockSize), exhausted.UsedBytes)
+	require.Equal(t, int64(2*LogicalBlockSize), exhausted.RequestedBytes)
+	require.Equal(t, int64(2*LogicalBlockSize), exhausted.LimitBytes)
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, before.Size(), after.Size())
+
+	usage := branch.DirtyTailUsage()
+	require.Equal(t, DirtyTailUsage{
+		DirtyBytes: LogicalBlockSize, JournalBytes: branchRecordBytes,
+		MaxBytes: 2 * LogicalBlockSize,
+	}, usage)
+	require.NoError(t, branch.Flush(), "capacity must not prevent flushing completed writes")
+	require.NoError(t, branch.Close())
+
+	reopened, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer reopened.Close()
+	require.Equal(t, usage, reopened.DirtyTailUsage())
+	actual := make([]byte, 3*LogicalBlockSize)
+	_, err = reopened.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, first, actual[:LogicalBlockSize])
+	require.Equal(t, base[LogicalBlockSize:3*LogicalBlockSize], actual[LogicalBlockSize:])
+}
+
+func TestBranchDirtyTailCapacityAppliesToRepeatedAndZeroWrites(t *testing.T) {
+	base := bytes.Repeat([]byte{0x55}, 3*LogicalBlockSize)
+	branch, err := OpenBranchWithOptions(
+		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: 2 * LogicalBlockSize},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x66}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x77}, LogicalBlockSize), 0)
+	require.NoError(t, err, "repeated overwrites consume durable journal capacity")
+	before := branch.DirtyTailUsage()
+	require.ErrorIs(t, branch.WriteZeroes(LogicalBlockSize-1, 2), syscall.ENOSPC)
+	require.Equal(t, before, branch.DirtyTailUsage(), "zero request must be admitted atomically")
+	actual := make([]byte, LogicalBlockSize+1)
+	_, err = branch.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x77), actual[LogicalBlockSize-1])
+	require.Equal(t, byte(0x55), actual[LogicalBlockSize])
+}
+
+func TestBranchDirtyTailOptionsAllowRetirementAfterLimitReduction(t *testing.T) {
+	base := make([]byte, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{1}, 2*LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, branch.Close())
+
+	reopened, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: LogicalBlockSize})
+	require.NoError(t, err)
+	defer reopened.Close()
+	_, err = reopened.WriteAt([]byte{2}, 0)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	updates, err := reopened.DurableUpdates()
+	require.NoError(t, err, "a lowered limit must not prevent terminal publication")
+	require.Len(t, updates, 2)
+
+	_, err = OpenBranchWithOptions(path+"-invalid", identity, bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: -1})
+	require.ErrorContains(t, err, "non-negative")
+	var exhausted *DirtyTailCapacityError
+	require.False(t, errors.As(err, &exhausted))
+}
+
+func TestNodeDirtyTailBudgetSerializesBranchesAndReleasesDeletedOwner(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
+	root := t.TempDir()
+	budget, err := NewDirtyTailBudget(2 * LogicalBlockSize)
+	require.NoError(t, err)
+	options := BranchOptions{MaxDirtyTailBytes: 3 * LogicalBlockSize, NodeDirtyBudget: budget}
+	firstPath := filepath.Join(root, "first.wal")
+	secondPath := filepath.Join(root, "second.wal")
+	first, err := OpenBranchWithOptions(firstPath, testBranchIdentity(int64(len(base))), bytes.NewReader(base), options)
+	require.NoError(t, err)
+	secondIdentity := testBranchIdentity(int64(len(base)))
+	secondIdentity.RootFSID = "rootfs-second"
+	second, err := OpenBranchWithOptions(secondPath, secondIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+
+	_, err = first.WriteAt(bytes.Repeat([]byte{0x21}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = second.WriteAt(bytes.Repeat([]byte{0x22}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = first.WriteAt([]byte{0x23}, LogicalBlockSize)
+	var exhausted *DirtyTailCapacityError
+	require.ErrorAs(t, err, &exhausted)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.Equal(t, "node", exhausted.Scope)
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 2 * LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 2,
+	}, budget.Usage())
+
+	require.Error(t, budget.ReleaseOwner(firstPath), "an open branch must retain its reservation")
+	require.NoError(t, first.Close())
+	require.NoError(t, os.Remove(firstPath))
+	require.NoError(t, budget.ReleaseOwner(firstPath))
+	_, err = second.WriteAt([]byte{0x24}, LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+}
+
+func TestNodeDirtyTailBudgetReconcilesConservativeStartupUsage(t *testing.T) {
+	base := bytes.Repeat([]byte{0x31}, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.wal")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x32}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	_, err = file.Write(bytes.Repeat([]byte{0xff}, 10))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	recovered, err := BranchJournalDirtyBytes(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(2*LogicalBlockSize), recovered, "partial tail must be charged conservatively")
+
+	budget, err := NewDirtyTailBudget(4 * LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, budget.Preload(path, recovered))
+	reopened, err := OpenBranchWithOptions(
+		path, identity, bytes.NewReader(base), BranchOptions{
+			MaxDirtyTailBytes: 4 * LogicalBlockSize, NodeDirtyBudget: budget,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: LogicalBlockSize, MaxBytes: 4 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage(), "opening must truncate and reconcile an incomplete record")
+	require.NoError(t, reopened.Close())
+}
+
+func TestNodeDirtyTailBudgetRejectsConcurrentOvercommit(t *testing.T) {
+	base := bytes.Repeat([]byte{0x41}, LogicalBlockSize)
+	root := t.TempDir()
+	budget, err := NewDirtyTailBudget(LogicalBlockSize)
+	require.NoError(t, err)
+	options := BranchOptions{MaxDirtyTailBytes: LogicalBlockSize, NodeDirtyBudget: budget}
+	firstIdentity := testBranchIdentity(int64(len(base)))
+	secondIdentity := firstIdentity
+	secondIdentity.RootFSID = "rootfs-concurrent-second"
+	first, err := OpenBranchWithOptions(filepath.Join(root, "first.wal"), firstIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer first.Close()
+	second, err := OpenBranchWithOptions(filepath.Join(root, "second.wal"), secondIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer second.Close()
+
+	start := make(chan struct{})
+	errorsByBranch := make(chan error, 2)
+	for _, branch := range []*Branch{first, second} {
+		branch := branch
+		go func() {
+			<-start
+			_, err := branch.WriteAt(bytes.Repeat([]byte{0x42}, LogicalBlockSize), 0)
+			errorsByBranch <- err
+		}()
+	}
+	close(start)
+	succeeded := 0
+	exhausted := 0
+	for range 2 {
+		err := <-errorsByBranch
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, syscall.ENOSPC):
+			exhausted++
+		default:
+			t.Fatalf("unexpected concurrent write error: %v", err)
+		}
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 1, exhausted)
+	require.Equal(t, int64(LogicalBlockSize), budget.Usage().UsedBytes)
+}
+
+func TestBranchRetirementReserveIsUnavailableToGuestWrites(t *testing.T) {
+	base := bytes.Repeat([]byte{0x51}, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "retirement-reserve.wal")
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	branch, err := OpenBranchWithOptions(
+		path,
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+		BranchOptions{
+			MaxDirtyTailBytes:      LogicalBlockSize,
+			RetirementReserveBytes: LogicalBlockSize,
+			NodeDirtyBudget:        budget,
+		},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+	require.Equal(t, NodeDirtyTailUsage{
+		ReservedBytes: LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x52}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt([]byte{0x53}, LogicalBlockSize)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.NoError(t, branch.BeginRetirement())
+	require.Equal(t, int64(LogicalBlockSize), budget.Usage().ReservedBytes)
+	_, err = branch.WriteAt([]byte{0x54}, LogicalBlockSize)
+	require.NoError(t, err, "filesystem shutdown traffic may consume the protected reserve")
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 2 * LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+}
+
+func TestBranchPressureBlocksBeforeNBDCapacityErrorUntilPlannedRetirement(t *testing.T) {
+	base := bytes.Repeat([]byte{0x61}, 2*LogicalBlockSize)
+	pressureObserved := make(chan DirtyTailPressure, 1)
+	branch, err := OpenBranchWithOptions(
+		filepath.Join(t.TempDir(), "pressure.wal"),
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+		BranchOptions{
+			MaxDirtyTailBytes: LogicalBlockSize, RetirementReserveBytes: LogicalBlockSize,
+			PressureObserver: func(pressure DirtyTailPressure) { pressureObserved <- pressure },
+		},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x62}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0x63}, LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	var pressure DirtyTailPressure
+	select {
+	case pressure = <-pressureObserved:
+	case <-time.After(time.Second):
+		t.Fatal("dirty-tail pressure was not observed")
+	}
+	require.Equal(t, DirtyTailPressure{
+		Scope: "session", UsedBytes: LogicalBlockSize,
+		RequestedBytes: LogicalBlockSize, LimitBytes: LogicalBlockSize,
+	}, pressure)
+	require.Equal(t, &pressure, branch.DirtyTailPressure())
+	select {
+	case err := <-writeDone:
+		t.Fatalf("pressured write returned before planned retirement: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	require.NoError(t, branch.BeginRetirement())
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("pressured write did not resume for retirement")
+	}
+	require.Nil(t, branch.DirtyTailPressure())
+	require.Equal(t, int64(2*LogicalBlockSize), branch.DirtyTailUsage().DirtyBytes)
+}
+
+func TestNodeDirtyTailRetirementReserveDoesNotScaleWithOwnerCount(t *testing.T) {
+	const owners = 10_000
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	for index := range owners {
+		require.NoError(t, budget.attach(fmt.Sprintf("owner-%05d", index), 0))
+	}
+	require.Equal(t, NodeDirtyTailUsage{
+		ReservedBytes: LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: owners,
+	}, budget.Usage())
+	for index := range owners {
+		require.NoError(t, budget.detach(fmt.Sprintf("owner-%05d", index)))
+	}
+}
+
+func TestNodeDirtyTailSerializesUnrelatedRetirementsUntilArtifactReclaim(t *testing.T) {
+	base := bytes.Repeat([]byte{0x71}, LogicalBlockSize)
+	budget, err := NewDirtyTailBudgetWithReserve(4*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	open := func(name, group string) *Branch {
+		path := filepath.Join(t.TempDir(), name+".wal")
+		branch, openErr := OpenBranchWithOptions(
+			path, testBranchIdentity(int64(len(base))), bytes.NewReader(base),
+			BranchOptions{NodeDirtyBudget: budget, RetirementGroup: group},
+		)
+		require.NoError(t, openErr)
+		return branch
+	}
+	first := open("first", "retire-first")
+	second := open("second", "retire-second")
+	defer second.Close()
+	require.NoError(t, first.BeginRetirement())
+	var busy *DirtyTailRetirementBusyError
+	require.ErrorAs(t, second.BeginRetirement(), &busy)
+	require.Equal(t, "retire-first", busy.ActiveGroup)
+	firstPath := first.dirtyOwner
+	require.NoError(t, first.Close())
+	require.ErrorIs(t, second.BeginRetirement(), syscall.EBUSY,
+		"closing a branch must not release charged retirement headroom")
+	require.NoError(t, os.Remove(firstPath))
+	require.NoError(t, budget.ReleaseOwner(firstPath))
+	require.NoError(t, second.BeginRetirement())
+}
+
+func TestNodeDirtyTailRecoveryHeadroomShrinksAfterRecoveredOwnerReclaim(t *testing.T) {
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, budget.Preload("recovered", 4*LogicalBlockSize))
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 4 * LogicalBlockSize, ReservedBytes: LogicalBlockSize,
+		MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+	require.NoError(t, budget.ReleaseOwner("recovered"))
+	require.NoError(t, budget.attach("new", 0))
+	require.NoError(t, budget.beginRetirement("new"))
+	require.ErrorIs(t, budget.reserve("new", 3*LogicalBlockSize), syscall.ENOSPC,
+		"reclaimed startup overage must not permanently raise the retirement ceiling")
+}
+
+func TestBranchCheckpointRemainsImmutableWhileWriterContinues(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	branch, err := OpenBranch(path, testBranchIdentity(int64(len(base))), bytes.NewReader(base))
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x21}, LogicalBlockSize)
+	second := bytes.Repeat([]byte{0x22}, LogicalBlockSize)
+	_, err = branch.WriteAt(first, 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(second, LogicalBlockSize)
+	require.NoError(t, err)
+
+	checkpoint, err := branch.Checkpoint()
+	require.NoError(t, err, "checkpoint must flush the captured boundary")
+	require.Equal(t, uint64(2), checkpoint.Sequence())
+	require.Equal(t, 2, checkpoint.RecordCount())
+	require.Len(t, branch.records.chunks, 2, "checkpoint must rotate a partially filled append-index chunk")
+
+	third := bytes.Repeat([]byte{0x33}, LogicalBlockSize)
+	_, err = branch.WriteAt(third, 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x34}, LogicalBlockSize), 2*LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+	require.NoError(t, os.Remove(path), "the checkpoint must own the exact inode rather than reopen its path")
+
+	blocks, err := checkpoint.Blocks()
+	require.NoError(t, err)
+	require.Equal(t, []uint64{0, 1}, blocks)
+	actual := make([]byte, LogicalBlockSize)
+	n, err := checkpoint.ReadBlock(0, actual)
+	require.NoError(t, err)
+	require.Equal(t, LogicalBlockSize, n)
+	require.Equal(t, first, actual, "a later overwrite must not change the checkpoint")
+	records, err := checkpoint.DurableRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	require.Equal(t, second, records[1].Data)
+	require.NoError(t, checkpoint.Close())
+	_, err = checkpoint.Blocks()
+	require.ErrorIs(t, err, os.ErrClosed)
+}
+
+func TestBranchCheckpointRejectsOversizedCompositeBeforeReadingPayload(t *testing.T) {
+	base := make([]byte, 12*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	branch, err := OpenBranch(path, testBranchIdentity(int64(len(base))), bytes.NewReader(base))
+	require.NoError(t, err)
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, LogicalBlockSize), int64(block*LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	checkpoint, err := branch.Checkpoint()
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+	require.NoError(t, os.Truncate(path, 0), "capacity must be rejected before checkpoint payload reads")
+
+	_, err = checkpoint.DurableRecords()
+	var tooLarge *CompositeTailTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Greater(t, tooLarge.Required, tooLarge.Limit)
+	require.NoError(t, checkpoint.Close())
+}
+
+func testBranchIdentity(logicalSize int64) BranchIdentity {
+	return BranchIdentity{
+		Version: BranchFormatVersion, RootFSID: "rootfs-a", GenerationID: "generation-a", WriterEpoch: 1,
+		LogicalSizeBytes: logicalSize, BaseRootDigest: digest.FromString("base-root").String(),
+	}
+}

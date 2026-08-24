@@ -15,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
@@ -26,44 +26,39 @@ type awsECRAPI interface {
 }
 
 type awsProvider struct {
-	cfg     config.RegistryAWSConfig
-	secrets secretReader
+	cfg config.RegistryAWSConfig
 }
 
 func (p *awsProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
 	if p.cfg.Region == "" {
 		return nil, fmt.Errorf("aws region is required")
 	}
-	accessKey := strings.TrimSpace(p.cfg.AccessKeyID)
-	secretKey := strings.TrimSpace(p.cfg.SecretAccessKey)
-	sessionToken := strings.TrimSpace(p.cfg.SessionToken)
-	if accessKey == "" || secretKey == "" {
-		if strings.TrimSpace(p.cfg.AccessKeySecret) == "" {
-			return nil, fmt.Errorf("aws access key secret is required")
-		}
-
-		var err error
-		accessKey, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.AccessKeyKey, "accessKeyId", "aws access key")
-		if err != nil {
-			return nil, err
-		}
-		secretKey, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.SecretKeyKey, "secretAccessKey", "aws secret key")
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(p.cfg.SessionTokenKey) != "" {
-			sessionToken, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.SessionTokenKey, "", "aws session token")
-			if err != nil {
-				return nil, err
-			}
-		}
+	accessKey, err := credentialValue(p.cfg.AccessKeyID, p.cfg.AccessKeyIDFile, "aws access key id")
+	if err != nil {
+		return nil, err
+	}
+	secretKey, err := credentialValue(p.cfg.SecretAccessKey, p.cfg.SecretAccessKeyFile, "aws secret access key")
+	if err != nil {
+		return nil, err
+	}
+	sessionToken, err := credentialValue(p.cfg.SessionToken, p.cfg.SessionTokenFile, "aws session token")
+	if err != nil {
+		return nil, err
+	}
+	if (accessKey == "") != (secretKey == "") {
+		return nil, errors.New("aws access key id and secret access key must be configured together")
+	}
+	if sessionToken != "" && accessKey == "" {
+		return nil, errors.New("aws session token requires static access key credentials")
 	}
 
-	awsCfg, err := awsconfig.LoadDefaultConfig(
-		ctx,
-		awsconfig.WithRegion(p.cfg.Region),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken)),
-	)
+	loadOptions := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(p.cfg.Region)}
+	if accessKey != "" {
+		loadOptions = append(loadOptions, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken),
+		))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}

@@ -8,10 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
-	"go.uber.org/zap"
 )
 
 func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
@@ -35,6 +33,45 @@ func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
 	}
 }
 
+func TestReadinessCheckFailsClosedWhenDependencyIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		readinessProbe: func(context.Context) error {
+			return context.DeadlineExceeded
+		},
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+	server.readinessCheck(ctx)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(recorder.Body.String(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("readiness response exposed dependency error: %s", recorder.Body.String())
+	}
+}
+
+func TestReadinessCheckSucceedsWhenDependencyIsReady(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		readinessProbe: func(context.Context) error { return nil },
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+	server.readinessCheck(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
 func managerHasRoute(router *gin.Engine, method, path string) bool {
 	for _, route := range router.Routes() {
 		if route.Method == method && route.Path == path {
@@ -45,7 +82,7 @@ func managerHasRoute(router *gin.Engine, method, path string) bool {
 }
 
 func TestRequireNetworkPolicyCapability(t *testing.T) {
-	server := newTestServerForCapability(t, network.NewNoopProvider())
+	server := newTestServerForCapability(t, false)
 	recorder := httptest.NewRecorder()
 	ctx, engine := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb-1/network", nil)
@@ -138,7 +175,7 @@ func TestRequireCredentialSourceCapability(t *testing.T) {
 
 func TestRequireNetworkPolicyInBody(t *testing.T) {
 	t.Run("allows request without network config", func(t *testing.T) {
-		server := newTestServerForCapability(t, network.NewNoopProvider())
+		server := newTestServerForCapability(t, false)
 		body := `{"template":"default","config":{"ttl":300}}`
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(body))
@@ -165,7 +202,7 @@ func TestRequireNetworkPolicyInBody(t *testing.T) {
 	})
 
 	t.Run("blocks request with network config when unsupported", func(t *testing.T) {
-		server := newTestServerForCapability(t, network.NewNoopProvider())
+		server := newTestServerForCapability(t, false)
 		body := `{"template":"default","config":{"network":{"mode":"allow_all"}}}`
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(body))
@@ -190,7 +227,7 @@ func TestRequireNetworkPolicyInBody(t *testing.T) {
 	})
 
 	t.Run("allows request with network config when supported", func(t *testing.T) {
-		server := newTestServerForCapability(t, testProvider("ctld"))
+		server := newTestServerForCapability(t, true)
 		body := `{"config":{"network":{"mode":"allow_all"}}}`
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes/sb-1", strings.NewReader(body))
@@ -215,28 +252,20 @@ func TestRequireNetworkPolicyInBody(t *testing.T) {
 	})
 }
 
-func newTestServerForCapability(t *testing.T, provider network.Provider) *Server {
+func newTestServerForCapability(t *testing.T, supported bool) *Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
-		NetworkProvider: provider,
-		Config:          service.SandboxServiceConfig{},
-		Logger:          zap.NewNop(),
-	})
-	return &Server{sandboxService: sandboxService}
+	return &Server{sandboxNetworkPolicy: capabilityNetworkPolicyService(supported)}
 }
 
-func testProvider(name string) network.Provider {
-	return fakeProvider{name: name}
+type capabilityNetworkPolicyService bool
+
+func (s capabilityNetworkPolicyService) SupportsNetworkPolicy() bool { return bool(s) }
+
+func (capabilityNetworkPolicyService) GetNetworkPolicy(context.Context, string) (*v1alpha1.SandboxNetworkPolicy, error) {
+	return nil, nil
 }
 
-type fakeProvider struct {
-	name string
+func (capabilityNetworkPolicyService) UpdateNetworkPolicy(context.Context, string, *v1alpha1.SandboxNetworkPolicy) (*v1alpha1.SandboxNetworkPolicy, error) {
+	return nil, nil
 }
-
-func (p fakeProvider) Name() string                                     { return p.name }
-func (p fakeProvider) EnsureBaseline(_ context.Context, _ string) error { return nil }
-func (p fakeProvider) ApplySandboxPolicy(_ context.Context, _ network.SandboxPolicyInput) error {
-	return nil
-}
-func (p fakeProvider) RemoveSandboxPolicy(_ context.Context, _, _ string) error { return nil }

@@ -87,6 +87,7 @@ func TestNewCMD(t *testing.T) {
 
 			if cmd == nil {
 				t.Fatal("NewCMD() returned nil CMD")
+				return
 			}
 
 			if cmd.ID() != tt.id {

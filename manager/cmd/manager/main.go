@@ -8,35 +8,30 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/deletionwebhook"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/legacyvolumemigrations"
 	managermetering "github.com/sandbox0-ai/sandbox0/manager/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -44,24 +39,17 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
-	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
-	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"go.uber.org/zap"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/flowcontrol"
 )
 
 func main() {
-
-	// Load configuration
 	cfg := config.LoadManagerConfig()
 
-	// Initialize logger
 	logger, err := observability.NewLogger(observability.LoggerConfig{
 		ServiceName: "manager",
 		Level:       cfg.LogLevel,
@@ -78,36 +66,28 @@ func main() {
 		zap.Int("metricsPort", cfg.MetricsPort),
 	)
 
-	// Create context that cancels on signal
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	templateReconcilerQuiesceSignals := make(chan os.Signal, 1)
-	signal.Notify(templateReconcilerQuiesceSignals, syscall.SIGUSR1)
-	defer signal.Stop(templateReconcilerQuiesceSignals)
 
-	// Initialize observability provider
 	obsProvider, err := observability.New(observability.ConfigFromEnv("manager", logger))
 	if err != nil {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}
 	defer obsProvider.Shutdown(ctx)
-
 	managerMetrics := obsmetrics.NewManager(obsProvider.MetricsRegistryOrNil())
 
-	kubernetesClients, err := buildManagerKubernetesClients(cfg, obsProvider, managerMetrics, logger)
-	if err != nil {
-		logger.Fatal("Failed to initialize Kubernetes clients", zap.Error(err))
-	}
-	k8sClient := kubernetesClients.client
-	hotClaimK8sClient := kubernetesClients.hotClaimClient
-	crdClient := kubernetesClients.crdClient
-
-	// Initialize database (required for template store)
 	if cfg.DatabaseURL == "" {
-		logger.Fatal("DATABASE_URL is required for template store")
+		logger.Fatal("DATABASE_URL is required")
 	}
-
-	pool, err := initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, obsProvider)
+	pool, err := initDatabase(
+		ctx,
+		cfg.DatabaseURL,
+		cfg.DatabaseMaxConns,
+		cfg.DatabaseMinConns,
+		true,
+		logger,
+		obsProvider,
+	)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
@@ -135,9 +115,9 @@ func main() {
 		logger.Fatal("Failed to configure credential store", zap.Error(err))
 	}
 
-	// Initialize clock for cross-cluster time synchronization
-	var clk *clock.Clock
-	clk, err = clock.NewPGX(ctx, pool,
+	clk, err := clock.NewPGX(
+		ctx,
+		pool,
 		clock.WithSyncInterval(30*time.Second),
 		clock.WithZapLogger(logger),
 	)
@@ -145,37 +125,11 @@ func main() {
 		logger.Fatal("Failed to initialize clock", zap.Error(err))
 	}
 	defer clk.Close()
-
 	logger.Info("Clock initialized for cross-cluster time synchronization",
 		zap.Int64("offset_ms", clk.Offset().Milliseconds()),
 		zap.Int64("rtt_ms", clk.LastRTT().Milliseconds()),
 	)
 
-	informerRuntime, err := buildManagerInformerRuntime(
-		kubernetesClients,
-		cfg,
-		pool,
-		clk,
-		managerMetrics,
-		logger,
-	)
-	if err != nil {
-		logger.Fatal("Failed to initialize Kubernetes informers", zap.Error(err))
-	}
-	informerFactory := informerRuntime.factory
-	crdInformerFactory := informerRuntime.crdFactory
-	podInformer := informerRuntime.podInformer
-	podLister := informerRuntime.podLister
-	nodeLister := informerRuntime.nodeLister
-	secretLister := informerRuntime.secretLister
-	namespaceLister := informerRuntime.namespaceLister
-	serviceAccountLister := informerRuntime.serviceAccountLister
-	networkPolicyLister := informerRuntime.networkPolicyLister
-	operator := informerRuntime.operator
-	recorder := informerRuntime.recorder
-	sandboxIndex := informerRuntime.sandboxIndex
-	teardownCoordinator := informerRuntime.teardownCoordinator
-	autoscalerAnnotationKeys := informerRuntime.autoscalerAnnotationKeys
 	meteringDB, meteringSink, meteringSinkReady, err := initMetering(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
@@ -183,7 +137,13 @@ func main() {
 	if meteringDB != nil {
 		defer meteringDB.Close()
 	}
+
 	sandboxStore := sandboxstore.NewPGSandboxStore(pool)
+	managerNodeAuthority, err := buildManagerNodeAuthority(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure manager node authority", zap.Error(err))
+	}
+
 	sandboxDeletionWebhookDispatcher := deletionwebhook.NewSandboxDeletionWebhookDispatcher(
 		deletionwebhook.NewSandboxDeletionWebhookOutbox(pool),
 		obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 5 * time.Second}),
@@ -196,6 +156,7 @@ func main() {
 			logger.Error("Sandbox deletion webhook dispatcher stopped", zap.Error(err))
 		}
 	}()
+
 	var meteringRepo *meteringoutbox.Repository
 	if cfg.Metering.Enabled {
 		meteringRepo = meteringoutbox.NewRepository(pool)
@@ -229,6 +190,7 @@ func main() {
 		}()
 		logger.Info("Metering PostgreSQL outbox projector started")
 	}
+
 	objectStoreRequestMeter := startManagerObjectStoreRequestMetering(
 		ctx,
 		meteringRepo,
@@ -237,131 +199,62 @@ func main() {
 		logger,
 	)
 	defer flushObjectStoreRequestMetering(objectStoreRequestMeter, logger)
-	if meteringRepo != nil {
-		lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
-		lifecycleProjector.SetLogger(logger)
-		lifecycleProjector.SetMetrics(managerMetrics)
-		lifecycleProjector.SetRuntimePauseLookup(func(ctx context.Context, info managermetering.RuntimeDeletionInfo) (bool, error) {
-			record, err := sandboxStore.GetSandbox(ctx, info.SandboxID)
-			if err != nil || record == nil {
-				return false, err
-			}
-			return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
-		})
-		podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
-	}
 
-	networkComponents := buildManagerNetworkComponents(
-		cfg,
-		k8sClient,
-		podInformer,
-		podLister,
-		networkPolicyLister,
-		logger,
-	)
-	networkPolicyService := networkComponents.policyService
-	templateNamespacePolicy := networkComponents.namespacePolicy
-	networkProvider := networkComponents.provider
-
+	networkPolicyService := buildNomadManagerNetworkComponents(logger).policyService
 	internalAuth := buildManagerInternalAuth(logger)
-	internalAuthGen := internalAuth.generator
 	internalTokenGenerator := internalAuth.procdTokenGenerator
 
-	// Parse ratios
-	pauseMemoryBufferRatio, err := strconv.ParseFloat(cfg.PauseMemoryBufferRatio, 64)
-	if err != nil {
-		logger.Warn("Failed to parse PauseMemoryBufferRatio, using default 1.1", zap.String("value", cfg.PauseMemoryBufferRatio), zap.Error(err))
-		pauseMemoryBufferRatio = 1.1
-	}
+	procdHTTPClient := obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})
+	procdClient := procdapi.NewProcdClientWithHTTPClient(procdHTTPClient)
 
-	// Create services
-	cfgForSandbox := service.SandboxServiceConfig{
-		ClusterID:                           naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
-		SandboxMemoryPerCPU:                 cfg.TeamTemplateMemoryPerCPU,
-		SandboxMaxMemory:                    cfg.SandboxMaxMemory,
-		PauseMinMemoryRequest:               cfg.PauseMinMemoryRequest,
-		PauseMinMemoryLimit:                 cfg.PauseMinMemoryLimit,
-		PauseMemoryBufferRatio:              pauseMemoryBufferRatio,
-		PauseMinCPU:                         cfg.PauseMinCPU,
-		CtldEnabled:                         cfg.CtldEnabled,
-		CtldPort:                            cfg.CtldPort,
-		CtldClientTimeout:                   cfg.CtldClientTimeout.Duration,
-		CtldHTTPClient:                      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
-		ProcdPort:                           cfg.ProcdConfig.HTTPPort,
-		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
-		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
-		RuntimeReadyTimeout:                 cfg.RuntimeReadyTimeout.Duration,
-		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
-		PreferredNodeSelector:               cfg.SandboxPodPlacement.PreferredNodeSelector,
-		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
-		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
-		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
-		PublicRootDomain:                    cfg.PublicRootDomain,
-		PublicRegionID:                      cfg.PublicRegionID,
-		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
-	}
-
-	var quotaUsageStore quota.UsageStore
+	var meteringQuotaUsageStore quota.UsageStore
 	if meteringSink != nil {
-		quotaUsageStore = meteringSink
+		meteringQuotaUsageStore = meteringSink
 	}
+	quotaUsageStore := quota.UsageStore(&managerQuotaUsageStore{
+		activeSandboxes: sandboxStore,
+		metering:        meteringQuotaUsageStore,
+	})
 	quotaRepo, err := buildQuotaRepository(ctx, pool, cfg, quotaUsageStore)
 	if err != nil {
 		logger.Fatal("Invalid quota configuration", zap.Error(err))
 	}
-	hotClaimReservationController := service.NewHotClaimReservationController(
-		k8sClient,
-		podLister,
-		sandboxStore,
-		logger,
-	)
-	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, objectStoreRequestMeter)
-	if rootFSObjectStoreErr != nil {
-		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
+	templateStore := templstorepg.NewStore(pool)
+	runtimeClasses, err := nomadclaim.LoadRuntimeClassCatalog(cfg.NodeAuthority.Claim.ClassCatalogFile)
+	if err != nil {
+		logger.Fatal("Failed to load the Nomad runtime class catalog", zap.Error(err))
 	}
-	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
-		K8sClient:                   k8sClient,
-		HotClaimK8sClient:           hotClaimK8sClient,
-		PodLister:                   podLister,
-		NodeLister:                  nodeLister,
-		SandboxIndex:                sandboxIndex,
-		SecretLister:                secretLister,
-		TemplateLister:              operator.GetTemplateLister(),
-		NetworkPolicyService:        networkPolicyService,
-		NetworkProvider:             networkProvider,
-		InternalTokenGenerator:      internalTokenGenerator,
-		Clock:                       clk,
-		Config:                      cfgForSandbox,
-		Logger:                      logger,
-		Metrics:                     managerMetrics,
-		HotClaimReservationEnqueuer: hotClaimReservationController,
-		CredentialStore:             credentialStore,
-		QuotaStore:                  quotaRepo,
-		SandboxStore:                sandboxStore,
-		RootFSObjectDeleter:         rootFSObjectStore,
-	})
-	sandboxService.SetTemplateImageBuildAvailable(false)
-	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
-	podInformer.Informer().AddEventHandler(hotClaimReservationController.ResourceEventHandler())
-	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
-	sandboxLifecycleController.SetMetrics(managerMetrics)
-	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
-	sandboxCrashLogCollector := service.NewSandboxCrashLogCollector(k8sClient, logger, managerMetrics)
-	podInformer.Informer().AddEventHandler(sandboxCrashLogCollector.ResourceEventHandler())
-	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
-	sandboxService.SetPauseEnqueuer(sandboxPauseController)
-	sandboxCrashRecoveryController := service.NewSandboxCrashRecoveryController(k8sClient, podLister, sandboxService, logger)
-	podInformer.Informer().AddEventHandler(sandboxCrashRecoveryController.ResourceEventHandler())
-	sandboxRuntimeReconciler := service.NewSandboxRuntimeReconciler(
-		naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+
+	rootFSObjectStore, err := buildRootFSObjectStore(cfg, objectStoreRequestMeter)
+	if err != nil {
+		logger.Fatal("Nomad RootFS object store is unavailable", zap.Error(err))
+	}
+	rootFSCompositeMaterializer, err := configureRootFSCompositeMaterializer(
+		cfg,
 		sandboxStore,
-		podLister,
-		sandboxService,
-		logger,
+		rootFSObjectStore,
 	)
-	podInformer.Informer().AddEventHandler(sandboxRuntimeReconciler.ResourceEventHandler())
-	sandboxLogWorker := buildSandboxObservabilityLogWorker(cfg, internalAuthGen, obsProvider, logger)
+	if err != nil {
+		logger.Fatal("Nomad RootFS composite materializer is unavailable", zap.Error(err))
+	}
+	rootFSImportWorker, err := configureRootFSImportWorker(cfg, sandboxStore, rootFSObjectStore)
+	if err != nil {
+		logger.Fatal("Durable RootFS importer is unavailable", zap.Error(err))
+	}
+	rootFSImportDiscovery, err := configureRootFSImportDiscovery(
+		cfg,
+		templateStore,
+		sandboxStore,
+		runtimeClasses.ArtifactPlatforms(),
+	)
+	if err != nil {
+		logger.Fatal("Template RootFS import discovery is unavailable", zap.Error(err))
+	}
+	sandboxClaimReconciler, err := configureSandboxClaimReconciler(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Nomad abandoned sandbox claim reconciler is unavailable", zap.Error(err))
+	}
+
 	staticAuth := make([]egressauthservice.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
 		staticAuth = append(staticAuth, egressauthservice.StaticAuthConfig{
@@ -376,107 +269,135 @@ func main() {
 	}, credentialStore, logger)
 	credentialSourceService := credentialsource.NewCredentialSourceService(credentialStore, logger)
 
-	templateService := templateservice.New(templateservice.Dependencies{
-		KubernetesClient: k8sClient,
-		CRDClient:        crdClient,
-		Templates:        operator.GetTemplateLister(),
-		Namespaces:       namespaceLister,
-		Pods:             podLister,
-		Secrets:          secretLister,
-		ServiceAccounts:  serviceAccountLister,
-		Network:          networkProvider,
-		Registry:         cfg.Registry,
-		Logger:           logger,
+	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
+	sandboxRuntime, err := buildSandboxRuntime(cfg, sandboxRuntimeBackendDependencies{
+		nodeAuthority:   managerNodeAuthority,
+		store:           sandboxStore,
+		quotaLimits:     quotaRepo,
+		templates:       templateStore,
+		networkPolicies: networkPolicyService,
+		resourcePolicy:  templateResourcePolicy,
+		prober:          procdClient,
+		tokenGenerator:  internalTokenGenerator,
+		observer:        runtimeslotclaim.NewPrometheusObserver(obsProvider.MetricsRegistryOrNil()),
+		defaultTTL:      cfg.DefaultSandboxTTL.Duration,
+		now:             clk.Now,
+		logger:          logger,
+		runtimeClasses:  runtimeClasses,
 	})
-	templateService.SetNamespacePolicyReconciler(templateNamespacePolicy)
-	operator.SetNamespacePolicyReconciler(templateNamespacePolicy)
-
-	registryProvider, err := registryprovider.NewProvider(cfg.Registry, secretLister, logger)
 	if err != nil {
-		logger.Warn("Registry provider disabled", zap.Error(err))
+		logger.Fatal("Failed to configure Nomad sandbox runtime", zap.Error(err))
 	}
-	registryService := registryservice.NewRegistryService(registryProvider, logger)
-	templateStore := templstorepg.NewStore(pool)
-	var templateReconciler *templreconciler.SingleClusterReconciler
-	if cfg.TemplateStoreEnabled {
-		templateApplier := templateservice.NewTemplateApplier(templateService)
-		reconcileInterval := cfg.ResyncPeriod.Duration
-		if reconcileInterval == 0 {
-			reconcileInterval = 30 * time.Second
-		}
-		templateReconciler = templreconciler.NewSingleClusterReconciler(
-			templateStore,
-			templateApplier,
+
+	if meteringRepo != nil {
+		lifecycleProjector, err := managermetering.NewNomadLifecycleProjector(
+			meteringRepo,
+			cfg.RegionID,
 			cfg.DefaultClusterId,
-			reconcileInterval,
-			clk,
-			logger,
-		)
-	} else {
-		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
-	}
-	var templateBuildWorker *templatebuild.TemplateBuildWorker
-	switch {
-	case registryProvider == nil:
-		logger.Warn("Template image build worker disabled; registry provider is not configured")
-	case rootFSObjectStoreErr != nil:
-		logger.Warn("Template image build worker disabled; rootfs object store is unavailable", zap.Error(rootFSObjectStoreErr))
-	case rootFSObjectStore == nil:
-		logger.Warn("Template image build worker disabled; rootfs object store is not configured")
-	default:
-		imagePublisher, publisherErr := templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
-		if publisherErr != nil {
-			logger.Warn("Template image build worker disabled", zap.Error(publisherErr))
-			break
-		}
-		templateBuildWorker, err = templatebuild.NewTemplateBuildWorker(
-			templateStore,
-			sandboxService,
-			imagePublisher,
-			rootFSObjectStore,
-			templatebuild.TemplateBuildWorkerConfig{
-				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-			},
-			logger,
+			managermetering.NomadLifecycleProjectorConfig{},
 		)
 		if err != nil {
-			logger.Warn("Template image build worker disabled", zap.Error(err))
-		} else {
-			sandboxService.SetTemplateImageBuildAvailable(true)
+			logger.Fatal("Failed to configure Nomad lifecycle metering", zap.Error(err))
 		}
+		lifecycleProjector.SetLogger(logger)
+		lifecycleProjector.SetMetrics(managerMetrics)
+		go func() {
+			if err := lifecycleProjector.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Nomad lifecycle metering projector stopped", zap.Error(err))
+			}
+		}()
+		logger.Info("Nomad lifecycle metering projector started")
 	}
-	go serveTemplateReconcilerQuiesceSignals(
-		ctx,
-		templateReconcilerQuiesceSignals,
-		templateReconciler,
-		defaultTemplateReconcilerQuiesceSupportedMarkerPath,
-		defaultTemplateReconcilerQuiescedMarkerPath,
-		logger,
-	)
 
-	// Create cluster service (for scheduler)
-	clusterService := clusterservice.NewClusterService(
-		k8sClient,
-		podLister,
-		nodeLister,
-		operator.GetTemplateLister(),
-		logger,
+	sandboxReader, err := service.NewNomadSandboxReader(sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox query service", zap.Error(err))
+	}
+	sandboxUpdater, err := service.NewNomadSandboxUpdater(sandboxStore, cfg.DefaultSandboxTTL.Duration, clk.Now)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox mutation service", zap.Error(err))
+	}
+	sandboxRootFS, err := service.NewNomadSandboxRootFSService(sandboxStore, clk.Now)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox RootFS service", zap.Error(err))
+	}
+	nomadSandboxNetworkPolicy, err := service.NewNomadSandboxNetworkPolicyService(
+		sandboxStore,
+		networkPolicyService,
+		managerNodeAuthority,
 	)
-	// Create cleanup controller
-	cleanupController := controller.NewCleanupController(
-		k8sClient,
-		podLister,
-		operator.GetTemplateLister(),
-		recorder,
-		clk,
-		sandboxService,
-		sandboxService,
-		logger,
-		cfg.CleanupInterval.Duration,
-	)
-	cleanupController.SetPodTeardownCoordinator(teardownCoordinator)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox network policy service", zap.Error(err))
+	}
 
-	// Initialize internal auth validator
+	pressurePauser, ok := sandboxRuntime.(rootfswriterauthority.PressurePauser)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime lacks exact RootFS pressure pause authority")
+	}
+	managerNodeAuthority.SetWriterPressurePauser(pressurePauser)
+
+	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxRuntime, logger)
+	sandboxRuntime.SetPauseEnqueuer(sandboxPauseController)
+	hardExpiryTerminator, ok := sandboxRuntime.(service.SandboxHardExpiryTerminator)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime lacks exact hard-expiry termination")
+	}
+	sandboxTTLController, err := service.NewSandboxTTLController(
+		sandboxStore,
+		sandboxRuntime,
+		hardExpiryTerminator,
+		service.SandboxTTLControllerConfig{Interval: cfg.CleanupInterval.Duration},
+		clk.Now,
+		logger,
+	)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox TTL controller", zap.Error(err))
+	}
+
+	forkReconciler, _ := sandboxRuntime.(service.SandboxForkReconciler)
+	rebaseReconciler, _ := sandboxRuntime.(service.SandboxRootFSRebaseReconciler)
+	rootFSRebaser, _ := sandboxRuntime.(service.SandboxRootFSRebaser)
+	var sandboxRootFSController *service.SandboxRootFSController
+	if forkReconciler != nil || rebaseReconciler != nil {
+		sandboxRootFSController = service.NewSandboxRootFSController(
+			sandboxStore,
+			forkReconciler,
+			rebaseReconciler,
+			logger,
+		)
+	}
+	sandboxNetworkMutationController := service.NewSandboxNetworkMutationController(
+		sandboxStore,
+		nomadSandboxNetworkPolicy,
+		logger,
+	)
+	nomadSandboxNetworkPolicy.SetMutationEnqueuer(sandboxNetworkMutationController)
+
+	var templateBuildWorker *templatebuild.TemplateBuildWorker
+	capturer, ok := sandboxRuntime.(templatebuild.Capturer)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime cannot capture RootFS generations")
+	}
+	templateBuildWorker, err = templatebuild.NewTemplateBuildWorker(
+		templateStore,
+		capturer,
+		templatebuild.TemplateBuildWorkerConfig{
+			ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+		},
+		logger,
+	)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad block-COW template build worker", zap.Error(err))
+	}
+	sandboxSourceResolver, err := service.NewNomadSandboxTemplateSourceResolver(
+		sandboxStore,
+		true,
+		clk.Now,
+	)
+	if err != nil {
+		logger.Fatal("Failed to configure Nomad sandbox template source resolver", zap.Error(err))
+	}
+
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
 	if err != nil {
 		logger.Fatal("Failed to load internal auth public key",
@@ -484,28 +405,32 @@ func main() {
 			zap.Error(err),
 		)
 	}
-
 	validatorConfig := internalauth.DefaultValidatorConfig(internalauth.ServiceManager, publicKey)
 	validatorConfig.AllowedCallers = internalauth.ManagerAllowedCallers()
 	authValidator := internalauth.NewValidator(validatorConfig)
-
 	logger.Info("Internal authentication enabled",
 		zap.String("target", internalauth.ServiceManager),
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
-		SandboxService:          sandboxService,
+		SandboxReader:           sandboxReader,
+		SandboxUpdater:          sandboxUpdater,
+		SandboxNetworkPolicy:    nomadSandboxNetworkPolicy,
+		SandboxRootFS:           sandboxRootFS,
+		SandboxSourceResolver:   sandboxSourceResolver,
+		SandboxClaimer:          sandboxRuntime,
+		SandboxTerminator:       sandboxRuntime,
+		SandboxPauser:           sandboxRuntime,
+		SandboxResumer:          sandboxRuntime,
+		SandboxForker:           sandboxRuntime,
+		SandboxRootFSRebaser:    rootFSRebaser,
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
-		TemplateService:         templateService,
-		RegistryService:         registryService,
+		PrivateRegistryHosts:    managerPrivateRegistryHosts(cfg.Registry),
 		TemplateStore:           templateStore,
-		TemplateReconciler:      templateReconciler,
 		TemplateStoreEnabled:    cfg.TemplateStoreEnabled,
-		TemplateResourcePolicy:  s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
-		ClusterService:          clusterService,
+		TemplateResourcePolicy:  templateResourcePolicy,
 		QuotaRepository:         quotaRepo,
 		AuthValidator:           authValidator,
 		Logger:                  logger,
@@ -513,168 +438,57 @@ func main() {
 		ObservabilityProvider:   obsProvider,
 		PublicRootDomain:        cfg.PublicRootDomain,
 		PublicRegionID:          cfg.PublicRegionID,
+		ReadinessProbe:          pool.Ping,
 	})
 
 	controllers := &managerControllerSet{
-		cfg:                            cfg,
-		k8sClient:                      k8sClient,
-		podLister:                      podLister,
-		clock:                          clk,
-		logger:                         logger,
-		operator:                       operator,
-		cleanupController:              cleanupController,
-		sandboxService:                 sandboxService,
-		sandboxLifecycleController:     sandboxLifecycleController,
-		sandboxCrashLogCollector:       sandboxCrashLogCollector,
-		sandboxCrashRecoveryController: sandboxCrashRecoveryController,
-		sandboxRuntimeReconciler:       sandboxRuntimeReconciler,
-		hotClaimReservationController:  hotClaimReservationController,
-		sandboxPauseController:         sandboxPauseController,
-		templateReconciler:             templateReconciler,
-		templateBuildWorker:            templateBuildWorker,
-		sandboxLogWorker:               sandboxLogWorker,
-		sandboxStore:                   sandboxStore,
-		rootFSObjectStore:              rootFSObjectStore,
-		rootFSObjectStoreErr:           rootFSObjectStoreErr,
-		meteringRepo:                   meteringRepo,
-		managerMetrics:                 managerMetrics,
+		cfg:                              cfg,
+		clock:                            clk,
+		logger:                           logger,
+		sandboxPauseController:           sandboxPauseController,
+		sandboxTTLController:             sandboxTTLController,
+		sandboxRootFSController:          sandboxRootFSController,
+		sandboxNetworkMutationController: sandboxNetworkMutationController,
+		templateBuildWorker:              templateBuildWorker,
+		sandboxStore:                     sandboxStore,
+		rootFSObjectStore:                rootFSObjectStore,
+		meteringRepo:                     meteringRepo,
+		managerMetrics:                   managerMetrics,
 	}
 
 	app := &managerApp{
-		ctx:                   ctx,
-		cancel:                cancel,
-		logger:                logger,
-		k8sClient:             k8sClient,
-		httpServer:            httpServer,
-		informerFactory:       informerFactory,
-		crdInformerFactory:    crdInformerFactory,
-		metricsPort:           cfg.MetricsPort,
-		leaderElectionEnabled: cfg.LeaderElection,
-		startControllers:      controllers.Start,
-		cacheSyncs:            informerRuntime.cacheSyncs(),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		logger:                 logger,
+		httpServer:             httpServer,
+		nodeAuthority:          managerNodeAuthority,
+		rootFSMaterializer:     rootFSCompositeMaterializer,
+		rootFSImportDiscovery:  rootFSImportDiscovery,
+		rootFSImporter:         rootFSImportWorker,
+		sandboxClaimReconciler: sandboxClaimReconciler,
+		metricsPort:            cfg.MetricsPort,
+		startControllers:       controllers.Start,
 	}
 	app.Run()
 }
 
-type templateReconcilerQuiescer interface {
-	Quiesce(context.Context) error
-}
-
-const (
-	defaultTemplateReconcilerQuiesceSupportedMarkerPath = "/tmp/sandbox0-manager-template-reconciler-quiesce-supported"
-	defaultTemplateReconcilerQuiescedMarkerPath         = "/tmp/sandbox0-manager-template-reconciler-quiesced"
-)
-
-// serveTemplateReconcilerQuiesceSignals exposes a process-local maintenance
-// barrier without stopping the manager APIs needed to drain active sandboxes.
-func serveTemplateReconcilerQuiesceSignals(
-	ctx context.Context,
-	signals <-chan os.Signal,
-	reconciler templateReconcilerQuiescer,
-	supportedMarkerPath string,
-	quiescedMarkerPath string,
-	logger *zap.Logger,
-) {
-	if err := os.Remove(quiescedMarkerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Error("Failed to clear stale template reconciliation quiesce acknowledgement", zap.Error(err))
-		return
-	}
-	if err := os.WriteFile(supportedMarkerPath, nil, 0o600); err != nil {
-		logger.Error("Failed to publish template reconciliation quiesce support", zap.Error(err))
-	} else {
-		logger.Info("Template reconciliation quiesce signal enabled")
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-signals:
-			if reconciler != nil {
-				quiesceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				err := reconciler.Quiesce(quiesceCtx)
-				cancel()
-				if err != nil {
-					logger.Error("Failed to quiesce template reconciliation", zap.Error(err))
-					continue
-				}
-			}
-			if err := os.WriteFile(quiescedMarkerPath, nil, 0o600); err != nil {
-				logger.Error("Failed to acknowledge quiesced template reconciliation", zap.Error(err))
-				continue
-			}
-			logger.Info("Template reconciliation quiesced")
+func managerPrivateRegistryHosts(registry config.RegistryConfig) []string {
+	hosts := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	for _, value := range []string{registry.PushRegistry, registry.PullRegistry, registry.InternalRegistry} {
+		host := strings.TrimSpace(value)
+		if host == "" {
+			continue
 		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
 	}
+	return hosts
 }
 
-// buildKubeConfig builds Kubernetes config
-func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
-}
-
-func configureK8sClientRateLimiter(restConfig *rest.Config, qps int, burst int) {
-	if restConfig == nil {
-		return
-	}
-	rate := float32(qps)
-	if rate <= 0 {
-		rate = s0k8s.DefaultClientQPS
-	}
-	if burst <= 0 {
-		burst = s0k8s.DefaultClientBurst
-	}
-	restConfig.QPS = rate
-	restConfig.Burst = burst
-	restConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
-}
-
-func isolatedK8sClientConfig(base *rest.Config) *rest.Config {
-	if base == nil {
-		return nil
-	}
-	isolated := rest.CopyConfig(base)
-	rate := effectiveK8sClientQPS(base)
-	burst := effectiveK8sClientBurst(base)
-	isolated.QPS = rate
-	isolated.Burst = burst
-	isolated.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
-	return isolated
-}
-
-func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, restConfig *rest.Config) {
-	if metrics == nil || metrics.K8sClientRateLimit == nil || restConfig == nil {
-		return
-	}
-	metrics.K8sClientRateLimit.WithLabelValues("qps").Set(float64(effectiveK8sClientQPS(restConfig)))
-	metrics.K8sClientRateLimit.WithLabelValues("burst").Set(float64(effectiveK8sClientBurst(restConfig)))
-}
-
-func observeHotClaimK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, restConfig *rest.Config) {
-	if metrics == nil || metrics.K8sClientRateLimit == nil || restConfig == nil {
-		return
-	}
-	metrics.K8sClientRateLimit.WithLabelValues("hot_claim_qps").Set(float64(effectiveK8sClientQPS(restConfig)))
-	metrics.K8sClientRateLimit.WithLabelValues("hot_claim_burst").Set(float64(effectiveK8sClientBurst(restConfig)))
-}
-
-func effectiveK8sClientQPS(restConfig *rest.Config) float32 {
-	if restConfig == nil || restConfig.QPS <= 0 {
-		return s0k8s.DefaultClientQPS
-	}
-	return restConfig.QPS
-}
-
-func effectiveK8sClientBurst(restConfig *rest.Config) int {
-	if restConfig == nil || restConfig.Burst <= 0 {
-		return s0k8s.DefaultClientBurst
-	}
-	return restConfig.Burst
-}
-
-// startMetricsServer starts the Prometheus metrics server
 func startMetricsServer(port int, logger *zap.Logger) {
 	http.Handle("/metrics", promhttp.Handler())
 
@@ -963,23 +777,15 @@ func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *
 	if err := sandboxstore.RunSandboxStoreMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("sandbox store migrations: %w", err)
 	}
-	if err := legacyvolumemigrations.Run(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-		return fmt.Errorf("legacy volume migrations: %w", err)
-	}
-
 	logger.Info("Sandbox store migrations completed successfully")
 	return nil
 }
 
 // initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
-	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL:    databaseURL,
-		MaxConns:       maxConns,
-		MinConns:       minConns,
-		Schema:         "scheduler",
-		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
-	})
+func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, requirePrimary bool, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+	options := managerDatabaseOptions(databaseURL, maxConns, minConns, requirePrimary)
+	options.ConfigModifier = obsProvider.Pgx.ConfigModifier()
+	pool, err := dbpool.New(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +793,18 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),
 		zap.Int32("min_conns", pool.Config().MinConns),
+		zap.Bool("require_primary", requirePrimary),
 	)
 
 	return pool, nil
+}
+
+func managerDatabaseOptions(databaseURL string, maxConns, minConns int32, requirePrimary bool) dbpool.Options {
+	return dbpool.Options{
+		DatabaseURL:    databaseURL,
+		MaxConns:       maxConns,
+		MinConns:       minConns,
+		Schema:         "scheduler",
+		RequirePrimary: requirePrimary,
+	}
 }

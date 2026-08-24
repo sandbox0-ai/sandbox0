@@ -9,7 +9,8 @@ Use it when a sandbox needs a customer-controlled egress IP, customer-side audit
 - Only TCP traffic is supported.
 - Sandbox network policy is still enforced before the proxy connection is opened.
 - Platform deny rules still apply.
-- Proxy credentials are referenced through credential bindings and are not stored in pod annotations.
+- Proxy credentials are referenced through credential bindings and are not
+  stored in runtime allocation metadata or exposed to the sandbox process.
 - UDP, QUIC, HTTP proxy, and VPN tunnels are not part of this feature.
 
 <Callout variant="info">

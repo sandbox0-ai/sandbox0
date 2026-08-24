@@ -28,24 +28,6 @@ func Enabled(cfg Config) bool {
 	return strings.TrimSpace(cfg.URL) != ""
 }
 
-// SpecEnabled centralizes Redis enablement semantics for CRD-style specs.
-func SpecEnabled(specPresent bool, backendType string, builtinEnabled *bool) bool {
-	if !specPresent {
-		return false
-	}
-	switch strings.TrimSpace(strings.ToLower(backendType)) {
-	case "builtin", "":
-		if builtinEnabled != nil {
-			return *builtinEnabled
-		}
-		return true
-	case "external":
-		return true
-	default:
-		return true
-	}
-}
-
 func NormalizeConfig(cfg Config) Config {
 	cfg.URL = strings.TrimSpace(cfg.URL)
 	cfg.KeyPrefix = strings.TrimSpace(cfg.KeyPrefix)

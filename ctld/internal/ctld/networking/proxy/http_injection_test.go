@@ -13,11 +13,10 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestHTTPAdapterInjectsResolvedHeaders(t *testing.T) {
@@ -46,7 +45,7 @@ func TestHTTPAdapterInjectsResolvedHeaders(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -151,7 +150,7 @@ func TestHTTPAdapterSubstitutesPlaceholdersInQueryHeaderAndBody(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -237,7 +236,7 @@ func TestHTTPAdapterSubstitutesPlaceholdersInQueryHeaderAndBody(t *testing.T) {
 func TestHTTPAdapterReturns503WhenAuthResolutionFails(t *testing.T) {
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -296,7 +295,7 @@ func TestHTTPAdapterFailOpenBypassesInjectionOnResolveError(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		logger: zap.NewNop(),
 	}
@@ -376,7 +375,7 @@ func TestHTTPAdapterInjectsHeadersOnlyWhenRequestMatcherMatches(t *testing.T) {
 	}
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 			EgressAuthEnabled:    true,
 		},
 		authResolver: resolver,
@@ -471,7 +470,7 @@ func TestHTTPAdapterSkipsResolverWhenRequestMatcherDoesNotMatch(t *testing.T) {
 	}
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 			EgressAuthEnabled:    true,
 		},
 		authResolver: resolver,
@@ -577,7 +576,7 @@ func TestHTTPAdapterFallsThroughCredentialCandidatesByRequestMatcher(t *testing.
 	}
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 			EgressAuthEnabled:    true,
 		},
 		authResolver: resolver,
@@ -650,7 +649,7 @@ func TestHTTPAdapterFallsThroughCredentialCandidatesByRequestMatcher(t *testing.
 func TestHTTPAdapterReturns503WhenDirectiveUnsupported(t *testing.T) {
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 		logger: zap.NewNop(),
 	}

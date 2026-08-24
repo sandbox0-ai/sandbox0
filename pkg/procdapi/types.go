@@ -3,20 +3,37 @@ package procdapi
 import (
 	"encoding/json"
 	"time"
+
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const (
-	ContextsPath         = "/api/v1/contexts"
-	FilesPath            = "/api/v1/files"
-	FileStatPath         = "/api/v1/files/stat"
-	FileListPath         = "/api/v1/files/list"
-	FileMovePath         = "/api/v1/files/move"
-	FileWatchPath        = "/api/v1/files/watch"
-	SandboxStatsPath     = "/api/v1/sandbox/stats"
-	SandboxPausePath     = "/api/v1/sandbox/pause"
-	SandboxResumePath    = "/api/v1/sandbox/resume"
-	LifecycleBarrierPath = "/api/v1/lifecycle/barrier"
+	ContextsPath          = "/api/v1/contexts"
+	FilesPath             = "/api/v1/files"
+	FileStatPath          = "/api/v1/files/stat"
+	FileListPath          = "/api/v1/files/list"
+	FileMovePath          = "/api/v1/files/move"
+	FileWatchPath         = "/api/v1/files/watch"
+	SandboxStatsPath      = "/api/v1/sandbox/stats"
+	SandboxPausePath      = "/api/v1/sandbox/pause"
+	SandboxResumePath     = "/api/v1/sandbox/resume"
+	LifecycleBarrierPath  = "/api/v1/lifecycle/barrier"
+	CommandReadyProbePath = protocol.ProcdCommandReadyProbePath
 )
+
+// CommandReadyProbeResponse identifies the exact procd process that completed
+// the authenticated, runtime-gated command.
+type CommandReadyProbeResponse struct {
+	InstanceID string `json:"instance_id"`
+	Status     string `json:"status"`
+}
+
+// CommandReadyProbeResult includes the raw response digest needed by the
+// regional runtime-slot command-ready proof.
+type CommandReadyProbeResult struct {
+	CommandReadyProbeResponse
+	ResponseBodyDigest string
+}
 
 func ContextPath(contextID string) string {
 	return ContextsPath + "/" + contextID

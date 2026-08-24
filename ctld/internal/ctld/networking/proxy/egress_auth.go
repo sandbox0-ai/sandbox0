@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 type egressAuthContext struct {
@@ -71,6 +71,7 @@ type egressAuthCache interface {
 
 type egressAuthCacheKey struct {
 	SandboxID       string
+	BindingDigest   string
 	AuthRef         string
 	Destination     string
 	DestinationPort int
@@ -754,6 +755,7 @@ func policyFailureOpen() v1alpha1.EgressAuthFailurePolicy {
 func buildEgressAuthCacheKey(req *adapterRequest, decision trafficDecision) egressAuthCacheKey {
 	return egressAuthCacheKey{
 		SandboxID:       compiledSandboxID(req.Compiled),
+		BindingDigest:   compiledCredentialBindingDigest(req.Compiled),
 		AuthRef:         decision.MatchedAuthRule.AuthRef,
 		Destination:     authDestination(req),
 		DestinationPort: req.DestPort,
@@ -780,6 +782,13 @@ func compiledSandboxID(compiled *policy.CompiledPolicy) string {
 		return ""
 	}
 	return compiled.SandboxID
+}
+
+func compiledCredentialBindingDigest(compiled *policy.CompiledPolicy) string {
+	if compiled == nil {
+		return ""
+	}
+	return compiled.CredentialBindingDigest
 }
 
 func compiledTeamID(compiled *policy.CompiledPolicy) string {

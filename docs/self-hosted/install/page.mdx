@@ -1,426 +1,251 @@
 # Install
 
-This is the shortest production-like path from zero to a running self-hosted Sandbox0.
+This guide describes the production Nomad boundary. It intentionally does not
+create a local orchestration cluster or install a development-only alternate
+runtime.
 
 ## Prerequisites
 
-- Kubernetes `1.35+`
-- Helm `3.8+`
-- `kubectl` matching your cluster minor version
-- A default `StorageClass`
+Prepare:
 
-<Callout variant="info">
-Kubernetes `1.35+` is required for the supported Sandbox0 runtime stack. Checkpointed pause/resume depends on `ctld` on sandbox nodes so Sandbox0 can save and restore writable rootfs checkpoints when releasing and recreating runtime pods.
-</Callout>
+- a Nomad server cluster and Linux Nomad clients dedicated to Sandbox0;
+- cgroup v2 with `cpu`, `cpuset`, `memory`, and `pids` controllers;
+- stock `runsc`, a compatible Linux kernel, OverlayFS, XFS, NBD, TPROXY, ipset,
+  and required netfilter modules on every sandbox node;
+- a regional PostgreSQL writer endpoint;
+- an access-controlled S3-compatible bucket with conditional-create behavior;
+- private DNS and mutually authenticated TLS between manager, ctld, and Nomad;
+- an OCI registry reachable by manager's durable RootFS importer; and
+- optional ClickHouse for metering and per-sandbox historical query projections.
 
-<Callout variant="warning">
-Keep the Kubernetes `ContainerRestartRules` feature gate enabled. Sandbox0 uses its container-level restart policy to leave a terminated `procd` attempt available for crash rootfs recovery while keeping the ReplicaSet-compatible pod restart policy.
-</Callout>
+The Nomad clients must use the `sandbox0` node pool and metadata
+`sandbox0_dedicated=true`. Do not schedule general workloads on these nodes.
 
-## 0) Create a Local Kind Cluster
+## 1. Build And Pin Artifacts
 
-Create the cluster:
-
-```bash
-kind create cluster --config kind-config.yaml
-```
-
-`kind-config.yaml`:
-
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: sandbox0
-nodes:
-- role: control-plane
-  image: kindest/node:v1.35.0
-  kubeadmConfigPatches:
-  - |
-    kind: ClusterConfiguration
-    apiServer:
-      extraArgs:
-        enable-aggregator-routing: "true"
-  extraPortMappings:
-  # cluster-gateway HTTP port
-  - containerPort: 30080
-    hostPort: 30080
-  # registry port for template image push
-  - containerPort: 30500
-    hostPort: 30500
-```
-
-## 1) Install infra-operator
+Build the control and node binaries from one commit:
 
 ```bash
-helm repo add sandbox0 https://charts.sandbox0.ai
-helm repo update
+make build-local-all
 
-helm install infra-operator sandbox0/infra-operator \
-    --namespace sandbox0-system \
-    --create-namespace
+cd nomad-driver-sandbox0
+go build -o ../bin/nomad-driver-sandbox0 .
+cd ..
 ```
 
-Verify operator + CRD:
+Acquire stock `runsc` from a pinned gVisor release. Record the exact Sandbox0
+commit, driver version, `runsc --version`, platform, DirectFS/file-access mode,
+and RootFS format. Do not mix versions within one runtime compatibility class.
+
+`procd` is imported into RootFS artifacts by manager. Configure its exact path,
+protocol, and SHA-256 digest in manager; do not fetch a mutable procd image on
+the claim path.
+
+## 2. Provision Regional Stores
+
+Create a database and configure all regional/data-plane services with the same
+PostgreSQL writer endpoint. Manager applies its schemas and migrations at
+startup. The endpoint must fail over to a read-write server; manager readiness
+fails closed when a pooled connection becomes read-only.
+
+Create a private RootFS bucket. Use installation-specific credentials and
+application-layer object encryption. Keep encryption keys identical across
+manager replicas and ctld A/B, but outside service YAML where possible.
+
+ClickHouse is optional for initial bring-up. PostgreSQL remains lifecycle and
+metering producer truth even when ClickHouse is enabled.
+
+## 3. Install Control Services
+
+Use `deploy/nomad/control/sandbox0-control@.service` or equivalent Nomad service
+jobs for:
+
+- `regional-gateway`;
+- `scheduler` only for multi-cluster routing;
+- `cluster-gateway`;
+- at least two `manager` replicas; and
+- `ssh-gateway` when SSH access is enabled.
 
 ```bash
-kubectl get pods -n sandbox0-system
-kubectl get crd sandbox0infras.infra.sandbox0.ai
+sudo install -o root -g root -m 0644 \
+    deploy/nomad/control/sandbox0-control@.service \
+    /etc/systemd/system/
+sudo install -o root -g root -m 0644 \
+    deploy/nomad/control/sandbox0-control.target \
+    /etc/systemd/system/
+sudo install -d -o root -g sandbox0 -m 0750 \
+    /etc/sandbox0 /var/lib/sandbox0
 ```
 
-## 2) Apply the Fullmode Sample
+Create `/etc/sandbox0/<service>.yaml` and optional mode-0600
+`/etc/sandbox0/<service>.env` for each enabled service. The files support
+environment expansion. The checked-in
+`deploy/nomad/control/manager.yaml.example` is a boundary example with
+placeholders, not a production-ready config.
 
-Use the fullmode sample for a complete single-cluster data plane:
+For self-hosted identity, configure `regional-gateway` with
+`edition: self-hosted`, `auth_mode: self_hosted`, signing keys, and either
+built-in auth or OIDC. `built_in_auth.init_user` creates the first admin and
+team only when the identity database is empty. Store the bootstrap password in
+a protected environment/file workflow and rotate it after first login.
 
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
-
-<Callout variant="info">
-Fullmode requires Linux Kubernetes nodes because ctld uses host networking, FUSE, and node-local runtime access.
-</Callout>
-
-<GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml" />
-
-Watch status:
+Start manager before admitting sandbox nodes:
 
 ```bash
-kubectl get sandbox0infra -n sandbox0-system -w
+sudo systemctl daemon-reload
+sudo systemctl enable --now sandbox0-control@manager.service
 ```
 
-Expected `status.phase` lifecycle:
+Every manager replica must use identical region/cluster IDs, RootFS encryption
+keys, writer-token key, runtime-class catalog, node CA, node identity mapping,
+and trusted Nomad endpoint catalog.
 
-1. `Installing`
-2. `Upgrading` (when reconciling changes)
-3. `Ready`
+## 4. Configure Node Authority
 
-## 3) Initial Admin Credentials
+Provision these root-owned manager inputs:
 
-When local password bootstrap is enabled, if `spec.initUser.passwordSecret` is not provided, operator generates `admin-password`.
+| Directory | Files |
+| --- | --- |
+| `/etc/sandbox0/node-authority/tls` | `tls.crt`, `tls.key`, `client-ca.crt` |
+| `/etc/sandbox0/node-authority/claim` | `runtime-classes.json`, 32-byte `writer-token.key` |
+| `/etc/sandbox0/node-authority/control` | `nomad-endpoints.json` and referenced CA, client certificate, key, and ACL-token files |
 
-When built-in auth is enabled, the gateway bootstraps the initial admin with that password on first start.
-When built-in auth is disabled but OIDC is enabled, the operator skips generating the password secret and the gateway still bootstraps the admin user and initial team,
-but leaves the account passwordless so the first OIDC login for the same email can bind to that admin account.
+Start from:
+
+- `nomad-driver-sandbox0/example/runtime-classes.example.json`; and
+- `nomad-driver-sandbox0/example/nomad-endpoints.example.json`.
+
+Map every node certificate common name to one exact cluster ID, Nomad node ID,
+durable node UID, and agent UID. The endpoint catalog must pin one HTTPS server
+endpoint per Nomad cluster and one exact HTTPS client endpoint per node.
+Redirects and ambient proxy routing are rejected.
+
+Enable manager's terminal worker. It is the plugin-independent owner of stop,
+client GC, physical-absence observation, and final capacity release.
+
+## 5. Install Each Dedicated Node
+
+Copy and replace every placeholder in:
+
+- `deploy/nomad/ctld/ctld.yaml.example`;
+- `deploy/nomad/ctld/ctld-networking.yaml.example`;
+- `deploy/nomad/ctld/ctld.env.example`; and
+- `deploy/nomad/ctld/nomad-plugin.hcl.example`.
+
+Set `SANDBOX0_RESOURCE_*` from the dedicated cpuset after reserving host,
+Nomad, and ctld overhead. These values are physical sandbox capacity. Do not
+copy the warm job's small carrier resource values.
+
+Then run as root:
 
 ```bash
-ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d)"
-printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
+sudo ./deploy/nomad/ctld/install-node.sh \
+    --ctld ./bin/ctld \
+    --driver ./bin/nomad-driver-sandbox0 \
+    --runsc ./bin/runsc \
+    --config ./node/ctld.yaml \
+    --network-config ./node/ctld-networking.yaml \
+    --nomad-config ./node/nomad-plugin.hcl \
+    --env ./node/ctld.env \
+    --start
 ```
 
-## 4) Install `s0`
+The installer configures the NBD pool, cgroup subtree, kernel modules,
+networking sysctls, ctld A/B systemd units, and the Nomad task-driver plugin.
+Nomad has a hard dependency on a healthy ctld target.
 
-macOS and Linux:
+Verify that one ctld instance is primary-ready and its peer is
+synchronized-standby-ready before enabling claims. The A/B services must share
+the host mount, device, and network namespaces; do not add systemd isolation
+that creates private mount or device namespaces.
+
+## 6. Submit The Unified Carrier Job
+
+Review and submit the warm-slot job:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.sh | bash
+nomad job run nomad-driver-sandbox0/example/warm-slot.nomad
 ```
 
-Windows PowerShell:
+Keep `restart { attempts = 0 }`. A carrier is one-shot and must be replaced by a
+fresh allocation and network namespace after consumption.
 
-```powershell
-irm https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.ps1 | iex
-```
+Confirm manager sees:
 
-Or with Go:
+- live node capacity and current boot IDs;
+- connected authenticated node channels;
+- ready resource-neutral slots with the expected compatibility digest;
+- default-deny warm networking; and
+- enough NBD devices and replacement carriers.
+
+## 7. Start The API Path
+
+Start cluster-gateway, regional-gateway, optional scheduler, and optional
+ssh-gateway after manager and node readiness succeed. In single-cluster mode,
+cluster-gateway can provide the external full-mode endpoint. In multi-cluster
+mode, expose regional-gateway and keep cluster endpoints private.
+
+Install `s0`, point it at the external endpoint, and log in:
 
 ```bash
-go install github.com/sandbox0-ai/s0/cmd/s0@latest
-```
-
-Manual release archives are available from <DocLink href="https://github.com/sandbox0-ai/s0/releases/latest" newTab>GitHub Releases</DocLink>. See the <DocLink href="https://github.com/sandbox0-ai/s0#installation" newTab>s0 README</DocLink> for platform-specific manual install steps.
-
-## 5) Configure the API URL, Log In, and Optionally Create an API Key
-
-For the local `kind` setup above, the API endpoint is `http://localhost:30080`.
-
-That is because the `kind` config maps host port `30080`, and the sample `Sandbox0Infra` exposes `cluster-gateway` on the same NodePort.
-
-Export the base URL, then log in with the initial admin account:
-
-```bash
-export SANDBOX0_BASE_URL="http://localhost:30080"
-
+export SANDBOX0_BASE_URL=https://sandbox0.example.com
 s0 auth login
 ```
 
-At that point, interactive `s0` CLI usage is ready.
-
-Create an API key only if you want to use the SDKs or raw HTTP API:
-
-```bash
-# If the server did not auto-select a team yet:
-# s0 team list
-# s0 team use <team-id>
-
-unset SANDBOX0_TOKEN
-export SANDBOX0_TOKEN="$(s0 apikey create --name sdk-quickstart --role developer --expires-in 30d --raw)"
-```
-
-After that, continue with [Get Started](/docs/sandbox/get-started) to make your first Sandbox0 API request.
-
-## Advanced: Deploy on GCP
-
-For Google Cloud, use GKE Standard rather than GKE Autopilot.
-
-Recommended path:
-
-1. Create a GKE Standard **regional** cluster with Linux nodes.
-2. Pin Kubernetes to an explicit `1.35+` version. Do not rely on the GKE default version.
-3. Keep a regular node pool for host-level system components.
-4. Add a GKE Sandbox (`gVisor`) node pool for sandbox workloads.
-5. Install `infra-operator`.
-6. Apply the GCP `gVisor` sample.
-7. Expose `cluster-gateway` through a `LoadBalancer`.
-8. Verify the deployment by logging in with `s0` and claiming a sandbox.
-
-### 1) Pick a Supported GKE Version
-
-Sandbox0 requires Kubernetes `1.35+`.
-
-Before creating the cluster, query the versions available in your region:
-
-```bash
-gcloud container get-server-config \
-    --zone us-east1-b \
-    --format='yaml(validMasterVersions)'
-```
-
-Choose any available `1.35.x` version from `validMasterVersions`, then reuse it below as `${GKE_VERSION}`.
-
-### 2) Create a Regional Cluster
-
-This creates a three-zone regional cluster in `us-east1`, with one regular Linux node per zone:
-
-```bash
-export GKE_VERSION="1.35.1-gke.1616000"
-
-gcloud container clusters create sandbox0-gke-gvisor \
-    --region us-east1 \
-    --node-locations us-east1-b,us-east1-c,us-east1-d \
-    --machine-type e2-standard-2 \
-    --disk-size 30 \
-    --num-nodes 1 \
-    --cluster-version "${GKE_VERSION}"
-```
-
-Get kubeconfig and confirm the nodes:
-
-```bash
-gcloud container clusters get-credentials sandbox0-gke-gvisor --region us-east1
-kubectl get nodes -o wide
-```
-
-Keep a regular node pool for core system services. In the GKE `gVisor` sample, `cluster-gateway`, `manager`, PostgreSQL, and the builtin registry run on the regular pool. The ctld HA pair and sandbox workloads run on the `gVisor` node pool, while ctld itself uses the node's host-compatible runtime.
-
-### 3) Add a `gVisor` Node Pool
-
-Add one `gVisor` node per zone:
-
-```bash
-gcloud container node-pools create gvisor-lite \
-    --cluster sandbox0-gke-gvisor \
-    --region us-east1 \
-    --machine-type e2-standard-2 \
-    --disk-size 30 \
-    --num-nodes 1 \
-    --sandbox type=gvisor
-```
-
-Verify both pools:
-
-```bash
-kubectl get nodes -L cloud.google.com/gke-nodepool,sandbox.gke.io/runtime
-```
-
-Expected result:
-
-1. `default-pool` nodes have no `sandbox.gke.io/runtime` label
-2. `gvisor-lite` nodes show `sandbox.gke.io/runtime=gvisor`
-
-### 4) Install `infra-operator`
-
-```bash
-helm repo add sandbox0 https://charts.sandbox0.ai
-helm repo update
-
-helm install infra-operator sandbox0/infra-operator \
-    --namespace sandbox0-system \
-    --create-namespace
-```
-
-Verify operator + CRD:
-
-```bash
-kubectl get pods -n sandbox0-system
-kubectl get crd sandbox0infras.infra.sandbox0.ai
-```
-
-### 5) Apply the GCP `gVisor` Sample
-
-Use the official `gVisor` sample, then switch `cluster-gateway` to `LoadBalancer`:
-
-<GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml" />
-
-```bash
-kubectl patch sandbox0infra fullmode -n sandbox0-system --type merge -p \
-    '{"spec":{"services":{"clusterGateway":{"service":{"type":"LoadBalancer","port":80}}}}}'
-```
-
-Wait for the deployment to finish reconciling:
-
-```bash
-kubectl get sandbox0infra -n sandbox0-system -w
-kubectl get svc -n sandbox0-system
-```
-
-Expected result:
-
-1. `Sandbox0Infra` becomes `Ready`
-2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
-3. `fullmode-ctld-a` and `fullmode-ctld-b` run on `gvisor-lite`; the elected primary owns rootfs and network runtime responsibilities
-4. sandbox pods in `tpl-default` run on `gvisor-lite`
-
-`fullmode-manager` serves lifecycle and rootfs metadata APIs. On every sandbox node, the elected ctld primary owns rootfs persistence and network enforcement; the standby takes over after promotion.
-
-This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
-
-### RuntimeClass and Rootfs Clean/Restore
-
-`services.manager.config.sandboxRuntimeClassName` only tells Sandbox0 which Kubernetes `RuntimeClass` to put on sandbox Pods. It does not install `runsc`, edit the node's containerd config, restart containerd, or create a custom runtime handler.
-
-On GKE Sandbox, Google manages the standard `gVisor` runtime setup and the sample uses `sandboxRuntimeClassName: gvisor`. On self-managed clusters, install the runtime handler and `RuntimeClass` before pointing Sandbox0 at it.
-
-For `gVisor` rootfs checkpoint and restore support, use a dedicated handler with shared rootfs access. `gvisor-rootfs` is just an example name; the Kubernetes `RuntimeClass.handler` must match the handler configured in containerd on every sandbox node.
-
-```toml
-# /etc/containerd/config.toml
-version = 2
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
-    runtime_type = "io.containerd.runsc.v1"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
-    TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
-```
-
-```toml
-# /etc/containerd/runsc-rootfs.toml
-[runsc_config]
-    overlay2 = "none"
-    file-access = "shared"
-```
-
-Restart containerd after changing node runtime configuration, then create the matching `RuntimeClass`:
+Self-hosted installs do not contain a hidden builtin-template seeder. Publish
+an image that manager can pull, resolve its manifest digest, and create the
+initial team-owned template explicitly:
 
 ```yaml
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-    name: gvisor-rootfs
-handler: gvisor-rootfs
-```
-
-Then configure Sandbox0 sandbox Pods to use it:
-
-```yaml
+# default-template.yaml
 spec:
-    services:
-        manager:
-            config:
-                sandboxRuntimeClassName: gvisor-rootfs
+    mainContainer:
+        image: registry.example.com/sandbox0/default@sha256:<64-hex-digest>
+        resources:
+            memory: 4Gi
+            ephemeralStorage: 8Gi
+    network:
+        mode: block-all
 ```
-
-The sandbox `RuntimeClass` does not apply to ctld. Keep ctld on the node's host-compatible runtime; it must not run under `gvisor`, `gvisor-rootfs`, or `kata`.
-
-`ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your node bootstrap stores containerd data somewhere else, set `services.ctld.containerdHostDataRoot` to the actual host path:
-
-```yaml
-spec:
-    services:
-        ctld:
-            containerdHostDataRoot: /var/lib/containerd/sandbox0
-```
-
-For large writable rootfs checkpoints, ctld uses a disposable node-local object cache capped at `20Gi` per node by default. Tune the cap and free-space floor for your node disk:
-
-```yaml
-spec:
-    services:
-        ctld:
-            rootfsObjectCacheMaxBytes: 20Gi
-            rootfsObjectCacheMinFreeBytes: 5Gi
-```
-
-### 6) Expose the API Publicly
-
-After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.
-
-Check the service:
 
 ```bash
-kubectl get svc fullmode-cluster-gateway -n sandbox0-system -o wide
+s0 template create --id default --spec-file default-template.yaml
+s0 template list
 ```
 
-Wait until `EXTERNAL-IP` is no longer `<pending>`, then export the public base URL directly from the service:
+Watch manager until template import discovery has ensured the operation and
+the durable importer logs a `ready` result. Then validate the public path:
 
 ```bash
-export SANDBOX0_BASE_URL="http://$(kubectl get svc fullmode-cluster-gateway -n sandbox0-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-printf '%s\n' "$SANDBOX0_BASE_URL"
+s0 sandbox create --template default
 ```
 
-For production on GCP, this is a better default than exposing a node IP through `NodePort`.
+An earlier claim must fail as data-plane-not-ready; it must never fall back to
+pulling a mutable image in the Nomad allocation.
 
-### 7) Verify with `s0`
+## 8. Acceptance
 
-Retrieve the generated admin password:
+Before production traffic:
 
-```bash
-ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d)"
-printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
-```
+1. run the stock-runsc cgroup integration test documented in
+   `deploy/nomad/ctld/README.md`;
+2. run the DirectFS/Gofer/runc semantic and isolation corpus as a compatibility
+   test, while keeping stock runsc DirectFS as the production lane;
+3. exercise RootFS attach, writes, pause, resume, snapshot, running fork,
+   rebase, and cross-node restore against real S3-compatible storage;
+4. inject task-driver, ctld primary, manager, Nomad server/client, PostgreSQL
+   writer, node reboot, and object-store failures; and
+5. run the public regional-gateway-to-procd SLO tool.
 
-Log in from the public endpoint:
-
-```bash
-s0 auth login \
-    --api-url "${SANDBOX0_BASE_URL}" \
-    --email admin@example.com \
-    --password "${ADMIN_PASSWORD}"
-```
-
-Claim a sandbox to verify the deployment is actually usable:
-
-```bash
-s0 sandbox create --api-url "${SANDBOX0_BASE_URL}" -t default
-```
-
-Optional deeper check:
-
-```bash
-s0 sandbox list --api-url "${SANDBOX0_BASE_URL}"
-s0 sandbox exec <sandbox-id> --api-url "${SANDBOX0_BASE_URL}" -- sh -lc 'echo ready && uname -s'
-```
-
-If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, the GCP deployment is working end to end.
-
-### Important Notes
-
-- Sandbox0 requires different runtime behavior for different components. On GKE, keep a regular node pool for system services and a `gVisor` node pool for sandbox workloads.
-- Sandbox workload runtime selection should be handled by cluster defaults or administrator-managed service configuration, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
-- Use `sandboxNodePlacement` to place sandbox workloads and the ctld HA pair onto the same sandbox node pool.
-- `infra-operator` does not install containerd runtime handlers. Install `runsc`/`containerd-shim-runsc-v1`, configure the handler, restart containerd, and create the `RuntimeClass` before using a custom `sandboxRuntimeClassName`.
-- If containerd uses a non-default data root, set `services.ctld.containerdHostDataRoot` to that host path so rootfs pause/resume can use the overlayfs fast path.
-- `infra-operator` runs two independent ctld DaemonSets per sandbox node, with one ctld container in each Pod. The elected primary owns the CSI endpoint, kubelet registration, FUSE request channels, and network runtime. The synchronized standby preserves existing mounts across a single ctld process or Pod failure and assumes all node-local responsibilities during promotion. A filesystem, mount, or newly established network flow in progress during handoff can return an error and should be retried. Node reboot, kernel failure, and simultaneous loss of both ctld Pods remain outside this protection boundary.
-- `ctld` depends on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
-- Even when ctld is scheduled onto `gVisor` nodes, its Pod uses the node's default host runtime.
-- If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.
-
-### Why Not Autopilot
-
-Autopilot is not suitable for fullmode because Sandbox0 host-level components need capabilities that Autopilot restricts. Ctld needs node-level access, while template sandbox pods run on the `gVisor` pool.
+Production acceptance requires at least eight carriers, eight truthful
+dedicated physical CPU cores, sufficient non-oversubscribed memory, serial
+1000 and synchronized concurrency, multi-node fault injection, and security
+gates. A smaller host validates only its actual width.
 
 ## Next Steps
 
 <CardGroup>
-  <Card title="Configuration" href="/docs/sandbox/self-hosted/configuration" cta="Continue">
-    Tune topology, storage, networking, and service-level configuration.
+  <Card title="Configuration" href="/docs/self-hosted/configuration" cta="Continue">
+    Review immutable identities, capacity, storage, and rollout rules.
   </Card>
 </CardGroup>

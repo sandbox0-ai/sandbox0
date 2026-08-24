@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 func TestMatchMCPProtocolRule(t *testing.T) {

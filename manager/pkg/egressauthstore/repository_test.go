@@ -39,6 +39,7 @@ func TestRepositoryPutSourceAdvancesExistingBindings(t *testing.T) {
 	}
 	if source == nil {
 		t.Fatal("source is nil")
+		return
 	}
 	if err := repo.UpsertBindings(ctx, &BindingRecord{
 		TeamID:    "team-1",
@@ -197,6 +198,7 @@ func newRepositoryTestStore(t *testing.T) (*Repository, *pgxpool.Pool) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
 		Schema:      schema,
+		MaxConns:    5,
 	})
 	if err != nil {
 		t.Fatalf("connect schema-scoped pool: %v", err)

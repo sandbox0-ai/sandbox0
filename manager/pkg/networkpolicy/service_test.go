@@ -3,7 +3,7 @@ package networkpolicy
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 )
 
@@ -150,6 +150,9 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	}
 	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
 		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
+	}
+	if result.PolicySpec.CredentialBindingDigest == "" {
+		t.Fatal("credential binding digest was not bound into runtime policy")
 	}
 	rule := result.PolicySpec.Egress.CredentialRules[0]
 	if rule.CredentialRef != "request-ref" {

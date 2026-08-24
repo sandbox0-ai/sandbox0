@@ -1,0 +1,16 @@
+log_level: info
+node_name: ${SANDBOX0_NODE_NAME}
+region_id: ${SANDBOX0_REGION_ID}
+cluster_id: ${SANDBOX0_CLUSTER_ID}
+database_url: ${SANDBOX0_DATABASE_URL}
+metrics_port: 9091
+health_port: 8081
+fail_closed: true
+prefer_nft: true
+proxy_listen_addr: 0.0.0.0
+proxy_http_port: 18080
+proxy_https_port: 18443
+procd_port: 49983
+cluster_dns_cidr: ${SANDBOX0_CLUSTER_DNS_CIDR}
+platform_allowed_cidrs: [${SANDBOX0_PLATFORM_ALLOWED_CIDRS}]
+audit_log_path: /var/lib/sandbox0/ctld/networking/audit.log

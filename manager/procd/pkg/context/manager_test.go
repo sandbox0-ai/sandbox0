@@ -92,6 +92,7 @@ func TestManager_CreateContext(t *testing.T) {
 	}
 	if ctx1 == nil {
 		t.Fatal("CreateContext() returned nil context")
+		return
 	}
 	if ctx1.ID == "" {
 		t.Error("Context ID is empty")
@@ -527,6 +528,7 @@ func TestManager_GetAllResourceUsage(t *testing.T) {
 	usage := m.GetAllResourceUsage()
 	if usage == nil {
 		t.Fatal("GetAllResourceUsage() returned nil")
+		return
 	}
 	if usage.ContextCount != 0 {
 		t.Errorf("GetAllResourceUsage() ContextCount = %d, want 0", usage.ContextCount)

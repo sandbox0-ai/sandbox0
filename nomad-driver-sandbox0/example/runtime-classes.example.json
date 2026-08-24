@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "classes": [
+    {
+      "name": "linux-amd64-systrap-standard",
+      "cluster_id": "cluster-1",
+      "artifact_platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "compatibility": {
+        "version": 2,
+        "architecture": "amd64",
+        "driver_version": "0.1.0",
+        "runsc_version": "runsc release-20260820.0",
+        "platform": "systrap",
+        "overlay2": "none",
+        "file_access": "shared",
+        "directfs": true,
+        "command": "/procd",
+        "procd_port": 49983,
+        "runtime_mode": "static",
+        "security_class": "standard"
+      }
+    }
+  ]
+}

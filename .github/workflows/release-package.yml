@@ -19,10 +19,6 @@ on:
       version:
         required: false
         type: string
-      upload_artifacts:
-        required: false
-        type: boolean
-        default: false
       publish_images:
         required: false
         type: boolean
@@ -36,10 +32,6 @@ on:
       version:
         required: false
         type: string
-      upload_artifacts:
-        required: false
-        type: boolean
-        default: false
       publish_images:
         required: false
         type: boolean
@@ -48,10 +40,6 @@ on:
         required: false
         type: boolean
         default: false
-    outputs:
-      artifact_run_id:
-        description: Run ID that contains uploaded release artifacts.
-        value: ${{ jobs.metadata.outputs.artifact_run_id }}
 
 permissions:
   contents: read
@@ -66,23 +54,17 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
-      upload_artifacts: ${{ steps.meta.outputs.upload_artifacts }}
       publish_images: ${{ steps.meta.outputs.publish_images }}
       publish_latest: ${{ steps.meta.outputs.publish_latest }}
-      artifact_run_id: ${{ steps.meta.outputs.artifact_run_id }}
     steps:
       - name: Derive release metadata
         id: meta
         shell: bash
         run: |
           requested_version="${{ inputs.version }}"
-          upload_artifacts="false"
           publish_images="false"
           publish_latest="false"
 
-          if [[ "${{ inputs.upload_artifacts }}" == "true" ]]; then
-            upload_artifacts="true"
-          fi
           if [[ "${{ inputs.publish_images }}" == "true" ]]; then
             publish_images="true"
           fi
@@ -100,10 +82,8 @@ jobs:
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
-          echo "upload_artifacts=${upload_artifacts}" >> "$GITHUB_OUTPUT"
           echo "publish_images=${publish_images}" >> "$GITHUB_OUTPUT"
           echo "publish_latest=${publish_latest}" >> "$GITHUB_OUTPUT"
-          echo "artifact_run_id=${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
   infra:
     name: release-package / infra
@@ -121,9 +101,6 @@ jobs:
         with:
           cache-key-suffix: release-package-amd64
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
       - name: Build local binaries
         run: make build-local-all
 
@@ -131,23 +108,6 @@ jobs:
         env:
           TAG: release-package
         run: docker build -t "${IMAGE_REPO}:${TAG}" -f Dockerfile.local .
-
-      - name: Validate and package Helm chart
-        run: |
-          VERSION="${{ needs.metadata.outputs.version }}"
-          sed -E -i "s/^version:.*/version: ${VERSION}/" infra-operator/chart/Chart.yaml
-          sed -E -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" infra-operator/chart/Chart.yaml
-          helm lint infra-operator/chart
-          helm package infra-operator/chart --destination .cr-release-packages
-          test -f ".cr-release-packages/infra-operator-${VERSION}.tgz"
-
-      - name: Upload Helm chart artifact
-        if: ${{ needs.metadata.outputs.upload_artifacts == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infra-operator-chart-${{ needs.metadata.outputs.version }}
-          path: .cr-release-packages/infra-operator-${{ needs.metadata.outputs.version }}.tgz
-          if-no-files-found: error
 
   publish-images:
     name: release-package / publish images

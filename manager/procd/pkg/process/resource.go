@@ -168,7 +168,7 @@ type ContainerMemoryStats struct {
 	// Swap is the swap usage.
 	Swap int64 `json:"swap"`
 	// WorkingSet is the non-reclaimable memory (usage - inactive_file).
-	// This is what Kubernetes uses for OOM decisions.
+	// This is the cgroup usage value used for OOM decisions.
 	WorkingSet int64 `json:"working_set"`
 }
 

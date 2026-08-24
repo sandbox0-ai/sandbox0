@@ -19,6 +19,7 @@ func TestResolveReturnsTimedFallbackClient(t *testing.T) {
 
 	if got == nil {
 		t.Fatal("Resolve() = nil")
+		return
 	}
 	if got.Timeout != 2*time.Second {
 		t.Fatalf("Timeout = %s, want 2s", got.Timeout)
@@ -30,6 +31,7 @@ func TestResolveUsesDefaultTimeout(t *testing.T) {
 
 	if got == nil {
 		t.Fatal("Resolve() = nil")
+		return
 	}
 	if got.Timeout != DefaultTimeout {
 		t.Fatalf("Timeout = %s, want %s", got.Timeout, DefaultTimeout)

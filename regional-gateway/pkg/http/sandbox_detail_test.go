@@ -9,14 +9,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestGetSandboxDetailWithoutSSHEndpoint(t *testing.T) {
@@ -43,7 +42,7 @@ func TestGetSandboxDetailWithoutSSHEndpoint(t *testing.T) {
 	server := &Server{
 		cfg: &config.RegionalGatewayConfig{
 			DefaultClusterGatewayURL: clusterGateway.URL,
-			ProxyTimeout:             metav1.Duration{Duration: time.Second},
+			ProxyTimeout:             config.Duration{Duration: time.Second},
 		},
 		logger: zap.NewNop(),
 		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{

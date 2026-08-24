@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"golang.org/x/oauth2"
 )
@@ -20,7 +20,7 @@ func TestNewProvider_BuiltinWithDirectCredentials(t *testing.T) {
 			Username: "u",
 			Password: "p",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestNewProvider_BuiltinAllowsTeamScopedTargetImages(t *testing.T) {
 			Username: "u",
 			Password: "p",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestNewProvider_BuiltinRejectsOutOfScopeTargets(t *testing.T) {
 			Username: "u",
 			Password: "p",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestNewProvider_HarborWithDirectCredentials(t *testing.T) {
 			Username: "robot$ci",
 			Password: "secret-token",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestNewProvider_GCPWithoutServiceAccountUsesADC(t *testing.T) {
 		GCP: &config.RegistryGCPConfig{
 			Registry: "us-east4-docker.pkg.dev",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestNewProvider_GCPADCErrorIsReturned(t *testing.T) {
 		GCP: &config.RegistryGCPConfig{
 			Registry: "us-east4-docker.pkg.dev",
 		},
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewProvider returned error: %v", err)
 	}

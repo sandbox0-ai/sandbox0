@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
@@ -21,11 +22,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	coreobs "github.com/sandbox0-ai/sandbox0/pkg/observability/core"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability/httpserver"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
+
+const apiV1Prefix = "/api/v1"
 
 // Server is the Procd HTTP server.
 type Server struct {
@@ -49,6 +53,7 @@ type Server struct {
 
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response
 	runtimeGate func() (bool, string)
+	instanceID  string
 }
 
 // NewServer creates a new HTTP server.
@@ -77,6 +82,7 @@ func NewServer(
 		obsProvider:       obsProvider,
 		probeRunner:       probeRunner,
 		runtimeGate:       runtimeGate,
+		instanceID:        uuid.NewString(),
 	}
 
 	s.setupRoutes()
@@ -95,14 +101,14 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
 
 	// Local-only API (localhost access only, no auth)
-	local := s.router.PathPrefix("/api/v1").Subrouter()
+	local := s.router.PathPrefix(apiV1Prefix).Subrouter()
 	local.Use(s.localhostOnlyMiddleware)
 
 	webhookHandler := handlers.NewWebhookHandler(s.webhookDispatcher)
 	local.HandleFunc("/webhook/publish", webhookHandler.Publish).Methods("POST")
 
 	// API v1 (auth required if enabled)
-	api := s.router.PathPrefix("/api/v1").Subrouter()
+	api := s.router.PathPrefix(apiV1Prefix).Subrouter()
 
 	// Apply auth middleware to all API routes
 	api.Use(s.authMiddleware)
@@ -113,6 +119,7 @@ func (s *Server) setupRoutes() {
 	// Sandbox-level handlers (pause/resume all processes)
 	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.sessionSupervisor, s.webhookDispatcher, s.logger)
 	api.HandleFunc("/lifecycle/barrier", s.lifecycleBarrierHandler).Methods("PUT")
+	api.HandleFunc(strings.TrimPrefix(procdapi.CommandReadyProbePath, apiV1Prefix), s.commandReadyProbeHandler).Methods("PUT")
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
 	api.HandleFunc("/sandbox/stats", sandboxHandler.Stats).Methods("GET")
@@ -165,6 +172,17 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/files", fileHandler.Handle).Methods("GET", "POST", "DELETE")
 	api.HandleFunc("/files/stat", fileHandler.Stat).Methods("GET")
 	api.HandleFunc("/files/list", fileHandler.List).Methods("GET")
+}
+
+// commandReadyProbeHandler is a real authenticated and runtime-gated command.
+// A successful response proves that this exact procd process can serve API
+// commands, rather than merely accepting a TCP readiness connection.
+func (s *Server) commandReadyProbeHandler(w http.ResponseWriter, _ *http.Request) {
+	if _, err := uuid.Parse(s.instanceID); err != nil {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "procd instance identity is unavailable")
+		return
+	}
+	_ = spec.WriteSuccess(w, http.StatusOK, procdapi.CommandReadyProbeResponse{InstanceID: s.instanceID, Status: "ready"})
 }
 
 func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {

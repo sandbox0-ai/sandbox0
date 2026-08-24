@@ -9,8 +9,6 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
@@ -85,18 +83,32 @@ func (c *Controller) Run(ctx context.Context) error {
 		workers = defaultRootFSMaintenanceWorkers
 	}
 
-	defer runtime.HandleCrash()
 	c.logger.Info("Starting rootfs maintenance controller",
 		zap.Int("workers", workers),
 		zap.Duration("interval", c.cfg.Interval),
 		zap.Int("batchSize", c.cfg.BatchSize),
 	)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, c.cfg.Interval)
+		go c.runWorkerLoop(ctx)
 	}
 	<-ctx.Done()
 	c.logger.Info("Rootfs maintenance controller stopped")
 	return ctx.Err()
+}
+
+func (c *Controller) runWorkerLoop(ctx context.Context) {
+	for {
+		c.runWorker(ctx)
+		timer := time.NewTimer(c.cfg.Interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *Controller) runWorker(ctx context.Context) {
@@ -111,13 +123,16 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 	}
 	started := time.Now()
 	status := "success"
-	var totalLayers int
 	var totalObjects int
 	var runErr error
 	defer func() {
-		c.observeRun(status, time.Since(started), totalLayers, totalObjects)
+		c.observeRun(status, time.Since(started), totalObjects)
 		c.observeQueueStats(ctx)
 	}()
+	if _, err := c.store.PruneExpiredRootFSWriterTerminalProofs(ctx, sandboxstore.MaxRootFSWriterTerminalProofPrune); err != nil {
+		status = "error"
+		runErr = err
+	}
 
 	for batch := 0; batch < c.cfg.MaxBatchesPerRun; batch++ {
 		if err := ctx.Err(); err != nil {
@@ -129,15 +144,16 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		opts.ContinueOnError = true
 		result, err := c.store.GarbageCollectRootFSFilesystemWithOptions(ctx, c.deleter, "", c.cfg.BatchSize, opts)
 		if result != nil {
-			totalLayers += len(result.Layers)
 			totalObjects += len(result.DeletedObjectKeys)
 		}
 		if err != nil {
 			status = "error"
-			runErr = err
+			if runErr == nil {
+				runErr = err
+			}
 			break
 		}
-		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
+		if result == nil || (len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
 			break
 		}
 	}
@@ -156,7 +172,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 	return runErr
 }
 
-func (c *Controller) observeRun(status string, duration time.Duration, layers, objects int) {
+func (c *Controller) observeRun(status string, duration time.Duration, objects int) {
 	if c == nil || c.metrics == nil {
 		return
 	}
@@ -165,9 +181,6 @@ func (c *Controller) observeRun(status string, duration time.Duration, layers, o
 	}
 	if c.metrics.RootFSMaintenanceDuration != nil {
 		c.metrics.RootFSMaintenanceDuration.WithLabelValues(status).Observe(duration.Seconds())
-	}
-	if layers > 0 && c.metrics.RootFSGCLayersTotal != nil {
-		c.metrics.RootFSGCLayersTotal.Add(float64(layers))
 	}
 	if objects > 0 && c.metrics.RootFSObjectDeletesTotal != nil {
 		c.metrics.RootFSObjectDeletesTotal.WithLabelValues("success").Add(float64(objects))

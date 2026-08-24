@@ -21,7 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -29,7 +29,6 @@ import (
 	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestSandboxServiceProxiesAuthorizedRouteWithRewrite(t *testing.T) {
@@ -1050,7 +1049,7 @@ func newSandboxServiceExposureTestServerWithAdmission(
 				PublicRootDomain:      "sandbox0.app",
 				PublicRegionID:        "aws-us-east-1",
 			},
-			ProxyTimeout: metav1.Duration{Duration: 10 * time.Second},
+			ProxyTimeout: config.Duration{Duration: 10 * time.Second},
 		},
 		logger:                zap.NewNop(),
 		managerClient:         client.NewManagerClient(managerURL, gen, zap.NewNop(), time.Second),

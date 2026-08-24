@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 func TestNewMetricsServerExposesDefaultCollectors(t *testing.T) {

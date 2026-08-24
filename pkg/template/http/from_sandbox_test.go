@@ -11,15 +11,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type fromSandboxBuildStore struct {
@@ -108,9 +106,9 @@ func TestCreateTemplateFromSandboxRejectsUnknownFields(t *testing.T) {
 func TestCreateTemplateFromSandboxIdempotentReplayDoesNotResolveSource(t *testing.T) {
 	t.Parallel()
 
-	sandboxID, err := naming.SandboxName("default", "source-template", "abcde")
+	sandboxID, err := naming.SandboxNameForOperation("default", "source-template", "operation-1")
 	if err != nil {
-		t.Fatalf("SandboxName() error = %v", err)
+		t.Fatalf("SandboxNameForOperation() error = %v", err)
 	}
 	request := TemplateFromSandboxRequest{
 		TemplateID: "derived",
@@ -131,7 +129,7 @@ func TestCreateTemplateFromSandboxIdempotentReplayDoesNotResolveSource(t *testin
 			Creation: &v1alpha1.TemplateCreationStatus{
 				State:     v1alpha1.TemplateCreationStateCreating,
 				Stage:     v1alpha1.TemplateCreationStageCapturing,
-				StartedAt: metav1Time(startedAt),
+				StartedAt: &startedAt,
 			},
 		},
 	}
@@ -185,9 +183,9 @@ func TestCreateTemplateFromSandboxIdempotentReplayDoesNotResolveSource(t *testin
 func TestCreateTemplateFromSandboxReplayAfterManualUpdateReturnsCurrentTemplate(t *testing.T) {
 	t.Parallel()
 
-	sandboxID, err := naming.SandboxName("default", "source-template", "abcde")
+	sandboxID, err := naming.SandboxNameForOperation("default", "source-template", "operation-1")
 	if err != nil {
-		t.Fatalf("SandboxName() error = %v", err)
+		t.Fatalf("SandboxNameForOperation() error = %v", err)
 	}
 	request := TemplateFromSandboxRequest{
 		TemplateID: "derived",
@@ -245,9 +243,9 @@ func TestCreateTemplateFromSandboxReplayAfterManualUpdateReturnsCurrentTemplate(
 func TestCreateTemplateFromSandboxRequiresCreateAndSourceReadPermissions(t *testing.T) {
 	t.Parallel()
 
-	sandboxID, err := naming.SandboxName("default", "source-template", "abcde")
+	sandboxID, err := naming.SandboxNameForOperation("default", "source-template", "operation-1")
 	if err != nil {
-		t.Fatalf("SandboxName() error = %v", err)
+		t.Fatalf("SandboxNameForOperation() error = %v", err)
 	}
 	body, err := json.Marshal(TemplateFromSandboxRequest{
 		TemplateID: "derived",
@@ -308,12 +306,12 @@ func TestCreateTemplateFromSandboxRequiresCreateAndSourceReadPermissions(t *test
 func TestCreateTemplateFromSandboxRejectsMemoryAbovePlatformMaximum(t *testing.T) {
 	t.Parallel()
 
-	sandboxID, err := naming.SandboxName("default", "source-template", "abcde")
+	sandboxID, err := naming.SandboxNameForOperation("default", "source-template", "operation-1")
 	if err != nil {
-		t.Fatalf("SandboxName() error = %v", err)
+		t.Fatalf("SandboxNameForOperation() error = %v", err)
 	}
 	sourceSpec := validTemplateSpec()
-	sourceSpec.MainContainer.Resources.Memory = resource.MustParse("32Gi")
+	sourceSpec.MainContainer.Resources.Memory = "32Gi"
 	store := &testTemplateStore{}
 	buildStore := &fromSandboxBuildStore{
 		create: func(context.Context, *template.Template, *template.TemplateBuild) (*template.Template, bool, error) {
@@ -366,9 +364,4 @@ func TestCreateTemplateFromSandboxRejectsMemoryAbovePlatformMaximum(t *testing.T
 	if resolver.calls != 1 {
 		t.Fatalf("source resolver calls = %d, want 1", resolver.calls)
 	}
-}
-
-func metav1Time(value time.Time) *metav1.Time {
-	out := metav1.NewTime(value)
-	return &out
 }

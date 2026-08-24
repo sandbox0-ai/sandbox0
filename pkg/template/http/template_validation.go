@@ -3,12 +3,13 @@ package http
 import (
 	"fmt"
 	"net"
-	"path/filepath"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -18,21 +19,6 @@ func validateTemplateSpecForClaims(
 	resourcePolicy s0template.ResourcePolicy,
 ) error {
 	isSystem := claims != nil && claims.IsSystemToken()
-	if !isSystem {
-		if spec.Pod != nil {
-			return fmt.Errorf("spec.pod requires system identity")
-		}
-		if spec.MainContainer.SecurityContext != nil {
-			return fmt.Errorf("spec.mainContainer.securityContext requires system identity")
-		}
-		if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
-			return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
-		}
-		if spec.ClusterId != nil {
-			return fmt.Errorf("spec.clusterId requires system identity")
-		}
-	}
-
 	subject := "team-owned template"
 	if isSystem {
 		subject = "system template"
@@ -44,6 +30,9 @@ func validateTemplateSpecForClaims(
 }
 
 func validateTemplateImagesForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims, privateRegistryHosts []string) error {
+	if _, err := rootfsimporter.PinnedSourceDigest(spec.MainContainer.Image); err != nil {
+		return fmt.Errorf("spec.mainContainer.image must be a normalized digest-pinned SHA-256 OCI reference: %w", err)
+	}
 	if claims == nil || claims.IsSystemToken() || strings.TrimSpace(claims.TeamID) == "" {
 		return nil
 	}
@@ -64,32 +53,19 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if strings.TrimSpace(spec.MainContainer.Image) == "" {
 		return fmt.Errorf("spec.mainContainer.image is required")
 	}
-	if spec.MainContainer.Resources.Memory.Sign() <= 0 {
+	if _, err := rootfsimporter.PinnedSourceDigest(spec.MainContainer.Image); err != nil {
+		return fmt.Errorf("spec.mainContainer.image must be a normalized digest-pinned SHA-256 OCI reference: %w", err)
+	}
+	memory, err := quantity.Parse(strings.TrimSpace(spec.MainContainer.Resources.Memory))
+	if err != nil || memory.Sign() <= 0 {
 		return fmt.Errorf("spec.mainContainer.resources.memory must be > 0")
 	}
-	if spec.MainContainer.Resources.CPU.Sign() <= 0 {
+	cpu, err := quantity.Parse(strings.TrimSpace(spec.MainContainer.Resources.CPU))
+	if err != nil || cpu.Sign() <= 0 {
 		return fmt.Errorf("derived spec.mainContainer.resources.cpu must be > 0")
 	}
-	if spec.MainContainer.Resources.EphemeralStorage.Sign() < 0 {
-		return fmt.Errorf("spec.mainContainer.resources.ephemeralStorage must be >= 0")
-	}
-	if err := validateSecurityContext(spec.MainContainer.SecurityContext, "spec.mainContainer.securityContext"); err != nil {
+	if _, err := s0template.ResolveRootFSLogicalSize(spec); err != nil {
 		return err
-	}
-	if spec.Pod != nil {
-		if err := validateEmptyDirMounts(spec.Pod.EmptyDirMounts); err != nil {
-			return err
-		}
-	}
-
-	if spec.Pool.MinIdle < 0 {
-		return fmt.Errorf("spec.pool.minIdle must be >= 0")
-	}
-	if spec.Pool.MaxIdle < 0 {
-		return fmt.Errorf("spec.pool.maxIdle must be >= 0")
-	}
-	if spec.Pool.MaxIdle < spec.Pool.MinIdle {
-		return fmt.Errorf("spec.pool.maxIdle must be >= spec.pool.minIdle")
 	}
 
 	if spec.Network != nil {
@@ -118,121 +94,13 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	return nil
 }
 
-func validateSecurityContext(sc *v1alpha1.SecurityContext, field string) error {
-	if sc == nil {
-		return nil
-	}
-	if sc.Capabilities != nil {
-		if err := validateCapabilities(sc.Capabilities.Add, field+".capabilities.add"); err != nil {
-			return err
-		}
-		if err := validateCapabilities(sc.Capabilities.Drop, field+".capabilities.drop"); err != nil {
-			return err
-		}
-	}
-	if err := validateSeccompProfile(sc.SeccompProfile, field+".seccompProfile"); err != nil {
-		return err
-	}
-	if err := validateAppArmorProfile(sc.AppArmorProfile, field+".appArmorProfile"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateCapabilities(caps []string, field string) error {
-	for i, cap := range caps {
-		if strings.TrimSpace(cap) == "" {
-			return fmt.Errorf("%s[%d] is required", field, i)
-		}
-	}
-	return nil
-}
-
-func validateSeccompProfile(profile *v1alpha1.SeccompProfile, field string) error {
-	if profile == nil {
-		return nil
-	}
-	switch profile.Type {
-	case v1alpha1.SeccompProfileTypeUnconfined, v1alpha1.SeccompProfileTypeRuntimeDefault:
-		if profile.LocalhostProfile != nil {
-			return fmt.Errorf("%s.localhostProfile must be omitted unless type is Localhost", field)
-		}
-	case v1alpha1.SeccompProfileTypeLocalhost:
-		if profile.LocalhostProfile == nil || strings.TrimSpace(*profile.LocalhostProfile) == "" {
-			return fmt.Errorf("%s.localhostProfile is required when type is Localhost", field)
-		}
-	default:
-		return fmt.Errorf("%s.type must be one of: Unconfined, RuntimeDefault, Localhost", field)
-	}
-	return nil
-}
-
-func validateAppArmorProfile(profile *v1alpha1.AppArmorProfile, field string) error {
-	if profile == nil {
-		return nil
-	}
-	switch profile.Type {
-	case v1alpha1.AppArmorProfileTypeUnconfined, v1alpha1.AppArmorProfileTypeRuntimeDefault:
-		if profile.LocalhostProfile != nil {
-			return fmt.Errorf("%s.localhostProfile must be omitted unless type is Localhost", field)
-		}
-	case v1alpha1.AppArmorProfileTypeLocalhost:
-		if profile.LocalhostProfile == nil || strings.TrimSpace(*profile.LocalhostProfile) == "" {
-			return fmt.Errorf("%s.localhostProfile is required when type is Localhost", field)
-		}
-	default:
-		return fmt.Errorf("%s.type must be one of: Unconfined, RuntimeDefault, Localhost", field)
-	}
-	return nil
-}
-
-func validateEmptyDirMounts(mounts []v1alpha1.EmptyDirMountSpec) error {
-	seenPaths := make(map[string]string, len(mounts))
-
-	for i, mount := range mounts {
-		field := fmt.Sprintf("spec.pod.emptyDirMounts[%d]", i)
-		mountPath := strings.TrimSpace(mount.MountPath)
-		cleanMountPath := filepath.Clean(mountPath)
-		if mountPath == "" || mountPath != cleanMountPath || !filepath.IsAbs(cleanMountPath) || cleanMountPath == string(filepath.Separator) {
-			return fmt.Errorf("%s.mountPath is invalid", field)
-		}
-		if err := validateReservedMountPath(cleanMountPath, field+".mountPath"); err != nil {
-			return err
-		}
-		if existingField, ok := seenPaths[cleanMountPath]; ok {
-			return fmt.Errorf("%s.mountPath %q duplicates %s.mountPath", field, cleanMountPath, existingField)
-		}
-		seenPaths[cleanMountPath] = field
-		if mount.SizeLimit != nil && mount.SizeLimit.Sign() <= 0 {
-			return fmt.Errorf("%s.sizeLimit must be > 0", field)
-		}
-	}
-	return nil
-}
-
-func validateTemplateClaimNameBudget(scope, teamID, templateID string, spec v1alpha1.SandboxTemplateSpec) error {
-	clusterTemplateID := naming.TemplateNameForCluster(scope, teamID, templateID)
-	clusterID := naming.ClusterIDOrDefault(spec.ClusterId)
-	sandboxName, err := naming.SandboxName(clusterID, clusterTemplateID, strings.Repeat("a", 5))
+func validateTemplateClaimNameBudget(templateID string, spec v1alpha1.SandboxTemplateSpec) error {
+	sandboxName, err := naming.SandboxNameForOperation(naming.DefaultClusterID, templateID, "name-budget-validation")
 	if err != nil {
 		return fmt.Errorf("template_id cannot generate claimable sandbox names: %w", err)
 	}
 	if _, err := naming.BuildExposureHostLabel(sandboxName, 65535); err != nil {
 		return fmt.Errorf("template_id cannot generate claimable sandbox exposure labels: %w", err)
-	}
-	return nil
-}
-
-func validateReservedMountPath(path, field string) error {
-	reserved := []string{
-		"/procd-image",
-		"/config",
-		"/var/run/sandbox0/networking",
-	}
-	for _, prefix := range reserved {
-		if path == prefix || strings.HasPrefix(path, prefix+string(filepath.Separator)) {
-			return fmt.Errorf("%s uses reserved path %q", field, prefix)
-		}
 	}
 	return nil
 }

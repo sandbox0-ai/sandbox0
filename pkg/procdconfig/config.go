@@ -16,8 +16,16 @@ import (
 )
 
 const (
-	DefaultWebhookOutboxDir = "/var/lib/sandbox0/procd/webhook-outbox"
-	DefaultSessionStateDir  = "/var/lib/sandbox0/procd/sessions"
+	DefaultHTTPPort               = 49983
+	DefaultLogLevel               = "info"
+	DefaultRootPath               = "/workspace"
+	DefaultContextCleanupInterval = 30 * time.Second
+	DefaultWebhookQueueSize       = 256
+	DefaultWebhookRequestTimeout  = 5 * time.Second
+	DefaultWebhookMaxRetries      = 3
+	DefaultWebhookBaseBackoff     = 500 * time.Millisecond
+	DefaultWebhookOutboxDir       = "/var/lib/sandbox0/procd/webhook-outbox"
+	DefaultSessionStateDir        = "/var/lib/sandbox0/procd/sessions"
 )
 
 // Duration wraps time.Duration with string-based JSON and YAML encoding.
@@ -63,64 +71,23 @@ func (d Duration) MarshalYAML() (any, error) {
 	return d.String(), nil
 }
 
-// ToUnstructured returns the representation used by Kubernetes converters.
-func (d Duration) ToUnstructured() any {
-	return d.String()
-}
-
-// OpenAPISchemaType describes Duration as a string.
-func (Duration) OpenAPISchemaType() []string {
-	return []string{"string"}
-}
-
-// OpenAPISchemaFormat returns the OpenAPI format for Duration.
-func (Duration) OpenAPISchemaFormat() string {
-	return ""
-}
-
 // Config holds all runtime configuration for procd.
 type Config struct {
-	// +optional
-	// +kubebuilder:default=49983
-	HTTPPort int `yaml:"http_port" json:"httpPort"`
-	// +optional
-	// +kubebuilder:default="info"
+	HTTPPort int    `yaml:"http_port" json:"httpPort"`
 	LogLevel string `yaml:"log_level" json:"logLevel"`
 
-	// +optional
-	// +kubebuilder:default="/workspace"
 	RootPath string `yaml:"root_path" json:"rootPath"`
 
-	// +optional
-	// +kubebuilder:default="30s"
 	ContextCleanupInterval Duration `yaml:"context_cleanup_interval" json:"contextCleanupInterval"`
-	// +optional
-	// +kubebuilder:default="0s"
-	ContextIdleTimeout Duration `yaml:"context_idle_timeout" json:"contextIdleTimeout"`
-	// +optional
-	// +kubebuilder:default="0s"
-	ContextMaxLifetime Duration `yaml:"context_max_lifetime" json:"contextMaxLifetime"`
-	// +optional
-	// +kubebuilder:default="0s"
-	ContextFinishedTTL Duration `yaml:"context_finished_ttl" json:"contextFinishedTTL"`
-	// +optional
-	// +kubebuilder:default=256
-	WebhookQueueSize int `yaml:"webhook_queue_size" json:"webhookQueueSize"`
-	// +optional
-	// +kubebuilder:default="5s"
-	WebhookRequestTimeout Duration `yaml:"webhook_request_timeout" json:"webhookRequestTimeout"`
-	// +optional
-	// +kubebuilder:default=3
-	WebhookMaxRetries int `yaml:"webhook_max_retries" json:"webhookMaxRetries"`
-	// +optional
-	// +kubebuilder:default="500ms"
-	WebhookBaseBackoff Duration `yaml:"webhook_base_backoff" json:"webhookBaseBackoff"`
-	// +optional
-	// +kubebuilder:default="/var/lib/sandbox0/procd/webhook-outbox"
-	WebhookOutboxDir string `yaml:"webhook_outbox_dir" json:"webhookOutboxDir"`
-	// +optional
-	// +kubebuilder:default="/var/lib/sandbox0/procd/sessions"
-	SessionStateDir string `yaml:"session_state_dir" json:"sessionStateDir"`
+	ContextIdleTimeout     Duration `yaml:"context_idle_timeout" json:"contextIdleTimeout"`
+	ContextMaxLifetime     Duration `yaml:"context_max_lifetime" json:"contextMaxLifetime"`
+	ContextFinishedTTL     Duration `yaml:"context_finished_ttl" json:"contextFinishedTTL"`
+	WebhookQueueSize       int      `yaml:"webhook_queue_size" json:"webhookQueueSize"`
+	WebhookRequestTimeout  Duration `yaml:"webhook_request_timeout" json:"webhookRequestTimeout"`
+	WebhookMaxRetries      int      `yaml:"webhook_max_retries" json:"webhookMaxRetries"`
+	WebhookBaseBackoff     Duration `yaml:"webhook_base_backoff" json:"webhookBaseBackoff"`
+	WebhookOutboxDir       string   `yaml:"webhook_outbox_dir" json:"webhookOutboxDir"`
+	SessionStateDir        string   `yaml:"session_state_dir" json:"sessionStateDir"`
 
 	setKeys map[string]bool
 }
@@ -206,6 +173,33 @@ func Load() *Config {
 
 // ApplyDefaults fills optional configuration values.
 func (c *Config) ApplyDefaults() {
+	if c.HTTPPort <= 0 {
+		c.HTTPPort = DefaultHTTPPort
+	}
+	if strings.TrimSpace(c.LogLevel) == "" {
+		c.LogLevel = DefaultLogLevel
+	}
+	if strings.TrimSpace(c.RootPath) == "" {
+		c.RootPath = DefaultRootPath
+	}
+	if c.ContextCleanupInterval.Duration <= 0 {
+		c.ContextCleanupInterval = Duration{Duration: DefaultContextCleanupInterval}
+	}
+	if c.WebhookQueueSize <= 0 {
+		c.WebhookQueueSize = DefaultWebhookQueueSize
+	}
+	if c.WebhookRequestTimeout.Duration <= 0 {
+		c.WebhookRequestTimeout = Duration{Duration: DefaultWebhookRequestTimeout}
+	}
+	if c.WebhookMaxRetries <= 0 {
+		c.WebhookMaxRetries = DefaultWebhookMaxRetries
+	}
+	if c.WebhookBaseBackoff.Duration <= 0 {
+		c.WebhookBaseBackoff = Duration{Duration: DefaultWebhookBaseBackoff}
+	}
+	if strings.TrimSpace(c.WebhookOutboxDir) == "" {
+		c.WebhookOutboxDir = DefaultWebhookOutboxDir
+	}
 	if strings.TrimSpace(c.SessionStateDir) == "" {
 		c.SessionStateDir = DefaultSessionStateDir
 	}

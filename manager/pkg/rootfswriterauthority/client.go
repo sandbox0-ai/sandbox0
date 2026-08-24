@@ -1,0 +1,452 @@
+package rootfswriterauthority
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
+)
+
+const maxResponseBytes = 64 << 10
+
+// PublishGenerationRequest submits a node's local detach proof and sealed
+// block generation to the regional writer authority.
+type PublishGenerationRequest struct {
+	WriterEpoch             int64                         `json:"writer_epoch"`
+	BindingVersion          int                           `json:"binding_version"`
+	BindingDigest           string                        `json:"binding_digest"`
+	OperationID             string                        `json:"operation_id"`
+	ProofDigest             string                        `json:"proof_digest"`
+	ExpectedOldGenerationID string                        `json:"expected_old_generation_id"`
+	Generation              sandboxstore.RootFSGeneration `json:"generation"`
+}
+
+// PublishRunningForkRequest submits a durable node checkpoint while leaving
+// the exact source writer active. Regional identity is repeated outside the
+// proof so handlers can reject a mismatched binding before entering storage.
+type PublishRunningForkRequest struct {
+	WriterEpoch    int64                                     `json:"writer_epoch"`
+	BindingVersion int                                       `json:"binding_version"`
+	BindingDigest  string                                    `json:"binding_digest"`
+	Checkpoint     rootfshandoff.RunningForkCheckpointResult `json:"checkpoint"`
+}
+
+// CrashAbandonBeginRequest asks the regional authority to fence one expired
+// writer before the node discards its unsealed physical branch.
+type CrashAbandonBeginRequest struct {
+	WriterEpoch             int64  `json:"writer_epoch"`
+	BindingVersion          int    `json:"binding_version"`
+	BindingDigest           string `json:"binding_digest"`
+	OperationID             string `json:"operation_id"`
+	ExpectedOldGenerationID string `json:"expected_old_generation_id"`
+}
+
+// CrashAbandonCompleteRequest submits the node's terminal absence proof after
+// the regional fence has become authoritative.
+type CrashAbandonCompleteRequest struct {
+	CrashAbandonBeginRequest
+	Proof rootfshandoff.CrashFenceProof `json:"proof"`
+}
+
+type ManagerClientConfig struct {
+	BaseURL        string
+	CAFile         string
+	ClientCertFile string
+	ClientKeyFile  string
+	TokenFile      string
+	Timeout        time.Duration
+}
+
+type ManagerClient struct {
+	baseURL   *url.URL
+	tokenFile string
+	http      *http.Client
+}
+
+func NewManagerClient(config ManagerClientConfig) (*ManagerClient, error) {
+	baseURL, err := url.Parse(strings.TrimSpace(config.BaseURL))
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return nil, fmt.Errorf("writer authority URL must be an HTTPS origin: %w", errdefs.ErrInvalidArgument)
+	}
+	if strings.TrimSpace(config.CAFile) == "" || strings.TrimSpace(config.TokenFile) == "" {
+		return nil, fmt.Errorf("writer authority CA and projected token files are required: %w", errdefs.ErrInvalidArgument)
+	}
+	var clientCertificates []tls.Certificate
+	if strings.TrimSpace(config.ClientCertFile) != "" || strings.TrimSpace(config.ClientKeyFile) != "" {
+		if strings.TrimSpace(config.ClientCertFile) == "" || strings.TrimSpace(config.ClientKeyFile) == "" {
+			return nil, fmt.Errorf("writer authority client certificate and key must be configured together: %w", errdefs.ErrInvalidArgument)
+		}
+		clientCertificate, err := tls.LoadX509KeyPair(config.ClientCertFile, config.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load writer authority client identity: %w", err)
+		}
+		clientCertificates = append(clientCertificates, clientCertificate)
+	}
+	caPEM, err := os.ReadFile(config.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read writer authority CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("writer authority CA contains no certificates: %w", errdefs.ErrInvalidArgument)
+	}
+	if config.Timeout <= 0 {
+		config.Timeout = 2 * time.Second
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Regional authority credentials must never be forwarded through ambient
+	// HTTP(S)_PROXY configuration on a compute node.
+	transport.Proxy = nil
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: clientCertificates,
+	}
+	return &ManagerClient{
+		baseURL: baseURL, tokenFile: strings.TrimSpace(config.TokenFile),
+		http: &http.Client{Transport: transport, Timeout: config.Timeout},
+	}, nil
+}
+
+func (c *ManagerClient) ConsumeWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest) (protocol.LeaseObservation, error) {
+	binding, err := writerGrantBinding(stage)
+	if err != nil {
+		return protocol.LeaseObservation{}, err
+	}
+	var observation protocol.LeaseObservation
+	if err := c.putWriterGrant(ctx, "consume", protocol.ConsumePath(stage.Identity.WriterGrantID), protocol.ConsumeRequest(binding), &observation); err != nil {
+		return protocol.LeaseObservation{}, err
+	}
+	return observation, nil
+}
+
+// PublishWriterGrant terminally publishes one locally sealed generation.
+func (c *ManagerClient) PublishWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest, request PublishGenerationRequest) error {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return err
+	}
+	request.WriterEpoch = binding.WriterEpoch
+	request.BindingVersion = binding.BindingVersion
+	request.BindingDigest = binding.BindingDigest
+	if strings.TrimSpace(request.OperationID) == "" || strings.TrimSpace(request.ProofDigest) == "" ||
+		strings.TrimSpace(request.ExpectedOldGenerationID) == "" || request.Generation.Descriptor == nil {
+		return fmt.Errorf("invalid terminal writer publication: %w", errdefs.ErrInvalidArgument)
+	}
+	return c.putWriterGrant(ctx, "publish", protocol.TerminalPath(stage.Identity.WriterGrantID)+"/publish", request, nil)
+}
+
+// PublishRunningFork atomically installs a live checkpoint on its paused
+// target without advancing or retiring the source writer.
+func (c *ManagerClient) PublishRunningFork(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+	checkpoint rootfshandoff.RunningForkCheckpointResult,
+) error {
+	request, err := publishRunningForkRequest(stage, fork, checkpoint)
+	if err != nil {
+		return err
+	}
+	return c.putWriterGrant(ctx, "publish running fork", protocol.RunningForkPath(stage.Identity.WriterGrantID), request, nil)
+}
+
+func publishRunningForkRequest(
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+	checkpoint rootfshandoff.RunningForkCheckpointResult,
+) (PublishRunningForkRequest, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return PublishRunningForkRequest{}, err
+	}
+	if err := fork.Validate(); err != nil {
+		return PublishRunningForkRequest{}, fmt.Errorf("validate running fork request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if err := checkpoint.Validate(); err != nil {
+		return PublishRunningForkRequest{}, fmt.Errorf("validate running fork checkpoint: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	proof := checkpoint.Proof
+	if proof.OperationID != fork.OperationID || proof.SourceSandboxID != fork.SourceSandboxID ||
+		proof.TargetSandboxID != fork.TargetSandboxID || proof.CheckpointGenerationID != fork.TargetGenerationID ||
+		proof.SourceFilesystemID != stage.Identity.RootFSID ||
+		proof.SourceWriterGrantID != stage.Identity.WriterGrantID || proof.SourceWriterEpoch != binding.WriterEpoch ||
+		proof.BindingVersion != binding.BindingVersion || proof.BindingDigest != binding.BindingDigest ||
+		proof.ExpectedSourceGenerationID != stage.InitialGeneration {
+		return PublishRunningForkRequest{}, fmt.Errorf("running fork checkpoint does not match the writer binding: %w", errdefs.ErrInvalidArgument)
+	}
+	return PublishRunningForkRequest{
+		WriterEpoch: binding.WriterEpoch, BindingVersion: binding.BindingVersion,
+		BindingDigest: binding.BindingDigest, Checkpoint: checkpoint,
+	}, nil
+}
+
+// BeginCrashAbandonWriterGrant establishes the regional lease fence before
+// local unplanned cleanup. Callers may retry the exact operation while the
+// lease remains within the server's renewal grace period.
+func (c *ManagerClient) BeginCrashAbandonWriterGrant(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) error {
+	request, err := crashAbandonBeginRequest(stage, operationID)
+	if err != nil {
+		return err
+	}
+	path := protocol.TerminalPath(stage.Identity.WriterGrantID) + "/crash-abandon/begin"
+	return c.putWriterGrant(ctx, "begin crash abandon", path, request, nil)
+}
+
+// CompleteCrashAbandonWriterGrant retires the fenced grant without advancing
+// its durable generation.
+func (c *ManagerClient) CompleteCrashAbandonWriterGrant(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+	proof rootfshandoff.CrashFenceProof,
+) error {
+	request, err := crashAbandonBeginRequest(stage, operationID)
+	if err != nil {
+		return err
+	}
+	if err := proof.Validate(); err != nil {
+		return fmt.Errorf("validate crash fence proof: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if proof.OperationID != request.OperationID || proof.WriterGrantID != stage.Identity.WriterGrantID ||
+		proof.WriterEpoch != request.WriterEpoch || proof.BindingVersion != request.BindingVersion ||
+		proof.BindingDigest != request.BindingDigest || proof.InitialGeneration != request.ExpectedOldGenerationID {
+		return fmt.Errorf("crash fence proof does not match the writer binding: %w", errdefs.ErrInvalidArgument)
+	}
+	path := protocol.TerminalPath(stage.Identity.WriterGrantID) + "/crash-abandon/complete"
+	return c.putWriterGrant(ctx, "complete crash abandon", path, CrashAbandonCompleteRequest{
+		CrashAbandonBeginRequest: request,
+		Proof:                    proof,
+	}, nil)
+}
+
+func crashAbandonBeginRequest(
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) (CrashAbandonBeginRequest, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return CrashAbandonBeginRequest{}, err
+	}
+	request := CrashAbandonBeginRequest{
+		WriterEpoch: binding.WriterEpoch, BindingVersion: binding.BindingVersion,
+		BindingDigest: binding.BindingDigest, OperationID: strings.TrimSpace(operationID),
+		ExpectedOldGenerationID: strings.TrimSpace(stage.InitialGeneration),
+	}
+	if request.OperationID == "" || request.ExpectedOldGenerationID == "" {
+		return CrashAbandonBeginRequest{}, fmt.Errorf("invalid crash abandon request: %w", errdefs.ErrInvalidArgument)
+	}
+	return request, nil
+}
+
+// RenewWriterGrant extends the lease for the exact consumed Stage binding.
+// The authenticated node is the durable owner, so renewal does not retain or
+// transmit the one-time raw grant token used by ConsumeWriterGrant.
+func (c *ManagerClient) RenewWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest) (protocol.LeaseObservation, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return protocol.LeaseObservation{}, err
+	}
+	request := protocol.RenewRequest(binding)
+	if err := request.Validate(); err != nil {
+		return protocol.LeaseObservation{}, fmt.Errorf("validate writer renewal: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	var observation protocol.LeaseObservation
+	if err := c.putWriterGrant(ctx, "renew", protocol.RenewPath(stage.Identity.WriterGrantID), request, &observation); err != nil {
+		return protocol.LeaseObservation{}, err
+	}
+	return observation, nil
+}
+
+// RequestWriterPressurePause asks Manager to persist an automatic planned
+// pause for the exact writer before local admission is allowed to enter its
+// protected retirement reserve.
+func (c *ManagerClient) RequestWriterPressurePause(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	pressure rootfsblock.DirtyTailPressure,
+) (string, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return "", err
+	}
+	request := protocol.DirtyTailPressureRequest{
+		TerminalRequest: binding, Scope: pressure.Scope, UsedBytes: pressure.UsedBytes,
+		RequestedBytes: pressure.RequestedBytes, LimitBytes: pressure.LimitBytes,
+	}
+	if err := request.Validate(); err != nil {
+		return "", fmt.Errorf("validate writer pressure pause: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	var response protocol.DirtyTailPressureResponse
+	if err := c.putWriterGrant(
+		ctx, "request pressure pause", protocol.DirtyTailPressurePath(stage.Identity.WriterGrantID), request, &response,
+	); err != nil {
+		return "", err
+	}
+	if err := response.Validate(); err != nil {
+		return "", fmt.Errorf("validate writer pressure response: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	return response.OperationID, nil
+}
+
+// RenewWriterGrants authenticates one node request and renews multiple exact
+// durable bindings. Per-grant authorization results remain independent.
+func (c *ManagerClient) RenewWriterGrants(ctx context.Context, stages []rootfshandoff.StageRequest) (protocol.BatchRenewResponse, error) {
+	request := protocol.BatchRenewRequest{Items: make([]protocol.BatchRenewItem, 0, len(stages))}
+	for _, stage := range stages {
+		binding, err := durableWriterGrantBinding(stage)
+		if err != nil {
+			return protocol.BatchRenewResponse{}, err
+		}
+		request.Items = append(request.Items, protocol.BatchRenewItem{
+			GrantID: stage.Identity.WriterGrantID, RenewRequest: protocol.RenewRequest(binding),
+		})
+	}
+	if err := request.Validate(); err != nil {
+		return protocol.BatchRenewResponse{}, fmt.Errorf("validate writer renewal batch: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	var response protocol.BatchRenewResponse
+	if err := c.putWriterGrant(ctx, "batch renew", protocol.BatchRenewPath, request, &response); err != nil {
+		return protocol.BatchRenewResponse{}, err
+	}
+	if err := response.Validate(len(request.Items)); err != nil {
+		return protocol.BatchRenewResponse{}, fmt.Errorf("validate writer renewal batch response: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	return response, nil
+}
+
+func durableWriterGrantBinding(stage rootfshandoff.StageRequest) (protocol.TerminalRequest, error) {
+	if err := stage.ValidateDurableBinding(); err != nil {
+		return protocol.TerminalRequest{}, fmt.Errorf("validate durable writer binding: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	digest, err := stage.BindingDigest()
+	if err != nil {
+		return protocol.TerminalRequest{}, fmt.Errorf("digest durable writer binding: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	return protocol.TerminalRequest{
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+// VerifyTerminalWriterGrant proves that the regional writer authority has
+// irreversibly retired or canceled the exact durable Stage binding.
+func (c *ManagerClient) VerifyTerminalWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest) error {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return err
+	}
+	request := protocol.TerminalRequest(binding)
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("validate terminal writer proof: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	return c.putWriterGrant(ctx, "verify terminal", protocol.TerminalPath(stage.Identity.WriterGrantID), request, nil)
+}
+
+// CancelUnconsumedWriterGrant terminally cancels an issued grant whose exact
+// durable Stage was journaled before Consume. A consumed grant returns failed
+// precondition and must follow the lease-fenced crash-abandon path instead.
+func (c *ManagerClient) CancelUnconsumedWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest) error {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return err
+	}
+	request := protocol.TerminalRequest(binding)
+	path := protocol.PreconsumeAbortPath(stage.Identity.WriterGrantID)
+	return c.putWriterGrant(ctx, "cancel unconsumed", path, request, nil)
+}
+
+func writerGrantBinding(stage rootfshandoff.StageRequest) (protocol.ConsumeRequest, error) {
+	if err := stage.Validate(); err != nil {
+		return protocol.ConsumeRequest{}, fmt.Errorf("validate writer binding: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	digest, err := stage.BindingDigest()
+	if err != nil {
+		return protocol.ConsumeRequest{}, fmt.Errorf("digest writer binding: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	return protocol.ConsumeRequest{
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(digest[:]), WriterToken: stage.Identity.WriterGrantToken,
+	}, nil
+}
+
+func (c *ManagerClient) putWriterGrant(ctx context.Context, operation, path string, body, result any) error {
+	token, err := os.ReadFile(c.tokenFile)
+	if err != nil {
+		return fmt.Errorf("read projected service account token: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	bearer := strings.TrimSpace(string(token))
+	if bearer == "" {
+		return fmt.Errorf("projected service account token is empty: %w", errdefs.ErrUnavailable)
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	target := *c.baseURL
+	target.Path = strings.TrimRight(target.Path, "/") + path
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, target.String(), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("%s writer grant: %w: %w", operation, err, errdefs.ErrUnavailable)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		if result != nil {
+			if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(result); err != nil {
+				return fmt.Errorf("decode %s writer grant response: %w: %w", operation, err, errdefs.ErrUnavailable)
+			}
+			if observation, ok := result.(*protocol.LeaseObservation); ok {
+				if err := observation.Validate(); err != nil {
+					return fmt.Errorf("validate %s writer grant response: %w: %w", operation, err, errdefs.ErrUnavailable)
+				}
+			}
+		}
+		return nil
+	}
+	responsePayload, _ := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	message := fmt.Sprintf("manager writer authority returned %s: %s", response.Status, strings.TrimSpace(string(responsePayload)))
+	switch response.StatusCode {
+	case http.StatusBadRequest:
+		return fmt.Errorf("%s: %w", message, errdefs.ErrInvalidArgument)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%s: %w", message, errdefs.ErrPermissionDenied)
+	case http.StatusNotFound:
+		return fmt.Errorf("%s: %w", message, errdefs.ErrNotFound)
+	case http.StatusPreconditionFailed:
+		return fmt.Errorf("%s: %w", message, errdefs.ErrFailedPrecondition)
+	case http.StatusGatewayTimeout:
+		return fmt.Errorf("%s: %w", message, context.DeadlineExceeded)
+	default:
+		if response.StatusCode >= 400 && response.StatusCode < 500 {
+			return fmt.Errorf("%s: %w", message, errdefs.ErrFailedPrecondition)
+		}
+		return fmt.Errorf("%s: %w", message, errdefs.ErrUnavailable)
+	}
+}

@@ -4,7 +4,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 type UnknownTrafficAction string
@@ -34,7 +34,7 @@ func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 	}
 	appProtocol = strings.ToLower(strings.TrimSpace(appProtocol))
 	if policy.Platform != nil {
-		if isOtherSandboxPod(policy.Platform, destIP) {
+		if isOtherSandbox(policy.Platform, destIP) {
 			return false
 		}
 		if matchCIDR(destIP, policy.Platform.DeniedCIDRs) {
@@ -97,7 +97,7 @@ func AllowUnknownEgressFallback(policy *CompiledPolicy, destIP net.IP, host stri
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
 	if policy.Platform != nil {
-		if isOtherSandboxPod(policy.Platform, destIP) {
+		if isOtherSandbox(policy.Platform, destIP) {
 			return false
 		}
 		if matchCIDR(destIP, policy.Platform.DeniedCIDRs) {
@@ -307,18 +307,18 @@ func matchTrafficRule(rule CompiledTrafficRule, destIP net.IP, destPort int, tra
 	return true
 }
 
-func isOtherSandboxPod(platform *PlatformPolicy, destIP net.IP) bool {
-	if platform == nil || destIP == nil || len(platform.SandboxPodIPs) == 0 {
+func isOtherSandbox(platform *PlatformPolicy, destIP net.IP) bool {
+	if platform == nil || destIP == nil || len(platform.SandboxIPs) == 0 {
 		return false
 	}
 	dest := destIP.String()
 	if dest == "" {
 		return false
 	}
-	if dest == platform.SourcePodIP {
+	if dest == platform.SourceIP {
 		return false
 	}
-	_, ok := platform.SandboxPodIPs[dest]
+	_, ok := platform.SandboxIPs[dest]
 	return ok
 }
 

@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	gatewayhttp "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/http"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -26,7 +26,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type gatewayTestEnv struct {
@@ -67,7 +66,7 @@ func newGatewayTestEnv(t *testing.T, managerURL, _ string, schedulerPerms []stri
 	cfg := &config.ClusterGatewayConfig{
 		ManagerURL:           managerURL,
 		AllowedCallers:       []string{"regional-gateway", "scheduler"},
-		ProxyTimeout:         metav1.Duration{Duration: 2 * time.Second},
+		ProxyTimeout:         config.Duration{Duration: 2 * time.Second},
 		SchedulerPermissions: schedulerPerms,
 	}
 
@@ -109,7 +108,7 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, _ string, pool *pgxpool.P
 			JWTIssuer: jwtIssuer,
 		},
 		AllowedCallers:       []string{"regional-gateway", "scheduler"},
-		ProxyTimeout:         metav1.Duration{Duration: 2 * time.Second},
+		ProxyTimeout:         config.Duration{Duration: 2 * time.Second},
 		SchedulerPermissions: []string{"*:*"},
 	}
 
@@ -142,7 +141,7 @@ func startGatewayTestServer(t *testing.T, server *gatewayhttp.Server, cfg *confi
 	}
 	cfg.HTTPPort = port
 	if cfg.ShutdownTimeout.Duration <= 0 {
-		cfg.ShutdownTimeout = metav1.Duration{Duration: time.Second}
+		cfg.ShutdownTimeout = config.Duration{Duration: time.Second}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

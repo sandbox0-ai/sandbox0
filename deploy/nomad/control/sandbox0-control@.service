@@ -1,0 +1,24 @@
+[Unit]
+Description=Sandbox0 %i service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sandbox0
+Group=sandbox0
+EnvironmentFile=-/etc/sandbox0/%i.env
+Environment=CONFIG_PATH=/etc/sandbox0/%i.yaml
+ExecStart=/usr/local/bin/%i
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sandbox0
+UMask=0077
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=sandbox0-control.target

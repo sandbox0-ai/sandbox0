@@ -1,0 +1,159 @@
+// Copyright 2026 Sandbox0 Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package nomadruntime
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	RuntimeMetricTargetVersion = 1
+	RuntimeMetricSampleVersion = 1
+	RuntimeMetricMaxTargets    = 512
+	maxRuntimeMetricIDBytes    = 512
+	maxRuntimeMetricCPUMilli   = 1_000_000
+	maxRuntimeMetricMemoryMiB  = 1 << 30
+)
+
+// RuntimeMetricTarget is the non-secret logical and runtime identity returned
+// by the root-owned node runtime. It deliberately contains no journal path,
+// mount path, network namespace path, or writer credential.
+type RuntimeMetricTarget struct {
+	Version           int    `json:"version"`
+	TeamID            string `json:"team_id"`
+	SandboxID         string `json:"sandbox_id"`
+	RuntimeGeneration int64  `json:"runtime_generation"`
+	CPUMillicpu       int64  `json:"cpu_millicpu"`
+	MemoryMiB         int64  `json:"memory_mib"`
+	AllocationID      string `json:"allocation_id"`
+	NodeBootID        string `json:"node_boot_id"`
+	LaunchAttempt     string `json:"launch_attempt"`
+	RunscContainerID  string `json:"runsc_container_id"`
+	BindingDigest     string `json:"binding_digest"`
+	SeriesEpoch       string `json:"series_epoch"`
+}
+
+// RuntimeMetricSample is one stock-runsc observation made only after the node
+// runtime has revalidated the target against its current durable binding.
+type RuntimeMetricSample struct {
+	Version    int        `json:"version"`
+	ObservedAt time.Time  `json:"observed_at"`
+	Stats      RunscStats `json:"stats"`
+}
+
+// Validate checks the sample against the exact target requested by the
+// collector. Unsupported gVisor fields remain absent from RunscStats.
+func (s RuntimeMetricSample) Validate(target RuntimeMetricTarget) error {
+	if s.Version != RuntimeMetricSampleVersion {
+		return fmt.Errorf("unsupported runtime metric sample version %d", s.Version)
+	}
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("target: %w", err)
+	}
+	if s.ObservedAt.IsZero() || s.ObservedAt.UnixNano() <= 0 {
+		return fmt.Errorf("observed_at must be after the Unix epoch")
+	}
+	if err := s.Stats.Validate(target.RunscContainerID); err != nil {
+		return fmt.Errorf("runsc stats: %w", err)
+	}
+	return nil
+}
+
+// Validate rejects ambiguous, unbounded, or self-inconsistent metric targets.
+func (t RuntimeMetricTarget) Validate() error {
+	if t.Version != RuntimeMetricTargetVersion {
+		return fmt.Errorf("unsupported runtime metric target version %d", t.Version)
+	}
+	for name, value := range map[string]string{
+		"team_id": t.TeamID, "sandbox_id": t.SandboxID, "allocation_id": t.AllocationID,
+		"node_boot_id": t.NodeBootID, "launch_attempt": t.LaunchAttempt,
+		"runsc_container_id": t.RunscContainerID,
+	} {
+		if value == "" || strings.TrimSpace(value) != value || len(value) > maxRuntimeMetricIDBytes {
+			return fmt.Errorf("%s must be canonical and contain 1..%d bytes", name, maxRuntimeMetricIDBytes)
+		}
+	}
+	if t.RuntimeGeneration <= 0 {
+		return fmt.Errorf("runtime_generation must be positive")
+	}
+	if t.CPUMillicpu <= 0 || t.CPUMillicpu > maxRuntimeMetricCPUMilli {
+		return fmt.Errorf("cpu_millicpu must be within 1..%d", maxRuntimeMetricCPUMilli)
+	}
+	if t.MemoryMiB <= 0 || t.MemoryMiB > maxRuntimeMetricMemoryMiB {
+		return fmt.Errorf("memory_mib must be within 1..%d", maxRuntimeMetricMemoryMiB)
+	}
+	if err := validateRuntimeMetricDigest("binding_digest", t.BindingDigest); err != nil {
+		return err
+	}
+	expected := RuntimeMetricSeriesEpoch(t.AllocationID, t.NodeBootID, t.LaunchAttempt, t.RunscContainerID)
+	if t.SeriesEpoch != expected {
+		return fmt.Errorf("series_epoch does not match the runtime incarnation")
+	}
+	return nil
+}
+
+// NormalizeRuntimeMetricTargets validates, canonically orders, and rejects
+// ambiguous target sets before a caller uses them for privileged stats RPCs.
+func NormalizeRuntimeMetricTargets(targets []RuntimeMetricTarget) ([]RuntimeMetricTarget, error) {
+	if len(targets) > RuntimeMetricMaxTargets {
+		return nil, fmt.Errorf("runtime metric target count %d exceeds %d", len(targets), RuntimeMetricMaxTargets)
+	}
+	result := append([]RuntimeMetricTarget(nil), targets...)
+	slices.SortFunc(result, func(left, right RuntimeMetricTarget) int {
+		return strings.Compare(left.BindingDigest, right.BindingDigest)
+	})
+	bindings := make(map[string]struct{}, len(result))
+	series := make(map[string]struct{}, len(result))
+	for index, target := range result {
+		if err := target.Validate(); err != nil {
+			return nil, fmt.Errorf("runtime metric target %d: %w", index, err)
+		}
+		if _, found := bindings[target.BindingDigest]; found {
+			return nil, fmt.Errorf("runtime metric binding %q is duplicated", target.BindingDigest)
+		}
+		if _, found := series[target.SeriesEpoch]; found {
+			return nil, fmt.Errorf("runtime metric series %q is duplicated", target.SeriesEpoch)
+		}
+		bindings[target.BindingDigest] = struct{}{}
+		series[target.SeriesEpoch] = struct{}{}
+	}
+	return result, nil
+}
+
+// RuntimeMetricSeriesEpoch derives the public counter-reset boundary from the
+// exact allocation, node boot, launch attempt, and runsc container identity.
+func RuntimeMetricSeriesEpoch(allocationID, nodeBootID, launchAttempt, runscContainerID string) string {
+	hash := sha256.New()
+	for _, value := range []string{allocationID, nodeBootID, launchAttempt, runscContainerID} {
+		_, _ = hash.Write([]byte(strconv.Itoa(len(value))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(value))
+	}
+	return "runsc:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func validateRuntimeMetricDigest(name, value string) error {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != value {
+		return fmt.Errorf("%s must be a canonical 32-byte hexadecimal digest", name)
+	}
+	return nil
+}

@@ -5,921 +5,281 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
-	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
-	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
+	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
+	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
+	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestSelectClusterForTemplatePrefersIdleCapacity(t *testing.T) {
-	tpl := newRoutingTemplate("tmpl-a")
-	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 3, 5),
-			newRoutingAllocation("cluster-b", 3, 5),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 1),
-			newRoutingCluster("cluster-b", 10),
-		},
-		&fakeRoutingReconciler{
-			templateIdle: map[string]map[string]int32{
-				"cluster-a": {clusterTemplateID: 2},
-				"cluster-b": {clusterTemplateID: 1},
-			},
-			templateStatsAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 5},
-				"cluster-b": {SandboxNodeCount: 10, TotalNodeCount: 10, TotalPodCount: 0},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-a" {
-		t.Fatalf("selected cluster = %v, want cluster-a", clusterID(selected))
-	}
-	if selectedBy != "idle" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "idle")
-	}
-}
-
-func TestSelectClusterForTemplatePrefersHeadroomWhenIdleUnavailable(t *testing.T) {
-	tpl := newRoutingTemplate("tmpl-a")
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 1),
-			newRoutingCluster("cluster-b", 1),
-		},
-		&fakeRoutingReconciler{
-			templateStatsAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 2, TotalNodeCount: 4, TotalPodCount: 18},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 4, TotalPodCount: 12},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "headroom" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
-	}
-}
-
-func TestSelectClusterForTemplateUsesHeadroomWhenIdleStatsAreStale(t *testing.T) {
-	tpl := newRoutingTemplate("tmpl-a")
-	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 5),
-			newRoutingCluster("cluster-b", 1),
-		},
-		&fakeRoutingReconciler{
-			templateIdle: map[string]map[string]int32{
-				"cluster-a": {clusterTemplateID: 5},
-			},
-			templateStatsAge: map[string]time.Duration{
-				"cluster-a": 3 * time.Second,
-			},
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 2, TotalPodCount: 9},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "headroom" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
-	}
-}
-
-func TestSelectClusterForTemplateUsesHeadroomWhenIdleStatsPredateTemplateSync(t *testing.T) {
-	syncedAt := time.Date(2026, 4, 14, 16, 54, 3, 0, time.UTC)
-	tpl := newRoutingTemplate("tmpl-a")
-	tpl.UpdatedAt = syncedAt.Add(-time.Second)
-	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-	clusterAAlloc := newRoutingAllocation("cluster-a", 2, 4)
-	clusterAAlloc.LastSyncedAt = &syncedAt
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			clusterAAlloc,
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 5),
-			newRoutingCluster("cluster-b", 1),
-		},
-		&fakeRoutingReconciler{
-			templateIdle: map[string]map[string]int32{
-				"cluster-a": {clusterTemplateID: 5},
-			},
-			templateStatsAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-			},
-			templateStatsUpdatedAt: map[string]time.Time{
-				"cluster-a": syncedAt.Add(-time.Millisecond),
-			},
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "headroom" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
-	}
-}
-
-func TestSelectClusterForTemplateUsesHeadroomWhenTemplateUpdateIsUnsynced(t *testing.T) {
-	syncedAt := time.Date(2026, 4, 14, 16, 54, 3, 0, time.UTC)
-	tpl := newRoutingTemplate("tmpl-a")
-	tpl.UpdatedAt = syncedAt.Add(time.Second)
-	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-	clusterAAlloc := newRoutingAllocation("cluster-a", 2, 4)
-	clusterAAlloc.LastSyncedAt = &syncedAt
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			clusterAAlloc,
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 5),
-			newRoutingCluster("cluster-b", 1),
-		},
-		&fakeRoutingReconciler{
-			templateIdle: map[string]map[string]int32{
-				"cluster-a": {clusterTemplateID: 5},
-			},
-			templateStatsAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-			},
-			templateStatsUpdatedAt: map[string]time.Time{
-				"cluster-a": syncedAt.Add(2 * time.Second),
-			},
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "headroom" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
-	}
-}
-
-func TestSelectClusterForTemplateFallsBackToWeight(t *testing.T) {
-	tpl := newRoutingTemplate("tmpl-a")
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 0),
-			newRoutingCluster("cluster-b", 5),
-		},
-		&fakeRoutingReconciler{},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "weight" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "weight")
-	}
-}
-
-func TestSelectClusterForTemplateFallsBackWhenWeightsAreUnavailable(t *testing.T) {
-	tpl := newRoutingTemplate("tmpl-a")
-	server := newRoutingTestServer(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 9),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 0),
-			newRoutingCluster("cluster-b", 0),
-		},
-		&fakeRoutingReconciler{},
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" {
-		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
-	}
-	if selectedBy != "fallback" {
-		t.Fatalf("selectedBy = %q, want %q", selectedBy, "fallback")
-	}
-}
-
-func TestSelectClusterForTemplateRecordsRoutingMetrics(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metrics := obsmetrics.NewScheduler(registry)
-
-	tpl := newRoutingTemplate("tmpl-a")
-	server := newRoutingTestServerWithMetrics(
-		tpl,
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			newRoutingCluster("cluster-a", 1),
-			newRoutingCluster("cluster-b", 1),
-		},
-		&fakeRoutingReconciler{
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 2, TotalNodeCount: 2, TotalPodCount: 10},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": 2 * time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-		metrics,
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected == nil || selected.ClusterID != "cluster-b" || selectedBy != "headroom" {
-		t.Fatalf("selection = (%v,%q), want (cluster-b,headroom)", clusterID(selected), selectedBy)
-	}
-
-	if got := testutil.ToFloat64(metrics.RoutingDecisions.WithLabelValues("cluster-b", "headroom")); got != 1 {
-		t.Fatalf("routing decision metric = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(metrics.ClusterSummaryAge.WithLabelValues("cluster-a")); got != 2 {
-		t.Fatalf("cluster-a summary age = %v, want 2", got)
-	}
-	if got := testutil.ToFloat64(metrics.ClusterSummaryAge.WithLabelValues("cluster-b")); got != 1 {
-		t.Fatalf("cluster-b summary age = %v, want 1", got)
-	}
-}
-
-func TestSelectClusterForTemplateRecordsUnavailableRoutingMetric(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metrics := obsmetrics.NewScheduler(registry)
-
-	server := newRoutingTestServerWithMetrics(
-		newRoutingTemplate("tmpl-a"),
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 1, 1),
-		},
-		[]*template.Cluster{
-			{ClusterID: "cluster-a", Enabled: false},
-		},
-		&fakeRoutingReconciler{},
-		metrics,
-	)
-
-	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
-	if err != nil {
-		t.Fatalf("selectClusterForTemplate() error = %v", err)
-	}
-	if selected != nil || selectedBy != "" {
-		t.Fatalf("selection = (%v,%q), want (nil,\"\")", clusterID(selected), selectedBy)
-	}
-	if got := testutil.ToFloat64(metrics.RoutingDecisions.WithLabelValues("none", "unavailable")); got != 1 {
-		t.Fatalf("unavailable routing metric = %v, want 1", got)
-	}
-}
-
-func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
+func TestSetupRoutesMountsTemplateFromSandboxEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	registry := prometheus.NewRegistry()
-	metrics := obsmetrics.NewScheduler(registry)
-
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ed25519 keypair: %v", err)
-	}
-
-	receivedA := 0
-	clusterA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedA++
-		w.Header().Set("Content-Type", "application/json")
-		if got := r.Header.Get("X-Team-ID"); got != "team-a" {
-			t.Fatalf("cluster-a X-Team-ID = %q, want team-a", got)
+	server := &Server{router: gin.New(), templateHandler: &templatehttp.Handler{}}
+	server.setupRoutes()
+	for _, route := range server.router.Routes() {
+		if route.Method == http.MethodPost && route.Path == "/api/v1/templates/from-sandbox" {
+			return
 		}
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-a"}}`))
-	}))
-	defer clusterA.Close()
+	}
+	t.Fatal("expected POST /api/v1/templates/from-sandbox route")
+}
 
-	receivedB := 0
-	clusterB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedB++
-		w.Header().Set("Content-Type", "application/json")
-		if got := r.Header.Get("X-Team-ID"); got != "team-a" {
-			t.Fatalf("cluster-b X-Team-ID = %q, want team-a", got)
-		}
-		if got := r.Header.Get("X-Internal-Token"); got == "" {
-			t.Fatal("expected internal token header")
-		}
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-b"}}`))
-	}))
-	defer clusterB.Close()
+func TestSelectBestClusterUsesDeterministicResourceOrder(t *testing.T) {
+	capacities := []*db.ClusterCapacity{
+		capacity("cluster-weight", 20, 4, 4, 16<<30, 4000),
+		capacity("cluster-slots", 1, 4, 5, 8<<30, 2000),
+		capacity("cluster-claims", 1, 5, 1, 4<<30, 1000),
+	}
+	if got := selectBestCluster(capacities); got == nil || got.Cluster.ClusterID != "cluster-claims" {
+		t.Fatalf("selected = %#v, want cluster-claims", got)
+	}
 
-	server := newRoutingTestServerWithMetrics(
-		newRoutingTemplate("tmpl-a"),
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 4),
-		},
-		[]*template.Cluster{
-			{ClusterID: "cluster-a", ClusterGatewayURL: clusterA.URL, Enabled: true, Weight: 1},
-			{ClusterID: "cluster-b", ClusterGatewayURL: clusterB.URL, Enabled: true, Weight: 1},
-		},
-		&fakeRoutingReconciler{
-			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 8},
-				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 15},
-			},
-			clusterSummaryAge: map[string]time.Duration{
-				"cluster-a": time.Second,
-				"cluster-b": time.Second,
-			},
-		},
-		metrics,
-	)
-	server.clusterGatewayProxies = make(map[string]*proxy.Router)
-	server.authValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "scheduler",
-		PublicKey:          publicKey,
-		AllowedCallers:     []string{"regional-gateway"},
-		ClockSkewTolerance: 5 * time.Second,
-	})
-	server.internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "scheduler",
-		PrivateKey: privateKey,
-		TTL:        time.Minute,
-	})
-	router := gin.New()
-	v1 := router.Group("/api/v1")
-	v1.Use(server.authMiddleware())
-	v1.POST("/sandboxes", server.createSandbox)
-	httpServer := httptest.NewServer(router)
-	defer httpServer.Close()
-
-	requestBody, err := json.Marshal(map[string]any{"template": "tmpl-a"})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
+	capacities = []*db.ClusterCapacity{
+		capacity("cluster-b", 10, 2, 2, 8<<30, 2000),
+		capacity("cluster-a", 10, 2, 2, 8<<30, 2000),
 	}
-	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/sandboxes", bytes.NewReader(requestBody))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", mustGenerateSchedulerTestToken(t, privateKey, "regional-gateway", "scheduler", "team-a", "user-a"))
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if receivedA != 0 {
-		t.Fatalf("cluster-a requests = %d, want 0", receivedA)
-	}
-	if receivedB != 1 {
-		t.Fatalf("cluster-b requests = %d, want 1", receivedB)
-	}
-	if got := testutil.ToFloat64(metrics.RoutingDecisions.WithLabelValues("cluster-b", "headroom")); got != 1 {
-		t.Fatalf("routing metric = %v, want 1", got)
+	if got := selectBestCluster(capacities); got == nil || got.Cluster.ClusterID != "cluster-a" {
+		t.Fatalf("tie selected = %#v, want lexical cluster-a", got)
 	}
 }
 
-func TestCreateSandboxFallsBackWhenNoFreshSignalsExist(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ed25519 keypair: %v", err)
-	}
-
-	receivedA := 0
-	clusterA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedA++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-a"}}`))
-	}))
-	defer clusterA.Close()
-
-	receivedB := 0
-	clusterB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedB++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-b"}}`))
-	}))
-	defer clusterB.Close()
-
-	server := newRoutingTestServerWithMetrics(
-		newRoutingTemplate("tmpl-a"),
-		[]*template.TemplateAllocation{
-			newRoutingAllocation("cluster-a", 2, 4),
-			newRoutingAllocation("cluster-b", 2, 9),
-		},
-		[]*template.Cluster{
-			{ClusterID: "cluster-a", ClusterGatewayURL: clusterA.URL, Enabled: true, Weight: 0},
-			{ClusterID: "cluster-b", ClusterGatewayURL: clusterB.URL, Enabled: true, Weight: 0},
-		},
-		&fakeRoutingReconciler{},
+func TestSelectBestClusterRejectsUnclaimableRows(t *testing.T) {
+	disabled := capacity("disabled", 100, 10, 10, 16<<30, 4000)
+	disabled.Cluster.Enabled = false
+	if got := selectBestCluster([]*db.ClusterCapacity{
 		nil,
-	)
-	server.clusterGatewayProxies = make(map[string]*proxy.Router)
-	server.authValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "scheduler",
-		PublicKey:          publicKey,
-		AllowedCallers:     []string{"regional-gateway"},
-		ClockSkewTolerance: 5 * time.Second,
-	})
-	server.internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "scheduler",
-		PrivateKey: privateKey,
-		TTL:        time.Minute,
-	})
-	router := gin.New()
-	v1 := router.Group("/api/v1")
-	v1.Use(server.authMiddleware())
-	v1.POST("/sandboxes", server.createSandbox)
-	httpServer := httptest.NewServer(router)
-	defer httpServer.Close()
-
-	requestBody, err := json.Marshal(map[string]any{"template": "tmpl-a"})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/sandboxes", bytes.NewReader(requestBody))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", mustGenerateSchedulerTestToken(t, privateKey, "regional-gateway", "scheduler", "team-a", "user-a"))
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if receivedA != 0 {
-		t.Fatalf("cluster-a requests = %d, want 0", receivedA)
-	}
-	if receivedB != 1 {
-		t.Fatalf("cluster-b requests = %d, want 1", receivedB)
+		disabled,
+		capacity("no-claim-capacity", 1, 0, 10, 16<<30, 4000),
+		capacity("no-ready-slots", 1, 10, 0, 16<<30, 4000),
+	}); got != nil {
+		t.Fatalf("selected = %#v, want nil", got)
 	}
 }
 
-func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ed25519 keypair: %v", err)
+func TestSelectClusterForTemplateUsesExactMemoryOverride(t *testing.T) {
+	tpl := routingTemplate("tmpl-a")
+	memory := "2Gi"
+	repo := &fakeCapacityRepository{capacities: []*db.ClusterCapacity{
+		capacity("cluster-a", 100, 8, 8, 32<<30, 8000),
+	}}
+	server := routingServer(tpl, repo)
+	req := &apispec.ClaimRequest{
+		Template: stringPointer("tmpl-a"),
+		Config: &apispec.SandboxConfig{
+			Resources: &apispec.SandboxResourceConfig{Memory: &memory},
+		},
 	}
 
-	clusterValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "cluster-gateway",
-		PublicKey:          publicKey,
-		AllowedCallers:     []string{"scheduler"},
-		ClockSkewTolerance: 5 * time.Second,
-	})
+	selected, loaded, selectedBy, err := server.selectClusterForTemplate(routingContext(), req, "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "cluster-a" || loaded != tpl || selectedBy != "resource_capacity" {
+		t.Fatalf("selection = cluster %#v template %#v by %q", selected, loaded, selectedBy)
+	}
+	if repo.cpuMillicores != 500 || repo.memoryBytes != 2<<30 {
+		t.Fatalf("capacity query = cpu %dm memory %d, want 500m/2Gi", repo.cpuMillicores, repo.memoryBytes)
+	}
+}
 
-	cluster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Team-ID"); got != "team-a" {
-			t.Fatalf("cluster X-Team-ID = %q, want team-a", got)
-		}
-		claims, err := clusterValidator.Validate(r.Header.Get("X-Internal-Token"))
-		if err != nil {
-			t.Fatalf("validate forwarded token: %v", err)
-		}
-		if claims.TeamID != "team-a" {
-			t.Fatalf("claims.TeamID = %q, want team-a", claims.TeamID)
-		}
-		if claims.UserID != "user-a" {
-			t.Fatalf("claims.UserID = %q, want user-a", claims.UserID)
-		}
-		wantPerms := []string{gatewayauthn.PermSandboxRead}
-		if !reflect.DeepEqual(claims.Permissions, wantPerms) {
-			t.Fatalf("claims.Permissions = %v, want %v", claims.Permissions, wantPerms)
-		}
+func TestSelectClusterForTemplateRejectsInvalidOverrideBeforeCapacityQuery(t *testing.T) {
+	tpl := routingTemplate("tmpl-a")
+	empty := ""
+	repo := &fakeCapacityRepository{}
+	server := routingServer(tpl, repo)
+	_, _, _, err := server.selectClusterForTemplate(routingContext(), &apispec.ClaimRequest{
+		Template: stringPointer("tmpl-a"),
+		Config: &apispec.SandboxConfig{
+			Resources: &apispec.SandboxResourceConfig{Memory: &empty},
+		},
+	}, "team-a")
+	if err == nil || repo.queries != 0 {
+		t.Fatalf("error = %v, capacity queries = %d", err, repo.queries)
+	}
+}
 
+func TestCreateSandboxRejectsCreatingTemplateBeforeCapacitySelection(t *testing.T) {
+	tpl := routingTemplate("derived")
+	tpl.Status = &sandboxspec.TemplateStatus{Creation: &sandboxspec.TemplateCreationStatus{
+		State: sandboxspec.TemplateCreationStateCreating,
+		Stage: sandboxspec.TemplateCreationStagePublishing,
+	}}
+	repo := &fakeCapacityRepository{}
+	server := routingServer(tpl, repo)
+	router := authenticatedClaimRouter(server)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sandboxes",
+		bytes.NewBufferString(`{"template":"derived"}`),
+	))
+	if recorder.Code != http.StatusConflict || recorder.Header().Get("Retry-After") != "1" {
+		t.Fatalf("status = %d retry-after = %q body = %s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	if repo.queries != 0 {
+		t.Fatalf("capacity queries = %d, want 0", repo.queries)
+	}
+}
+
+func TestCreateSandboxRoutesUnmodifiedBodyToCapacitySelectedCluster(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upstreamBody []byte
+	var upstreamToken string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		upstreamToken = r.Header.Get(internalauth.DefaultTokenHeader)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"runtime_generation":2,"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z","hard_expires_at":"2026-04-07T02:00:00Z"}],"count":1,"has_more":false}}`))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"s0-cluster-a-tmpl-a-op","runtime_id":"alloc","status":"running","template":"tmpl-a","cluster_id":"cluster-a"}}`))
 	}))
-	defer cluster.Close()
+	defer upstream.Close()
 
-	server := newRoutingTestServer(
-		newRoutingTemplate("tmpl-a"),
-		nil,
-		[]*template.Cluster{{ClusterID: "home", ClusterGatewayURL: cluster.URL, Enabled: true, Weight: 1}},
-		&fakeRoutingReconciler{},
-	)
-	server.authValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "scheduler",
-		PublicKey:          publicKey,
-		AllowedCallers:     []string{"regional-gateway"},
-		ClockSkewTolerance: 5 * time.Second,
-	})
+	tpl := routingTemplate("tmpl-a")
+	repo := &fakeCapacityRepository{capacities: []*db.ClusterCapacity{
+		capacityWithURL("cluster-a", upstream.URL),
+	}}
+	server := routingServer(tpl, repo)
 	server.internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "scheduler",
-		PrivateKey: privateKey,
-		TTL:        time.Minute,
+		Caller: "scheduler", PrivateKey: privateKey, TTL: time.Minute,
 	})
+	server.httpClient = upstream.Client()
+	server.clusterGatewayProxies = make(map[string]*proxy.Router)
 
-	server.obsProvider = newTestSchedulerObservability(t)
-
-	router := gin.New()
-	v1 := router.Group("/api/v1")
-	v1.Use(server.authMiddleware())
-	v1.GET("/sandboxes", server.listSandboxes)
-	httpServer := httptest.NewServer(router)
-	defer httpServer.Close()
-
-	regionalGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "regional-gateway",
-		PrivateKey: privateKey,
-		TTL:        time.Minute,
-	})
-	regionalToken, err := regionalGen.Generate("scheduler", "team-a", "user-a", internalauth.GenerateOptions{
-		Permissions: []string{gatewayauthn.PermSandboxRead},
-	})
-	if err != nil {
-		t.Fatalf("generate regional token: %v", err)
+	body := []byte(`{"template":"tmpl-a","config":{"resources":{"memory":"2Gi"}},"snapshot_id":"snap-a"}`)
+	recorder := httptest.NewRecorder()
+	authenticatedClaimRouter(server).ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body)),
+	)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", recorder.Code, recorder.Body.String())
 	}
-
-	req, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/sandboxes", nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
+	if !bytes.Equal(upstreamBody, body) {
+		t.Fatalf("upstream body = %s, want %s", upstreamBody, body)
 	}
-	req.Header.Set("X-Internal-Token", regionalToken)
-
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
+	if upstreamToken == "" {
+		t.Fatal("upstream internal token is empty")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-
-	var body struct {
-		Success bool `json:"success"`
-		Data    struct {
-			Sandboxes []struct {
-				ID                string  `json:"id"`
-				ClusterID         *string `json:"cluster_id"`
-				RuntimeGeneration int64   `json:"runtime_generation"`
-				HardExpiresAt     string  `json:"hard_expires_at"`
-			} `json:"sandboxes"`
-			Count int `json:"count"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !body.Success {
-		t.Fatal("expected success response")
-	}
-	if body.Data.Count != 1 || len(body.Data.Sandboxes) != 1 {
-		t.Fatalf("sandboxes = %d/%d, want 1/1", len(body.Data.Sandboxes), body.Data.Count)
-	}
-	if body.Data.Sandboxes[0].HardExpiresAt != "2026-04-07T02:00:00Z" {
-		t.Fatalf("hard_expires_at = %q, want 2026-04-07T02:00:00Z", body.Data.Sandboxes[0].HardExpiresAt)
-	}
-	if body.Data.Sandboxes[0].ClusterID == nil || *body.Data.Sandboxes[0].ClusterID != "home" {
-		t.Fatalf("cluster_id = %v, want home", body.Data.Sandboxes[0].ClusterID)
-	}
-	if body.Data.Sandboxes[0].RuntimeGeneration != 2 {
-		t.Fatalf("runtime_generation = %d, want 2", body.Data.Sandboxes[0].RuntimeGeneration)
+	if repo.cpuMillicores != 500 || repo.memoryBytes != 2<<30 {
+		t.Fatalf("capacity query = %dm/%d", repo.cpuMillicores, repo.memoryBytes)
 	}
 }
 
-type fakeRoutingTemplateStore struct {
+func TestCreateSandboxReturnsUnavailableWithoutClaimableCapacity(t *testing.T) {
+	server := routingServer(routingTemplate("tmpl-a"), &fakeCapacityRepository{})
+	recorder := httptest.NewRecorder()
+	authenticatedClaimRouter(server).ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template":"tmpl-a"}`)),
+	)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+type fakeTemplateStore struct {
+	templatestore.TemplateStore
 	template *template.Template
 }
 
-func (s *fakeRoutingTemplateStore) CreateTemplate(ctx context.Context, tpl *template.Template) error {
-	return errors.New("not implemented")
-}
-
-func (s *fakeRoutingTemplateStore) GetTemplate(ctx context.Context, scope, teamID, templateID string) (*template.Template, error) {
-	return s.template, nil
-}
-
-func (s *fakeRoutingTemplateStore) GetTemplateForTeam(ctx context.Context, teamID, templateID string) (*template.Template, error) {
+func (s *fakeTemplateStore) GetTemplateForTeam(_ context.Context, _ string, templateID string) (*template.Template, error) {
 	if s.template == nil || s.template.TemplateID != templateID {
 		return nil, nil
 	}
 	return s.template, nil
 }
 
-func (s *fakeRoutingTemplateStore) ListTemplates(ctx context.Context) ([]*template.Template, error) {
-	return nil, errors.New("not implemented")
+type fakeCapacityRepository struct {
+	ClusterRepository
+	capacities    []*db.ClusterCapacity
+	cpuMillicores int64
+	memoryBytes   int64
+	queries       int
+	err           error
 }
 
-func (s *fakeRoutingTemplateStore) ListVisibleTemplates(ctx context.Context, teamID string) ([]*template.Template, error) {
-	return nil, errors.New("not implemented")
+func (r *fakeCapacityRepository) ListSchedulableClusters(_ context.Context, cpuMillicores, memoryBytes int64) ([]*db.ClusterCapacity, error) {
+	r.queries++
+	r.cpuMillicores = cpuMillicores
+	r.memoryBytes = memoryBytes
+	return r.capacities, r.err
 }
 
-func (s *fakeRoutingTemplateStore) UpdateTemplate(ctx context.Context, tpl *template.Template) error {
-	return errors.New("not implemented")
-}
-
-func (s *fakeRoutingTemplateStore) DeleteTemplate(ctx context.Context, scope, teamID, templateID string) error {
-	return errors.New("not implemented")
-}
-
-type fakeRoutingAllocationStore struct {
-	allocations []*template.TemplateAllocation
-}
-
-func (s *fakeRoutingAllocationStore) UpsertAllocation(ctx context.Context, alloc *template.TemplateAllocation) error {
-	return errors.New("not implemented")
-}
-
-func (s *fakeRoutingAllocationStore) ListAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) ([]*template.TemplateAllocation, error) {
-	return s.allocations, nil
-}
-
-func (s *fakeRoutingAllocationStore) UpdateAllocationSyncStatus(ctx context.Context, scope, teamID, templateID, clusterID, status string, syncError *string) error {
-	return errors.New("not implemented")
-}
-
-func (s *fakeRoutingAllocationStore) DeleteAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) error {
-	return errors.New("not implemented")
-}
-
-type fakeRoutingClusterRepo struct {
-	clusters []*template.Cluster
-}
-
-func (r *fakeRoutingClusterRepo) Ping(ctx context.Context) error { return nil }
-func (r *fakeRoutingClusterRepo) CreateCluster(ctx context.Context, cluster *template.Cluster) error {
-	return errors.New("not implemented")
-}
-func (r *fakeRoutingClusterRepo) GetCluster(ctx context.Context, clusterID string) (*template.Cluster, error) {
-	for _, cluster := range r.clusters {
-		if cluster.ClusterID == clusterID {
-			return cluster, nil
-		}
-	}
-	return nil, nil
-}
-func (r *fakeRoutingClusterRepo) ListClusters(ctx context.Context) ([]*template.Cluster, error) {
-	return r.clusters, nil
-}
-func (r *fakeRoutingClusterRepo) ListEnabledClusters(ctx context.Context) ([]*template.Cluster, error) {
-	var enabled []*template.Cluster
-	for _, cluster := range r.clusters {
-		if cluster.Enabled {
-			enabled = append(enabled, cluster)
-		}
-	}
-	return enabled, nil
-}
-func (r *fakeRoutingClusterRepo) UpdateCluster(ctx context.Context, cluster *template.Cluster) error {
-	return errors.New("not implemented")
-}
-func (r *fakeRoutingClusterRepo) UpdateClusterLastSeen(ctx context.Context, clusterID string) error {
-	return errors.New("not implemented")
-}
-func (r *fakeRoutingClusterRepo) DeleteCluster(ctx context.Context, clusterID string) error {
-	return errors.New("not implemented")
-}
-
-type fakeRoutingReconciler struct {
-	templateIdle           map[string]map[string]int32
-	templateStatsAge       map[string]time.Duration
-	templateStatsUpdatedAt map[string]time.Time
-	clusterSummaries       map[string]*templreconciler.ClusterSummary
-	clusterSummaryAge      map[string]time.Duration
-}
-
-func (r *fakeRoutingReconciler) TriggerReconcile(ctx context.Context) {}
-
-func (r *fakeRoutingReconciler) GetTemplateIdleCount(clusterID, templateID string) (int32, bool) {
-	if r.templateIdle == nil {
-		return 0, false
-	}
-	byTemplate, ok := r.templateIdle[clusterID]
-	if !ok {
-		return 0, false
-	}
-	idle, ok := byTemplate[templateID]
-	return idle, ok
-}
-
-func (r *fakeRoutingReconciler) GetTemplateStatsAge(clusterID string) (time.Duration, bool) {
-	age, ok := r.templateStatsAge[clusterID]
-	return age, ok
-}
-
-func (r *fakeRoutingReconciler) GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool) {
-	if r.templateStatsUpdatedAt == nil {
-		return time.Time{}, false
-	}
-	updatedAt, ok := r.templateStatsUpdatedAt[clusterID]
-	return updatedAt, ok
-}
-
-func (r *fakeRoutingReconciler) GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool) {
-	summary, ok := r.clusterSummaries[clusterID]
-	return summary, ok
-}
-
-func (r *fakeRoutingReconciler) GetClusterSummaryAge(clusterID string) (time.Duration, bool) {
-	age, ok := r.clusterSummaryAge[clusterID]
-	return age, ok
-}
-
-func newRoutingTestServer(tpl *template.Template, allocations []*template.TemplateAllocation, clusters []*template.Cluster, reconciler *fakeRoutingReconciler) *Server {
-	return newRoutingTestServerWithMetrics(tpl, allocations, clusters, reconciler, nil)
-}
-
-func newRoutingTestServerWithMetrics(tpl *template.Template, allocations []*template.TemplateAllocation, clusters []*template.Cluster, reconciler *fakeRoutingReconciler, metrics *obsmetrics.SchedulerMetrics) *Server {
+func routingServer(tpl *template.Template, repo *fakeCapacityRepository) *Server {
 	return &Server{
 		cfg: &config.SchedulerConfig{
-			ReconcileInterval: metav1.Duration{Duration: time.Second},
-			PodsPerNode:       10,
+			TeamTemplateMemoryPerCPU: "4Gi",
+			SandboxMaxMemory:         "16Gi",
+			ProxyTimeout:             config.Duration{Duration: time.Second},
 		},
-		repo:            &fakeRoutingClusterRepo{clusters: clusters},
-		templateStore:   &fakeRoutingTemplateStore{template: tpl},
-		allocationStore: &fakeRoutingAllocationStore{allocations: allocations},
-		reconciler:      reconciler,
-		logger:          zap.NewNop(),
-		metrics:         metrics,
+		repo:                  repo,
+		templateStore:         &fakeTemplateStore{template: tpl},
+		logger:                zap.NewNop(),
+		httpClient:            http.DefaultClient,
+		clusterGatewayProxies: make(map[string]*proxy.Router),
 	}
 }
 
-func newRoutingContext() *gin.Context {
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest("GET", "/api/v1/sandboxes", nil)
+func routingTemplate(templateID string) *template.Template {
+	return &template.Template{
+		TemplateID: templateID,
+		Scope:      naming.ScopeTeam,
+		TeamID:     "team-a",
+		Spec: sandboxspec.TemplateSpec{
+			MainContainer: sandboxspec.ContainerSpec{
+				Image:     "ubuntu:24.04",
+				Resources: sandboxspec.ResourceQuota{CPU: "1", Memory: "4Gi"},
+			},
+		},
+	}
+}
+
+func capacity(clusterID string, weight int, claims, slots, memoryBytes, cpuMillicores int64) *db.ClusterCapacity {
+	return &db.ClusterCapacity{
+		Cluster:       template.Cluster{ClusterID: clusterID, Weight: weight, Enabled: true},
+		ClaimCapacity: claims, ReadySlots: slots,
+		FreeMemoryBytes: memoryBytes, FreeCPUMillicores: cpuMillicores,
+	}
+}
+
+func capacityWithURL(clusterID, url string) *db.ClusterCapacity {
+	result := capacity(clusterID, 100, 8, 8, 32<<30, 8000)
+	result.Cluster.ClusterGatewayURL = url
+	return result
+}
+
+func routingContext() *gin.Context {
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", nil)
 	return ctx
 }
 
-func newRoutingTemplate(templateID string) *template.Template {
-	return &template.Template{
-		TemplateID: templateID,
-		Scope:      naming.ScopePublic,
-	}
-}
-
-func newRoutingAllocation(clusterID string, minIdle, maxIdle int32) *template.TemplateAllocation {
-	return &template.TemplateAllocation{
-		TemplateID: "tmpl-a",
-		ClusterID:  clusterID,
-		MinIdle:    minIdle,
-		MaxIdle:    maxIdle,
-	}
-}
-
-func newRoutingCluster(clusterID string, weight int) *template.Cluster {
-	return &template.Cluster{
-		ClusterID: clusterID,
-		Weight:    weight,
-		Enabled:   true,
-	}
-}
-
-func clusterID(cluster *template.Cluster) string {
-	if cluster == nil {
-		return "<nil>"
-	}
-	return cluster.ClusterID
-}
-
-func mustGenerateSchedulerTestToken(t *testing.T, privateKey ed25519.PrivateKey, caller, target, teamID, userID string) string {
-	t.Helper()
-	gen := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     caller,
-		PrivateKey: privateKey,
-		TTL:        time.Minute,
+func authenticatedClaimRouter(server *Server) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		claims := &internalauth.Claims{TeamID: "team-a", UserID: "user-a", Permissions: []string{"*:*"}}
+		c.Request = c.Request.WithContext(internalauth.WithClaims(c.Request.Context(), claims))
+		c.Next()
 	})
-	token, err := gen.Generate(target, teamID, userID, internalauth.GenerateOptions{})
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	return token
+	router.POST("/api/v1/sandboxes", server.createSandbox)
+	return router
 }
 
-func newTestSchedulerObservability(t *testing.T) *observability.Provider {
-	t.Helper()
-	provider, err := observability.New(observability.Config{
-		ServiceName:    "scheduler-routing-test",
-		Logger:         zap.NewNop(),
-		DisableTracing: true,
-		DisableMetrics: true,
-		DisableLogging: true,
-		TraceExporter:  observability.TraceExporterConfig{Type: "noop"},
-	})
-	if err != nil {
-		t.Fatalf("create observability provider: %v", err)
-	}
-	return provider
-}
+func stringPointer(value string) *string { return &value }

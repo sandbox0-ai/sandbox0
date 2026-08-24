@@ -1,0 +1,658 @@
+// Copyright 2026 Sandbox0 Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package driver
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/drivers/shared/eventer"
+	"github.com/hashicorp/nomad/plugins/base"
+	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
+	"github.com/hashicorp/nomad/plugins/shared/hclspec"
+	"github.com/hashicorp/nomad/plugins/shared/structs"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+)
+
+const (
+	PluginName                   = "sandbox0-gvisor"
+	PluginVersion                = "0.1.0"
+	taskHandleVersion            = 1
+	fingerprintPeriod            = 30 * time.Second
+	defaultRunscOperationTimeout = 30 * time.Second
+	maxRunscOperationTimeout     = 2 * time.Minute
+)
+
+var (
+	pluginInfo = &base.PluginInfoResponse{
+		Type:              base.PluginTypeDriver,
+		PluginApiVersions: []string{drivers.ApiVersion010},
+		PluginVersion:     PluginVersion,
+		Name:              PluginName,
+	}
+
+	pluginConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"runsc_path": hclspec.NewDefault(
+			hclspec.NewAttr("runsc_path", "string", false),
+			hclspec.NewLiteral(`"/usr/local/bin/runsc"`),
+		),
+		"runsc_root": hclspec.NewDefault(
+			hclspec.NewAttr("runsc_root", "string", false),
+			hclspec.NewLiteral(`"/run/sandbox0/runsc"`),
+		),
+		"runsc_operation_timeout_seconds": hclspec.NewDefault(
+			hclspec.NewAttr("runsc_operation_timeout_seconds", "number", false),
+			hclspec.NewLiteral(`30`),
+		),
+		"control_dir": hclspec.NewDefault(
+			hclspec.NewAttr("control_dir", "string", false),
+			hclspec.NewLiteral(`"/run/sandbox0/nomad-slots"`),
+		),
+		"platform": hclspec.NewDefault(
+			hclspec.NewAttr("platform", "string", false),
+			hclspec.NewLiteral(`"systrap"`),
+		),
+		"overlay2": hclspec.NewDefault(
+			hclspec.NewAttr("overlay2", "string", false),
+			hclspec.NewLiteral(`"none"`),
+		),
+		"file_access": hclspec.NewDefault(
+			hclspec.NewAttr("file_access", "string", false),
+			hclspec.NewLiteral(`"shared"`),
+		),
+		"directfs": hclspec.NewDefault(
+			hclspec.NewAttr("directfs", "bool", false),
+			hclspec.NewLiteral(`true`),
+		),
+		"security_class": hclspec.NewDefault(
+			hclspec.NewAttr("security_class", "string", false),
+			hclspec.NewLiteral(`"standard"`),
+		),
+		"resource_cgroup_root": hclspec.NewDefault(
+			hclspec.NewAttr("resource_cgroup_root", "string", false),
+			hclspec.NewLiteral(`"/sys/fs/cgroup/sandbox0"`),
+		),
+		"rootfs_node_socket": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_node_socket", "string", false),
+			hclspec.NewLiteral(`"/run/sandbox0/ctld-nomad-runtime.sock"`),
+		),
+		"rootfs_authority_url":               hclspec.NewAttr("rootfs_authority_url", "string", false),
+		"rootfs_authority_ca_file":           hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
+		"rootfs_authority_client_cert_file":  hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
+		"rootfs_authority_client_key_file":   hclspec.NewAttr("rootfs_authority_client_key_file", "string", false),
+		"rootfs_authority_token_file":        hclspec.NewAttr("rootfs_authority_token_file", "string", false),
+		"procd_internal_jwt_public_key_file": hclspec.NewAttr("procd_internal_jwt_public_key_file", "string", false),
+		"runtime_slot_cluster_id":            hclspec.NewAttr("runtime_slot_cluster_id", "string", false),
+		"runtime_slot_node_boot_id_file": hclspec.NewDefault(
+			hclspec.NewAttr("runtime_slot_node_boot_id_file", "string", false),
+			hclspec.NewLiteral(`"/proc/sys/kernel/random/boot_id"`),
+		),
+	})
+
+	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+		"command": hclspec.NewDefault(
+			hclspec.NewAttr("command", "string", false),
+			hclspec.NewLiteral(`"/procd"`),
+		),
+		"args": hclspec.NewAttr("args", "list(string)", false),
+	})
+
+	capabilities = &drivers.Capabilities{
+		SendSignals:         true,
+		Exec:                false,
+		FSIsolation:         fsisolation.Image,
+		NetIsolationModes:   []drivers.NetIsolationMode{drivers.NetIsolationModeGroup},
+		MustInitiateNetwork: false,
+	}
+)
+
+// PluginConfig is the node-wide driver configuration.
+type PluginConfig struct {
+	RunscPath                     string `codec:"runsc_path"`
+	RunscRoot                     string `codec:"runsc_root"`
+	RunscOperationTimeoutSeconds  int64  `codec:"runsc_operation_timeout_seconds"`
+	ControlDir                    string `codec:"control_dir"`
+	Platform                      string `codec:"platform"`
+	Overlay2                      string `codec:"overlay2"`
+	FileAccess                    string `codec:"file_access"`
+	DirectFS                      bool   `codec:"directfs"`
+	SecurityClass                 string `codec:"security_class"`
+	ResourceCgroupRoot            string `codec:"resource_cgroup_root"`
+	RootFSNodeSocket              string `codec:"rootfs_node_socket"`
+	RootFSAuthorityURL            string `codec:"rootfs_authority_url"`
+	RootFSAuthorityCAFile         string `codec:"rootfs_authority_ca_file"`
+	RootFSAuthorityClientCertFile string `codec:"rootfs_authority_client_cert_file"`
+	RootFSAuthorityClientKeyFile  string `codec:"rootfs_authority_client_key_file"`
+	RootFSAuthorityTokenFile      string `codec:"rootfs_authority_token_file"`
+	ProcdInternalJWTPublicKeyFile string `codec:"procd_internal_jwt_public_key_file"`
+
+	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
+	RuntimeSlotNodeBootIDFile string `codec:"runtime_slot_node_boot_id_file"`
+}
+
+// TaskConfig is the per-allocation driver configuration.
+type TaskConfig struct {
+	Command string   `codec:"command"`
+	Args    []string `codec:"args"`
+}
+
+// Plugin implements a Nomad task driver for generic gVisor warm slots.
+type Plugin struct {
+	eventer *eventer.Eventer
+	config  *PluginConfig
+	tasks   *taskStore
+
+	newRunner         func(config PluginConfig) Runsc
+	rootfs            RootFSRuntime
+	rootfsOnce        sync.Once
+	rootfsErr         error
+	slotAuthority     runtimeSlotAuthority
+	slotAuthorityOnce sync.Once
+	slotAuthorityErr  error
+	newSlotAuthority  func(*PluginConfig) (runtimeSlotAuthority, error)
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger hclog.Logger
+}
+
+// NewPlugin returns a driver plugin wired to the production runsc runner.
+func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
+	return newPlugin(logger, func(config PluginConfig) Runsc {
+		return NewCommandRunsc(config)
+	})
+}
+
+func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) drivers.DriverPlugin {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger = logger.Named(PluginName)
+	return &Plugin{
+		eventer:          eventer.NewEventer(ctx, logger),
+		config:           defaultPluginConfig(),
+		tasks:            newTaskStore(),
+		newRunner:        newRunner,
+		newSlotAuthority: newRuntimeSlotAuthority,
+		ctx:              ctx,
+		cancel:           cancel,
+		logger:           logger,
+	}
+}
+
+func defaultPluginConfig() *PluginConfig {
+	return &PluginConfig{
+		RunscPath:                    "/usr/local/bin/runsc",
+		RunscRoot:                    "/run/sandbox0/runsc",
+		RunscOperationTimeoutSeconds: int64(defaultRunscOperationTimeout / time.Second),
+		ControlDir:                   "/run/sandbox0/nomad-slots",
+		Platform:                     "systrap",
+		Overlay2:                     "none",
+		FileAccess:                   "shared",
+		DirectFS:                     true,
+		SecurityClass:                "standard",
+		ResourceCgroupRoot:           protocol.RuntimeResourceCgroupRoot,
+		RootFSNodeSocket:             "/run/sandbox0/ctld-nomad-runtime.sock",
+		RuntimeSlotNodeBootIDFile:    "/proc/sys/kernel/random/boot_id",
+	}
+}
+
+// PluginInfo identifies the driver to Nomad.
+func (p *Plugin) PluginInfo() (*base.PluginInfoResponse, error) {
+	return pluginInfo, nil
+}
+
+// ConfigSchema returns the node-wide HCL schema.
+func (p *Plugin) ConfigSchema() (*hclspec.Spec, error) {
+	return pluginConfigSpec, nil
+}
+
+// SetConfig validates and stores node-wide driver configuration.
+func (p *Plugin) SetConfig(config *base.Config) error {
+	if config == nil {
+		return errors.New("nil plugin config")
+	}
+	decoded := defaultPluginConfig()
+	if len(config.PluginConfig) != 0 {
+		if err := base.MsgPackDecode(config.PluginConfig, decoded); err != nil {
+			return fmt.Errorf("decode plugin config: %w", err)
+		}
+	}
+	decoded.RunscPath = strings.TrimSpace(decoded.RunscPath)
+	decoded.RunscRoot = strings.TrimSpace(decoded.RunscRoot)
+	decoded.ControlDir = strings.TrimSpace(decoded.ControlDir)
+	decoded.Platform = strings.TrimSpace(decoded.Platform)
+	decoded.Overlay2 = strings.TrimSpace(decoded.Overlay2)
+	decoded.FileAccess = strings.TrimSpace(decoded.FileAccess)
+	decoded.SecurityClass = strings.TrimSpace(decoded.SecurityClass)
+	decoded.ResourceCgroupRoot = strings.TrimSpace(decoded.ResourceCgroupRoot)
+	if decoded.RunscPath == "" || decoded.RunscRoot == "" || decoded.ControlDir == "" {
+		return errors.New("runsc, control, and rootfs paths must be non-empty")
+	}
+	if err := validateRunscOperationTimeout(decoded.RunscOperationTimeoutSeconds); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(decoded.ResourceCgroupRoot) || filepath.Clean(decoded.ResourceCgroupRoot) != decoded.ResourceCgroupRoot ||
+		decoded.ResourceCgroupRoot == string(filepath.Separator) {
+		return errors.New("resource_cgroup_root must be a canonical non-root absolute path")
+	}
+	if decoded.ResourceCgroupRoot != protocol.RuntimeResourceCgroupRoot {
+		return fmt.Errorf("resource_cgroup_root must be %s", protocol.RuntimeResourceCgroupRoot)
+	}
+	if _, err := runtimeLeaseCgroupsPath(decoded.ResourceCgroupRoot, "s0-config-validation"); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(decoded.RunscPath) || !filepath.IsAbs(decoded.RunscRoot) || !filepath.IsAbs(decoded.ControlDir) {
+		return errors.New("runsc and control paths must be absolute")
+	}
+	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" || decoded.SecurityClass == "" {
+		return errors.New("platform, overlay2, file_access, and security_class cannot be empty")
+	}
+	if decoded.Overlay2 != "none" {
+		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
+	}
+	decoded.RootFSNodeSocket = strings.TrimSpace(decoded.RootFSNodeSocket)
+	decoded.RootFSAuthorityURL = strings.TrimSpace(decoded.RootFSAuthorityURL)
+	decoded.RootFSAuthorityCAFile = strings.TrimSpace(decoded.RootFSAuthorityCAFile)
+	decoded.RootFSAuthorityClientCertFile = strings.TrimSpace(decoded.RootFSAuthorityClientCertFile)
+	decoded.RootFSAuthorityClientKeyFile = strings.TrimSpace(decoded.RootFSAuthorityClientKeyFile)
+	decoded.RootFSAuthorityTokenFile = strings.TrimSpace(decoded.RootFSAuthorityTokenFile)
+	decoded.ProcdInternalJWTPublicKeyFile = strings.TrimSpace(decoded.ProcdInternalJWTPublicKeyFile)
+	decoded.RuntimeSlotClusterID = strings.TrimSpace(decoded.RuntimeSlotClusterID)
+	decoded.RuntimeSlotNodeBootIDFile = strings.TrimSpace(decoded.RuntimeSlotNodeBootIDFile)
+	if err := validateRootFSConfig(decoded); err != nil {
+		return err
+	}
+	if err := validateRuntimeSlotConfig(decoded); err != nil {
+		return err
+	}
+	if _, err := internalauth.LoadEd25519PublicKeyFromFile(decoded.ProcdInternalJWTPublicKeyFile); err != nil {
+		return fmt.Errorf("load procd internal JWT public key: %w", err)
+	}
+	p.config = decoded
+	return nil
+}
+
+func validateRunscOperationTimeout(seconds int64) error {
+	if seconds < 1 || seconds > int64(maxRunscOperationTimeout/time.Second) {
+		return fmt.Errorf("runsc_operation_timeout_seconds must be between 1 and %d", int64(maxRunscOperationTimeout/time.Second))
+	}
+	return nil
+}
+
+// rootfsRuntime lazily creates the client for the ctld-owned node runtime.
+// Nomad starts short-lived plugin loader processes, so SetConfig only validates
+// local configuration and never opens the privileged runtime socket.
+func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
+	p.rootfsOnce.Do(func() {
+		p.rootfs, p.rootfsErr = newRootFSRuntime(p.config, p.logger.Named("rootfs"))
+	})
+	if p.rootfsErr != nil {
+		return nil, p.rootfsErr
+	}
+	return p.rootfs, nil
+}
+
+func (p *Plugin) runtimeSlotAuthority() (runtimeSlotAuthority, error) {
+	p.slotAuthorityOnce.Do(func() {
+		p.slotAuthority, p.slotAuthorityErr = p.newSlotAuthority(p.config)
+	})
+	if p.slotAuthorityErr != nil {
+		return nil, p.slotAuthorityErr
+	}
+	return p.slotAuthority, nil
+}
+
+// TaskConfigSchema returns the per-task HCL schema.
+func (p *Plugin) TaskConfigSchema() (*hclspec.Spec, error) {
+	return taskConfigSpec, nil
+}
+
+// Capabilities declares the driver's supported Nomad features.
+func (p *Plugin) Capabilities() (*drivers.Capabilities, error) {
+	return capabilities, nil
+}
+
+// Fingerprint reports whether the node can run the configured gVisor runtime.
+func (p *Plugin) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, error) {
+	channel := make(chan *drivers.Fingerprint)
+	go p.handleFingerprint(ctx, channel)
+	return channel, nil
+}
+
+func (p *Plugin) handleFingerprint(ctx context.Context, channel chan<- *drivers.Fingerprint) {
+	defer close(channel)
+	ticker := time.NewTimer(0)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			channel <- p.buildFingerprint()
+			ticker.Reset(fingerprintPeriod)
+		}
+	}
+}
+
+func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
+	runner := p.newRunner(*p.config)
+	version, err := runner.Version(context.Background())
+	if err != nil {
+		return &drivers.Fingerprint{
+			Health:            drivers.HealthStateUndetected,
+			HealthDescription: fmt.Sprintf("runsc not available at %s: %v", p.config.RunscPath, err),
+		}
+	}
+	client, err := newNodeRuntimeClient(p.config.RootFSNodeSocket)
+	if err != nil {
+		return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
+	}
+	healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, err = client.RuntimeInfo(healthCtx)
+	cancel()
+	if err != nil {
+		return &drivers.Fingerprint{
+			Health:            drivers.HealthStateUndetected,
+			HealthDescription: fmt.Sprintf("ctld Nomad runtime unavailable at %s: %v", p.config.RootFSNodeSocket, err),
+		}
+	}
+	return &drivers.Fingerprint{
+		Health:            drivers.HealthStateHealthy,
+		HealthDescription: drivers.DriverHealthy,
+		Attributes: map[string]*structs.Attribute{
+			"driver.sandbox0_gvisor":              structs.NewBoolAttribute(true),
+			"driver.sandbox0_gvisor.version":      structs.NewStringAttribute(version),
+			"driver.sandbox0_gvisor.platform":     structs.NewStringAttribute(p.config.Platform),
+			"driver.sandbox0_gvisor.overlay2":     structs.NewStringAttribute(p.config.Overlay2),
+			"driver.sandbox0_gvisor.ctld_runtime": structs.NewBoolAttribute(p.config.RootFSNodeSocket != ""),
+		},
+	}
+}
+
+// StartTask creates a warm allocation and returns before any gVisor container exists.
+func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	if config == nil {
+		return nil, nil, errors.New("nil task config")
+	}
+	if config.ID == "" {
+		return nil, nil, errors.New("task ID cannot be empty")
+	}
+	if _, exists := p.tasks.Get(config.ID); exists {
+		return nil, nil, fmt.Errorf("task %q already exists", config.ID)
+	}
+
+	var taskConfig TaskConfig
+	if err := config.DecodeDriverConfig(&taskConfig); err != nil {
+		return nil, nil, fmt.Errorf("decode task config: %w", err)
+	}
+	taskConfig.Command = strings.TrimSpace(taskConfig.Command)
+	if taskConfig.Command == "" {
+		taskConfig.Command = "/procd"
+	}
+	if !filepath.IsAbs(taskConfig.Command) {
+		return nil, nil, errors.New("task command must be absolute")
+	}
+	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+		return nil, nil, err
+	}
+
+	taskDir := config.TaskDir().Dir
+	bundleDir := filepath.Join(taskDir, "gvisor-bundle")
+	containerID := safeContainerID(config.ID)
+	rootMount := filepath.Join(bundleDir, "rootfs")
+	socketPath := controlSocketPath(p.config.ControlDir, config.ID)
+	rootfs, err := p.rootfsRuntime()
+	if err != nil {
+		return nil, nil, err
+	}
+	rootfsAllowedRoot := ""
+	if rootfs != nil {
+		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
+		if err != nil {
+			return nil, nil, err
+		}
+		rootfsAllowedRoot = info.MountRoot
+	}
+
+	handle := newTaskHandle(taskHandleOptions{
+		taskConfig:                    config,
+		bundleDir:                     bundleDir,
+		containerID:                   containerID,
+		rootMount:                     rootMount,
+		socketPath:                    socketPath,
+		runner:                        p.newRunner(*p.config),
+		runscOperationTimeout:         time.Duration(p.config.RunscOperationTimeoutSeconds) * time.Second,
+		mounter:                       systemMounter{},
+		rootfsAllowedRoot:             rootfsAllowedRoot,
+		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
+		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		rootfs:                        rootfs,
+		procdPort:                     protocol.NomadProcdPort,
+		logger:                        p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
+	})
+
+	if err := handle.Prepare(taskConfig); err != nil {
+		return nil, nil, err
+	}
+	if err := p.startTaskControl(handle); err != nil {
+		_ = handle.Close(false)
+		return nil, nil, err
+	}
+
+	nomadHandle := drivers.NewTaskHandle(taskHandleVersion)
+	nomadHandle.Config = config
+	if err := nomadHandle.SetDriverState(handle.PersistedState()); err != nil {
+		_ = handle.Close(false)
+		return nil, nil, fmt.Errorf("persist driver state: %w", err)
+	}
+	lifecycle, observation, err := p.activateRuntimeSlot(handle, rootfs, true)
+	if err != nil {
+		_ = handle.Close(false)
+		return nil, nil, err
+	}
+
+	p.tasks.Set(config.ID, handle)
+	p.emit(config.ID, "warm-slot-created")
+	if lifecycle != nil {
+		go lifecycle.runHeartbeat(p.ctx, handle.done, observation, handle.runtimeSlotHeartbeatLost)
+	}
+
+	return nomadHandle, nil, nil
+}
+
+// RecoverTask reconstructs plugin state after a Nomad client or plugin restart.
+func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
+	if handle == nil || handle.Config == nil {
+		return errors.New("task handle and config are required")
+	}
+	if _, exists := p.tasks.Get(handle.Config.ID); exists {
+		return nil
+	}
+	var state PersistedState
+	if err := handle.GetDriverState(&state); err != nil {
+		return fmt.Errorf("decode persisted driver state: %w", err)
+	}
+	if state.TaskConfig == nil || state.ContainerID == "" || state.BundleDir == "" || state.RootMount == "" {
+		return errors.New("persisted driver state is incomplete")
+	}
+	var taskConfig TaskConfig
+	if err := handle.Config.DecodeDriverConfig(&taskConfig); err != nil {
+		return fmt.Errorf("decode recovered task config: %w", err)
+	}
+	taskConfig.Command = strings.TrimSpace(taskConfig.Command)
+	if taskConfig.Command == "" {
+		taskConfig.Command = "/procd"
+	}
+	if !filepath.IsAbs(taskConfig.Command) {
+		return errors.New("recovered task command must be absolute")
+	}
+	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+		return err
+	}
+	if state.TaskConfig.ID != handle.Config.ID || state.TaskConfig.AllocID != handle.Config.AllocID {
+		return errors.New("persisted task identity does not match the Nomad task handle")
+	}
+	state.TaskConfig = handle.Config
+
+	runner := p.newRunner(*p.config)
+	rootfs, err := p.rootfsRuntime()
+	if err != nil {
+		return err
+	}
+	rootfsAllowedRoot := ""
+	if rootfs != nil {
+		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
+		if err != nil {
+			return err
+		}
+		rootfsAllowedRoot = info.MountRoot
+	}
+	recovered := newTaskHandle(taskHandleOptions{
+		taskConfig:                    state.TaskConfig,
+		driverConfig:                  taskConfig,
+		bundleDir:                     state.BundleDir,
+		containerID:                   state.ContainerID,
+		rootMount:                     state.RootMount,
+		socketPath:                    controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
+		runner:                        runner,
+		runscOperationTimeout:         time.Duration(p.config.RunscOperationTimeoutSeconds) * time.Second,
+		mounter:                       systemMounter{},
+		rootfsAllowedRoot:             rootfsAllowedRoot,
+		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
+		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		rootfs:                        rootfs,
+		procdPort:                     protocol.NomadProcdPort,
+		logger:                        p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
+	})
+	if err := recovered.Recover(state); err != nil {
+		return err
+	}
+	if err := p.startTaskControl(recovered); err != nil {
+		recovered.stopExitWatch()
+		return err
+	}
+	lifecycle, observation, err := p.activateRuntimeSlot(recovered, rootfs, false)
+	if err != nil {
+		p.stopTaskControl(recovered)
+		recovered.stopExitWatch()
+		return err
+	}
+	p.tasks.Set(state.TaskConfig.ID, recovered)
+	if lifecycle != nil {
+		go lifecycle.runHeartbeat(p.ctx, recovered.done, observation, recovered.runtimeSlotHeartbeatLost)
+	}
+	p.emit(state.TaskConfig.ID, "warm-slot-recovered")
+	return nil
+}
+
+// WaitTask returns a channel that closes when the warm or active task exits.
+func (p *Plugin) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
+	handle, ok := p.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+	return handle.WaitChannel(ctx), nil
+}
+
+// StopTask stops a warm or active one-shot gVisor container.
+func (p *Plugin) StopTask(taskID string, timeout time.Duration, signal string) error {
+	handle, ok := p.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	return handle.Stop(timeout, signal)
+}
+
+// DestroyTask cleans runsc state, mounts, sockets, and bundle files.
+func (p *Plugin) DestroyTask(taskID string, force bool) error {
+	handle, ok := p.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	if handle.IsRunning() && !force {
+		return errors.New("cannot destroy running task")
+	}
+	if err := handle.Close(force); err != nil {
+		p.logger.Error("task cleanup failed", "task_id", taskID, "error", err)
+		return fmt.Errorf("cleanup task %s: %w", taskID, err)
+	}
+	p.tasks.Delete(taskID)
+	return nil
+}
+
+// InspectTask returns driver-owned status for a warm or active slot.
+func (p *Plugin) InspectTask(taskID string) (*drivers.TaskStatus, error) {
+	handle, ok := p.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+	return handle.TaskStatus(), nil
+}
+
+// TaskStats is intentionally minimal until cgroup accounting is integrated.
+func (p *Plugin) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
+	if _, ok := p.tasks.Get(taskID); !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+	channel := make(chan *drivers.TaskResourceUsage)
+	go func() {
+		defer close(channel)
+		<-ctx.Done()
+	}()
+	return channel, nil
+}
+
+// TaskEvents returns driver lifecycle events.
+func (p *Plugin) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
+	return p.eventer.TaskEvents(ctx)
+}
+
+// SignalTask forwards a signal to an active container. Warm slots reject signals.
+func (p *Plugin) SignalTask(taskID string, signal string) error {
+	handle, ok := p.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	return handle.Signal(signal)
+}
+
+// ExecTask is not supported because guest execution belongs to procd.
+func (p *Plugin) ExecTask(taskID string, command []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
+	return nil, errors.New("exec is not supported by the sandbox0 gVisor driver")
+}
+
+func (p *Plugin) emit(taskID, message string) {
+	_ = p.eventer.EmitEvent(&drivers.TaskEvent{TaskID: taskID, Timestamp: time.Now(), Message: message})
+}
+
+func safeContainerID(taskID string) string {
+	return protocol.NomadRunscContainerID(taskID)
+}
+
+func controlSocketPath(controlDir, taskID string) string {
+	sum := sha256.Sum256([]byte(taskID))
+	return filepath.Join(controlDir, hex.EncodeToString(sum[:12])+".sock")
+}

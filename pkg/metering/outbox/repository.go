@@ -180,12 +180,12 @@ func (r *Repository) UpsertSandboxProjectionStateTx(ctx context.Context, tx pgx.
 			sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
 			owner_kind, resource_millicpu, resource_memory_mib,
 			claimed_at, active_since, paused, paused_at, terminated_at,
-			last_observed_at, last_resource_version
+			last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9,
 			$10, $11, $12, $13, $14,
-			$15, $16
+			$15, $16, $17, $18
 		)
 		ON CONFLICT (sandbox_id) DO UPDATE
 		SET namespace = EXCLUDED.namespace,
@@ -202,11 +202,13 @@ func (r *Repository) UpsertSandboxProjectionStateTx(ctx context.Context, tx pgx.
 			paused_at = EXCLUDED.paused_at,
 			terminated_at = EXCLUDED.terminated_at,
 			last_observed_at = EXCLUDED.last_observed_at,
-			last_resource_version = EXCLUDED.last_resource_version
+			last_resource_version = EXCLUDED.last_resource_version,
+			source_revision = EXCLUDED.source_revision,
+			source_lifecycle_epoch = EXCLUDED.source_lifecycle_epoch
 	`, state.SandboxID, state.Namespace, state.TeamID, state.UserID, state.TemplateID, state.ClusterID,
 		state.OwnerKind, state.ResourceMillicpu, state.ResourceMemoryMiB,
 		state.ClaimedAt, state.ActiveSince, state.Paused, state.PausedAt, state.TerminatedAt,
-		state.LastObservedAt, state.LastResourceVer,
+		state.LastObservedAt, state.LastResourceVer, state.SourceRevision, state.SourceLifecycleEpoch,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox projection state: %w", err)
@@ -849,7 +851,7 @@ func getSandboxProjectionState(ctx context.Context, source db, sandboxID string,
 			sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
 			owner_kind, resource_millicpu, resource_memory_mib,
 			claimed_at, active_since, paused, paused_at, terminated_at,
-			last_observed_at, last_resource_version
+			last_observed_at, last_resource_version, source_revision, source_lifecycle_epoch
 		FROM metering.manager_sandbox_projection_state
 		WHERE sandbox_id = $1
 	`
@@ -861,7 +863,7 @@ func getSandboxProjectionState(ctx context.Context, source db, sandboxID string,
 		&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
 		&state.OwnerKind, &state.ResourceMillicpu, &state.ResourceMemoryMiB,
 		&state.ClaimedAt, &state.ActiveSince, &state.Paused, &state.PausedAt, &state.TerminatedAt,
-		&state.LastObservedAt, &state.LastResourceVer,
+		&state.LastObservedAt, &state.LastResourceVer, &state.SourceRevision, &state.SourceLifecycleEpoch,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil

@@ -9,41 +9,31 @@ import (
 )
 
 const (
-	chainName           = "CTLD_NETWORK_PREROUTING"
-	natChainName        = "CTLD_NETWORK_NAT_PREROUTING"
-	ipsetName           = "ctld-network-sandbox-ips"
-	nextIPSetName       = "ctld-network-sandbox-ips-next"
-	legacyChainName     = "NETD_PREROUTING"
-	legacyNATChainName  = "NETD_NAT_PREROUTING"
-	legacyIPSetName     = "netd-sandbox-ips"
-	legacyNextIPSetName = "netd-sandbox-ips-next"
-	tproxyMark          = "0x1/0x1"
-	defaultLoopback     = "127.0.0.0/8"
-	natBypassJumpMark   = tproxyMark
-	calicoWorkloadIF    = "cali+"
-	ciliumWorkloadIF    = "lxc+"
+	chainName         = "CTLD_NETWORK_PREROUTING"
+	natChainName      = "CTLD_NETWORK_NAT_PREROUTING"
+	ipsetName         = "ctld-network-sandbox-ips"
+	nextIPSetName     = "ctld-network-sandbox-ips-next"
+	tproxyMark        = "0x1/0x1"
+	defaultLoopback   = "127.0.0.0/8"
+	natBypassJumpMark = tproxyMark
 )
 
 func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	var buf bytes.Buffer
 	bypass := normalizeCIDRs(append([]string{defaultLoopback}, bypassCIDRs...))
-	runtimeWatchTCPPorts := normalizePorts(cfg.RuntimeWatchTCPPorts)
 
 	buf.WriteString("*mangle\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
 
-	appendRuntimeWatchBypassRules(&buf, chainName, runtimeWatchTCPPorts)
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))
 	}
 
-	// Calico/Canal and Cilium native mode need TCP TPROXY on their workload
-	// veth interfaces. Bridge CNIs use the NAT REDIRECT fallback below.
-	for _, inputInterface := range []string{calicoWorkloadIF, ciliumWorkloadIF} {
-		appendTPROXYRules(&buf, inputInterface, "tcp", 443, cfg.ProxyHTTPSPort)
-		appendTPROXYRules(&buf, inputInterface, "tcp", 853, cfg.ProxyHTTPSPort)
-		appendTPROXYRules(&buf, inputInterface, "tcp", 0, cfg.ProxyHTTPPort)
-	}
+	// Source-IP membership scopes these rules to registered Nomad network
+	// namespaces, so they do not depend on a particular bridge interface name.
+	appendTPROXYRules(&buf, "", "tcp", 443, cfg.ProxyHTTPSPort)
+	appendTPROXYRules(&buf, "", "tcp", 853, cfg.ProxyHTTPSPort)
+	appendTPROXYRules(&buf, "", "tcp", 0, cfg.ProxyHTTPPort)
 	appendTPROXYRules(&buf, "", "udp", 443, cfg.ProxyHTTPSPort)
 	appendTPROXYRules(&buf, "", "udp", 853, cfg.ProxyHTTPSPort)
 	appendTPROXYRules(&buf, "", "udp", 0, cfg.ProxyHTTPPort)
@@ -53,7 +43,6 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	buf.WriteString("*nat\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", natChainName))
 	buf.WriteString(fmt.Sprintf("-A %s -m mark --mark %s -j ACCEPT\n", natChainName, natBypassJumpMark))
-	appendRuntimeWatchBypassRules(&buf, natChainName, runtimeWatchTCPPorts)
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", natChainName, cidr))
 	}
@@ -63,24 +52,6 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	buf.WriteString("COMMIT\n")
 
 	return buf.String()
-}
-
-// appendRuntimeWatchBypassRules preserves the Pod source address only for the
-// dedicated CTLD event listener. The listener exposes no CTLD control APIs and
-// validates the source against the subscribed Pod.
-func appendRuntimeWatchBypassRules(buf *bytes.Buffer, chain string, ports []int) {
-	if buf == nil || chain == "" {
-		return
-	}
-	for _, port := range ports {
-		_, _ = fmt.Fprintf(
-			buf,
-			"-A %s -m set --match-set %s src -p tcp --dport %d -m addrtype --dst-type LOCAL -j RETURN\n",
-			chain,
-			ipsetName,
-			port,
-		)
-	}
 }
 
 func appendTPROXYRules(buf *bytes.Buffer, inputInterface, protocol string, destPort int, proxyPort int) {
@@ -135,22 +106,6 @@ func normalizeIPs(values []string) []string {
 
 func normalizeCIDRs(values []string) []string {
 	return normalizeUnique(values)
-}
-
-func normalizePorts(values []int) []int {
-	out := make([]int, 0, len(values))
-	seen := make(map[int]struct{}, len(values))
-	for _, value := range values {
-		if value <= 0 || value > 65535 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func normalizeUnique(values []string) []string {

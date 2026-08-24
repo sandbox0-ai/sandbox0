@@ -7,9 +7,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/workqueue"
 )
 
 const (
@@ -26,32 +23,40 @@ type pendingRuntimeRecoveryStore interface {
 	ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
 }
 
+type sandboxPauseLifecycleStore interface {
+	ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error)
+}
+
 // SandboxPauseController completes durable pause transactions outside the API request path.
 type SandboxPauseController struct {
-	service        *SandboxService
+	store          sandboxPauseLifecycleStore
 	logger         *zap.Logger
-	queue          workqueue.TypedRateLimitingInterface[sandboxPauseItem]
+	queue          *retryQueue[sandboxPauseItem]
 	resyncInterval time.Duration
 	scanLimit      int
 	complete       func(context.Context, string) error
 	resume         func(context.Context, string) error
 }
 
-func NewSandboxPauseController(service *SandboxService, logger *zap.Logger) *SandboxPauseController {
+func NewSandboxPauseController(
+	store sandboxPauseLifecycleStore,
+	backend SandboxPauseReconciler,
+	logger *zap.Logger,
+) *SandboxPauseController {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	controller := &SandboxPauseController{
-		service:        service,
+		store:          store,
 		logger:         logger,
-		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]()),
+		queue:          newRetryQueue[sandboxPauseItem](),
 		resyncInterval: defaultSandboxPauseResyncPeriod,
 		scanLimit:      defaultSandboxPauseScanLimit,
 	}
-	if service != nil {
-		controller.complete = service.CompletePausingSandboxRuntime
+	if backend != nil {
+		controller.complete = backend.CompletePausingSandboxRuntime
 		controller.resume = func(ctx context.Context, sandboxID string) error {
-			_, err := service.ResumePausedSandboxRuntime(ctx, sandboxID)
+			_, err := backend.ResumePausedSandboxRuntime(ctx, sandboxID)
 			return err
 		}
 	}
@@ -89,7 +94,7 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 		workers = 1
 	}
 	if c.queue == nil {
-		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]())
+		c.queue = newRetryQueue[sandboxPauseItem]()
 	}
 	if c.scanLimit <= 0 {
 		c.scanLimit = defaultSandboxPauseScanLimit
@@ -98,13 +103,12 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 		c.resyncInterval = defaultSandboxPauseResyncPeriod
 	}
 
-	defer runtime.HandleCrash()
 	defer c.queue.ShutDown()
 
 	c.logger.Info("Starting sandbox pause controller", zap.Int("workers", workers))
 	c.enqueuePausingSandboxes(ctx)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		go c.runWorker(ctx)
 	}
 
 	ticker := time.NewTicker(c.resyncInterval)
@@ -121,10 +125,10 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 }
 
 func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
-	if c == nil || c.service == nil || c.service.sandboxStore == nil {
+	if c == nil || c.store == nil {
 		return
 	}
-	txns, err := c.service.sandboxStore.ListActiveLifecycleTxns(ctx, sandboxstore.SandboxLifecycleKindPause, c.scanLimit)
+	txns, err := c.store.ListActiveLifecycleTxns(ctx, sandboxstore.SandboxLifecycleKindPause, c.scanLimit)
 	if err != nil {
 		c.logger.Warn("Failed to list active pause lifecycle transactions", zap.Error(err))
 		return
@@ -138,7 +142,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 			}
 		}
 	}
-	recoveryStore, ok := c.service.sandboxStore.(pendingRuntimeRecoveryStore)
+	recoveryStore, ok := c.store.(pendingRuntimeRecoveryStore)
 	if !ok {
 		return
 	}

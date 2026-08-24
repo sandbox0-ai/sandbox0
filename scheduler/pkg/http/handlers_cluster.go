@@ -244,8 +244,6 @@ func (s *Server) deleteCluster(c *gin.Context) {
 		return
 	}
 
-	// Note: Allocations will be cascade deleted due to foreign key constraint
-
 	if err := s.failCapturingTemplateBuildsForCluster(c, clusterID, "deleted"); err != nil {
 		s.logger.Error("Failed to terminate uncaptured template builds before deleting cluster",
 			zap.String("cluster_id", clusterID),

@@ -218,7 +218,8 @@ Current producers are:
 - cluster-gateway for authenticated Sandbox API access, including regional detail requests
 - the ctld network runtime for network attempts and results
 - manager for historical logs
-- node-local ctld collectors for sandbox-wide CRI runtime samples, collected every 15 seconds with jitter
+- node-local ctld collectors for sandbox-wide stock-runsc runtime samples,
+  collected every 15 seconds with jitter
 
 Historical queries return `503` when their backend is disabled or unavailable. The static metric catalog remains available so clients can build selectors without probing storage.
 
@@ -227,7 +228,9 @@ Historical queries return `503` when their backend is disabled or unavailable. T
 - Metering windows remain separate usage-ledger records for quota, showback, and billing export.
 - `process.*` and `file.*` facts prove authenticated gateway requests and their HTTP results. They do not observe every process effect, SSH/SFTP command, POSIX write, or manager-initiated reconciliation.
 - Public exposure streams and WebSockets record a durable open attempt, but abrupt node or process loss can prevent the eventual close result.
-- Cluster-gateway pending events require reattachable durable storage. Node-local network-flow buffers survive same-node Pod restarts, not permanent node loss.
+- Cluster-gateway pending events require reattachable durable storage.
+  Node-local network-flow buffers survive ctld process restarts on the same
+  disk, not permanent node loss.
 - Per-row signatures detect modified returned facts. They do not prove that a privileged ClickHouse administrator never deleted a row.
 
 Deployments that require completeness across node loss should preserve audit signing public keys and export signed facts or checkpoints to independently controlled immutable storage. See [Self-hosted Observability](/docs/sandbox/self-hosted/observability) for ClickHouse, retention, delivery persistence, and signing-key configuration.

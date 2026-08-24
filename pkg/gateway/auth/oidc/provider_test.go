@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"golang.org/x/oauth2"
 )
 
@@ -164,6 +164,7 @@ func TestResolveHTTPClientUsesTimeoutDefault(t *testing.T) {
 	got := resolveHTTPClient(nil)
 	if got == nil {
 		t.Fatal("resolveHTTPClient returned nil")
+		return
 	}
 	if got.Timeout != defaultHTTPTimeout {
 		t.Fatalf("timeout = %s, want %s", got.Timeout, defaultHTTPTimeout)

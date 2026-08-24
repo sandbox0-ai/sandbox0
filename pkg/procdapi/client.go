@@ -4,6 +4,8 @@ package procdapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,6 +145,47 @@ func (c *ProcdClient) PauseSandbox(ctx context.Context, procdAddress, internalTo
 func (c *ProcdClient) ResumeSandbox(ctx context.Context, procdAddress, internalToken string) (*ProcdResumeResponse, error) {
 	url := procdAddress + SandboxResumePath
 	return doProcdRequest[ProcdResumeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "resume procd sandbox", nil)
+}
+
+// ProbeCommandReady executes the authenticated, runtime-gated procd command
+// and returns both its process identity and exact response-body digest.
+func (c *ProcdClient) ProbeCommandReady(
+	ctx context.Context,
+	procdAddress, internalToken string,
+) (*CommandReadyProbeResult, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, procdAddress+CommandReadyProbePath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create command-ready probe request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Internal-Token", internalToken)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("execute command-ready probe: %w", err)
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read command-ready probe response: %w", err)
+	}
+	if len(payload) > 1<<20 {
+		return nil, fmt.Errorf("command-ready probe response exceeds 1 MiB")
+	}
+	result, apiErr, err := decodeProcdResponse[CommandReadyProbeResponse](payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode command-ready probe response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("command-ready probe failed: %s", apiErr.Message)
+	}
+	if response.StatusCode != http.StatusOK || result.Status != "ready" || result.InstanceID == "" {
+		return nil, fmt.Errorf("command-ready probe returned invalid status or process identity")
+	}
+	digest := sha256.Sum256(payload)
+	return &CommandReadyProbeResult{
+		CommandReadyProbeResponse: *result,
+		ResponseBodyDigest:        hex.EncodeToString(digest[:]),
+	}, nil
 }
 
 func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {

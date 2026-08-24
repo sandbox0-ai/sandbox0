@@ -3,14 +3,12 @@ package registry
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 type harborProvider struct {
-	cfg     config.RegistryHarborConfig
-	secrets secretReader
+	cfg config.RegistryHarborConfig
 }
 
 func (p *harborProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
@@ -19,23 +17,17 @@ func (p *harborProvider) GetPushCredentials(ctx context.Context, req PushCredent
 	if registry == "" {
 		return nil, fmt.Errorf("harbor registry is required")
 	}
-	username := strings.TrimSpace(p.cfg.Username)
-	password := strings.TrimSpace(p.cfg.Password)
-	if username == "" || password == "" {
-		if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
-			return nil, fmt.Errorf("harbor credentials secret is required")
-		}
-		var err error
-		username, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.UsernameKey, "username", "harbor username")
-		if err != nil {
-			return nil, err
-		}
-		password, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.PasswordKey, "password", "harbor password")
-		if err != nil {
-			return nil, err
-		}
+	username, err := credentialValue(p.cfg.Username, p.cfg.UsernameFile, "harbor username")
+	if err != nil {
+		return nil, err
 	}
-	// Harbor credentials are static credentials sourced from Kubernetes secret.
+	password, err := credentialValue(p.cfg.Password, p.cfg.PasswordFile, "harbor password")
+	if err != nil {
+		return nil, err
+	}
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("harbor username and password are required")
+	}
 	return &Credential{
 		Provider:     "harbor",
 		PushRegistry: registry,

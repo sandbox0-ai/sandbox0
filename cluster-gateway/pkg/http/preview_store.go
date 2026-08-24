@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 

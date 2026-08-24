@@ -75,7 +75,7 @@ func TestSandboxDeletionWebhookOutboxEnqueueIntegration(t *testing.T) {
 	assert.Equal(t, deletedAt, event.Timestamp)
 	assert.Equal(t, record.ID, event.SandboxID)
 	assert.Equal(t, record.TeamID, event.TeamID)
-	assert.Equal(t, "pod_deleted", event.Payload.Reason)
+	assert.Equal(t, "runtime_deleted", event.Payload.Reason)
 
 	firstExpiresAt := expiresAt
 	require.NoError(t, store.MarkSandboxDeleted(ctx, record.ID, deletedAt.Add(time.Hour)))

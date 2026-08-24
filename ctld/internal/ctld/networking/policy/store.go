@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 )
 
@@ -22,18 +22,18 @@ type Store struct {
 type policyEntry struct {
 	compiled   *CompiledPolicy
 	policyHash string
-	podIP      string
+	sourceIP   string
 	updatedAt  time.Time
 }
 
 type SandboxPolicyChange struct {
-	Namespace  string
-	Name       string
-	PodIP      string
-	OldPodIP   string
-	PolicyHash string
-	PrevHash   string
-	Initial    bool
+	Scope       string
+	Name        string
+	SourceIP    string
+	OldSourceIP string
+	PolicyHash  string
+	PrevHash    string
+	Initial     bool
 }
 
 type SandboxPolicyReconcileResult struct {
@@ -53,33 +53,33 @@ func NewStore(logger *zap.Logger) *Store {
 	}
 }
 
-func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPolicyReconcileResult {
+func (s *Store) ReconcileSandboxes(sandboxes []*model.SandboxInfo) SandboxPolicyReconcileResult {
 	result := SandboxPolicyReconcileResult{}
 	desired := make(map[string]*policyEntry, len(sandboxes))
-	desiredInfo := make(map[string]*watcher.SandboxInfo, len(sandboxes))
+	desiredInfo := make(map[string]*model.SandboxInfo, len(sandboxes))
 	currentKeys := make(map[string]struct{}, len(sandboxes))
 	now := time.Now()
 	for _, info := range sandboxes {
-		if info == nil || info.PodIP == "" {
+		if info == nil || info.SourceIP == "" {
 			continue
 		}
-		key := info.Namespace + "/" + info.Name
+		key := info.Scope + "/" + info.Name
 		currentKeys[key] = struct{}{}
 		spec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(info.NetworkPolicy)
 		if err != nil {
-			s.logger.Warn("Failed to parse network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
+			s.logger.Warn("Failed to parse network policy", zap.Error(err), zap.String("source_ip", info.SourceIP))
 			continue
 		}
 		compiled, err := CompileNetworkPolicy(spec)
 		if err != nil {
-			s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
+			s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("source_ip", info.SourceIP))
 			continue
 		}
 		applySandboxOwner(compiled, info)
 		desired[key] = &policyEntry{
 			compiled:   compiled,
 			policyHash: info.NetworkPolicyHash,
-			podIP:      info.PodIP,
+			sourceIP:   info.SourceIP,
 			updatedAt:  now,
 		}
 		desiredInfo[key] = info
@@ -92,34 +92,34 @@ func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPoli
 			continue
 		}
 		delete(s.byKey, key)
-		if existing != nil && existing.podIP != "" {
-			delete(s.byIP, existing.podIP)
-			result.RemovedIPs = append(result.RemovedIPs, existing.podIP)
+		if existing != nil && existing.sourceIP != "" {
+			delete(s.byIP, existing.sourceIP)
+			result.RemovedIPs = append(result.RemovedIPs, existing.sourceIP)
 		}
 	}
 	for key, entry := range desired {
 		info := desiredInfo[key]
 		existing := s.byKey[key]
 		change := SandboxPolicyChange{
-			Namespace:  info.Namespace,
+			Scope:      info.Scope,
 			Name:       info.Name,
-			PodIP:      entry.podIP,
+			SourceIP:   entry.sourceIP,
 			PolicyHash: entry.policyHash,
 			Initial:    existing == nil,
 		}
 		if existing != nil {
 			change.PrevHash = existing.policyHash
-			change.OldPodIP = existing.podIP
+			change.OldSourceIP = existing.sourceIP
 		}
-		if existing == nil || existing.policyHash != entry.policyHash || existing.podIP != entry.podIP {
+		if existing == nil || existing.policyHash != entry.policyHash || existing.sourceIP != entry.sourceIP {
 			result.Changed = append(result.Changed, change)
 		}
-		if existing != nil && existing.podIP != "" && existing.podIP != entry.podIP {
-			delete(s.byIP, existing.podIP)
-			result.RemovedIPs = append(result.RemovedIPs, existing.podIP)
+		if existing != nil && existing.sourceIP != "" && existing.sourceIP != entry.sourceIP {
+			delete(s.byIP, existing.sourceIP)
+			result.RemovedIPs = append(result.RemovedIPs, existing.sourceIP)
 		}
 		s.byKey[key] = entry
-		s.byIP[entry.podIP] = entry
+		s.byIP[entry.sourceIP] = entry
 		result.Upserted++
 	}
 	if len(result.RemovedIPs) > 0 || len(result.Changed) > 0 {
@@ -133,7 +133,7 @@ func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPoli
 	return result
 }
 
-func applySandboxOwner(compiled *CompiledPolicy, info *watcher.SandboxInfo) {
+func applySandboxOwner(compiled *CompiledPolicy, info *model.SandboxInfo) {
 	if compiled == nil || info == nil {
 		return
 	}
@@ -145,31 +145,31 @@ func (s *Store) DeleteByKey(namespace, name string) {
 	s.mu.Lock()
 	entry := s.byKey[key]
 	delete(s.byKey, key)
-	if entry != nil && entry.podIP != "" {
-		delete(s.byIP, entry.podIP)
+	if entry != nil && entry.sourceIP != "" {
+		delete(s.byIP, entry.sourceIP)
 	}
-	podIP := ""
+	sourceIP := ""
 	if entry != nil {
-		podIP = entry.podIP
+		sourceIP = entry.sourceIP
 	}
 	s.logger.Info(
 		"Sandbox network policy deleted by key",
 		zap.String("sandbox", key),
-		zap.String("pod_ip", podIP),
+		zap.String("source_ip", sourceIP),
 	)
 	s.mu.Unlock()
 }
 
-func (s *Store) GetByIP(podIP string) *CompiledPolicy {
+func (s *Store) GetByIP(sourceIP string) *CompiledPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.byIP[podIP]
+	entry := s.byIP[sourceIP]
 	if entry == nil || entry.compiled == nil {
 		return nil
 	}
 	clone := *entry.compiled
 	clone.Egress = cloneRuleSet(entry.compiled.Egress)
-	clone.Platform = clonePlatformPolicy(s.getPlatformPolicy(), podIP)
+	clone.Platform = clonePlatformPolicy(s.getPlatformPolicy(), sourceIP)
 	return &clone
 }
 
@@ -229,7 +229,7 @@ func cloneCompiledHTTPMatch(in *CompiledHTTPMatch) *CompiledHTTPMatch {
 	}
 }
 
-func clonePlatformPolicy(in *PlatformPolicy, sourcePodIP string) *PlatformPolicy {
+func clonePlatformPolicy(in *PlatformPolicy, sourceIP string) *PlatformPolicy {
 	if in == nil {
 		return nil
 	}
@@ -238,12 +238,12 @@ func clonePlatformPolicy(in *PlatformPolicy, sourcePodIP string) *PlatformPolicy
 		DeniedCIDRs:    append([]*net.IPNet(nil), in.DeniedCIDRs...),
 		AllowedDomains: append([]DomainRule(nil), in.AllowedDomains...),
 		DeniedDomains:  append([]DomainRule(nil), in.DeniedDomains...),
-		SourcePodIP:    sourcePodIP,
+		SourceIP:       sourceIP,
 	}
-	if len(in.SandboxPodIPs) > 0 {
-		out.SandboxPodIPs = make(map[string]struct{}, len(in.SandboxPodIPs))
-		for ip := range in.SandboxPodIPs {
-			out.SandboxPodIPs[ip] = struct{}{}
+	if len(in.SandboxIPs) > 0 {
+		out.SandboxIPs = make(map[string]struct{}, len(in.SandboxIPs))
+		for ip := range in.SandboxIPs {
+			out.SandboxIPs[ip] = struct{}{}
 		}
 	}
 	return out

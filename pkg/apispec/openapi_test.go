@@ -32,3 +32,23 @@ func TestSandboxExpirationFieldsAreOptionalAndNullable(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxRuntimeIdentityIsRuntimeNeutral(t *testing.T) {
+	document, err := openapi3.NewLoader().LoadFromFile("openapi.yaml")
+	if err != nil {
+		t.Fatalf("load OpenAPI document: %v", err)
+	}
+
+	for _, schemaName := range []string{"ClaimResponse", "Sandbox", "SandboxStatus"} {
+		schemaRef, ok := document.Components.Schemas[schemaName]
+		if !ok || schemaRef.Value == nil {
+			t.Fatalf("schema %q is missing", schemaName)
+		}
+		if _, exists := schemaRef.Value.Properties["pod_name"]; exists {
+			t.Errorf("schema %q must not expose Kubernetes pod_name", schemaName)
+		}
+		if _, exists := schemaRef.Value.Properties["runtime_id"]; !exists {
+			t.Errorf("schema %q must expose runtime_id", schemaName)
+		}
+	}
+}

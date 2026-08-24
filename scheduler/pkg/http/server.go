@@ -10,7 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -20,8 +20,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
-	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
+	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -33,11 +33,9 @@ type Server struct {
 	cfg             *config.SchedulerConfig
 	repo            ClusterRepository
 	templateStore   store.TemplateStore
-	allocationStore store.AllocationStore
 	templateHandler *templatehttp.Handler
 	authValidator   *internalauth.Validator
 	internalAuthGen *internalauth.Generator
-	reconciler      Reconciler
 	logger          *zap.Logger
 	obsProvider     *observability.Provider
 	metrics         *obsmetrics.SchedulerMetrics
@@ -51,16 +49,6 @@ type Server struct {
 	clusterCacheMu sync.RWMutex
 }
 
-// Reconciler interface for triggering reconciliation
-type Reconciler interface {
-	TriggerReconcile(ctx context.Context)
-	GetTemplateIdleCount(clusterID, templateID string) (int32, bool)
-	GetTemplateStatsAge(clusterID string) (time.Duration, bool)
-	GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool)
-	GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool)
-	GetClusterSummaryAge(clusterID string) (time.Duration, bool)
-}
-
 // ClusterRepository provides cluster CRUD and lookup operations.
 type ClusterRepository interface {
 	Ping(ctx context.Context) error
@@ -68,6 +56,7 @@ type ClusterRepository interface {
 	GetCluster(ctx context.Context, clusterID string) (*template.Cluster, error)
 	ListClusters(ctx context.Context) ([]*template.Cluster, error)
 	ListEnabledClusters(ctx context.Context) ([]*template.Cluster, error)
+	ListSchedulableClusters(ctx context.Context, cpuMillicores, memoryBytes int64) ([]*db.ClusterCapacity, error)
 	UpdateCluster(ctx context.Context, cluster *template.Cluster) error
 	UpdateClusterLastSeen(ctx context.Context, clusterID string) error
 	DeleteCluster(ctx context.Context, clusterID string) error
@@ -78,11 +67,9 @@ type ServerDependencies struct {
 	Config         *config.SchedulerConfig
 	Clusters       ClusterRepository
 	Templates      store.TemplateStore
-	Allocations    store.AllocationStore
 	SourceResolver templatehttp.SandboxTemplateSourceResolver
 	AuthValidator  *internalauth.Validator
 	InternalAuth   *internalauth.Generator
-	Reconciler     Reconciler
 	Logger         *zap.Logger
 	Observability  *observability.Provider
 	Metrics        *obsmetrics.SchedulerMetrics
@@ -93,11 +80,9 @@ func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
 	cfg := deps.Config
 	repo := deps.Clusters
 	templateStore := deps.Templates
-	allocationStore := deps.Allocations
 	sourceResolver := deps.SourceResolver
 	authValidator := deps.AuthValidator
 	internalAuthGen := deps.InternalAuth
-	reconciler := deps.Reconciler
 	logger := deps.Logger
 	obsProvider := deps.Observability
 	metrics := deps.Metrics
@@ -125,10 +110,8 @@ func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
 		cfg:                   cfg,
 		repo:                  repo,
 		templateStore:         templateStore,
-		allocationStore:       allocationStore,
 		authValidator:         authValidator,
 		internalAuthGen:       internalAuthGen,
-		reconciler:            reconciler,
 		logger:                logger,
 		obsProvider:           obsProvider,
 		metrics:               metrics,
@@ -138,13 +121,10 @@ func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
 	}
 	buildStore, _ := templateStore.(store.TemplateBuildStore)
 	server.templateHandler = &templatehttp.Handler{
-		Store:           templateStore,
-		BuildStore:      buildStore,
-		SourceResolver:  sourceResolver,
-		AllocationStore: allocationStore,
-		ClusterStore:    repo,
-		Reconciler:      reconciler,
-		ResourcePolicy:  template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
+		Store:          templateStore,
+		BuildStore:     buildStore,
+		SourceResolver: sourceResolver,
+		ResourcePolicy: template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
 		PrivateRegistryHosts: privateRegistryHosts(
 			cfg.RegistryPushRegistry,
 			cfg.RegistryPullRegistry,
@@ -292,29 +272,6 @@ func (s *Server) readinessCheck(c *gin.Context) {
 		"timestamp": time.Now().Unix(),
 	}
 
-	// Include reconciler status if available
-	if s.reconciler != nil {
-		if statusGetter, ok := s.reconciler.(interface {
-			GetStatus() (time.Time, error)
-		}); ok {
-			lastReconcile, lastErr := statusGetter.GetStatus()
-			response["last_reconcile"] = lastReconcile.Unix()
-			if lastErr != nil {
-				response["last_reconcile_error"] = lastErr.Error()
-			}
-
-			// Warn if reconcile hasn't run in a long time (e.g., 10x interval)
-			reconcileInterval := s.cfg.ReconcileInterval.Duration
-			if reconcileInterval == 0 {
-				reconcileInterval = 30 * time.Second
-			}
-			warningThreshold := reconcileInterval * 10
-			if time.Since(lastReconcile) > warningThreshold && !lastReconcile.IsZero() {
-				response["warning"] = "reconcile hasn't run recently"
-			}
-		}
-	}
-
 	spec.JSONSuccess(c, http.StatusOK, response)
 }
 
@@ -440,7 +397,7 @@ func (s *Server) getClusterFromCache(clusterID string) *template.Cluster {
 }
 
 func (s *Server) refreshClusterCache(ctx context.Context) error {
-	cacheTTL := s.cfg.ReconcileInterval.Duration
+	cacheTTL := s.cfg.ClusterCacheTTL.Duration
 	if cacheTTL <= 0 {
 		cacheTTL = 30 * time.Second
 	}

@@ -141,14 +141,6 @@ func (m *iptablesManager) sync(
 	if err := m.ensureNATJump(ctx); err != nil {
 		return err
 	}
-	if err := m.cleanupLegacyChains(ctx); err != nil {
-		m.logger.Warn("Failed to remove legacy network redirect chains", zap.Error(err))
-	}
-	for _, name := range []string{legacyIPSetName, legacyNextIPSetName} {
-		if err := destroyIPSet(ctx, name); err != nil {
-			m.logger.Warn("Failed to remove legacy network redirect IP set", zap.String("ipset", name), zap.Error(err))
-		}
-	}
 	m.initialized = true
 	m.sandboxIPs = append(m.sandboxIPs[:0], sandboxIPs...)
 	m.bypassCIDRs = append(m.bypassCIDRs[:0], bypassCIDRs...)
@@ -224,10 +216,6 @@ func (m *iptablesManager) Cleanup(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (m *iptablesManager) cleanupLegacyChains(ctx context.Context) error {
-	return m.cleanupChains(ctx, legacyChainName, legacyNATChainName)
 }
 
 func (m *iptablesManager) cleanupChains(ctx context.Context, mangleChain, natChain string) error {
@@ -346,9 +334,9 @@ func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {
 		mask := uint32(1)
 		rule.Mask = &mask
 		rule.Table = ruleTableID
-		// The TPROXY mark must win before CNI source-based rules. Terway installs
-		// per-pod source rules at priority 2048, while an unspecified priority is
-		// assigned near 32765 and routes marked packets away from the local proxy.
+		// The TPROXY mark must win before later source-based routing rules. An
+		// unspecified priority is assigned near 32765 and can route marked packets
+		// away from the local proxy.
 		rule.Priority = policyRulePriority
 		if err := netlink.RuleAdd(rule); err != nil && !isExist(err) {
 			return err

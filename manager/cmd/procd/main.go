@@ -34,6 +34,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
+	runtimeAssignment, err := runtimecontroller.AssignmentFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid runtime control configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Initialize logger
 	logger, err := coreobs.NewLogger(coreobs.LoggerConfig{
@@ -168,8 +173,7 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Note: Network isolation is handled by the ctld network runtime through pod annotations.
-	// Procd no longer manages network policies.
+	// Network isolation is enforced by the node-local ctld runtime.
 
 	runtimeController := runtimecontroller.New(
 		contextManager,
@@ -179,16 +183,16 @@ func main() {
 		cfg.HTTPPort,
 		logger,
 	)
-	runtimeIdentity, err := runtimecontroller.IdentityFromEnv()
+	activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = runtimeController.Activate(activationCtx, *runtimeAssignment)
+	activationCancel()
 	if err != nil {
-		logger.Fatal("Failed to load runtime control identity", zap.Error(err))
+		logger.Fatal("Failed to activate runtime assignment", zap.Error(err))
 	}
-	runtimeClient, err := runtimecontroller.NewClient(runtimeIdentity, runtimeController, logger)
-	if err != nil {
-		logger.Fatal("Failed to create runtime control client", zap.Error(err))
-	}
-	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
-	go runtimeClient.Run(runtimeCtx)
+	logger.Info("Runtime assignment activated",
+		zap.String("sandbox_id", runtimeAssignment.SandboxID),
+		zap.Int64("runtime_generation", runtimeAssignment.RuntimeGeneration),
+	)
 
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
@@ -218,7 +222,6 @@ func main() {
 
 		cleanupCancel()
 		reaperCancel()
-		runtimeCancel()
 
 		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,

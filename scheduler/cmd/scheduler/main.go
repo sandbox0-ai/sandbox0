@@ -9,21 +9,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/pkg/clock"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	httpserver "github.com/sandbox0-ai/sandbox0/scheduler/pkg/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
-	schedpubsub "github.com/sandbox0-ai/sandbox0/scheduler/pkg/pubsub"
-	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/reconciler"
 	"go.uber.org/zap"
 )
 
@@ -72,21 +68,6 @@ func main() {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
 
-	// Initialize clock for cross-cluster time synchronization
-	clk, err := clock.NewPGX(ctx, pool,
-		clock.WithSyncInterval(30*time.Second),
-		clock.WithZapLogger(logger),
-	)
-	if err != nil {
-		logger.Fatal("Failed to initialize clock", zap.Error(err))
-	}
-	defer clk.Close()
-
-	logger.Info("Clock initialized for cross-cluster time synchronization",
-		zap.Int64("offset_ms", clk.Offset().Milliseconds()),
-		zap.Int64("rtt_ms", clk.LastRTT().Milliseconds()),
-	)
-
 	// Create repository
 	repo := db.NewRepository(pool)
 	templateStore := templstorepg.NewStore(pool)
@@ -129,19 +110,14 @@ func main() {
 	clusterGatewayClient := client.NewClusterGatewayClient(internalAuthGen, logger, obsProvider)
 	templateSourceResolver := httpserver.NewSchedulerSandboxTemplateSourceResolver(repo, clusterGatewayClient)
 
-	// Create reconciler
-	rec := reconciler.NewReconciler(templateStore, templateStore, repo, clusterGatewayClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
-
 	// Create HTTP server
 	httpServer, err := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		Config:         cfg,
 		Clusters:       repo,
 		Templates:      templateStore,
-		Allocations:    templateStore,
 		SourceResolver: templateSourceResolver,
 		AuthValidator:  authValidator,
 		InternalAuth:   internalAuthGen,
-		Reconciler:     rec,
 		Logger:         logger,
 		Observability:  obsProvider,
 		Metrics:        schedulerMetrics,
@@ -149,22 +125,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create scheduler HTTP server", zap.Error(err))
 	}
-
-	// Start template idle listener
-	if cfg.DatabaseURL != "" {
-		schedpubsub.StartTemplateIdleListener(ctx, cfg.DatabaseURL, logger, func(event pubsub.TemplateIdleEvent) {
-			logger.Info("Received template idle event",
-				zap.String("cluster_id", event.ClusterID),
-				zap.String("template_id", event.TemplateID),
-				zap.Int32("idle_count", event.IdleCount),
-				zap.Int32("active_count", event.ActiveCount),
-			)
-			rec.UpdateTemplateStats(event.ClusterID, event.TemplateID, event.IdleCount, event.ActiveCount, event.Timestamp)
-		})
-	}
-
-	// Start reconciler in background
-	go rec.Start(ctx)
 
 	// Start HTTP server (blocks until context is cancelled)
 	if err := httpServer.Start(ctx); err != nil {

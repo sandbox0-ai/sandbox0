@@ -2,13 +2,20 @@ package objectstore
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestBuildEndpointGCS(t *testing.T) {
@@ -187,6 +194,106 @@ func TestPrefixedStoreListPreservesCommonPrefixes(t *testing.T) {
 	want := []string{"file:visible.txt", "prefix:dir/"}
 	if !equalStringSlices(got, want) {
 		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrefixedStoreConditionalCreateUsesPrefixedKey(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	store := Prefix(base, "tenant-a/rootfs").(ConditionalStore)
+	created, err := store.PutIfAbsent("packs/object", strings.NewReader("first"))
+	if err != nil || !created {
+		t.Fatalf("first PutIfAbsent() = %v, %v", created, err)
+	}
+	created, err = store.PutIfAbsent("packs/object", strings.NewReader("second"))
+	if err != nil || created {
+		t.Fatalf("second PutIfAbsent() = %v, %v", created, err)
+	}
+	reader, err := base.Get("tenant-a/rootfs/packs/object", 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(payload) != "first" {
+		t.Fatalf("stored payload = %q, %v", payload, err)
+	}
+}
+
+func TestContextConditionalStoreCancellationFollowsPrefix(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	prefixed := Prefix(base, "tenant-a/rootfs")
+	store, ok := prefixed.(ContextConditionalStore)
+	if !ok || !SupportsContextConditionalCreate(prefixed) {
+		t.Fatal("prefix wrapper lost contextual conditional access")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.PutIfAbsentContext(ctx, "object", strings.NewReader("payload")); err != context.Canceled {
+		t.Fatalf("canceled PutIfAbsentContext() error = %v", err)
+	}
+	if _, err := store.GetContext(ctx, "object", 0, -1); err != context.Canceled {
+		t.Fatalf("canceled GetContext() error = %v", err)
+	}
+	if _, err := base.Get("tenant-a/rootfs/object", 0, -1); err == nil {
+		t.Fatal("canceled conditional write created an object")
+	}
+}
+
+func TestRemoteConditionalCreateStopsOnInFlightCancellation(t *testing.T) {
+	for _, provider := range []string{TypeS3, TypeGCS} {
+		t.Run(provider, func(t *testing.T) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				once.Do(func() { close(started) })
+				select {
+				case <-request.Context().Done():
+				case <-release:
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+
+			var store ContextConditionalStore
+			if provider == TypeS3 {
+				created, err := Create(Config{
+					Type: TypeS3, Bucket: "rootfs", Region: "us-east-1", Endpoint: server.URL,
+					AccessKey: "test-access-key", SecretKey: "test-secret-key",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = created.(ContextConditionalStore)
+			} else {
+				store = &gcsStore{client: server.Client(), bucket: "rootfs", baseURL: server.URL}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			result := make(chan error, 1)
+			go func() {
+				_, err := store.PutIfAbsentContext(ctx, "objects/one", strings.NewReader("payload"))
+				result <- err
+			}()
+			select {
+			case <-started:
+			case err := <-result:
+				cancel()
+				t.Fatalf("conditional create stopped before the test endpoint: %v", err)
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatal("conditional create did not reach the test endpoint")
+			}
+			cancel()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("PutIfAbsentContext() error = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("conditional create ignored context cancellation")
+			}
+		})
 	}
 }
 

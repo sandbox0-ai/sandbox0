@@ -8,20 +8,21 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type updateSandboxRequest struct {
@@ -43,6 +44,8 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
+	req.StartedAt = sandboxClaimIngressStartedAt(claims)
+	req.OperationID = sandboxClaimOperationID(claims)
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
@@ -69,13 +72,19 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		}
 	}
 
-	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
+	claimer := s.sandboxClaimer
+	if claimer == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox claim backend is not configured")
+		return
+	}
+	resp, err := claimer.ClaimSandbox(c.Request.Context(), &req)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if apierrors.IsNotFound(err) || errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
+		if apierror.IsNotFound(err) || errors.Is(err, service.ErrTemplateNotFound) ||
+			errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
 			return
 		}
@@ -101,7 +110,31 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		return
 	}
 
+	if resp.CommandReadyDuration > 0 {
+		c.Header("Server-Timing", fmt.Sprintf(
+			"sandbox0-command-ready;dur=%.3f", float64(resp.CommandReadyDuration)/float64(time.Millisecond),
+		))
+		slo := "missed"
+		if resp.CommandReadyWithinSLO {
+			slo = "met"
+		}
+		c.Header("Sandbox0-Command-Ready-SLO", slo)
+	}
 	spec.JSONSuccess(c, http.StatusCreated, resp)
+}
+
+func sandboxClaimIngressStartedAt(claims *internalauth.Claims) time.Time {
+	if claims == nil || claims.Audit == nil || claims.Audit.IngressStartedAt == nil {
+		return time.Time{}
+	}
+	return claims.Audit.IngressStartedAt.UTC()
+}
+
+func sandboxClaimOperationID(claims *internalauth.Claims) string {
+	if claims == nil || claims.Audit == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.Audit.OperationID)
 }
 
 func writeManagerTemplateNotReady(c *gin.Context, tpl *template.Template) {
@@ -175,7 +208,11 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		req.Offset = offset
 	}
 
-	resp, err := s.sandboxService.ListSandboxes(c.Request.Context(), req)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return
+	}
+	resp, err := s.sandboxReader.ListSandboxes(c.Request.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to list sandboxes",
 			zap.String("teamID", claims.TeamID),
@@ -220,7 +257,11 @@ func requireAuthenticatedClaims(c *gin.Context) (*internalauth.Claims, bool) {
 }
 
 func (s *Server) getOwnedSandbox(c *gin.Context, sandboxID string, claims *internalauth.Claims, failureLog string) (*managerapi.Sandbox, bool) {
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return nil, false
+	}
+	sandbox, err := s.sandboxReader.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		if failureLog != "" {
 			s.logger.Error(failureLog,
@@ -264,7 +305,11 @@ func (s *Server) getSandboxInternal(c *gin.Context) {
 		return
 	}
 
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return
+	}
+	sandbox, err := s.sandboxReader.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get sandbox (internal)",
 			zap.String("sandboxID", sandboxID),
@@ -295,7 +340,11 @@ func (s *Server) getSandboxTemplateSourceInternal(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox:read permission is required")
 		return
 	}
-	source, err := s.sandboxService.ResolveSandboxTemplateSource(c.Request.Context(), sandboxID, claims.TeamID)
+	if s.sandboxSourceResolver == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox template source resolver is not configured")
+		return
+	}
+	source, err := s.sandboxSourceResolver.ResolveSandboxTemplateSource(c.Request.Context(), sandboxID, claims.TeamID)
 	if err != nil {
 		switch {
 		case errors.Is(err, template.ErrTemplateSourceNotFound):
@@ -364,7 +413,11 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
-	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
+	if s.sandboxUpdater == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox update service is not configured")
+		return
+	}
+	updated, err := s.sandboxUpdater.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -372,6 +425,18 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		}
 		if errors.Is(err, service.ErrQuotaExceeded) {
 			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+			return
+		}
+		if errors.Is(err, service.ErrSandboxRuntimeUpdateUnavailable) {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
+		if apierror.IsConflict(err) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox conflicts with another lifecycle operation")
+			return
+		}
+		if apierror.IsNotFound(err) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}
 		s.logger.Error("Failed to update sandbox",
@@ -399,7 +464,7 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 		return
 	}
 
-	status, err := s.sandboxService.GetSandboxStatus(c.Request.Context(), sandboxID)
+	status, err := s.sandboxReader.GetSandboxStatus(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get sandbox status",
 			zap.String("sandboxID", sandboxID),
@@ -426,7 +491,11 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 		return
 	}
 
-	err := s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxTerminator == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox termination is unavailable")
+		return
+	}
+	err := s.sandboxTerminator.TerminateSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to terminate sandbox",
 			zap.String("sandboxID", sandboxID),
@@ -455,7 +524,11 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.PauseSandboxAndWait(c.Request.Context(), sandboxID)
+	if s.sandboxPauser == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox pause is unavailable")
+		return
+	}
+	resp, err := s.sandboxPauser.PauseSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "pause", sandboxID, err)
 		return
@@ -478,7 +551,11 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
+	if s.sandboxResumer == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume is unavailable")
+		return
+	}
+	resp, err := s.sandboxResumer.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "resume", sandboxID, err)
 		return
@@ -494,9 +571,11 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		zap.Error(err),
 	)
 	switch {
-	case apierrors.IsConflict(err):
+	case errors.Is(err, service.ErrSandboxLifecycleUnavailable):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+	case apierror.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
-	case apierrors.IsNotFound(err):
+	case apierror.IsNotFound(err):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 	case errors.Is(err, service.ErrQuotaExceeded):
 		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
@@ -532,10 +611,21 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.RefreshSandbox(c.Request.Context(), sandboxID, &req)
+	if s.sandboxUpdater == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox update service is not configured")
+		return
+	}
+	resp, err := s.sandboxUpdater.RefreshSandbox(c.Request.Context(), sandboxID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrInvalidClaimRequest) {
+		switch {
+		case errors.Is(err, service.ErrInvalidClaimRequest):
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		case apierror.IsConflict(err):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox termination is in progress")
+			return
+		case apierror.IsNotFound(err):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}
 		s.logger.Error("Failed to refresh sandbox",

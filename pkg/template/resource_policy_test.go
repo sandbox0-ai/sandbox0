@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 func TestMemoryPerCPUOrDefault(t *testing.T) {
@@ -26,7 +26,7 @@ func TestMemoryPerCPUOrDefault(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := MemoryPerCPUOrDefault(tt.in)
-			want := resource.MustParse(tt.want)
+			want := quantity.MustParse(tt.want)
 			if got.Cmp(want) != 0 {
 				t.Fatalf("MemoryPerCPUOrDefault(%q) = %s, want %s", tt.in, got.String(), want.String())
 			}
@@ -38,18 +38,18 @@ func TestResourcePolicyDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 
 	defaults := ResourcePolicy{}
-	if got := defaults.MemoryPerCPU(); got.Cmp(resource.MustParse(DefaultMemoryPerCPU)) != 0 {
+	if got := defaults.MemoryPerCPU(); got.Cmp(quantity.MustParse(DefaultMemoryPerCPU)) != 0 {
 		t.Fatalf("default memory per CPU = %s, want %s", got.String(), DefaultMemoryPerCPU)
 	}
-	if got := defaults.MaxMemory(); got.Cmp(resource.MustParse(DefaultSandboxMaxMemory)) != 0 {
+	if got := defaults.MaxMemory(); got.Cmp(quantity.MustParse(DefaultSandboxMaxMemory)) != 0 {
 		t.Fatalf("default max memory = %s, want %s", got.String(), DefaultSandboxMaxMemory)
 	}
 
 	configured := NewResourcePolicy("2Gi", "32Gi")
-	if got := configured.MemoryPerCPU(); got.Cmp(resource.MustParse("2Gi")) != 0 {
+	if got := configured.MemoryPerCPU(); got.Cmp(quantity.MustParse("2Gi")) != 0 {
 		t.Fatalf("configured memory per CPU = %s, want 2Gi", got.String())
 	}
-	if got := configured.MaxMemory(); got.Cmp(resource.MustParse("32Gi")) != 0 {
+	if got := configured.MaxMemory(); got.Cmp(quantity.MustParse("32Gi")) != 0 {
 		t.Fatalf("configured max memory = %s, want 32Gi", got.String())
 	}
 }
@@ -94,8 +94,8 @@ func TestResourcePolicyValidateTemplateRejectsMemoryAboveMaximum(t *testing.T) {
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Resources: v1alpha1.ResourceQuota{
-				CPU:    resource.MustParse("16"),
-				Memory: resource.MustParse("32Gi"),
+				CPU:    "16",
+				Memory: "32Gi",
 			},
 		},
 	}
@@ -121,8 +121,8 @@ func TestCPUForMemory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := CPUForMemory(resource.MustParse(tt.memory), resource.MustParse("4Gi"))
-			want := resource.MustParse(tt.want)
+			got := CPUForMemory(quantity.MustParse(tt.memory), quantity.MustParse("4Gi"))
+			want := quantity.MustParse(tt.want)
 			if got.Cmp(want) != 0 {
 				t.Fatalf("CPUForMemory(%s) = %s, want %s", tt.memory, got.String(), want.String())
 			}
@@ -136,25 +136,25 @@ func TestValidateResourceRatio(t *testing.T) {
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Resources: v1alpha1.ResourceQuota{
-				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("4Gi"),
+				CPU:    "1",
+				Memory: "4Gi",
 			},
 		},
 	}
 
-	if err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template default"); err != nil {
+	if err := ValidateResourceRatio(spec, quantity.MustParse("4Gi"), "builtin template default"); err != nil {
 		t.Fatalf("expected ratio to pass, got %v", err)
 	}
 
-	spec.MainContainer.Resources.CPU = resource.MustParse("32m")
-	spec.MainContainer.Resources.Memory = resource.MustParse("129Mi")
-	if err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "rounded template"); err != nil {
+	spec.MainContainer.Resources.CPU = "32m"
+	spec.MainContainer.Resources.Memory = "129Mi"
+	if err := ValidateResourceRatio(spec, quantity.MustParse("4Gi"), "rounded template"); err != nil {
 		t.Fatalf("expected rounded memory-derived cpu to pass, got %v", err)
 	}
 
-	spec.MainContainer.Resources.CPU = resource.MustParse("1")
-	spec.MainContainer.Resources.Memory = resource.MustParse("1Gi")
-	err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template default")
+	spec.MainContainer.Resources.CPU = "1"
+	spec.MainContainer.Resources.Memory = "1Gi"
+	err := ValidateResourceRatio(spec, quantity.MustParse("4Gi"), "builtin template default")
 	if err == nil {
 		t.Fatal("expected ratio validation to fail")
 	}

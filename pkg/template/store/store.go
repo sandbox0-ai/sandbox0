@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -20,15 +19,29 @@ type TemplateStore interface {
 	DeleteTemplate(ctx context.Context, scope, teamID, templateID string) error
 }
 
-// AllocationStore provides CRUD operations for template allocations.
-type AllocationStore interface {
-	UpsertAllocation(ctx context.Context, alloc *template.TemplateAllocation) error
-	ListAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) ([]*template.TemplateAllocation, error)
-	UpdateAllocationSyncStatus(ctx context.Context, scope, teamID, templateID, clusterID, status string, syncError *string) error
-	DeleteAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) error
+// ImageSourceCursor is the stable keyset position used by active-active
+// template image import discovery.
+type ImageSourceCursor struct {
+	Scope      string
+	TeamID     string
+	TemplateID string
 }
 
-// TemplateBuildStore persists asynchronous template image builds.
+// ImageSource is the bounded immutable input needed to discover a template's
+// OCI-to-block import requirements.
+type ImageSource struct {
+	Cursor           ImageSourceCursor
+	Image            string
+	EphemeralStorage string
+}
+
+// ImageSourceStore enumerates ready image-based templates without loading
+// captured block-COW templates or maintaining a second template projection.
+type ImageSourceStore interface {
+	ListImageSourcesForRootFSImport(context.Context, ImageSourceCursor, int) ([]ImageSource, error)
+}
+
+// TemplateBuildStore persists asynchronous template RootFS builds.
 type TemplateBuildStore interface {
 	// CreateTemplateBuild atomically creates the visible template and its
 	// durable build. Replayed idempotent requests return the existing template
@@ -38,7 +51,7 @@ type TemplateBuildStore interface {
 	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error)
 	RenewTemplateBuildLease(ctx context.Context, buildID, workerID string, leaseDuration time.Duration) error
 	MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error
-	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error
+	PublishRootFSTemplateBuild(ctx context.Context, buildID, workerID string, source template.RootFSTemplateSource, capturedAt time.Time) error
 	FailTemplateBuild(ctx context.Context, buildID, workerID, reason, message string) error
 	ReleaseTemplateBuild(ctx context.Context, buildID, workerID string, retryAt time.Time, lastError string) error
 	TemplateBuildCancelled(ctx context.Context, buildID string) (bool, error)
@@ -46,14 +59,16 @@ type TemplateBuildStore interface {
 	CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope, teamID, templateID string) (bool, error)
 }
 
+// TemplateRootFSDeletionStore owns snapshot cleanup tombstones after a
+// visible template or canceled build releases its internal capture.
+type TemplateRootFSDeletionStore interface {
+	ClaimTemplateRootFSDeletion(ctx context.Context, workerID string, leaseDuration time.Duration) (*template.TemplateRootFSDeletion, error)
+	FinishTemplateRootFSDeletion(ctx context.Context, snapshotID, workerID string) error
+	ReleaseTemplateRootFSDeletion(ctx context.Context, snapshotID, workerID string, retryAt time.Time, lastError string) error
+}
+
 // TemplateBuildLifecycleStore terminates builds that can no longer capture
 // their source sandbox because a data-plane cluster is being removed.
 type TemplateBuildLifecycleStore interface {
 	FailCapturingTemplateBuildsForCluster(ctx context.Context, clusterID, reason, message string) (int64, error)
-}
-
-// TemplateCreationStore owns the final creation-state transition after a
-// reconciler has verified that a template is claimable.
-type TemplateCreationStore interface {
-	MarkTemplateCreationReady(ctx context.Context, scope, teamID, templateID, buildID string, completedAt time.Time) (bool, error)
 }

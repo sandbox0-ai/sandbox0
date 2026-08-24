@@ -13,46 +13,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-// ClusterStore provides cluster lookup for delete warnings.
-type ClusterStore interface {
-	GetCluster(ctx context.Context, clusterID string) (*template.Cluster, error)
-}
-
-// Reconciler triggers template reconciliation.
-type Reconciler interface {
-	TriggerReconcile(ctx context.Context)
-}
-
-// TemplateStat contains pool counters for a synced template.
-type TemplateStat struct {
-	TemplateID  string
-	Namespace   string
-	IdleCount   int32
-	ActiveCount int32
-}
-
-// TemplateStats is a container for all template stats.
-type TemplateStats struct {
-	Templates []TemplateStat
-}
-
-// TemplateStatsProvider resolves current pool status for templates.
-type TemplateStatsProvider interface {
-	GetTemplateStats(ctx context.Context) (*TemplateStats, error)
-}
 
 // SandboxTemplateSourceResolver resolves durable source sandbox metadata in the
 // sandbox's owning data-plane cluster.
@@ -65,10 +36,6 @@ type Handler struct {
 	Store                store.TemplateStore
 	BuildStore           store.TemplateBuildStore
 	SourceResolver       SandboxTemplateSourceResolver
-	AllocationStore      store.AllocationStore
-	ClusterStore         ClusterStore
-	Reconciler           Reconciler
-	StatsProvider        TemplateStatsProvider
 	ResourcePolicy       template.ResourcePolicy
 	PrivateRegistryHosts []string
 	Logger               *zap.Logger
@@ -89,10 +56,9 @@ type TemplateFromSandboxRequest struct {
 // TemplateFromSandboxSpecOverrides contains the safe overrides accepted by the
 // from-sandbox constructor.
 type TemplateFromSandboxSpecOverrides struct {
-	Description *string                `json:"description,omitempty"`
-	DisplayName *string                `json:"displayName,omitempty"`
-	Tags        *[]string              `json:"tags,omitempty"`
-	Pool        *v1alpha1.PoolStrategy `json:"pool,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	DisplayName *string   `json:"displayName,omitempty"`
+	Tags        *[]string `json:"tags,omitempty"`
 }
 
 // ListTemplates lists all templates.
@@ -114,7 +80,6 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list templates")
 		return
 	}
-	h.enrichTemplatesStatus(c.Request.Context(), templates)
 	responseTemplates, err := templatesForResponse(templates, claims)
 	if err != nil {
 		h.Logger.Error("Failed to project template response", zap.Error(err))
@@ -169,7 +134,6 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
 		return
 	}
-	h.enrichTemplatesStatus(c.Request.Context(), []*template.Template{tpl})
 
 	responseTemplate, err := templateForResponse(tpl, claims)
 	if err != nil {
@@ -178,60 +142,6 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, responseTemplate)
-}
-
-func (h *Handler) enrichTemplatesStatus(ctx context.Context, templates []*template.Template) {
-	if len(templates) == 0 || h.StatsProvider == nil {
-		return
-	}
-
-	stats, err := h.StatsProvider.GetTemplateStats(ctx)
-	if err != nil {
-		h.Logger.Warn("Failed to load template status", zap.Error(err))
-		return
-	}
-	if stats == nil || len(stats.Templates) == 0 {
-		return
-	}
-
-	statsMap := make(map[string]TemplateStat, len(stats.Templates))
-	for _, stat := range stats.Templates {
-		statsMap[templateStatKey(stat.Namespace, stat.TemplateID)] = stat
-	}
-
-	for _, tpl := range templates {
-		namespace, err := templateNamespaceForScope(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-		if err != nil {
-			h.Logger.Warn("Failed to resolve template namespace for status",
-				zap.String("template_id", tpl.TemplateID),
-				zap.String("scope", tpl.Scope),
-				zap.String("team_id", tpl.TeamID),
-				zap.Error(err),
-			)
-			continue
-		}
-		clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
-		stat, ok := statsMap[templateStatKey(namespace, clusterTemplateID)]
-		if !ok {
-			continue
-		}
-		if tpl.Status == nil {
-			tpl.Status = &v1alpha1.SandboxTemplateStatus{}
-		}
-		tpl.Status.IdleCount = stat.IdleCount
-		tpl.Status.ActiveCount = stat.ActiveCount
-	}
-}
-
-func templateNamespaceForScope(scope, teamID, templateID string) (string, error) {
-	if scope == naming.ScopeTeam {
-		return naming.TemplateNamespaceForTeam(teamID)
-	}
-	return naming.TemplateNamespaceForBuiltin(templateID)
-}
-
-func templateStatKey(namespace, templateID string) string {
-	return namespace + "\x00" + templateID
 }
 
 func templatesForResponse(templates []*template.Template, claims *internalauth.Claims) ([]*apispec.Template, error) {
@@ -256,12 +166,6 @@ func templateForResponse(tpl *template.Template, claims *internalauth.Claims) (*
 	out.Spec = *tpl.Spec.DeepCopy()
 	if tpl.Status != nil {
 		out.Status = tpl.Status.DeepCopy()
-	}
-	if claims == nil || !claims.IsSystemToken() {
-		out.Spec.Pod = nil
-		out.Spec.MainContainer.SecurityContext = nil
-		out.Spec.MainContainer.ImagePullPolicy = ""
-		out.Spec.ClusterId = nil
 	}
 	raw, err := json.Marshal(&out)
 	if err != nil {
@@ -292,38 +196,33 @@ func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpe
 	if len(raw) == 0 {
 		return out, nil
 	}
-	if err := rejectUnsupportedTemplateSpecFields(raw); err != nil {
-		return out, err
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&out); err != nil {
 		return out, fmt.Errorf("invalid spec: %w", err)
+	}
+	if err := rejectExplicitTemplateCPU(raw); err != nil {
+		return out, err
 	}
 	return out, nil
 }
 
 // deriveTemplateCPU materializes the platform-managed CPU before persistence.
-func deriveTemplateCPU(spec *v1alpha1.SandboxTemplateSpec, memoryPerCPU resource.Quantity) {
-	if spec == nil || spec.MainContainer.Resources.Memory.Sign() <= 0 {
+func deriveTemplateCPU(spec *v1alpha1.SandboxTemplateSpec, memoryPerCPU quantity.Quantity) {
+	if spec == nil {
 		return
 	}
-	spec.MainContainer.Resources.CPU = template.CPUForMemory(
-		spec.MainContainer.Resources.Memory,
-		memoryPerCPU,
-	)
+	memory, err := quantity.Parse(strings.TrimSpace(spec.MainContainer.Resources.Memory))
+	if err != nil || memory.Sign() <= 0 {
+		return
+	}
+	spec.MainContainer.Resources.CPU = template.CPUForMemory(memory, memoryPerCPU).String()
 }
 
-func rejectUnsupportedTemplateSpecFields(raw json.RawMessage) error {
-	if strings.TrimSpace(string(raw)) == "null" {
-		return nil
-	}
+func rejectExplicitTemplateCPU(raw json.RawMessage) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return fmt.Errorf("spec must be an object: %w", err)
-	}
-	for _, field := range []string{"lifecycle", "public", "allowedTeams"} {
-		if _, ok := fields[field]; ok {
-			return fmt.Errorf("spec.%s is not supported", field)
-		}
+		return nil
 	}
 	var mainContainerFields map[string]json.RawMessage
 	if err := json.Unmarshal(fields["mainContainer"], &mainContainerFields); err != nil {
@@ -389,7 +288,7 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, templateSpec); err != nil {
+	if err := validateTemplateClaimNameBudget(req.TemplateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -427,8 +326,6 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		zap.String("team_id", teamID),
 	)
 
-	h.triggerReconcile()
-
 	created, _ := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if created == nil {
 		created = tpl
@@ -442,7 +339,7 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusCreated, responseTemplate)
 }
 
-// CreateTemplateFromSandbox creates a template and enqueues its image build.
+// CreateTemplateFromSandbox creates a template and enqueues its RootFS build.
 func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 	var req TemplateFromSandboxRequest
 	if err := decodeStrictJSON(c, &req); err != nil {
@@ -488,7 +385,7 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 		return
 	}
 	if h.BuildStore == nil {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template RootFS builds are unavailable")
 		return
 	}
 
@@ -550,7 +447,7 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 		return
 	}
 	if h.SourceResolver == nil {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template RootFS builds are unavailable")
 		return
 	}
 
@@ -574,7 +471,7 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 
 	templateSpec := templateSpecFromSandboxSource(source.Spec, req.SpecOverrides)
 	resourcePolicy := h.ResourcePolicy
-	templateSpec.MainContainer.Resources.CPU = resource.Quantity{}
+	templateSpec.MainContainer.Resources.CPU = ""
 	deriveTemplateCPU(&templateSpec, resourcePolicy.MemoryPerCPU())
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "source template is not reusable: "+err.Error())
@@ -584,14 +481,18 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, templateSpec); err != nil {
+	if err := validateTemplateImagesForClaims(templateSpec, claims, h.PrivateRegistryHosts); err != nil {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		return
+	}
+	if err := validateTemplateClaimNameBudget(req.TemplateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
 	now := time.Now().UTC()
 	buildID := uuid.NewString()
-	startedAt := metav1.NewTime(now)
+	startedAt := now
 	tpl := &template.Template{
 		TemplateID: req.TemplateID,
 		Scope:      scope,
@@ -662,11 +563,6 @@ func (h *Handler) writeAcceptedTemplate(c *gin.Context, tpl *template.Template, 
 
 func templateSpecFromSandboxSource(source v1alpha1.SandboxTemplateSpec, overrides *TemplateFromSandboxSpecOverrides) v1alpha1.SandboxTemplateSpec {
 	out := *source.DeepCopy()
-	out.Pod = nil
-	out.MainContainer.SecurityContext = nil
-	out.MainContainer.ImagePullPolicy = ""
-	out.ClusterId = nil
-	out.Pool = v1alpha1.PoolStrategy{}
 	if overrides == nil {
 		return out
 	}
@@ -678,9 +574,6 @@ func templateSpecFromSandboxSource(source v1alpha1.SandboxTemplateSpec, override
 	}
 	if overrides.Tags != nil {
 		out.Tags = append([]string(nil), (*overrides.Tags)...)
-	}
-	if overrides.Pool != nil {
-		out.Pool = *overrides.Pool
 	}
 	return out
 }
@@ -799,7 +692,7 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateClaimNameBudget(scope, teamID, templateID, templateSpec); err != nil {
+	if err := validateTemplateClaimNameBudget(templateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -823,8 +716,6 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		zap.String("scope", scope),
 		zap.String("team_id", teamID),
 	)
-
-	h.triggerReconcile()
 
 	updated, _ := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if updated == nil {
@@ -875,47 +766,6 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 		return
 	}
 
-	var cleanupErrors []string
-	if h.AllocationStore != nil {
-		allocations, err := h.AllocationStore.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
-		if err != nil {
-			h.Logger.Error("Failed to get template allocations", zap.Error(err))
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
-			return
-		}
-
-		if h.ClusterStore != nil {
-			for _, alloc := range allocations {
-				cluster, err := h.ClusterStore.GetCluster(c.Request.Context(), alloc.ClusterID)
-				if err != nil {
-					h.Logger.Warn("Failed to get cluster info for cleanup",
-						zap.String("cluster_id", alloc.ClusterID),
-						zap.Error(err),
-					)
-					cleanupErrors = append(cleanupErrors, alloc.ClusterID+": failed to get cluster info")
-					continue
-				}
-				if cluster == nil {
-					h.Logger.Warn("Cluster not found for cleanup",
-						zap.String("cluster_id", alloc.ClusterID),
-					)
-					continue
-				}
-
-				h.Logger.Info("Template will be cleaned from cluster via reconcile",
-					zap.String("cluster_id", alloc.ClusterID),
-					zap.String("template_id", templateID),
-				)
-			}
-		}
-
-		if err := h.AllocationStore.DeleteAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
-			h.Logger.Error("Failed to delete template allocations", zap.Error(err))
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
-			return
-		}
-	}
-
 	if existing.CreationBuildID != "" && h.BuildStore != nil {
 		if _, err := h.BuildStore.CancelTemplateBuildAndDeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
 			h.Logger.Error("Failed to cancel template build", zap.Error(err))
@@ -936,18 +786,5 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 		zap.String("team_id", teamID),
 	)
 
-	h.triggerReconcile()
-
-	response := gin.H{"message": "template deleted"}
-	if len(cleanupErrors) > 0 {
-		response["cleanup_warnings"] = cleanupErrors
-	}
-	spec.JSONSuccess(c, http.StatusOK, response)
-}
-
-func (h *Handler) triggerReconcile() {
-	if h.Reconciler == nil {
-		return
-	}
-	go h.Reconciler.TriggerReconcile(context.Background())
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "template deleted"})
 }

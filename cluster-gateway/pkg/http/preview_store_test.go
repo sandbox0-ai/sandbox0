@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 func TestMemoryPreviewGrantStoreBootstrapIsOneTime(t *testing.T) {
@@ -99,7 +98,7 @@ func TestRedisPreviewGrantStoreSharesAndAtomicallyUpdatesGrants(t *testing.T) {
 	cfg := config.GatewayConfig{
 		RedisURL:       "redis://" + redisServer.Addr() + "/0",
 		RedisKeyPrefix: "sandbox0:test",
-		RedisTimeout:   metav1.Duration{Duration: time.Second},
+		RedisTimeout:   config.Duration{Duration: time.Second},
 	}
 	first, err := newPreviewGrantStore(t.Context(), cfg)
 	if err != nil {

@@ -5,8 +5,8 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -19,8 +19,15 @@ const (
 // templates and sandbox lifecycle operations. Its zero value uses platform
 // defaults.
 type ResourcePolicy struct {
-	memoryPerCPU resource.Quantity
-	maxMemory    resource.Quantity
+	memoryPerCPU quantity.Quantity
+	maxMemory    quantity.Quantity
+}
+
+// ClaimResources is the exact resource lease shape derived for one claim.
+type ClaimResources struct {
+	Quota         sandboxspec.ResourceQuota
+	CPUMillicores int64
+	MemoryBytes   int64
 }
 
 // NewResourcePolicy resolves configured resource settings with platform defaults.
@@ -32,51 +39,51 @@ func NewResourcePolicy(memoryPerCPU, maxMemory string) ResourcePolicy {
 }
 
 // MemoryPerCPU returns the effective memory-per-CPU ratio.
-func (p ResourcePolicy) MemoryPerCPU() resource.Quantity {
+func (p ResourcePolicy) MemoryPerCPU() quantity.Quantity {
 	if p.memoryPerCPU.Sign() <= 0 {
-		return resource.MustParse(DefaultMemoryPerCPU)
+		return quantity.MustParse(DefaultMemoryPerCPU)
 	}
-	return p.memoryPerCPU.DeepCopy()
+	return p.memoryPerCPU
 }
 
 // MaxMemory returns the effective maximum memory limit for one sandbox.
-func (p ResourcePolicy) MaxMemory() resource.Quantity {
+func (p ResourcePolicy) MaxMemory() quantity.Quantity {
 	if p.maxMemory.Sign() <= 0 {
-		return resource.MustParse(DefaultSandboxMaxMemory)
+		return quantity.MustParse(DefaultSandboxMaxMemory)
 	}
-	return p.maxMemory.DeepCopy()
+	return p.maxMemory
 }
 
 // ParseMemory parses and validates a sandbox memory limit against the shared
 // platform bounds.
-func (p ResourcePolicy) ParseMemory(value, field string) (resource.Quantity, error) {
+func (p ResourcePolicy) ParseMemory(value, field string) (quantity.Quantity, error) {
 	if strings.TrimSpace(field) == "" {
 		field = "memory"
 	}
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return resource.Quantity{}, fmt.Errorf("%s is required", field)
+		return quantity.Quantity{}, fmt.Errorf("%s is required", field)
 	}
-	memory, err := resource.ParseQuantity(raw)
+	memory, err := quantity.Parse(raw)
 	if err != nil {
-		return resource.Quantity{}, fmt.Errorf("%s is invalid: %w", field, err)
+		return quantity.Quantity{}, fmt.Errorf("%s is invalid: %w", field, err)
 	}
 	if err := p.ValidateMemory(memory, field); err != nil {
-		return resource.Quantity{}, err
+		return quantity.Quantity{}, err
 	}
 	return memory, nil
 }
 
 // ValidateMemory validates a parsed sandbox memory limit against the shared
 // platform bounds.
-func (p ResourcePolicy) ValidateMemory(memory resource.Quantity, field string) error {
+func (p ResourcePolicy) ValidateMemory(memory quantity.Quantity, field string) error {
 	if strings.TrimSpace(field) == "" {
 		field = "memory"
 	}
 	if memory.Sign() <= 0 {
 		return fmt.Errorf("%s must be > 0", field)
 	}
-	minMemory := resource.MustParse(DefaultSandboxMinMemory)
+	minMemory := quantity.MustParse(DefaultSandboxMinMemory)
 	if memory.Cmp(minMemory) < 0 {
 		return fmt.Errorf("%s must be >= %s", field, minMemory.String())
 	}
@@ -86,7 +93,7 @@ func (p ResourcePolicy) ValidateMemory(memory resource.Quantity, field string) e
 // ValidateMaxMemory enforces the configurable platform ceiling. Callers that
 // accept raw user input should use ValidateMemory to enforce the fixed lower
 // bound as well.
-func (p ResourcePolicy) ValidateMaxMemory(memory resource.Quantity, field string) error {
+func (p ResourcePolicy) ValidateMaxMemory(memory quantity.Quantity, field string) error {
 	if strings.TrimSpace(field) == "" {
 		field = "memory"
 	}
@@ -97,32 +104,76 @@ func (p ResourcePolicy) ValidateMaxMemory(memory resource.Quantity, field string
 	return nil
 }
 
+// ResolveClaimResources applies an optional memory override and returns exact
+// integer values shared by regional routing and the manager claim transaction.
+func (p ResourcePolicy) ResolveClaimResources(
+	spec sandboxspec.TemplateSpec,
+	memoryOverride *string,
+) (ClaimResources, error) {
+	quota := spec.MainContainer.Resources
+	memory, err := quantity.Parse(quota.Memory)
+	if err != nil {
+		return ClaimResources{}, fmt.Errorf("template memory is invalid: %w", err)
+	}
+	if memoryOverride != nil {
+		memory, err = p.ParseMemory(*memoryOverride, "config.resources.memory")
+		if err != nil {
+			return ClaimResources{}, err
+		}
+		quota.Memory = memory.String()
+		quota.CPU = CPUForMemory(memory, p.MemoryPerCPU()).String()
+	}
+	if err := p.ValidateMaxMemory(memory, "sandbox memory limit"); err != nil {
+		return ClaimResources{}, err
+	}
+
+	cpu, err := quantity.Parse(quota.CPU)
+	if err != nil {
+		return ClaimResources{}, fmt.Errorf("CPU is invalid: %w", err)
+	}
+	millicpu := cpu.MilliValue()
+	if millicpu <= 0 || quantity.NewMilli(millicpu).Cmp(cpu) != 0 {
+		return ClaimResources{}, fmt.Errorf("CPU must be a positive exact millicore quantity")
+	}
+	memoryBytes := memory.Value()
+	if memoryBytes <= 0 || quantity.New(memoryBytes).Cmp(memory) != 0 {
+		return ClaimResources{}, fmt.Errorf("memory must be a positive exact byte quantity")
+	}
+	return ClaimResources{
+		Quota: quota, CPUMillicores: millicpu, MemoryBytes: memoryBytes,
+	}, nil
+}
+
 // ValidateTemplate enforces the platform memory ceiling and resource ratio on a template.
-func (p ResourcePolicy) ValidateTemplate(spec v1alpha1.SandboxTemplateSpec, subject string) error {
-	if err := p.ValidateMaxMemory(spec.MainContainer.Resources.Memory, "spec.mainContainer.resources.memory"); err != nil {
+func (p ResourcePolicy) ValidateTemplate(spec sandboxspec.TemplateSpec, subject string) error {
+	memory, err := quantity.Parse(spec.MainContainer.Resources.Memory)
+	if err != nil {
+		return fmt.Errorf("spec.mainContainer.resources.memory is invalid: %w", err)
+	}
+	if err := p.ValidateMaxMemory(memory, "spec.mainContainer.resources.memory"); err != nil {
 		return err
 	}
 	return ValidateResourceRatio(spec, p.MemoryPerCPU(), subject)
 }
 
 // MemoryPerCPUOrDefault parses memory-per-CPU settings and falls back to the platform default.
-func MemoryPerCPUOrDefault(value string) resource.Quantity {
+func MemoryPerCPUOrDefault(value string) quantity.Quantity {
 	return positiveQuantityOrDefault(value, DefaultMemoryPerCPU)
 }
 
-func positiveQuantityOrDefault(value, fallback string) resource.Quantity {
-	parsed, err := resource.ParseQuantity(strings.TrimSpace(value))
+func positiveQuantityOrDefault(value, fallback string) quantity.Quantity {
+	parsed, err := quantity.Parse(strings.TrimSpace(value))
 	if err != nil || parsed.Sign() <= 0 {
-		return resource.MustParse(fallback)
+		return quantity.MustParse(fallback)
 	}
 	return parsed
 }
 
 // CPUForMemory returns the CPU limit required for a memory limit at the given
-// memory-per-CPU ratio, rounded up to Kubernetes millicpu precision.
-func CPUForMemory(memory, memoryPerCPU resource.Quantity) resource.Quantity {
+// memory-per-CPU ratio, rounded up to exact millicore precision.
+func CPUForMemory(memory, memoryPerCPU quantity.Quantity) quantity.Quantity {
 	if memory.Sign() <= 0 || memoryPerCPU.Sign() <= 0 {
-		return resource.Quantity{}
+		return quantity.Quantity{}
 	}
 	numerator := big.NewInt(memory.Value())
 	numerator.Mul(numerator, big.NewInt(1000))
@@ -132,21 +183,27 @@ func CPUForMemory(memory, memoryPerCPU resource.Quantity) resource.Quantity {
 		quotient.Add(quotient, big.NewInt(1))
 	}
 	if !quotient.IsInt64() {
-		return *resource.NewMilliQuantity(1<<63-1, resource.DecimalSI)
+		return quantity.NewMilli(1<<63 - 1)
 	}
-	return *resource.NewMilliQuantity(quotient.Int64(), resource.DecimalSI)
+	return quantity.NewMilli(quotient.Int64())
 }
 
 // ValidateResourceRatio enforces the platform memory-derived CPU shape for template specs.
-func ValidateResourceRatio(spec v1alpha1.SandboxTemplateSpec, memoryPerCPU resource.Quantity, subject string) error {
+func ValidateResourceRatio(spec sandboxspec.TemplateSpec, memoryPerCPU quantity.Quantity, subject string) error {
 	if subject == "" {
 		subject = "template"
 	}
 	if memoryPerCPU.Sign() <= 0 {
 		memoryPerCPU = MemoryPerCPUOrDefault("")
 	}
-	totalCPU := spec.MainContainer.Resources.CPU.DeepCopy()
-	totalMemory := spec.MainContainer.Resources.Memory.DeepCopy()
+	totalCPU, err := quantity.Parse(spec.MainContainer.Resources.CPU)
+	if err != nil {
+		return fmt.Errorf("%s cpu is invalid: %w", subject, err)
+	}
+	totalMemory, err := quantity.Parse(spec.MainContainer.Resources.Memory)
+	if err != nil {
+		return fmt.Errorf("%s memory is invalid: %w", subject, err)
+	}
 	requiredCPU := CPUForMemory(totalMemory, memoryPerCPU)
 	if totalCPU.Cmp(requiredCPU) != 0 {
 		return fmt.Errorf(

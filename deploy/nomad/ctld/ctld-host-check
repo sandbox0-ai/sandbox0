@@ -1,0 +1,112 @@
+#!/bin/sh
+set -eu
+
+slot=${1:-}
+case "$slot" in
+  a|b) ;;
+  *) echo "ctld host check requires HA slot a or b" >&2; exit 64 ;;
+esac
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ctld must run as root" >&2
+  exit 1
+fi
+
+require_canonical_directory() {
+  path=$1
+  [ -d "$path" ] || { echo "required directory is absent: $path" >&2; exit 1; }
+  [ ! -L "$path" ] || { echo "required directory must not be a symlink: $path" >&2; exit 1; }
+  [ "$(stat -c %u "$path")" -eq 0 ] || { echo "required directory is not root-owned: $path" >&2; exit 1; }
+  mode=$(stat -c %a "$path")
+  case "$mode" in
+    *[2367][0-9]|*[0-9][2367])
+      echo "required directory is writable by group or other: $path ($mode)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_root_file() {
+  path=$1
+  [ -f "$path" ] || { echo "required file is absent: $path" >&2; exit 1; }
+  [ ! -L "$path" ] || { echo "required file must not be a symlink: $path" >&2; exit 1; }
+  [ "$(stat -c %u "$path")" -eq 0 ] || { echo "required file is not root-owned: $path" >&2; exit 1; }
+  mode=$(stat -c %a "$path")
+  case "$mode" in
+    *[2367][0-9]|*[0-9][2367])
+      echo "required file is writable by group or other: $path ($mode)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_root_file "${CONFIG_PATH:-/etc/sandbox0/ctld.yaml}"
+require_root_file "${CTLD_NETWORK_CONFIG_PATH:-/etc/sandbox0/ctld-networking.yaml}"
+require_root_file /etc/sandbox0/ctld.env
+require_root_file /etc/sandbox0/ctld-a.env
+require_root_file /etc/sandbox0/ctld-b.env
+require_root_file /etc/nomad.d/30-sandbox0-gvisor.hcl
+require_root_file /usr/local/bin/ctld
+require_root_file /usr/local/bin/runsc
+require_root_file /opt/nomad/plugins/sandbox0-gvisor
+for file in \
+  /etc/sandbox0/pki/manager-ca.pem \
+  /etc/sandbox0/pki/ctld.pem \
+  /etc/sandbox0/pki/ctld-key.pem \
+  /etc/sandbox0/pki/nomad-ca.pem \
+  /etc/sandbox0/pki/nomad.pem \
+  /etc/sandbox0/pki/nomad-key.pem \
+  /etc/sandbox0/tokens/manager.token \
+  /etc/sandbox0/tokens/nomad.token
+do
+  require_root_file "$file"
+done
+require_canonical_directory /var/lib/sandbox0/ctld
+require_canonical_directory /run/sandbox0
+require_canonical_directory /run/sandbox0/nomad-slots
+require_canonical_directory /opt/nomad
+require_canonical_directory /run/netns
+require_canonical_directory /sys/fs/cgroup/sandbox0
+
+[ -f /sys/fs/cgroup/cgroup.controllers ] || {
+  echo "Sandbox0 requires a unified cgroup v2 hierarchy" >&2
+  exit 1
+}
+[ ! -s /sys/fs/cgroup/sandbox0/cgroup.procs ] || {
+  echo "resource cgroup root contains processes" >&2
+  exit 1
+}
+delegated=" $(cat /sys/fs/cgroup/sandbox0/cgroup.subtree_control) "
+for controller in cpu cpuset memory pids; do
+  case "$delegated" in
+    *" $controller "*) ;;
+    *) echo "resource cgroup controller is not delegated: $controller" >&2; exit 1 ;;
+  esac
+done
+
+[ -n "${SANDBOX0_NODE_NAME:-}" ] || { echo "SANDBOX0_NODE_NAME is required" >&2; exit 1; }
+
+if [ "${SANDBOX0_SKIP_HOST_NAMESPACE_CHECK:-0}" != 1 ]; then
+  host_mount_ns=$(readlink /proc/1/ns/mnt)
+  current_mount_ns=$(readlink /proc/self/ns/mnt)
+  if [ "$host_mount_ns" != "$current_mount_ns" ]; then
+    echo "ctld must share the host mount namespace: pid1=$host_mount_ns current=$current_mount_ns" >&2
+    exit 1
+  fi
+fi
+
+for command in ip ipset iptables-restore runsc; do
+  command -v "$command" >/dev/null 2>&1 || { echo "required command is absent: $command" >&2; exit 1; }
+done
+
+devices=${SANDBOX0_ROOTFS_NBD_DEVICES:-}
+[ -n "$devices" ] || { echo "SANDBOX0_ROOTFS_NBD_DEVICES is required" >&2; exit 1; }
+old_ifs=$IFS
+IFS=,
+for device in $devices; do
+  case "$device" in /dev/nbd*) ;; *) echo "invalid NBD device path: $device" >&2; exit 1 ;; esac
+  number=${device#/dev/nbd}
+  case "$number" in ''|*[!0-9]*) echo "invalid NBD device path: $device" >&2; exit 1 ;; esac
+  [ -b "$device" ] || { echo "NBD block device is absent: $device" >&2; exit 1; }
+done
+IFS=$old_ifs

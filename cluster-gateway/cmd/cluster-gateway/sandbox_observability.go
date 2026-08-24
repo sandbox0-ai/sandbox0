@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	obsclickhouse "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability/clickhouse"
 	"go.uber.org/zap"
 )

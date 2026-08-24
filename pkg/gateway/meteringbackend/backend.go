@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	"go.uber.org/zap"
 )

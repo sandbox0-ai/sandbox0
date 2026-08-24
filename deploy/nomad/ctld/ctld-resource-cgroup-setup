@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+parent=/sys/fs/cgroup
+root=${SANDBOX0_RESOURCE_CGROUP_ROOT:-/sys/fs/cgroup/sandbox0}
+controllers="cpu cpuset memory pids"
+
+[ "$root" = /sys/fs/cgroup/sandbox0 ] || {
+  echo "SANDBOX0_RESOURCE_CGROUP_ROOT must be /sys/fs/cgroup/sandbox0" >&2
+  exit 1
+}
+[ -f "$parent/cgroup.controllers" ] || {
+  echo "Sandbox0 requires a unified cgroup v2 hierarchy" >&2
+  exit 1
+}
+
+contains_word() {
+  list=$1
+  word=$2
+  case " $list " in
+    *" $word "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+enable_controllers() {
+  directory=$1
+  available=$(cat "$directory/cgroup.controllers")
+  for controller in $controllers; do
+    contains_word "$available" "$controller" || {
+      echo "cgroup controller $controller is unavailable below $directory" >&2
+      exit 1
+    }
+    enabled=$(cat "$directory/cgroup.subtree_control")
+    if ! contains_word "$enabled" "$controller"; then
+      printf '+%s\n' "$controller" > "$directory/cgroup.subtree_control"
+    fi
+  done
+}
+
+enable_controllers "$parent"
+mkdir -p "$root"
+chown root:root "$root"
+chmod 0755 "$root"
+
+# A cpuset child starts with empty masks. Pin it to the parent's effective
+# confinement before delegating cpuset to per-lease grandchildren.
+if [ ! -s "$root/cpuset.cpus" ]; then
+  cat "$parent/cpuset.cpus.effective" > "$root/cpuset.cpus"
+fi
+if [ ! -s "$root/cpuset.mems" ]; then
+  cat "$parent/cpuset.mems.effective" > "$root/cpuset.mems"
+fi
+
+if [ -s "$root/cgroup.procs" ]; then
+  echo "resource cgroup root must not contain processes: $root" >&2
+  exit 1
+fi
+enable_controllers "$root"
+
+enabled=$(cat "$root/cgroup.subtree_control")
+for controller in $controllers; do
+  contains_word "$enabled" "$controller" || {
+    echo "resource cgroup controller $controller was not delegated" >&2
+    exit 1
+  }
+done

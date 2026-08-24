@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
@@ -111,7 +111,7 @@ func TestSandboxObservabilityRoutesProxyToOwningCluster(t *testing.T) {
 	gateway := httptest.NewServer(server.router)
 	defer gateway.Close()
 
-	sandboxName, err := naming.SandboxName(clusterID, "template-a", "abcde")
+	sandboxName, err := naming.SandboxNameForOperation(clusterID, "template-a", "operation-1")
 	if err != nil {
 		t.Fatalf("sandbox name: %v", err)
 	}

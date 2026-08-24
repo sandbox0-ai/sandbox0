@@ -22,7 +22,7 @@ type Sandbox struct {
 	AutoResume        bool                   `json:"auto_resume"`
 	Resources         *SandboxResourceConfig `json:"resources,omitempty"`
 	Services          []SandboxAppService    `json:"services,omitempty"`
-	PodName           string                 `json:"pod_name"`
+	RuntimeID         string                 `json:"runtime_id"`
 	RuntimeGeneration int64                  `json:"runtime_generation"`
 	ExpiresAt         *time.Time             `json:"expires_at"`
 	HardExpiresAt     *time.Time             `json:"hard_expires_at"`

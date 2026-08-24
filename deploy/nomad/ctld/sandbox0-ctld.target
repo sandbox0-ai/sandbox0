@@ -1,0 +1,8 @@
+[Unit]
+Description=Sandbox0 ctld A/B Nomad node runtime
+Wants=sandbox0-ctld@a.service sandbox0-ctld@b.service
+After=network-online.target
+Before=nomad.service
+
+[Install]
+WantedBy=multi-user.target

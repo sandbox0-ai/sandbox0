@@ -123,10 +123,11 @@ type AuditActor struct {
 // AuditContext preserves actor and correlation identity while each service
 // still issues a new short-lived authorization token for the next hop.
 type AuditContext struct {
-	Actor       AuditActor `json:"actor"`
-	OperationID string     `json:"operation_id,omitempty"`
-	RequestID   string     `json:"request_id,omitempty"`
-	Origin      string     `json:"origin,omitempty"`
+	Actor            AuditActor `json:"actor"`
+	OperationID      string     `json:"operation_id,omitempty"`
+	RequestID        string     `json:"request_id,omitempty"`
+	Origin           string     `json:"origin,omitempty"`
+	IngressStartedAt *time.Time `json:"ingress_started_at,omitempty"`
 }
 
 // GetExpirationTime implements jwt.Claims interface.

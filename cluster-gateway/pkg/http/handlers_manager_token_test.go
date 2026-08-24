@@ -65,3 +65,35 @@ func TestGenerateManagerTokenUsesSystemTokenForPlatformAPIKey(t *testing.T) {
 		t.Fatalf("Permissions = %v, want [%s]", claims.Permissions, authn.PermTemplateCreate)
 	}
 }
+
+func TestGenerateManagerTokenPreservesSignedIngressTiming(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	startedAt := time.Date(2026, time.August, 20, 8, 9, 10, 123456789, time.UTC)
+	server := &Server{internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller: internalauth.ServiceClusterGateway, PrivateKey: privateKey, TTL: time.Minute,
+	})}
+	token, err := server.generateManagerToken(
+		&authn.AuthContext{TeamID: "team-1", UserID: "user-1"},
+		&internalauth.Claims{Audit: &internalauth.AuditContext{
+			Actor:            internalauth.AuditActor{Kind: "human", UserID: "user-1"},
+			IngressStartedAt: &startedAt,
+		}},
+		[]string{authn.PermSandboxCreate},
+	)
+	if err != nil {
+		t.Fatalf("generateManagerToken: %v", err)
+	}
+	claims, err := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target: internalauth.ServiceManager, PublicKey: publicKey,
+	}).Validate(token)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.Audit == nil || claims.Audit.IngressStartedAt == nil ||
+		!claims.Audit.IngressStartedAt.Equal(startedAt) {
+		t.Fatalf("Audit = %#v, want ingress start %s", claims.Audit, startedAt)
+	}
+}

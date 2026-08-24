@@ -3,7 +3,7 @@ package policy
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
 	"go.uber.org/zap"
 )
 
@@ -12,45 +12,45 @@ func TestStoreReconcileSandboxesRemovesStalePolicies(t *testing.T) {
 	sandboxA := testSandboxInfo("default", "sandbox-a", "10.0.0.2", "hash-a")
 	sandboxB := testSandboxInfo("default", "sandbox-b", "10.0.0.3", "hash-b")
 
-	store.ReconcileSandboxes([]*watcher.SandboxInfo{sandboxA, sandboxB})
-	if got := store.GetByIP(sandboxB.PodIP); got == nil {
+	store.ReconcileSandboxes([]*model.SandboxInfo{sandboxA, sandboxB})
+	if got := store.GetByIP(sandboxB.SourceIP); got == nil {
 		t.Fatalf("expected sandbox-b policy before removal")
 	}
 
-	result := store.ReconcileSandboxes([]*watcher.SandboxInfo{sandboxA})
-	if got := store.GetByIP(sandboxB.PodIP); got != nil {
+	result := store.ReconcileSandboxes([]*model.SandboxInfo{sandboxA})
+	if got := store.GetByIP(sandboxB.SourceIP); got != nil {
 		t.Fatalf("stale policy for removed sandbox still present: %#v", got)
 	}
-	if len(result.RemovedIPs) != 1 || result.RemovedIPs[0] != sandboxB.PodIP {
-		t.Fatalf("removed IPs = %#v, want [%s]", result.RemovedIPs, sandboxB.PodIP)
+	if len(result.RemovedIPs) != 1 || result.RemovedIPs[0] != sandboxB.SourceIP {
+		t.Fatalf("removed IPs = %#v, want [%s]", result.RemovedIPs, sandboxB.SourceIP)
 	}
 }
 
-func TestStoreReconcileSandboxesRemovesOldIPOnPodIPChange(t *testing.T) {
+func TestStoreReconcileSandboxesRemovesOldIPOnSourceIPChange(t *testing.T) {
 	store := NewStore(zap.NewNop())
 	oldSandbox := testSandboxInfo("default", "sandbox-a", "10.0.0.2", "hash-a")
 	newSandbox := testSandboxInfo("default", "sandbox-a", "10.0.0.4", "hash-a")
 
-	store.ReconcileSandboxes([]*watcher.SandboxInfo{oldSandbox})
-	result := store.ReconcileSandboxes([]*watcher.SandboxInfo{newSandbox})
+	store.ReconcileSandboxes([]*model.SandboxInfo{oldSandbox})
+	result := store.ReconcileSandboxes([]*model.SandboxInfo{newSandbox})
 
-	if got := store.GetByIP(oldSandbox.PodIP); got != nil {
-		t.Fatalf("old pod IP policy still present: %#v", got)
+	if got := store.GetByIP(oldSandbox.SourceIP); got != nil {
+		t.Fatalf("old source IP policy still present: %#v", got)
 	}
-	if got := store.GetByIP(newSandbox.PodIP); got == nil {
-		t.Fatalf("new pod IP policy missing")
+	if got := store.GetByIP(newSandbox.SourceIP); got == nil {
+		t.Fatalf("new source IP policy missing")
 	}
-	if len(result.RemovedIPs) != 1 || result.RemovedIPs[0] != oldSandbox.PodIP {
-		t.Fatalf("removed IPs = %#v, want [%s]", result.RemovedIPs, oldSandbox.PodIP)
+	if len(result.RemovedIPs) != 1 || result.RemovedIPs[0] != oldSandbox.SourceIP {
+		t.Fatalf("removed IPs = %#v, want [%s]", result.RemovedIPs, oldSandbox.SourceIP)
 	}
 }
 
-func testSandboxInfo(namespace, name, podIP, hash string) *watcher.SandboxInfo {
-	return &watcher.SandboxInfo{
-		Namespace:         namespace,
+func testSandboxInfo(namespace, name, sourceIP, hash string) *model.SandboxInfo {
+	return &model.SandboxInfo{
+		Scope:             namespace,
 		Name:              name,
-		PodIP:             podIP,
-		NodeName:          "node-a",
+		SourceIP:          sourceIP,
+		NodeID:            "node-a",
 		SandboxID:         "sandbox-id-" + name,
 		NetworkPolicyHash: hash,
 	}

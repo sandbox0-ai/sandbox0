@@ -34,7 +34,7 @@ func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	metricTarget := testRuntimeMetricTarget()
 	cleaner.metricTargets = []RuntimeMetricTarget{metricTarget}
 	cleaner.metricSample = RuntimeMetricSample{
-		Version: RuntimeMetricSampleVersion, ObservedAt: time.Unix(1, 0),
+		Version: RuntimeMetricSampleVersion, ObservedAt: time.Unix(1, 0).UTC(),
 		Stats: RunscStats{Type: "stats", ID: metricTarget.RunscContainerID},
 	}
 	go func() { done <- serveNodeRuntime(ctx, socket, runtime, nil, nil, cleaner) }()
@@ -453,7 +453,7 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network,
 		resourceCgroups: resourceCgroups, journal: journal,
 		config: Config{
 			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
@@ -558,7 +558,7 @@ func testNodeRuntimeCleansUnconsumedWriterFromJournal(t *testing.T, retireKind s
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network, journal: journal,
 		config: Config{
 			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
 		},
@@ -617,7 +617,7 @@ func TestNodeRuntimeCleansPlannedRetiredWriterAfterSessionForgotten(t *testing.T
 	network := newFakeCtldNetwork(t)
 	runtime := &cleanupRootFSRuntime{fakeRootFSRuntime: &fakeRootFSRuntime{}}
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network, journal: journal,
 		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
 		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
@@ -708,7 +708,7 @@ func TestNodeRuntimeFinishesMatchingPlannedSessionBeforeProof(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client, journal: journal,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t), journal: journal,
 		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot},
 		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
@@ -742,7 +742,7 @@ func TestNodeRuntimeRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *testing.T
 	}
 	runner := newFakeRunsc()
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t),
 		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}
 
@@ -780,7 +780,7 @@ func TestNodeRuntimeCleansAndReplaysGrantlessJournaledSlot(t *testing.T) {
 	runner.stateErr = errdefs.ErrNotFound
 	network := newFakeCtldNetwork(t)
 	daemon := &nodeRuntime{
-		runtime: &fakeRootFSRuntime{}, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network.client, journal: journal,
+		runtime: &fakeRootFSRuntime{}, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: network, journal: journal,
 		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
 		clusterID: registration.ClusterID, nodeID: registration.NodeID, nodeUID: "node-uid-1",
 	}
@@ -841,28 +841,7 @@ func TestNodeRuntimeBuildsCtldPrepareFromDurableJournal(t *testing.T) {
 	journal, err := newRuntimeSlotJournal(filepath.Join(root, "runtime-slots.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
-	socket := filepath.Join(root, "ctld-network.sock")
-	listener, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	require.NoError(t, os.Chmod(socket, 0o600))
-	registrations := make(chan protocol.RuntimeSlotNetworkRegistrationRequest, 1)
-	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != protocol.RuntimeSlotNetworkRegisterPath {
-			http.NotFound(writer, request)
-			return
-		}
-		var registration protocol.RuntimeSlotNetworkRegistrationRequest
-		if err := json.NewDecoder(request.Body).Decode(&registration); err != nil {
-			http.Error(writer, err.Error(), http.StatusBadRequest)
-			return
-		}
-		registrations <- registration
-		_ = json.NewEncoder(writer).Encode(protocol.RuntimeSlotNetworkRegistrationResponse{NetworkPolicyApplied: true})
-	})}
-	t.Cleanup(func() { require.NoError(t, server.Close()) })
-	go func() { _ = server.Serve(listener) }()
-	client, err := protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
-	require.NoError(t, err)
+	network := newFakeCtldNetwork(t)
 	containerID := protocol.NomadRunscContainerID("slot-1")
 	registration := RuntimeSlotRegistration{
 		Version: RuntimeSlotJournalVersion, SlotID: "slot-1", ClusterID: "cluster-1",
@@ -872,14 +851,16 @@ func TestNodeRuntimeBuildsCtldPrepareFromDurableJournal(t *testing.T) {
 		MountNamespaceID: mountNamespaceID,
 	}
 	daemon := &nodeRuntime{
-		journal: journal, runtimeSlotNetwork: client,
+		journal: journal, runtimeSlotNetwork: network,
 		config: Config{
 			RootFSConsumerMountRoot: root, RootFSConsumerNetNSRoot: netnsRoot,
 		},
 		clusterID: registration.ClusterID, nodeID: registration.NodeID, nodeUID: "node-uid-1",
 	}
 	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), registration))
-	ctldRegistration := <-registrations
+	registrations := network.registrationsSnapshot()
+	require.Len(t, registrations, 1)
+	ctldRegistration := registrations[0]
 	require.Equal(t, registration.SlotID, ctldRegistration.SlotID)
 	require.Equal(t, registration.NetNSIdentity, ctldRegistration.NetNSIdentity)
 	require.Equal(t, "allocation.ns", ctldRegistration.NetNSRelativePath)
@@ -1113,7 +1094,7 @@ func TestNodeRuntimeRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t *testing
 	}
 	runner := newFakeRunsc()
 	daemon := &nodeRuntime{
-		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t).client,
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, runtimeSlotNetwork: newFakeCtldNetwork(t),
 		config:    Config{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
 		clusterID: request.ClusterID, nodeID: request.NodeID, nodeUID: request.NodeUID,
 	}

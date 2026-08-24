@@ -41,7 +41,7 @@ type nodeRuntimeChannelExecutor struct {
 	cleaner       runtimeSlotCleaner
 	forker        runtimeSlotRunningForker
 	rebaser       runtimeSlotPausedRebaser
-	network       *protocol.RuntimeSlotNetworkClient
+	network       runtimeSlotNetworkControl
 	networkSource runtimeSlotNetworkPrepareSource
 	resources     runtimeResourceCgroup
 }
@@ -53,6 +53,13 @@ var _ protocol.NodeChannelNetworkExecutor = (*nodeRuntimeChannelExecutor)(nil)
 
 type runtimeSlotNetworkPrepareSource interface {
 	runtimeSlotNetworkPrepareRequest(protocol.NodeNetworkPrepareControlRequest) (protocol.RuntimeSlotNetworkPrepareRequest, error)
+}
+
+type runtimeSlotNetworkControl interface {
+	Register(context.Context, protocol.RuntimeSlotNetworkRegistrationRequest) error
+	Prepare(context.Context, protocol.RuntimeSlotNetworkPrepareRequest) (rootfshandoff.NetworkPolicyToken, error)
+	Cleanup(context.Context, protocol.NodeCleanupControlRequest) error
+	Ping(context.Context) error
 }
 
 type runtimeSlotRunningForker interface {
@@ -85,7 +92,7 @@ func newNodeRuntimeChannelAgent(
 	config Config,
 	nomadConfig NomadAllocationConfig,
 	cleaner runtimeSlotCleaner,
-	network *protocol.RuntimeSlotNetworkClient,
+	network runtimeSlotNetworkControl,
 	resources runtimeResourceCgroup,
 ) (*protocol.NodeChannelAgentSet, error) {
 	if !nomadConfig.RuntimeSlotChannelEnabled {

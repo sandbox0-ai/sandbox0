@@ -55,6 +55,8 @@ type Config struct {
 	NodeID            string
 	TerminalRetention time.Duration
 	MaxRecords        int
+	// ExpectedOwnerUID defaults to root. Tests may set it to the test process owner.
+	ExpectedOwnerUID *uint32
 }
 
 // NamespaceInspector proves an exact namespace incarnation and returns its
@@ -116,6 +118,10 @@ type Registry struct {
 
 // NewRegistry opens the shared-host journal used by both ctld HA slots.
 func NewRegistry(config Config, inspector NamespaceInspector) (*Registry, error) {
+	expectedOwnerUID := uint32(0)
+	if config.ExpectedOwnerUID != nil {
+		expectedOwnerUID = *config.ExpectedOwnerUID
+	}
 	statePath := filepath.Clean(strings.TrimSpace(config.StatePath))
 	if !filepath.IsAbs(statePath) || statePath == string(filepath.Separator) || statePath != strings.TrimSpace(config.StatePath) {
 		return nil, fmt.Errorf("runtime slot network state path must be canonical, absolute, and non-root: %w", errdefs.ErrInvalidArgument)
@@ -136,7 +142,7 @@ func NewRegistry(config Config, inspector NamespaceInspector) (*Registry, error)
 		return nil, fmt.Errorf("inspect runtime slot network namespace root: %w: %w", err, errdefs.ErrPermissionDenied)
 	}
 	if !netnsRootInfo.IsDir() || netnsRootInfo.Mode().Perm()&0o022 != 0 ||
-		!pathOwnedByRoot(netnsRootInfo) {
+		!pathOwnedByUID(netnsRootInfo, expectedOwnerUID) {
 		return nil, fmt.Errorf("runtime slot network namespace root must be root-owned and not writable by group or other: %w", errdefs.ErrPermissionDenied)
 	}
 	config.StatePath = statePath
@@ -167,11 +173,12 @@ func NewRegistry(config Config, inspector NamespaceInspector) (*Registry, error)
 		return nil, fmt.Errorf("inspect runtime slot network state directory: %w: %w", err, errdefs.ErrPermissionDenied)
 	}
 	if !stateDirectoryInfo.IsDir() || stateDirectoryInfo.Mode().Perm()&0o022 != 0 ||
-		!pathOwnedByRoot(stateDirectoryInfo) {
+		!pathOwnedByUID(stateDirectoryInfo, expectedOwnerUID) {
 		return nil, fmt.Errorf("runtime slot network state directory must be root-owned and not writable by group or other: %w", errdefs.ErrPermissionDenied)
 	}
 	if info, err := os.Lstat(statePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !pathOwnedByRoot(info) {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+			!pathOwnedByUID(info, expectedOwnerUID) {
 			return nil, fmt.Errorf("runtime slot network state must be a root-owned mode-0600 regular file: %w", errdefs.ErrPermissionDenied)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

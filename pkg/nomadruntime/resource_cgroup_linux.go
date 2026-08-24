@@ -17,18 +17,27 @@ import (
 )
 
 type cgroupV2RuntimeResources struct {
-	root string
+	root     string
+	ownerUID uint32
 }
 
 func newRuntimeResourceCgroup(
 	root string,
 	capacity protocol.NodeChannelCapacity,
 ) (runtimeResourceCgroup, error) {
+	return newRuntimeResourceCgroupForOwner(root, capacity, 0)
+}
+
+func newRuntimeResourceCgroupForOwner(
+	root string,
+	capacity protocol.NodeChannelCapacity,
+	ownerUID uint32,
+) (runtimeResourceCgroup, error) {
 	root = strings.TrimSpace(root)
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
 		return nil, fmt.Errorf("runtime resource cgroup root must be a canonical non-root absolute path: %w", errdefs.ErrInvalidArgument)
 	}
-	if err := validateRootOwnedCgroupDirectory(root); err != nil {
+	if err := validateCgroupDirectoryOwner(root, ownerUID); err != nil {
 		return nil, fmt.Errorf("inspect predelegated runtime resource cgroup root: %w", err)
 	}
 	controllers, err := readCgroupValue(filepath.Join(root, "cgroup.controllers"))
@@ -59,7 +68,7 @@ func newRuntimeResourceCgroup(
 	if err := validateRuntimeResourceCgroupCapacity(root, capacity); err != nil {
 		return nil, err
 	}
-	return &cgroupV2RuntimeResources{root: root}, nil
+	return &cgroupV2RuntimeResources{root: root, ownerUID: ownerUID}, nil
 }
 
 func (c *cgroupV2RuntimeResources) Prepare(
@@ -84,7 +93,7 @@ func (c *cgroupV2RuntimeResources) Prepare(
 		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create runtime resource cgroup: %w", err)
 		}
-		if err := validateRootOwnedCgroupDirectory(path); err != nil {
+		if err := validateCgroupDirectoryOwner(path, c.ownerUID); err != nil {
 			return fmt.Errorf("inspect existing runtime resource cgroup: %w", err)
 		}
 	} else {
@@ -157,7 +166,7 @@ func (c *cgroupV2RuntimeResources) RemoveAndConfirm(
 	} else if err != nil {
 		return false, err
 	}
-	if err := validateRootOwnedCgroupDirectory(path); err != nil {
+	if err := validateCgroupDirectoryOwner(path, c.ownerUID); err != nil {
 		return false, fmt.Errorf("inspect runtime resource cgroup: %w", err)
 	}
 	procs, err := readCgroupValue(filepath.Join(path, "cgroup.procs"))
@@ -203,7 +212,7 @@ func containsCgroupToken(value, want string) bool {
 	return false
 }
 
-func validateRootOwnedCgroupDirectory(path string) error {
+func validateCgroupDirectoryOwner(path string, ownerUID uint32) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -212,7 +221,7 @@ func validateRootOwnedCgroupDirectory(path string) error {
 		return fmt.Errorf("cgroup path is not a canonical directory: %w", errdefs.ErrFailedPrecondition)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+	if !ok || stat.Uid != ownerUID || info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("cgroup directory must be root-owned and not writable by group or other: %w", errdefs.ErrPermissionDenied)
 	}
 	return nil

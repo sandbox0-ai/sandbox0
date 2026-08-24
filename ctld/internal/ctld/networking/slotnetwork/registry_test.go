@@ -380,11 +380,17 @@ func newTestRegistry(
 	registry, err := NewRegistry(Config{
 		StatePath: state, NetNSRoot: netnsRoot, NodeID: "node-1",
 		TerminalRetention: retention, MaxRecords: 100,
+		ExpectedOwnerUID: testOwnerUID(),
 	}, inspector)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func testOwnerUID() *uint32 {
+	uid := uint32(os.Geteuid())
+	return &uid
 }
 
 func autoAcknowledge(registry *Registry) {

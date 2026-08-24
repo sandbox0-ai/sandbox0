@@ -288,8 +288,11 @@ func applyLayer(
 	}
 	closeDecompressedErr := decompressed.Close()
 	closeRawErr := raw.Close()
+	if applyErr != nil {
+		return errors.Join(applyErr, closeDecompressedErr, closeRawErr)
+	}
 	verifyErr := verified.Verify()
-	if err := errors.Join(applyErr, closeDecompressedErr, closeRawErr, verifyErr); err != nil {
+	if err := errors.Join(closeDecompressedErr, closeRawErr, verifyErr); err != nil {
 		return err
 	}
 	state.unpackedBytes += bounded.read

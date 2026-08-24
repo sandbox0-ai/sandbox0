@@ -157,7 +157,7 @@ type nodeRuntime struct {
 	preempting         map[string]bool
 	trigger            chan string
 	allocations        nomadAllocationSource
-	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
+	runtimeSlotNetwork runtimeSlotNetworkControl
 	resourceCgroups    runtimeResourceCgroup
 	journal            *runtimeSlotJournal
 	lastJournalPrune   time.Time
@@ -377,7 +377,7 @@ func run(
 	if err != nil {
 		return fmt.Errorf("open runtime resource cgroup root: %w", err)
 	}
-	var runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
+	var runtimeSlotNetwork runtimeSlotNetworkControl
 	if controlSocket := strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket); controlSocket != "" {
 		runtimeSlotNetwork, err = protocol.NewRuntimeSlotNetworkClient(
 			controlSocket,

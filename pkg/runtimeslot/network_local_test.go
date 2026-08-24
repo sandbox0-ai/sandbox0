@@ -56,7 +56,7 @@ func TestRuntimeSlotNetworkClientUsesSecureExactUnixProtocol(t *testing.T) {
 	defer server.Close()
 	go func() { _ = server.Serve(listener) }()
 
-	client, err := NewRuntimeSlotNetworkClient(socket, 0)
+	client, err := newRuntimeSlotNetworkClient(socket, 0, uint32(os.Geteuid()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +79,15 @@ func TestRuntimeSlotNetworkClientUsesSecureExactUnixProtocol(t *testing.T) {
 	}
 	if err := client.Cleanup(t.Context(), testNodeChannelCleanupRequest()); err != nil {
 		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		rootOnlyClient, err := NewRuntimeSlotNetworkClient(socket, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rootOnlyClient.Ping(t.Context()); !errdefs.IsPermissionDenied(err) {
+			t.Fatalf("non-root socket owner error = %v", err)
+		}
 	}
 }
 

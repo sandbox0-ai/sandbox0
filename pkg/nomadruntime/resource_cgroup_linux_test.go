@@ -30,25 +30,25 @@ func TestRuntimeResourceCgroupRequiresExactPredelegatedRoot(t *testing.T) {
 	write("memory.swap.max", "max\n")
 	write("pids.max", "max\n")
 
-	controller, err := newRuntimeResourceCgroup(root, testRuntimeResourceCgroupCapacity())
+	controller, err := newRuntimeResourceCgroupForOwner(root, testRuntimeResourceCgroupCapacity(), uint32(os.Geteuid()))
 	if err != nil || controller == nil {
 		t.Fatalf("newRuntimeResourceCgroup() = %T, %v", controller, err)
 	}
 
 	write("cgroup.subtree_control", "cpu cpuset memory\n")
-	if _, err := newRuntimeResourceCgroup(root, testRuntimeResourceCgroupCapacity()); !errdefs.IsFailedPrecondition(err) {
+	if _, err := newRuntimeResourceCgroupForOwner(root, testRuntimeResourceCgroupCapacity(), uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("missing pids delegation error = %v", err)
 	}
 	write("cgroup.subtree_control", "cpu cpuset memory pids\n")
 	write("cgroup.procs", "123\n")
-	if _, err := newRuntimeResourceCgroup(root, testRuntimeResourceCgroupCapacity()); !errdefs.IsFailedPrecondition(err) {
+	if _, err := newRuntimeResourceCgroupForOwner(root, testRuntimeResourceCgroupCapacity(), uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("root process error = %v", err)
 	}
 	write("cgroup.procs", "")
 	outside := testRuntimeResourceCgroupCapacity()
 	outside.CPUSetCPUs = "4"
 	outside.CPUMillicores = 1_000
-	if _, err := newRuntimeResourceCgroup(root, outside); !errdefs.IsFailedPrecondition(err) {
+	if _, err := newRuntimeResourceCgroupForOwner(root, outside, uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("outside cpuset error = %v", err)
 	}
 }
@@ -70,7 +70,7 @@ func TestRuntimeResourceCgroupPreparesAndVerifiesExactLease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	controller, err := newRuntimeResourceCgroup(root, testRuntimeResourceCgroupCapacity())
+	controller, err := newRuntimeResourceCgroupForOwner(root, testRuntimeResourceCgroupCapacity(), uint32(os.Geteuid()))
 	if err != nil {
 		t.Fatal(err)
 	}

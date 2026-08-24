@@ -16,11 +16,6 @@ package nomadruntime
 
 import (
 	"context"
-	"encoding/json"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +23,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
-	"github.com/stretchr/testify/require"
 )
 
 type fakeRunsc struct {
@@ -302,43 +296,57 @@ func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, op
 }
 
 type fakeCtldNetwork struct {
-	client   *protocol.RuntimeSlotNetworkClient
-	mu       sync.Mutex
-	cleanups int
+	mu            sync.Mutex
+	cleanups      int
+	registrations []protocol.RuntimeSlotNetworkRegistrationRequest
 }
 
 func newFakeCtldNetwork(t *testing.T) *fakeCtldNetwork {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "ctld-network.sock")
-	listener, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	require.NoError(t, os.Chmod(socket, 0o600))
-	fake := &fakeCtldNetwork{}
-	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		switch request.URL.Path {
-		case protocol.RuntimeSlotNetworkHealthPath:
-			_, _ = writer.Write([]byte("{}"))
-		case protocol.RuntimeSlotNetworkRegisterPath:
-			_ = json.NewEncoder(writer).Encode(protocol.RuntimeSlotNetworkRegistrationResponse{NetworkPolicyApplied: true})
-		case protocol.RuntimeSlotNetworkCleanupPath:
-			fake.mu.Lock()
-			fake.cleanups++
-			fake.mu.Unlock()
-			_ = json.NewEncoder(writer).Encode(protocol.RuntimeSlotNetworkCleanupResponse{NetworkPolicyAbsent: true})
-		default:
-			http.NotFound(writer, request)
-		}
-	})}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { require.NoError(t, server.Close()) })
-	fake.client, err = protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
-	require.NoError(t, err)
-	return fake
+	return &fakeCtldNetwork{}
+}
+
+func (f *fakeCtldNetwork) Register(
+	_ context.Context,
+	request protocol.RuntimeSlotNetworkRegistrationRequest,
+) error {
+	f.mu.Lock()
+	f.registrations = append(f.registrations, request)
+	f.mu.Unlock()
+	return nil
+}
+
+func (*fakeCtldNetwork) Prepare(
+	_ context.Context,
+	request protocol.RuntimeSlotNetworkPrepareRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	control := request.Request
+	return rootfshandoff.NetworkPolicyToken{
+		AllocationID: control.AllocationID, NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(control),
+		ClaimID: control.ClaimID, NetworkEpoch: 1, PolicyDigest: control.PolicyDigest,
+		SourceIP: "192.0.2.2", CtldGeneration: "ctld-test", NetNSIdentity: control.NetNSIdentity,
+	}, nil
+}
+
+func (f *fakeCtldNetwork) Cleanup(context.Context, protocol.NodeCleanupControlRequest) error {
+	f.mu.Lock()
+	f.cleanups++
+	f.mu.Unlock()
+	return nil
+}
+
+func (*fakeCtldNetwork) Ping(context.Context) error {
+	return nil
 }
 
 func (f *fakeCtldNetwork) cleanupCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.cleanups
+}
+
+func (f *fakeCtldNetwork) registrationsSnapshot() []protocol.RuntimeSlotNetworkRegistrationRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]protocol.RuntimeSlotNetworkRegistrationRequest(nil), f.registrations...)
 }

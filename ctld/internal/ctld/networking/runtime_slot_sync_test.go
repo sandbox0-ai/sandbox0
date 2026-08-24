@@ -48,7 +48,7 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	}
 	registry, err := slotnetwork.NewRegistry(slotnetwork.Config{
 		StatePath: filepath.Join(directory, "runtime-slot-network.db"),
-		NetNSRoot: netnsRoot, NodeID: "node-1",
+		NetNSRoot: netnsRoot, NodeID: "node-1", ExpectedOwnerUID: testOwnerUID(),
 	}, syncTestNamespaceInspector{})
 	if err != nil {
 		t.Fatal(err)
@@ -138,6 +138,11 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 		len(redirect.input[1]) != 1 || redirect.input[1][0] != "192.0.2.8" || len(redirect.input[2]) != 0 {
 		t.Fatalf("redirect inputs = %+v", redirect.input)
 	}
+}
+
+func testOwnerUID() *uint32 {
+	uid := uint32(os.Geteuid())
+	return &uid
 }
 
 func waitForRuntimeSlotClaimed(t *testing.T, registry *slotnetwork.Registry) {

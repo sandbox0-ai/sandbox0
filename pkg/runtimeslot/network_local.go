@@ -128,11 +128,20 @@ type RuntimeSlotNetworkCleanupResponse struct {
 type RuntimeSlotNetworkClient struct {
 	socketPath string
 	timeout    time.Duration
+	ownerUID   uint32
 }
 
 // NewRuntimeSlotNetworkClient validates immutable local transport policy. The
 // socket itself may appear later when the ctld HA primary is elected.
 func NewRuntimeSlotNetworkClient(socketPath string, timeout time.Duration) (*RuntimeSlotNetworkClient, error) {
+	return newRuntimeSlotNetworkClient(socketPath, timeout, 0)
+}
+
+func newRuntimeSlotNetworkClient(
+	socketPath string,
+	timeout time.Duration,
+	ownerUID uint32,
+) (*RuntimeSlotNetworkClient, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	if !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath || socketPath == string(filepath.Separator) {
 		return nil, fmt.Errorf("ctld runtime slot network socket must be a canonical non-root absolute path: %w", errdefs.ErrInvalidArgument)
@@ -140,7 +149,7 @@ func NewRuntimeSlotNetworkClient(socketPath string, timeout time.Duration) (*Run
 	if timeout <= 0 {
 		timeout = defaultRuntimeSlotNetworkTimeout
 	}
-	return &RuntimeSlotNetworkClient{socketPath: socketPath, timeout: timeout}, nil
+	return &RuntimeSlotNetworkClient{socketPath: socketPath, timeout: timeout, ownerUID: ownerUID}, nil
 }
 
 // Register waits until ctld has durably stored and synchronized the exact warm
@@ -227,7 +236,7 @@ func (c *RuntimeSlotNetworkClient) exchange(ctx context.Context, method, path st
 	if c == nil {
 		return nil, fmt.Errorf("ctld runtime slot network client is unavailable: %w", errdefs.ErrUnavailable)
 	}
-	if err := validateRuntimeSlotNetworkSocket(c.socketPath); err != nil {
+	if err := validateRuntimeSlotNetworkSocket(c.socketPath, c.ownerUID); err != nil {
 		return nil, err
 	}
 	var encoded []byte
@@ -244,7 +253,7 @@ func (c *RuntimeSlotNetworkClient) exchange(ctx context.Context, method, path st
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-			return dialSecureNodeSocket(dialCtx, c.socketPath, 0)
+			return dialSecureNodeSocket(dialCtx, c.socketPath, c.ownerUID)
 		},
 		DisableKeepAlives: true,
 	}
@@ -281,7 +290,7 @@ func (c *RuntimeSlotNetworkClient) exchange(ctx context.Context, method, path st
 	return payload, nil
 }
 
-func validateRuntimeSlotNetworkSocket(path string) error {
+func validateRuntimeSlotNetworkSocket(path string, ownerUID uint32) error {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("resolve ctld runtime slot network socket: %w: %w", err, errdefs.ErrUnavailable)
@@ -289,7 +298,7 @@ func validateRuntimeSlotNetworkSocket(path string) error {
 	if resolved != path {
 		return fmt.Errorf("ctld runtime slot network socket must not traverse symlinks: %w", errdefs.ErrPermissionDenied)
 	}
-	if err := validateSecureNodeSocket(path, 0); err != nil {
+	if err := validateSecureNodeSocket(path, ownerUID); err != nil {
 		return err
 	}
 	return nil

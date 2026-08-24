@@ -164,6 +164,7 @@ func TestResolveHTTPClientUsesTimeoutDefault(t *testing.T) {
 	got := resolveHTTPClient(nil)
 	if got == nil {
 		t.Fatal("resolveHTTPClient returned nil")
+		return
 	}
 	if got.Timeout != defaultHTTPTimeout {
 		t.Fatalf("timeout = %s, want %s", got.Timeout, defaultHTTPTimeout)

@@ -45,14 +45,14 @@ func LoadStaticEndpointResolver(path string) (*StaticEndpointResolver, error) {
 	rawPath := path
 	path = strings.TrimSpace(path)
 	if path != rawPath || path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
-		return nil, fmt.Errorf("Nomad endpoint catalog must be a canonical non-root absolute path: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("nomad endpoint catalog must be a canonical non-root absolute path: %w", errdefs.ErrInvalidArgument)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Nomad endpoint catalog: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("Nomad endpoint catalog must resolve to a regular file: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("nomad endpoint catalog must resolve to a regular file: %w", errdefs.ErrInvalidArgument)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -64,7 +64,7 @@ func LoadStaticEndpointResolver(path string) (*StaticEndpointResolver, error) {
 		return nil, fmt.Errorf("read Nomad endpoint catalog: %w", err)
 	}
 	if len(payload) > maxNomadEndpointCatalogSize {
-		return nil, fmt.Errorf("Nomad endpoint catalog exceeds %d bytes: %w", maxNomadEndpointCatalogSize, errdefs.ErrResourceExhausted)
+		return nil, fmt.Errorf("nomad endpoint catalog exceeds %d bytes: %w", maxNomadEndpointCatalogSize, errdefs.ErrResourceExhausted)
 	}
 	var catalog endpointCatalog
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -73,19 +73,19 @@ func LoadStaticEndpointResolver(path string) (*StaticEndpointResolver, error) {
 		return nil, fmt.Errorf("decode Nomad endpoint catalog: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("Nomad endpoint catalog must contain exactly one JSON value: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("nomad endpoint catalog must contain exactly one JSON value: %w", errdefs.ErrInvalidArgument)
 	}
 	if catalog.Version != nomadEndpointCatalogVersion {
 		return nil, fmt.Errorf("unsupported Nomad endpoint catalog version %d: %w", catalog.Version, errdefs.ErrInvalidArgument)
 	}
 	if len(catalog.Endpoints) == 0 || len(catalog.Endpoints) > maxNomadEndpointCount {
-		return nil, fmt.Errorf("Nomad endpoint catalog must contain between 1 and %d endpoints: %w", maxNomadEndpointCount, errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("nomad endpoint catalog must contain between 1 and %d endpoints: %w", maxNomadEndpointCount, errdefs.ErrInvalidArgument)
 	}
 	endpoints := make([]Endpoint, 0, len(catalog.Endpoints))
 	for index, record := range catalog.Endpoints {
 		timeout, err := parseCatalogTimeout(record.Timeout)
 		if err != nil {
-			return nil, fmt.Errorf("Nomad endpoint %d timeout: %w", index, err)
+			return nil, fmt.Errorf("nomad endpoint %d timeout: %w", index, err)
 		}
 		endpoints = append(endpoints, Endpoint{
 			ClusterID: record.ClusterID, NodeID: record.NodeID, BaseURL: record.BaseURL,

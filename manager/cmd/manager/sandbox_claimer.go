@@ -38,18 +38,18 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		return nil, fmt.Errorf("manager config is required")
 	}
 	if !cfg.NodeAuthority.Enabled {
-		return nil, fmt.Errorf("Nomad sandbox claims require manager node authority")
+		return nil, fmt.Errorf("nomad sandbox claims require manager node authority")
 	}
 	if !cfg.NodeAuthority.Terminal.Enabled {
-		return nil, fmt.Errorf("Nomad sandbox claims require terminal reconciliation")
+		return nil, fmt.Errorf("nomad sandbox claims require terminal reconciliation")
 	}
 	claim := cfg.NodeAuthority.Claim
 	if claim.ClassCatalogFile != config.NodeAuthorityRuntimeClassesPath ||
 		claim.WriterTokenKeyFile != config.NodeAuthorityWriterTokenKeyPath {
-		return nil, fmt.Errorf("Nomad claim assets must use deployment-pinned mount paths")
+		return nil, fmt.Errorf("nomad claim assets must use deployment-pinned mount paths")
 	}
 	if deps.runtimeClasses == nil {
-		return nil, fmt.Errorf("Nomad sandbox claims require a runtime class catalog")
+		return nil, fmt.Errorf("nomad sandbox claims require a runtime class catalog")
 	}
 	writerTokenKey, err := loadWriterTokenKey(claim.WriterTokenKeyFile)
 	if err != nil {

@@ -156,7 +156,7 @@ func (c *NomadCollector) Run(ctx context.Context) {
 // retired CPU series, and samples each active target within fixed bounds.
 func (c *NomadCollector) Collect(ctx context.Context) (result CollectResult, err error) {
 	if c == nil {
-		return CollectResult{}, fmt.Errorf("Nomad collector is nil")
+		return CollectResult{}, fmt.Errorf("nomad collector is nil")
 	}
 	started := time.Now()
 	defer func() {
@@ -219,7 +219,7 @@ func (c *NomadCollector) Collect(ctx context.Context) (result CollectResult, err
 		if results[index].err != nil {
 			result.Failed++
 			collectionErr = errors.Join(collectionErr, fmt.Errorf(
-				"collect Nomad runtime metric binding %s: %w",
+				"collect nomad runtime metric binding %s: %w",
 				collectionTargets[index].target.BindingDigest,
 				results[index].err,
 			))
@@ -238,7 +238,7 @@ func (c *NomadCollector) Collect(ctx context.Context) (result CollectResult, err
 		if !ok {
 			result.Failed++
 			collectionErr = errors.Join(collectionErr, fmt.Errorf(
-				"project Nomad runtime metric binding %s",
+				"project nomad runtime metric binding %s",
 				item.target.BindingDigest,
 			))
 			continue
@@ -251,7 +251,7 @@ func (c *NomadCollector) Collect(ctx context.Context) (result CollectResult, err
 	}
 	if deferred := len(collectionTargets) - dispatched; deferred > 0 {
 		collectionErr = errors.Join(collectionErr, fmt.Errorf(
-			"Nomad runtime metric collection stopped with %d of %d targets deferred: %w",
+			"nomad runtime metric collection stopped with %d of %d targets deferred: %w",
 			deferred,
 			len(collectionTargets),
 			budgetCtx.Err(),

@@ -333,6 +333,7 @@ func TestSupervisorPersistsEOFReceiptBeforeAttemptExit(t *testing.T) {
 	if runtime == nil {
 		managed.mu.Unlock()
 		t.Fatal("session runtime is missing")
+		return
 	}
 	originalProcess := runtime.proc
 	runtime.proc = &blockingCloseInputProcess{

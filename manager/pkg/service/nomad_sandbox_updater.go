@@ -35,10 +35,10 @@ func NewNomadSandboxUpdater(
 	now func() time.Time,
 ) (*NomadSandboxUpdater, error) {
 	if store == nil {
-		return nil, fmt.Errorf("Nomad sandbox mutation store is required")
+		return nil, fmt.Errorf("nomad sandbox mutation store is required")
 	}
 	if defaultTTL < 0 {
-		return nil, fmt.Errorf("Nomad sandbox default TTL must not be negative")
+		return nil, fmt.Errorf("nomad sandbox default TTL must not be negative")
 	}
 	reader, err := NewNomadSandboxReader(store)
 	if err != nil {

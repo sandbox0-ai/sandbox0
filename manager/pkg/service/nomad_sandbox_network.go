@@ -64,7 +64,7 @@ func NewNomadSandboxNetworkPolicyService(
 	preparers ...runtimeslotclaim.NetworkPreparer,
 ) (*NomadSandboxNetworkPolicyService, error) {
 	if store == nil || policies == nil {
-		return nil, fmt.Errorf("Nomad sandbox store and network policy builder are required")
+		return nil, fmt.Errorf("nomad sandbox store and network policy builder are required")
 	}
 	var preparer runtimeslotclaim.NetworkPreparer
 	if len(preparers) > 1 {
@@ -295,7 +295,7 @@ func (s *NomadSandboxNetworkPolicyService) CompleteNomadSandboxNetworkMutation(
 	sandboxID string,
 ) error {
 	if s == nil || s.mutationStore == nil || s.preparer == nil {
-		return fmt.Errorf("Nomad sandbox network mutation authority is not configured")
+		return fmt.Errorf("nomad sandbox network mutation authority is not configured")
 	}
 	mutation, err := s.mutationStore.PrepareNomadSandboxNetworkMutation(ctx, sandboxID)
 	if err != nil {
@@ -385,7 +385,7 @@ func validateNomadSandboxNetworkMutationToken(
 	token rootfshandoff.NetworkPolicyToken,
 ) error {
 	if mutation == nil {
-		return fmt.Errorf("Nomad sandbox network mutation is missing")
+		return fmt.Errorf("nomad sandbox network mutation is missing")
 	}
 	if err := token.Validate(); err != nil {
 		return fmt.Errorf("applied Nomad network token: %w", err)

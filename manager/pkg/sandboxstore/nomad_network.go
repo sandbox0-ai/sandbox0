@@ -416,7 +416,7 @@ func (s *PGSandboxStore) ListPendingNomadSandboxNetworkMutations(
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}
 	if limit <= 0 || limit > MaxNomadSandboxNetworkMutationScan {
-		return nil, fmt.Errorf("Nomad sandbox network mutation limit must be between 1 and %d",
+		return nil, fmt.Errorf("nomad sandbox network mutation limit must be between 1 and %d",
 			MaxNomadSandboxNetworkMutationScan)
 	}
 	rows, err := s.pool.Query(ctx, nomadSandboxNetworkMutationSelectSQL()+`
@@ -552,7 +552,7 @@ func cancelPendingNomadSandboxNetworkMutationForSandbox(
 ) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return fmt.Errorf("Nomad sandbox network cancellation reason is required")
+		return fmt.Errorf("nomad sandbox network cancellation reason is required")
 	}
 	if len(reason) > 1024 {
 		reason = reason[:1024]
@@ -618,7 +618,7 @@ func normalizeBeginNomadSandboxNetworkMutationRequest(
 	request *BeginNomadSandboxNetworkMutationRequest,
 ) (*BeginNomadSandboxNetworkMutationRequest, []byte, error) {
 	if request == nil || request.RequestPolicy == nil {
-		return nil, nil, fmt.Errorf("Nomad sandbox network mutation request and request policy are required")
+		return nil, nil, fmt.Errorf("nomad sandbox network mutation request and request policy are required")
 	}
 	if len(request.RequestPolicy.CredentialBindings) > 0 {
 		return nil, nil, fmt.Errorf("requested network policy must not embed credential bindings")
@@ -683,9 +683,11 @@ func nomadSandboxNetworkMutationBeginMatches(
 	requestPolicy []byte,
 	slot *RuntimeSlot,
 ) bool {
+	if mutation == nil || request == nil || slot == nil {
+		return false
+	}
 	storedPolicy := mustMarshalNetworkPolicy(mutation.RequestPolicy)
-	return mutation != nil && request != nil && slot != nil &&
-		mutation.OperationID == request.OperationID && mutation.SandboxID == request.SandboxID &&
+	return mutation.OperationID == request.OperationID && mutation.SandboxID == request.SandboxID &&
 		mutation.TeamID == request.ExpectedTeamID &&
 		mutation.CurrentPolicyDigest == request.ExpectedCurrentPolicyDigest &&
 		mutation.DesiredPolicy == request.DesiredPolicy &&

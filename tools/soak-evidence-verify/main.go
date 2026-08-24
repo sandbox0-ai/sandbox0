@@ -200,7 +200,7 @@ func verify(opts options) (report, error) {
 	if verified.ActiveElapsed < opts.minimumActiveDuration {
 		return report{}, fmt.Errorf("soak active duration %s is below required %s", verified.ActiveElapsed, opts.minimumActiveDuration)
 	}
-	contract := make(map[string]json.RawMessage, 3)
+	var contract map[string]json.RawMessage
 	if opts.kind == materializerKind {
 		contract, err = validateMaterializer(verified, opts.minimumActiveDuration)
 	} else {
@@ -301,7 +301,7 @@ func validateBolt(verified soakstate.Verification, duration time.Duration) (map[
 	if config.Duration != duration.String() || config.Proofs != requiredItems || config.Bursts != 20 ||
 		config.TerminalTTL != time.Hour.String() || config.JournalFormat != 1 ||
 		!canonicalNonRootAbsolutePath(config.StateDir) {
-		return nil, fmt.Errorf("Bolt configuration does not match the production acceptance contract")
+		return nil, fmt.Errorf("bolt configuration does not match the production acceptance contract")
 	}
 	var final boltFinal
 	if err := json.Unmarshal(verified.LastData, &final); err != nil {
@@ -311,7 +311,7 @@ func validateBolt(verified soakstate.Verification, duration time.Duration) (map[
 		final.WarmFileBytes <= 0 || final.FinalFileBytes <= 0 ||
 		final.FinalFileBytes-final.WarmFileBytes != final.GrowthBytes ||
 		final.GrowthBytes < 0 || final.GrowthBytes > int64(os.Getpagesize()) {
-		return nil, fmt.Errorf("Bolt final data does not satisfy the production acceptance contract")
+		return nil, fmt.Errorf("bolt final data does not satisfy the production acceptance contract")
 	}
 	var checkpoint boltCheckpoint
 	if err := json.Unmarshal(verified.LastCheckpoint, &checkpoint); err != nil {
@@ -321,7 +321,7 @@ func validateBolt(verified soakstate.Verification, duration time.Duration) (map[
 		checkpoint.Deleted != requiredItems || !checkpoint.Restarted ||
 		checkpoint.WarmSize != final.WarmFileBytes ||
 		checkpoint.ActiveElapsedNS != verified.ActiveElapsed.Nanoseconds() {
-		return nil, fmt.Errorf("Bolt final checkpoint is incomplete")
+		return nil, fmt.Errorf("bolt final checkpoint is incomplete")
 	}
 	return rawContract(verified), nil
 }

@@ -61,7 +61,7 @@ var _ API = (*HTTPAPI)(nil)
 // NewHTTPAPI constructs a secure Nomad API implementation.
 func NewHTTPAPI(resolver EndpointResolver) (*HTTPAPI, error) {
 	if resolver == nil {
-		return nil, errors.New("Nomad endpoint resolver is required")
+		return nil, errors.New("nomad endpoint resolver is required")
 	}
 	return &HTTPAPI{resolver: resolver}, nil
 }
@@ -94,7 +94,7 @@ func (a *HTTPAPI) ServerAllocation(
 		return nil, fmt.Errorf("decode Nomad server allocation: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("Nomad server allocation contains trailing data: %w", errdefs.ErrUnavailable)
+		return nil, fmt.Errorf("nomad server allocation contains trailing data: %w", errdefs.ErrUnavailable)
 	}
 	return &allocation, nil
 }
@@ -199,7 +199,7 @@ func (a *HTTPAPI) serverEndpoint(
 		return Endpoint{}, fmt.Errorf("resolve Nomad server endpoint: %w", err)
 	}
 	if endpoint.ClusterID != target.ClusterID || endpoint.NodeID != "" {
-		return Endpoint{}, fmt.Errorf("Nomad server resolver returned another target: %w", errdefs.ErrFailedPrecondition)
+		return Endpoint{}, fmt.Errorf("nomad server resolver returned another target: %w", errdefs.ErrFailedPrecondition)
 	}
 	if err := endpoint.validate(); err != nil {
 		return Endpoint{}, fmt.Errorf("validate Nomad server endpoint: %w", err)
@@ -216,7 +216,7 @@ func (a *HTTPAPI) clientEndpoint(
 		return Endpoint{}, fmt.Errorf("resolve Nomad client endpoint: %w", err)
 	}
 	if endpoint.ClusterID != target.ClusterID || endpoint.NodeID != target.NodeID {
-		return Endpoint{}, fmt.Errorf("Nomad client resolver returned another target: %w", errdefs.ErrFailedPrecondition)
+		return Endpoint{}, fmt.Errorf("nomad client resolver returned another target: %w", errdefs.ErrFailedPrecondition)
 	}
 	if err := endpoint.validate(); err != nil {
 		return Endpoint{}, fmt.Errorf("validate Nomad client endpoint: %w", err)
@@ -229,7 +229,7 @@ func (e Endpoint) validate() error {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
 		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || baseURL != e.BaseURL {
-		return fmt.Errorf("Nomad endpoint must be a canonical HTTPS origin: %w", errdefs.ErrInvalidArgument)
+		return fmt.Errorf("nomad endpoint must be a canonical HTTPS origin: %w", errdefs.ErrInvalidArgument)
 	}
 	if err := validateID("Nomad endpoint cluster_id", e.ClusterID); err != nil {
 		return err
@@ -248,16 +248,16 @@ func (e Endpoint) validate() error {
 	for _, file := range files {
 		path := strings.TrimSpace(file.path)
 		if path != file.path || !filepath.IsAbs(path) || path == string(filepath.Separator) || filepath.Clean(path) != path {
-			return fmt.Errorf("Nomad endpoint %s file must be a canonical non-root absolute path: %w", file.name, errdefs.ErrInvalidArgument)
+			return fmt.Errorf("nomad endpoint %s file must be a canonical non-root absolute path: %w", file.name, errdefs.ErrInvalidArgument)
 		}
 	}
 	peerURI, err := url.Parse(e.PeerURISAN)
 	if err != nil || peerURI.Scheme != "spiffe" || peerURI.Host == "" || peerURI.User != nil ||
 		peerURI.RawQuery != "" || peerURI.Fragment != "" || peerURI.String() != e.PeerURISAN || len(e.PeerURISAN) > 2048 {
-		return fmt.Errorf("Nomad endpoint peer URI SAN must be canonical SPIFFE: %w", errdefs.ErrInvalidArgument)
+		return fmt.Errorf("nomad endpoint peer URI SAN must be canonical SPIFFE: %w", errdefs.ErrInvalidArgument)
 	}
 	if e.Timeout < 0 || e.Timeout > maxNomadEndpointTimeout {
-		return fmt.Errorf("Nomad endpoint timeout must be non-negative and at most %s: %w", maxNomadEndpointTimeout, errdefs.ErrInvalidArgument)
+		return fmt.Errorf("nomad endpoint timeout must be non-negative and at most %s: %w", maxNomadEndpointTimeout, errdefs.ErrInvalidArgument)
 	}
 	return nil
 }
@@ -309,7 +309,7 @@ func exchangeNomad(
 		return 0, nil, fmt.Errorf("read Nomad response: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	if int64(len(payload)) > limit {
-		return 0, nil, fmt.Errorf("Nomad response exceeds %d bytes: %w", limit, errdefs.ErrUnavailable)
+		return 0, nil, fmt.Errorf("nomad response exceeds %d bytes: %w", limit, errdefs.ErrUnavailable)
 	}
 	return response.StatusCode, payload, nil
 }
@@ -325,7 +325,7 @@ func newNomadHTTPClient(endpoint Endpoint) (*http.Client, *url.URL, error) {
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, nil, fmt.Errorf("Nomad endpoint CA has no certificates: %w", errdefs.ErrInvalidArgument)
+		return nil, nil, fmt.Errorf("nomad endpoint CA has no certificates: %w", errdefs.ErrInvalidArgument)
 	}
 	certificate, err := tls.LoadX509KeyPair(endpoint.ClientCertFile, endpoint.ClientKeyFile)
 	if err != nil {
@@ -336,14 +336,14 @@ func newNomadHTTPClient(endpoint Endpoint) (*http.Client, *url.URL, error) {
 		ServerName: baseURL.Hostname(),
 		VerifyConnection: func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) == 0 {
-				return errors.New("Nomad endpoint presented no peer certificate")
+				return errors.New("nomad endpoint presented no peer certificate")
 			}
 			for _, identity := range state.PeerCertificates[0].URIs {
 				if identity.String() == endpoint.PeerURISAN {
 					return nil
 				}
 			}
-			return fmt.Errorf("Nomad endpoint certificate lacks URI SAN %q", endpoint.PeerURISAN)
+			return fmt.Errorf("nomad endpoint certificate lacks URI SAN %q", endpoint.PeerURISAN)
 		},
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -357,7 +357,7 @@ func newNomadHTTPClient(endpoint Endpoint) (*http.Client, *url.URL, error) {
 	return &http.Client{
 		Transport: transport, Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("Nomad endpoint redirects are forbidden")
+			return errors.New("nomad endpoint redirects are forbidden")
 		},
 	}, baseURL, nil
 }
@@ -373,11 +373,11 @@ func readNomadToken(path string) (string, error) {
 		return "", fmt.Errorf("read Nomad ACL token: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	if len(payload) > maxNomadTokenBytes {
-		return "", fmt.Errorf("Nomad ACL token exceeds %d bytes: %w", maxNomadTokenBytes, errdefs.ErrInvalidArgument)
+		return "", fmt.Errorf("nomad ACL token exceeds %d bytes: %w", maxNomadTokenBytes, errdefs.ErrInvalidArgument)
 	}
 	token := strings.TrimSpace(string(payload))
 	if token == "" || len(strings.Fields(token)) != 1 || strings.ContainsAny(token, "\r\n") {
-		return "", fmt.Errorf("Nomad ACL token is empty or non-canonical: %w", errdefs.ErrInvalidArgument)
+		return "", fmt.Errorf("nomad ACL token is empty or non-canonical: %w", errdefs.ErrInvalidArgument)
 	}
 	return token, nil
 }

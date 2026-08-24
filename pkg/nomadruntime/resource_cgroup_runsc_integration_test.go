@@ -140,10 +140,7 @@ func TestRuntimeResourceCgroupRunscIntegration(t *testing.T) {
 
 	throttledBefore := readCgroupStat(t, filepath.Join(path, "cpu.stat"), "nr_throttled")
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if readCgroupStat(t, filepath.Join(path, "cpu.stat"), "nr_throttled") > throttledBefore {
-			break
-		}
+	for readCgroupStat(t, filepath.Join(path, "cpu.stat"), "nr_throttled") <= throttledBefore {
 		if time.Now().After(deadline) {
 			t.Fatal("runsc workload was not throttled by the leased CPU quota")
 		}

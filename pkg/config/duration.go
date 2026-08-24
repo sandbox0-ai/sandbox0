@@ -28,7 +28,7 @@ func (d *Duration) UnmarshalText(value []byte) error {
 
 // MarshalText returns the canonical duration string.
 func (d Duration) MarshalText() ([]byte, error) {
-	return []byte(d.Duration.String()), nil
+	return []byte(d.String()), nil
 }
 
 // UnmarshalYAML accepts only a scalar duration string.
@@ -41,7 +41,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 // MarshalYAML emits a scalar duration string.
 func (d Duration) MarshalYAML() (any, error) {
-	return d.Duration.String(), nil
+	return d.String(), nil
 }
 
 // UnmarshalJSON parses a JSON duration string.
@@ -55,5 +55,5 @@ func (d *Duration) UnmarshalJSON(value []byte) error {
 
 // MarshalJSON emits a JSON duration string.
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(d.Duration.String())
+	return json.Marshal(d.String())
 }

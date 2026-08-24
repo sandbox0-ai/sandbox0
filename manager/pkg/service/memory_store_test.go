@@ -335,14 +335,6 @@ func cloneCredentialDigestMap(in map[string]string) map[string]string {
 	return out
 }
 
-func (s *memorySandboxStore) setSandboxDesiredState(sandboxID, desiredState string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if record := s.records[sandboxID]; record != nil {
-		record.DesiredState = desiredState
-	}
-}
-
 func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, runtimeNamespace, runtimeID string, generation int64, expiresAt, hardExpiresAt time.Time, ownerKind string) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()

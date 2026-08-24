@@ -506,7 +506,7 @@ func allocationTarget(slot *sandboxstore.RuntimeSlot) AllocationTarget {
 
 func validateAllocationObservation(observation AllocationObservation, target AllocationTarget) error {
 	if observation.Target != target {
-		return errors.New("Nomad allocation observation does not match runtime slot")
+		return errors.New("nomad allocation observation does not match runtime slot")
 	}
 	return validateProof("Nomad allocation observation", observation.ProofDigest)
 }

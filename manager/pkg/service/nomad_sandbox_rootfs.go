@@ -36,7 +36,7 @@ func NewNomadSandboxRootFSService(
 	now func() time.Time,
 ) (*NomadSandboxRootFSService, error) {
 	if store == nil {
-		return nil, fmt.Errorf("Nomad sandbox rootfs store is required")
+		return nil, fmt.Errorf("nomad sandbox rootfs store is required")
 	}
 	if now == nil {
 		now = time.Now

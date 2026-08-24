@@ -29,9 +29,11 @@ func TestSandboxToAPIPreservesPublicDetailFields(t *testing.T) {
 	payload := sandboxToAPI(sandbox, sharedssh.BuildConnectionInfo("aws-us-east-1.ssh.sandbox0.app", 30222, sandbox.ID))
 	if payload == nil {
 		t.Fatal("expected payload")
+		return
 	}
 	if payload.Ssh == nil {
 		t.Fatal("expected SSH connection")
+		return
 	}
 	if payload.Ssh.Host != "aws-us-east-1.ssh.sandbox0.app" {
 		t.Fatalf("ssh host = %q", payload.Ssh.Host)

@@ -264,7 +264,7 @@ func (e *ConsumedAttachError) Unwrap() error {
 
 func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRuntime, error) {
 	if config == nil {
-		return nil, fmt.Errorf("Nomad RootFS runtime configuration is required")
+		return nil, fmt.Errorf("nomad RootFS runtime configuration is required")
 	}
 	store, err := objectstore.Create(objectstore.Config{
 		Type: config.RootFSObjectType, Bucket: config.RootFSObjectBucket,
@@ -960,7 +960,7 @@ func (r *rootfsRuntime) stopAllRenewals() {
 
 func validateRootFSConfig(config *Config) error {
 	if config == nil {
-		return fmt.Errorf("Nomad RootFS runtime configuration is required")
+		return fmt.Errorf("nomad RootFS runtime configuration is required")
 	}
 	if config.RootFSMaxDirtyTailBytes < 0 {
 		return fmt.Errorf("rootfs_max_dirty_tail_bytes must be non-negative")

@@ -388,9 +388,10 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelCommand) NodeChannelResult {
 	result := NodeChannelResult{Version: NodeChannelVersion, RequestID: command.RequestID, Kind: command.Kind}
 	timeout := a.config.OperationTimeout
-	if command.Kind == NodeChannelCommandRunningFork {
+	switch command.Kind {
+	case NodeChannelCommandRunningFork:
 		timeout = a.config.RunningForkTimeout
-	} else if command.Kind == NodeChannelCommandPausedRebase {
+	case NodeChannelCommandPausedRebase:
 		timeout = a.config.PausedRebaseTimeout
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, timeout)

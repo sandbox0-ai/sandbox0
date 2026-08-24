@@ -37,7 +37,7 @@ func (s *Service) EnsureTemplateBuildCapture(
 ) (*templatebuild.CaptureMetadata, error) {
 	store, ok := s.store.(nomadTemplateCaptureStore)
 	if !ok {
-		return nil, fmt.Errorf("Nomad template capture store is unavailable")
+		return nil, fmt.Errorf("nomad template capture store is unavailable")
 	}
 	sandboxID = strings.TrimSpace(sandboxID)
 	teamID = strings.TrimSpace(teamID)
@@ -256,7 +256,7 @@ func (s *Service) nomadTemplateCaptureMetadata(
 func (s *Service) DeleteTemplateBuildCapture(ctx context.Context, snapshotID, teamID string) error {
 	store, ok := s.store.(nomadTemplateCaptureStore)
 	if !ok {
-		return fmt.Errorf("Nomad template capture store is unavailable")
+		return fmt.Errorf("nomad template capture store is unavailable")
 	}
 	snapshotID = strings.TrimSpace(snapshotID)
 	teamID = strings.TrimSpace(teamID)

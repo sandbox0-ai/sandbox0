@@ -59,6 +59,7 @@ func TestRequireFeature_DeniesUnlicensedRequest(t *testing.T) {
 	}
 	if apiErr == nil {
 		t.Fatalf("expected api error response")
+		return
 	}
 	if apiErr.Code != spec.CodeNotLicensed {
 		t.Fatalf("expected code %q, got %q", spec.CodeNotLicensed, apiErr.Code)

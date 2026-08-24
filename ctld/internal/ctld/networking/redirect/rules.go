@@ -108,22 +108,6 @@ func normalizeCIDRs(values []string) []string {
 	return normalizeUnique(values)
 }
 
-func normalizePorts(values []int) []int {
-	out := make([]int, 0, len(values))
-	seen := make(map[int]struct{}, len(values))
-	for _, value := range values {
-		if value <= 0 || value > 65535 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
 func normalizeUnique(values []string) []string {
 	out := make([]string, 0, len(values))
 	seen := map[string]struct{}{}

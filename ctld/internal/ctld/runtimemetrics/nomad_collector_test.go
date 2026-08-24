@@ -258,6 +258,7 @@ func TestNomadCollectorRunCollectsImmediately(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		collector.Run(ctx)

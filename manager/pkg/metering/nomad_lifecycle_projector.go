@@ -99,7 +99,7 @@ func NewNomadLifecycleProjector(
 	config NomadLifecycleProjectorConfig,
 ) (*NomadLifecycleProjector, error) {
 	if repo == nil {
-		return nil, fmt.Errorf("Nomad lifecycle metering repository is required")
+		return nil, fmt.Errorf("nomad lifecycle metering repository is required")
 	}
 	config = normalizeNomadLifecycleProjectorConfig(config)
 	return &NomadLifecycleProjector{
@@ -141,7 +141,7 @@ func (p *NomadLifecycleProjector) SetMetrics(metrics *obsmetrics.ManagerMetrics)
 // producer watermark only while a table lock proves the durable queue empty.
 func (p *NomadLifecycleProjector) Run(ctx context.Context) error {
 	if p == nil || p.repo == nil {
-		return fmt.Errorf("Nomad lifecycle metering projector is not configured")
+		return fmt.Errorf("nomad lifecycle metering projector is not configured")
 	}
 	poll := time.NewTicker(p.config.PollInterval)
 	defer poll.Stop()
@@ -168,7 +168,7 @@ func (p *NomadLifecycleProjector) Run(ctx context.Context) error {
 // drains and integration tests.
 func (p *NomadLifecycleProjector) RunOnce(ctx context.Context) (int, error) {
 	if p == nil || p.repo == nil {
-		return 0, fmt.Errorf("Nomad lifecycle metering projector is not configured")
+		return 0, fmt.Errorf("nomad lifecycle metering projector is not configured")
 	}
 	processed := 0
 	for processed < p.config.BatchSize {
@@ -290,7 +290,7 @@ func loadNomadMeteringSource(ctx context.Context, tx pgx.Tx, sandboxID string) (
 		&source.DeletedAt, &source.InitialActiveAt, &source.ObservedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("Nomad metering source %s is missing", sandboxID)
+		return nil, fmt.Errorf("nomad metering source %s is missing", sandboxID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load Nomad metering source %s: %w", sandboxID, err)
@@ -367,11 +367,11 @@ func (p *NomadLifecycleProjector) project(
 		}
 	} else {
 		if state.SandboxID != source.SandboxID || state.TerminatedAt != nil && source.DeletedAt == nil {
-			return nil, fmt.Errorf("Nomad metering projection identity changed for %s", source.SandboxID)
+			return nil, fmt.Errorf("nomad metering projection identity changed for %s", source.SandboxID)
 		}
 		if state.ResourceMillicpu != 0 && state.ResourceMillicpu != source.ResourceMillicpu ||
 			state.ResourceMemoryMiB != 0 && state.ResourceMemoryMiB != source.ResourceMemoryMiB {
-			return nil, fmt.Errorf("Nomad metering resources changed without a durable resize transition")
+			return nil, fmt.Errorf("nomad metering resources changed without a durable resize transition")
 		}
 		if state.TerminatedAt == nil && state.ActiveSince == nil && !state.Paused && source.InitialActiveAt != nil {
 			state.ActiveSince = cloneTimePtr(source.InitialActiveAt)
@@ -467,20 +467,20 @@ func (p *NomadLifecycleProjector) project(
 
 func validateNomadMeteringSource(source *nomadSandboxMeteringSource) error {
 	if source == nil || strings.TrimSpace(source.SandboxID) == "" {
-		return fmt.Errorf("Nomad metering source is required")
+		return fmt.Errorf("nomad metering source is required")
 	}
 	if source.ClaimedAt == nil || source.ClaimedAt.IsZero() {
-		return fmt.Errorf("Nomad sandbox %s has no trusted claimed_at", source.SandboxID)
+		return fmt.Errorf("nomad sandbox %s has no trusted claimed_at", source.SandboxID)
 	}
 	if strings.TrimSpace(source.TeamID) == "" || strings.TrimSpace(source.TemplateID) == "" {
-		return fmt.Errorf("Nomad sandbox %s has incomplete metering ownership", source.SandboxID)
+		return fmt.Errorf("nomad sandbox %s has incomplete metering ownership", source.SandboxID)
 	}
 	if source.ResourceMillicpu <= 0 || source.ResourceMemoryMiB <= 0 {
-		return fmt.Errorf("Nomad sandbox %s has invalid metering resources %dm/%dMiB",
+		return fmt.Errorf("nomad sandbox %s has invalid metering resources %dm/%dMiB",
 			source.SandboxID, source.ResourceMillicpu, source.ResourceMemoryMiB)
 	}
 	if source.ObservedAt.IsZero() {
-		return fmt.Errorf("Nomad sandbox %s has no PostgreSQL observation time", source.SandboxID)
+		return fmt.Errorf("nomad sandbox %s has no PostgreSQL observation time", source.SandboxID)
 	}
 	return nil
 }
@@ -512,7 +512,7 @@ func nomadTransitionTime(transition nomadMeteringLifecycleTransition) (time.Time
 		value = transition.AbortedAt
 	}
 	if value == nil || value.IsZero() {
-		return time.Time{}, fmt.Errorf("Nomad lifecycle %s has no terminal timestamp", transition.ID)
+		return time.Time{}, fmt.Errorf("nomad lifecycle %s has no terminal timestamp", transition.ID)
 	}
 	return value.UTC(), nil
 }
@@ -529,14 +529,14 @@ func (p *NomadLifecycleProjector) closeNomadRuntimeWindow(
 	startedAt := state.ActiveSince.UTC()
 	endedAt = endedAt.UTC()
 	if endedAt.Before(startedAt) {
-		return nil, fmt.Errorf("Nomad runtime window for %s ends before it starts", source.SandboxID)
+		return nil, fmt.Errorf("nomad runtime window for %s ends before it starts", source.SandboxID)
 	}
 	durationMS := endedAt.Sub(startedAt).Milliseconds()
 	if durationMS == 0 {
 		return nil, nil
 	}
 	if state.ResourceMemoryMiB > math.MaxInt64/durationMS {
-		return nil, fmt.Errorf("Nomad runtime window value overflows for %s", source.SandboxID)
+		return nil, fmt.Errorf("nomad runtime window value overflows for %s", source.SandboxID)
 	}
 	return &meteringpkg.Window{
 		WindowID: sandboxWindowID(source.SandboxID, meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds, startedAt, endedAt),
@@ -624,7 +624,7 @@ func deleteNomadMeteringQueueItem(ctx context.Context, tx pgx.Tx, item *nomadMet
 		return fmt.Errorf("complete Nomad metering queue item: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("Nomad metering queue item %s/%d changed", item.SandboxID, item.Revision)
+		return fmt.Errorf("nomad metering queue item %s/%d changed", item.SandboxID, item.Revision)
 	}
 	return nil
 }

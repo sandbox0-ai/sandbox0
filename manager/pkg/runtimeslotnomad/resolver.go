@@ -41,7 +41,7 @@ func NewStaticEndpointResolver(endpoints []Endpoint) (*StaticEndpointResolver, e
 	}
 	for _, endpoint := range resolver.clients {
 		if _, ok := resolver.servers[endpoint.ClusterID]; !ok {
-			return nil, fmt.Errorf("Nomad client cluster %q has no server endpoint: %w", endpoint.ClusterID, errdefs.ErrInvalidArgument)
+			return nil, fmt.Errorf("nomad client cluster %q has no server endpoint: %w", endpoint.ClusterID, errdefs.ErrInvalidArgument)
 		}
 	}
 	return resolver, nil
@@ -49,22 +49,22 @@ func NewStaticEndpointResolver(endpoints []Endpoint) (*StaticEndpointResolver, e
 
 func (r *StaticEndpointResolver) ServerEndpoint(_ context.Context, clusterID string) (Endpoint, error) {
 	if r == nil {
-		return Endpoint{}, fmt.Errorf("Nomad endpoint resolver is unavailable: %w", errdefs.ErrUnavailable)
+		return Endpoint{}, fmt.Errorf("nomad endpoint resolver is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	endpoint, ok := r.servers[strings.TrimSpace(clusterID)]
 	if !ok || endpoint.ClusterID != clusterID {
-		return Endpoint{}, fmt.Errorf("Nomad server endpoint for cluster %q is absent: %w", clusterID, errdefs.ErrNotFound)
+		return Endpoint{}, fmt.Errorf("nomad server endpoint for cluster %q is absent: %w", clusterID, errdefs.ErrNotFound)
 	}
 	return endpoint, nil
 }
 
 func (r *StaticEndpointResolver) ClientEndpoint(_ context.Context, clusterID, nodeID string) (Endpoint, error) {
 	if r == nil {
-		return Endpoint{}, fmt.Errorf("Nomad endpoint resolver is unavailable: %w", errdefs.ErrUnavailable)
+		return Endpoint{}, fmt.Errorf("nomad endpoint resolver is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	endpoint, ok := r.clients[strings.TrimSpace(clusterID)+"\x00"+strings.TrimSpace(nodeID)]
 	if !ok || endpoint.ClusterID != clusterID || endpoint.NodeID != nodeID {
-		return Endpoint{}, fmt.Errorf("Nomad client endpoint for cluster %q node %q is absent: %w", clusterID, nodeID, errdefs.ErrNotFound)
+		return Endpoint{}, fmt.Errorf("nomad client endpoint for cluster %q node %q is absent: %w", clusterID, nodeID, errdefs.ErrNotFound)
 	}
 	return endpoint, nil
 }

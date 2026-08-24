@@ -68,20 +68,6 @@ func rootFSTestSandboxRecord(sandboxID, teamID string) *SandboxRecord {
 	}
 }
 
-type recordingRootFSObjectDeleter struct {
-	keys    []string
-	failKey string
-	err     error
-}
-
-func (d *recordingRootFSObjectDeleter) Delete(key string) error {
-	d.keys = append(d.keys, key)
-	if key == d.failKey {
-		return d.err
-	}
-	return nil
-}
-
 func rootFSTestCountRows(t *testing.T, pool *pgxpool.Pool, table string) int64 {
 	t.Helper()
 	if table != "rootfs_object_deletions" {
@@ -93,32 +79,9 @@ func rootFSTestCountRows(t *testing.T, pool *pgxpool.Pool, table string) int64 {
 	return count
 }
 
-func rootFSTestFilesystemExists(t *testing.T, pool *pgxpool.Pool, filesystemID string) bool {
-	t.Helper()
-	var exists bool
-	require.NoError(t, pool.QueryRow(context.Background(), `
-		SELECT EXISTS (
-			SELECT 1 FROM manager.rootfs_filesystems WHERE filesystem_id = $1
-		)
-	`, filesystemID).Scan(&exists))
-	return exists
-}
-
 type noopSandboxStoreMigrateLogger struct{}
 
 func (noopSandboxStoreMigrateLogger) Printf(string, ...any) {}
 func (noopSandboxStoreMigrateLogger) Fatalf(format string, args ...any) {
 	panic(fmt.Sprintf(format, args...))
-}
-
-func assertSandboxStoreColumnExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, column string, want bool) {
-	t.Helper()
-	var exists bool
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.columns
-			WHERE table_schema = 'manager' AND table_name = 'sandboxes' AND column_name = $1
-		)
-	`, column).Scan(&exists))
-	require.Equal(t, want, exists, "column manager.sandboxes.%s existence", column)
 }

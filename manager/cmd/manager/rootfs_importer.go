@@ -50,14 +50,14 @@ func configureRootFSImportWorker(
 		return nil, fmt.Errorf("manager config is required")
 	}
 	if cfg.RootFSImporter.Disabled {
-		return nil, fmt.Errorf("Nomad sandbox runtime requires the durable RootFS importer")
+		return nil, fmt.Errorf("nomad sandbox runtime requires the durable RootFS importer")
 	}
 	if store == nil {
-		return nil, fmt.Errorf("Nomad RootFS importer requires PostgreSQL")
+		return nil, fmt.Errorf("nomad RootFS importer requires PostgreSQL")
 	}
 	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
-		return nil, fmt.Errorf("Nomad RootFS importer requires contextual conditional object storage")
+		return nil, fmt.Errorf("nomad RootFS importer requires contextual conditional object storage")
 	}
 	procdDigest, err := digest.Parse(cfg.RootFSImporter.ProcdDigest)
 	if err != nil {

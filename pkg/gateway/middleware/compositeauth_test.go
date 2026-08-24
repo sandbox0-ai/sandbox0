@@ -37,6 +37,7 @@ func TestCompositeAuthMiddlewareFallsBackToPublicWithoutInternalValidator(t *tes
 		authCtx := GetAuthContext(c)
 		if authCtx == nil {
 			t.Fatal("missing auth context")
+			return
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"auth_method": authCtx.AuthMethod,

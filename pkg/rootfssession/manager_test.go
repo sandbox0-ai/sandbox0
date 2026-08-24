@@ -1631,7 +1631,6 @@ type fakeHostRuntime struct {
 	calls                         []string
 	unmountSync                   []bool
 	failAt                        string
-	devices                       int
 	source                        *sessionObjectStore
 	deviceCloseErr                error
 	fenceObservation              CrashFenceHostObservation

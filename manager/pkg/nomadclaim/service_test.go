@@ -1718,6 +1718,7 @@ func TestServiceRunningForkRecoversPublicationAfterNodeResponseLoss(t *testing.T
 	source := fixture.store.records[claimed.SandboxID]
 	if source == nil {
 		t.Fatalf("claimed source %s was not persisted", claimed.SandboxID)
+		return
 	}
 	operationID := "operation-running-fork-1"
 	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
@@ -2376,6 +2377,7 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 	record := fixture.store.records[claimed.SandboxID]
 	if record == nil {
 		t.Fatalf("claimed sandbox %s was not persisted", claimed.SandboxID)
+		return ""
 	}
 	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	record.RuntimeID = ""

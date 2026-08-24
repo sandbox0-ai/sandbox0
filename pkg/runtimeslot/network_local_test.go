@@ -106,10 +106,11 @@ func TestRuntimeSlotNetworkClientRejectsUnsafeSocketAndCrossRequestToken(t *test
 	}
 
 	_ = listener.Close()
-	listener, err = net.Listen("unix", target)
+	secondListener, err := net.Listen("unix", target)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer secondListener.Close()
 	if err := os.Chmod(target, 0o666); err != nil {
 		t.Fatal(err)
 	}

@@ -342,7 +342,7 @@ func validateNomadRunningForkCandidate(
 		candidate.SourceGenerationID == "" || candidate.SourceWriterGrantID == "" ||
 		candidate.SourceWriterEpoch <= 0 || candidate.BindingVersion != rootfshandoff.WriterBindingVersion ||
 		len(candidate.BindingDigest) != 32 {
-		return fmt.Errorf("Nomad running-fork authority returned an incomplete or changed candidate")
+		return fmt.Errorf("nomad running-fork authority returned an incomplete or changed candidate")
 	}
 	return nil
 }

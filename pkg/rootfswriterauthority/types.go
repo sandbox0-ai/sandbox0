@@ -118,7 +118,7 @@ func (r BatchRenewRequest) Validate() error {
 			return fmt.Errorf("items[%d].grant_id is duplicated", index)
 		}
 		seen[item.GrantID] = struct{}{}
-		if err := item.RenewRequest.Validate(); err != nil {
+		if err := item.Validate(); err != nil {
 			return fmt.Errorf("items[%d]: %w", index, err)
 		}
 	}

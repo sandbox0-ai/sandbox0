@@ -31,7 +31,7 @@ type NomadSandboxReader struct {
 // NewNomadSandboxReader creates the fail-closed Nomad public query service.
 func NewNomadSandboxReader(store NomadSandboxProjectionStore) (*NomadSandboxReader, error) {
 	if store == nil {
-		return nil, fmt.Errorf("Nomad sandbox projection store is required")
+		return nil, fmt.Errorf("nomad sandbox projection store is required")
 	}
 	return &NomadSandboxReader{store: store}, nil
 }
@@ -158,7 +158,7 @@ func projectNomadSandboxSlot(
 	slot *sandboxstore.RuntimeSlot,
 ) (*managerapi.Sandbox, error) {
 	if slot == nil || slot.SandboxID != record.ID {
-		return nil, fmt.Errorf("Nomad runtime slot projection does not match sandbox %s", record.ID)
+		return nil, fmt.Errorf("nomad runtime slot projection does not match sandbox %s", record.ID)
 	}
 	projected.RuntimeID = slot.AllocationID
 	switch slot.State {

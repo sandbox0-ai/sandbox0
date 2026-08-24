@@ -411,7 +411,7 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 
 func normalizeNomadSandboxResumeRequest(request *RequestNomadSandboxResumeRequest) (*RequestNomadSandboxResumeRequest, error) {
 	if request == nil {
-		return nil, fmt.Errorf("Nomad sandbox resume request is required")
+		return nil, fmt.Errorf("nomad sandbox resume request is required")
 	}
 	normalized := *request
 	normalized.SandboxID = strings.TrimSpace(request.SandboxID)

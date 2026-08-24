@@ -30,7 +30,7 @@ func NewNomadSandboxTemplateSourceResolver(
 	now func() time.Time,
 ) (*NomadSandboxTemplateSourceResolver, error) {
 	if store == nil {
-		return nil, fmt.Errorf("Nomad sandbox template source store is required")
+		return nil, fmt.Errorf("nomad sandbox template source store is required")
 	}
 	reader, err := NewNomadSandboxReader(store)
 	if err != nil {

@@ -89,7 +89,7 @@ func TestConfigureRootFSCompositeMaterializerRequiresWorker(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			worker, err := configureRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{}, nil)
-			if err == nil || worker != nil || !strings.Contains(err.Error(), "Nomad") {
+			if err == nil || worker != nil || !strings.Contains(err.Error(), "nomad") {
 				t.Fatalf("configure materializer = %v, %v", worker, err)
 			}
 		})

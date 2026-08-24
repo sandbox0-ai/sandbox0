@@ -475,7 +475,7 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 
 func normalizeNomadPausedRebaseRequest(request *NomadPausedRebaseRequest) (*NomadPausedRebaseRequest, error) {
 	if request == nil {
-		return nil, fmt.Errorf("Nomad paused-rebase request is required")
+		return nil, fmt.Errorf("nomad paused-rebase request is required")
 	}
 	normalized := *request
 	normalized.OperationID = strings.TrimSpace(request.OperationID)

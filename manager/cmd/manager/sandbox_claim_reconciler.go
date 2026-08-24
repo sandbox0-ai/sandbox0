@@ -17,7 +17,7 @@ func configureSandboxClaimReconciler(
 		return nil, fmt.Errorf("manager config is required")
 	}
 	if store == nil {
-		return nil, fmt.Errorf("Nomad sandbox claim cleanup requires the PostgreSQL sandbox store")
+		return nil, fmt.Errorf("nomad sandbox claim cleanup requires the PostgreSQL sandbox store")
 	}
 	worker, err := sandboxclaimreconciler.New(sandboxclaimreconciler.Config{Store: store})
 	if err != nil {

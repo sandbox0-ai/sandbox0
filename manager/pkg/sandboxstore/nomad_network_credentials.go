@@ -88,7 +88,7 @@ func publishNomadSandboxNetworkMutationBindings(
 	mutation *NomadSandboxNetworkMutation,
 ) error {
 	if mutation == nil {
-		return fmt.Errorf("Nomad sandbox network mutation is required")
+		return fmt.Errorf("nomad sandbox network mutation is required")
 	}
 	pending, err := loadNomadSandboxNetworkMutationBindings(ctx, tx, mutation.OperationID)
 	if err != nil {

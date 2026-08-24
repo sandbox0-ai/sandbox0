@@ -45,7 +45,7 @@ var _ runtimeslotreconciler.AllocationController = (*Controller)(nil)
 // New constructs a direct Nomad allocation controller.
 func New(api API) (*Controller, error) {
 	if api == nil {
-		return nil, errors.New("Nomad allocation API is required")
+		return nil, errors.New("nomad allocation API is required")
 	}
 	return &Controller{api: api}, nil
 }
@@ -169,13 +169,13 @@ func validateID(name, value string) error {
 func validateAllocation(allocation Allocation, target runtimeslotreconciler.AllocationTarget) error {
 	if allocation.ID != target.AllocationID || allocation.Namespace != target.AllocationNamespace ||
 		allocation.NodeID != target.NodeID {
-		return fmt.Errorf("Nomad server allocation belongs to another target: %w", errdefs.ErrFailedPrecondition)
+		return fmt.Errorf("nomad server allocation belongs to another target: %w", errdefs.ErrFailedPrecondition)
 	}
 	switch allocation.DesiredStatus {
 	case "run", "stop", "evict":
 		return nil
 	default:
-		return fmt.Errorf("Nomad server allocation has invalid desired status %q: %w", allocation.DesiredStatus, errdefs.ErrFailedPrecondition)
+		return fmt.Errorf("nomad server allocation has invalid desired status %q: %w", allocation.DesiredStatus, errdefs.ErrFailedPrecondition)
 	}
 }
 

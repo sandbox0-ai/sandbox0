@@ -39,6 +39,7 @@ func TestRepositoryPutSourceAdvancesExistingBindings(t *testing.T) {
 	}
 	if source == nil {
 		t.Fatal("source is nil")
+		return
 	}
 	if err := repo.UpsertBindings(ctx, &BindingRecord{
 		TeamID:    "team-1",

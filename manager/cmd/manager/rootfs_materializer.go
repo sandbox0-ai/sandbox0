@@ -53,7 +53,7 @@ func configureRootFSCompositeMaterializer(
 		return nil, err
 	}
 	if cfg != nil && worker == nil {
-		return nil, fmt.Errorf("Nomad sandbox runtime requires the RootFS composite materializer and conditional object storage")
+		return nil, fmt.Errorf("nomad sandbox runtime requires the RootFS composite materializer and conditional object storage")
 	}
 	return worker, nil
 }

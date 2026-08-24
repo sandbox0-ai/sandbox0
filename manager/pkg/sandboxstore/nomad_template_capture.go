@@ -204,7 +204,7 @@ func normalizeNomadTemplateCaptureRequest(
 	request *NomadTemplateCaptureRequest,
 ) (*NomadTemplateCaptureRequest, []byte, string, string, error) {
 	if request == nil {
-		return nil, nil, "", "", fmt.Errorf("Nomad template capture request is required")
+		return nil, nil, "", "", fmt.Errorf("nomad template capture request is required")
 	}
 	normalized := *request
 	normalized.OperationID = strings.TrimSpace(request.OperationID)

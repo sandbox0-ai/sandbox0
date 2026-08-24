@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 
@@ -199,19 +198,4 @@ func TestRootFSImportJournalRejectsOperationMismatch(t *testing.T) {
 	}
 	err := journal.PrepareObject(context.Background(), "rootfs-import-two", rootfsblock.ObjectReference{})
 	require.ErrorContains(t, err, "does not match")
-}
-
-func assertRootFSImportSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool, want bool) {
-	t.Helper()
-	var operationTable, attestationColumn bool
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT to_regclass('manager.rootfs_import_operations') IS NOT NULL,
-			EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'manager' AND table_name = 'rootfs_base_artifacts'
-					AND column_name = 'attestation'
-			)
-	`).Scan(&operationTable, &attestationColumn))
-	require.Equal(t, want, operationTable)
-	require.Equal(t, want, attestationColumn)
 }

@@ -355,7 +355,7 @@ func run(
 		return err
 	}
 	if allocations == nil {
-		return fmt.Errorf("Nomad allocation authority is required for the ctld Nomad runtime")
+		return fmt.Errorf("nomad allocation authority is required for the ctld Nomad runtime")
 	}
 	journal, err := newRuntimeSlotJournal(config.RuntimeSlotJournalPath, runtimeSlotProofRetention)
 	if err != nil {
@@ -1497,12 +1497,12 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		return nil, nil
 	}
 	if address == "" || nodeID == "" {
-		return nil, fmt.Errorf("Nomad address and node ID must be configured together")
+		return nil, fmt.Errorf("nomad address and node ID must be configured together")
 	}
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return nil, fmt.Errorf("Nomad address must be an HTTP(S) origin")
+		return nil, fmt.Errorf("nomad address must be an HTTP(S) origin")
 	}
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -1516,13 +1516,13 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 			}
 			roots := x509.NewCertPool()
 			if !roots.AppendCertsFromPEM(payload) {
-				return nil, fmt.Errorf("Nomad CA contains no certificates")
+				return nil, fmt.Errorf("nomad CA contains no certificates")
 			}
 			tlsConfig.RootCAs = roots
 		}
 		if strings.TrimSpace(config.CertFile) != "" || strings.TrimSpace(config.KeyFile) != "" {
 			if strings.TrimSpace(config.CertFile) == "" || strings.TrimSpace(config.KeyFile) == "" {
-				return nil, fmt.Errorf("Nomad client certificate and key must be configured together")
+				return nil, fmt.Errorf("nomad client certificate and key must be configured together")
 			}
 			certificate, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
 			if err != nil {

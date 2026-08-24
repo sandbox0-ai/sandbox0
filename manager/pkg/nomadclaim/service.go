@@ -159,13 +159,13 @@ func New(config Config) (*Service, error) {
 		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
 		config.PausedRebase == nil ||
 		config.QuotaLimits == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, runtime classes, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
+		return nil, fmt.Errorf("nomad claim store, templates, runtime classes, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
 	}
 	if config.ClaimTTL < time.Second || config.ClaimTTL > time.Minute {
-		return nil, fmt.Errorf("Nomad claim TTL must be between 1s and 1m")
+		return nil, fmt.Errorf("nomad claim TTL must be between 1s and 1m")
 	}
 	defaultLogicalSize, err := templatepkg.ResolveRootFSLogicalSize(v1alpha1.SandboxTemplateSpec{})
 	if err != nil {
@@ -177,7 +177,7 @@ func New(config Config) (*Service, error) {
 		ProcdProtocol:    config.RootFSProcdProtocol,
 		ProcdDigest:      config.RootFSProcdDigest,
 	}).Validate(); err != nil {
-		return nil, fmt.Errorf("Nomad claim RootFS artifact policy: %w", err)
+		return nil, fmt.Errorf("nomad claim RootFS artifact policy: %w", err)
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -545,14 +545,14 @@ func validateNomadResumeCandidate(
 	plan nomadResumePlan,
 ) error {
 	if candidate == nil || candidate.Record == nil || expected == nil {
-		return fmt.Errorf("Nomad resume authority returned no sandbox candidate")
+		return fmt.Errorf("nomad resume authority returned no sandbox candidate")
 	}
 	record := candidate.Record
 	if candidate.SandboxID != expected.ID || record.ID != expected.ID || record.TeamID != expected.TeamID ||
 		record.UserID != expected.UserID || record.ClusterID != plan.runtimeClass.ClusterID ||
 		!reflect.DeepEqual(record.TemplateSpec, expected.TemplateSpec) ||
 		!nomadRuntimeConfigEqual(record.Config, expected.Config) {
-		return fmt.Errorf("Nomad resume sandbox identity changed before lifecycle reservation")
+		return fmt.Errorf("nomad resume sandbox identity changed before lifecycle reservation")
 	}
 	if candidate.AlreadyActive {
 		if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeID == "" ||
@@ -567,7 +567,7 @@ func validateNomadResumeCandidate(
 		record.DesiredState != sandboxstore.SandboxDesiredStatePaused || record.RuntimeID != "" ||
 		record.RuntimeNamespace != "" || candidate.RuntimeGeneration != record.RuntimeGeneration+1 ||
 		candidate.RuntimeGeneration != plan.request.RuntimeGeneration {
-		return fmt.Errorf("Nomad resume candidate does not bind the exact paused generation")
+		return fmt.Errorf("nomad resume candidate does not bind the exact paused generation")
 	}
 	return nil
 }
@@ -850,9 +850,9 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 		return nil, err
 	}
 	if result == nil || result.Slot == nil {
-		return nil, fmt.Errorf("Nomad slot planner returned no runtime binding")
+		return nil, fmt.Errorf("nomad slot planner returned no runtime binding")
 	}
-	record, err = s.store.CompleteSandboxClaim(ctx, &sandboxstore.CompleteSandboxClaimRequest{
+	_, err = s.store.CompleteSandboxClaim(ctx, &sandboxstore.CompleteSandboxClaimRequest{
 		SandboxID: sandboxID, OperationID: req.OperationID, SlotID: result.Slot.ID,
 		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
 		ResourceLeaseID:     result.Slot.ResourceLease.LeaseID,

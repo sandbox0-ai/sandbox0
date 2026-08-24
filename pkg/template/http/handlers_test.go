@@ -3,7 +3,6 @@ package http
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -291,13 +290,4 @@ func performTemplateRequest(router http.Handler, method, path, body string) *htt
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	return response
-}
-
-func decodeTemplateResponse(t *testing.T, response *httptest.ResponseRecorder) map[string]any {
-	t.Helper()
-	var payload map[string]any
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	return payload
 }

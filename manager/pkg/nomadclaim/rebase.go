@@ -454,7 +454,7 @@ func validatePendingNomadPausedRebaseLifecycle(lifecycle *sandboxstore.SandboxLi
 			return errors.New("rejected Nomad paused-rebase lifecycle is not pending acknowledgement")
 		}
 	default:
-		return errors.New("Nomad paused-rebase lifecycle is not pending")
+		return errors.New("nomad paused-rebase lifecycle is not pending")
 	}
 	return nil
 }

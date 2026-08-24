@@ -368,7 +368,7 @@ func normalizeNomadSandboxForkRequest(
 	request *NomadSandboxForkRequest,
 ) (*NomadSandboxForkRequest, error) {
 	if request == nil || request.Target == nil {
-		return nil, fmt.Errorf("Nomad fork request and target are required")
+		return nil, fmt.Errorf("nomad fork request and target are required")
 	}
 	normalized := *request
 	normalized.OperationID = strings.TrimSpace(request.OperationID)
@@ -393,7 +393,7 @@ func normalizeNomadSandboxForkRequest(
 		target.DesiredState != SandboxDesiredStatePaused ||
 		target.RuntimeGeneration != 0 || target.RuntimeID != "" || target.RuntimeNamespace != "" ||
 		!target.DeletedAt.IsZero() {
-		return nil, fmt.Errorf("Nomad fork target must be a fresh paused Nomad sandbox")
+		return nil, fmt.Errorf("nomad fork target must be a fresh paused Nomad sandbox")
 	}
 	if _, err := sandboxRecordInsertArgs(&target); err != nil {
 		return nil, err
@@ -405,7 +405,7 @@ func normalizeNomadSandboxForkRequest(
 // a durable fork operation must preserve across API and controller retries.
 func NomadSandboxForkTargetRecordDigest(target *SandboxRecord) ([]byte, error) {
 	if target == nil {
-		return nil, fmt.Errorf("Nomad fork target is required")
+		return nil, fmt.Errorf("nomad fork target is required")
 	}
 	canonical := *target
 	canonical.LifecycleEpoch = 0

@@ -12,22 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setStoredRootFSWriterBindingVersion(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	grantID string,
-	version int,
-) {
-	t.Helper()
-	_, err := pool.Exec(ctx, `
-		UPDATE manager.rootfs_writer_grants
-		SET binding_version = $2
-		WHERE grant_id = $1
-	`, grantID, version)
-	require.NoError(t, err)
-}
-
 func TestRootFSWriterCrashAbandonPreservesDurableGenerationAndAbortsLifecycleAtomically(t *testing.T) {
 	fixture := newRootFSWriterCrashAbandonFixture(t, SandboxLifecycleSourceCrash, true)
 	ctx := context.Background()

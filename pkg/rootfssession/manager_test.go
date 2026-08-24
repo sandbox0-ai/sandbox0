@@ -1152,7 +1152,7 @@ func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
 		err   error
 	}
 	forkRequest := rootfshandoff.RunningForkCheckpointRequest{
-		OperationID: "fork-running", SourceSandboxID: request.Identity.PodUID,
+		OperationID: "fork-running", SourceSandboxID: request.Identity.AllocationID,
 		TargetSandboxID: "running-fork-target", TargetGenerationID: "running-fork-generation",
 	}
 	done := make(chan captureResult, 1)
@@ -1537,18 +1537,18 @@ func testStageRequestWithBlocks(t *testing.T, objects *sessionObjectStore, name 
 		Parent:            digest.FromString("parent-" + name).String(),
 		InitialGeneration: "generation-" + name,
 		Identity: rootfshandoff.Identity{
-			NodeUID: "node", BootID: "boot", RuntimeGeneration: "runtime", PodUID: "pod-" + name,
-			PodSandboxID: "sandbox-" + name, ContainerName: "app", Image: "gate-" + name,
-			Snapshotter: "sandbox0-rootfs", RuntimeName: "io.containerd.runsc.v1", SlotNonce: "slot-" + name,
+			NodeUID: "node", BootID: "boot", RuntimeGeneration: "runtime", AllocationID: "pod-" + name,
+			NetworkIncarnationID: "sandbox-" + name, TaskName: "app", SourceOCIDigest: "gate-" + name,
+			RootFSDriver: "sandbox0-rootfs", RuntimeClass: "io.containerd.runsc.v1", SlotNonce: "slot-" + name,
 			ClaimID: "claim-" + name, LaunchAttempt: "attempt-" + name, RootFSID: "rootfs-" + name,
 			WriterEpoch: 1, WriterGrantID: "grant-" + name, WriterGrantToken: "token-" + name,
 		},
 	}
 	request.Identity.WriterGrantTokenDigest = rootfshandoff.WriterGrantTokenDigest(request.Identity.WriterGrantToken)
 	request.ExpectedPolicyToken = rootfshandoff.NetworkPolicyToken{
-		PodUID: request.Identity.PodUID, PodSandboxID: request.Identity.PodSandboxID,
+		AllocationID: request.Identity.AllocationID, NetworkIncarnationID: request.Identity.NetworkIncarnationID,
 		ClaimID: request.Identity.ClaimID, NetworkEpoch: request.Identity.WriterEpoch,
-		PolicyDigest: "policy-" + name, PodIP: "10.0.0.2", CtldGeneration: "ctld",
+		PolicyDigest: "policy-" + name, SourceIP: "10.0.0.2", CtldGeneration: "ctld",
 		NetNSIdentity: "netns-" + name,
 	}
 	request.Generation = &rootfshandoff.GenerationDescriptor{

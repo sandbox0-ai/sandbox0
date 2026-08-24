@@ -133,6 +133,14 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if len(api.stopCalls) != 1 || api.gcCalls != 3 {
 		t.Fatalf("server-GC retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
+
+	api.client = false
+	if err := controller.Purge(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.stopCalls) != 1 || api.gcCalls != 3 {
+		t.Fatalf("absent retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
+	}
 }
 
 func TestControllerStopsServerWithoutForcingClientGC(t *testing.T) {
@@ -175,7 +183,10 @@ func TestControllerRejectsMismatchedServerIdentityBeforeNodeAccess(t *testing.T)
 }
 
 func TestControllerPropagatesClientGCNotReady(t *testing.T) {
-	api := &fakeAPI{allocation: testAllocation(), gcErr: runtimeslotreconciler.ErrAllocationStillPresent}
+	api := &fakeAPI{
+		allocation: testAllocation(), client: true,
+		gcErr: runtimeslotreconciler.ErrAllocationStillPresent,
+	}
 	controller, err := New(api)
 	if err != nil {
 		t.Fatal(err)

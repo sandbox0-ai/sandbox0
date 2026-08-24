@@ -3,20 +3,12 @@ package main
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
-func TestConfigureSandboxClaimReconcilerIsRequiredOnlyForNomad(t *testing.T) {
-	worker, err := configureSandboxClaimReconciler(&config.ManagerConfig{
-		SandboxRuntimeBackend: config.SandboxRuntimeBackendKubernetes,
-	}, nil)
-	if err != nil || worker != nil {
-		t.Fatalf("Kubernetes worker = %v, %v", worker, err)
-	}
-	worker, err = configureSandboxClaimReconciler(&config.ManagerConfig{
-		SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad,
-	}, nil)
+func TestConfigureSandboxClaimReconcilerRequiresStore(t *testing.T) {
+	worker, err := configureSandboxClaimReconciler(&config.ManagerConfig{}, nil)
 	if err == nil || worker != nil {
-		t.Fatalf("Nomad worker = %v, %v", worker, err)
+		t.Fatalf("worker = %v, %v", worker, err)
 	}
 }

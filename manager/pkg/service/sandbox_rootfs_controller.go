@@ -7,9 +7,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/workqueue"
 )
 
 const (
@@ -34,7 +31,7 @@ type SandboxRootFSController struct {
 	fork           SandboxForkReconciler
 	rebase         SandboxRootFSRebaseReconciler
 	logger         *zap.Logger
-	queue          workqueue.TypedRateLimitingInterface[sandboxRootFSWorkItem]
+	queue          *retryQueue[sandboxRootFSWorkItem]
 	resyncInterval time.Duration
 	scanLimit      int
 }
@@ -50,9 +47,7 @@ func NewSandboxRootFSController(
 	}
 	return &SandboxRootFSController{
 		store: store, fork: fork, rebase: rebase, logger: logger,
-		queue: workqueue.NewTypedRateLimitingQueue(
-			workqueue.DefaultTypedControllerRateLimiter[sandboxRootFSWorkItem](),
-		),
+		queue:          newRetryQueue[sandboxRootFSWorkItem](),
 		resyncInterval: defaultSandboxRootFSResyncPeriod, scanLimit: defaultSandboxRootFSScanLimit,
 	}
 }
@@ -88,13 +83,12 @@ func (c *SandboxRootFSController) Run(ctx context.Context, workers int) error {
 	if c.resyncInterval <= 0 {
 		c.resyncInterval = defaultSandboxRootFSResyncPeriod
 	}
-	defer runtime.HandleCrash()
 	defer c.queue.ShutDown()
 
 	c.logger.Info("Starting sandbox RootFS operation controller", zap.Int("workers", workers))
 	c.enqueuePending(ctx)
 	for range workers {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		go c.runWorker(ctx)
 	}
 	ticker := time.NewTicker(c.resyncInterval)
 	defer ticker.Stop()

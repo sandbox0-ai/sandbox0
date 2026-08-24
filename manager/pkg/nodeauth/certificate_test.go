@@ -13,7 +13,7 @@ import (
 func testCertificateIdentity() CertificateIdentity {
 	return CertificateIdentity{
 		CommonName: "nomad-node-a", ClusterID: "cluster-a", NodeID: "node-a",
-		NodeUID: "node-uid-a", PodUID: "agent-a",
+		NodeUID: "node-uid-a", AgentUID: "agent-a",
 	}
 }
 
@@ -27,7 +27,7 @@ func TestCertificateVerifierReturnsAuthenticatedRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	if identity.ClusterID != "cluster-a" || identity.NodeID != "node-a" ||
-		identity.NodeUID != "node-uid-a" || identity.PodUID != "agent-a" {
+		identity.NodeUID != "node-uid-a" || identity.AgentUID != "agent-a" {
 		t.Fatalf("identity = %+v", identity)
 	}
 }

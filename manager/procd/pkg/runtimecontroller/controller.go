@@ -16,17 +16,25 @@ import (
 	"go.uber.org/zap"
 )
 
-type Reporter func(runtimecontrol.Observation) error
+// Phase is the local activation state of an immutable procd assignment.
+type Phase string
 
+const (
+	PhasePending    Phase = "pending"
+	PhaseActivating Phase = "activating"
+	PhaseReady      Phase = "ready"
+	PhaseFailed     Phase = "failed"
+)
+
+// State is procd's local activation state.
 type State struct {
-	Desired           runtimecontrol.DesiredState
-	Observed          runtimecontrol.ObservedState
+	Phase             Phase
 	Revision          string
 	RuntimeGeneration int64
 	Reason            string
 }
 
-// Controller applies level-triggered CTLD snapshots to one procd process.
+// Controller activates the immutable assignment of one procd process.
 type Controller struct {
 	contextManager    *ctxpkg.Manager
 	sessionSupervisor *session.Supervisor
@@ -35,9 +43,8 @@ type Controller struct {
 	httpPort          int
 	logger            *zap.Logger
 
-	mu    sync.RWMutex
-	state State
-
+	mu      sync.RWMutex
+	state   State
 	applyMu sync.Mutex
 	watchMu sync.Mutex
 	watch   struct {
@@ -67,39 +74,25 @@ func New(
 		httpPort:          httpPort,
 		logger:            logger,
 		state: State{
-			Observed: runtimecontrol.ObservedDisconnected,
-			Reason:   "runtime control stream is disconnected",
+			Phase:  PhasePending,
+			Reason: "runtime assignment has not been activated",
 		},
 	}
 }
 
 func (c *Controller) State() State {
 	if c == nil {
-		return State{Observed: runtimecontrol.ObservedDisconnected}
+		return State{Phase: PhaseFailed, Reason: "runtime controller is not configured"}
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state
 }
 
-func (c *Controller) MarkDisconnected(reason string) {
-	if c == nil {
-		return
-	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "runtime control stream is disconnected"
-	}
-	c.mu.Lock()
-	c.state.Observed = runtimecontrol.ObservedDisconnected
-	c.state.Reason = reason
-	c.mu.Unlock()
-}
-
 // CanServe reports whether authenticated sandbox APIs may execute.
 func (c *Controller) CanServe() (bool, string) {
 	state := c.State()
-	if state.Observed == runtimecontrol.ObservedReady {
+	if state.Phase == PhaseReady {
 		return true, ""
 	}
 	if state.Reason != "" {
@@ -110,100 +103,53 @@ func (c *Controller) CanServe() (bool, string) {
 
 func (c *Controller) Probe(kind sandboxprobe.Kind) sandboxprobe.Response {
 	state := c.State()
-	switch state.Observed {
-	case runtimecontrol.ObservedStandby:
-		return sandboxprobe.Passed(kind, "RuntimeStandby", "runtime is ready for assignment", nil)
-	case runtimecontrol.ObservedWaitingRootFS:
-		if kind == sandboxprobe.KindReadiness {
-			return sandboxprobe.Suspended(kind, "RuntimeWaitingStorage", "runtime assignment is waiting for storage", nil)
-		}
-		return sandboxprobe.Passed(kind, "RuntimeControlConnected", "runtime control stream is connected", nil)
-	case runtimecontrol.ObservedLoading:
-		if kind == sandboxprobe.KindReadiness {
-			return sandboxprobe.Suspended(kind, "RuntimeLoading", "runtime state is loading", nil)
-		}
-		return sandboxprobe.Passed(kind, "RuntimeControlConnected", "runtime control stream is connected", nil)
-	case runtimecontrol.ObservedRecovering:
-		if kind == sandboxprobe.KindReadiness {
-			return sandboxprobe.Suspended(kind, "RuntimeRecovering", "runtime processes are recovering", nil)
-		}
-		return sandboxprobe.Passed(kind, "RuntimeControlConnected", "runtime control stream is connected", nil)
-	case runtimecontrol.ObservedReady:
+	if kind == sandboxprobe.KindLiveness {
+		return sandboxprobe.Passed(kind, "ProcdLive", "procd is live", nil)
+	}
+	switch state.Phase {
+	case PhaseReady:
 		return sandboxprobe.Passed(kind, "RuntimeReady", "runtime assignment is ready", nil)
-	case runtimecontrol.ObservedFailed:
-		if kind != sandboxprobe.KindReadiness {
-			return sandboxprobe.Passed(kind, "ProcdLive", "procd is live but runtime activation failed", nil)
-		}
+	case PhaseFailed:
 		return sandboxprobe.Failed(kind, "RuntimeFailed", state.Reason, nil)
+	case PhaseActivating:
+		return sandboxprobe.Suspended(kind, "RuntimeActivating", "runtime assignment is activating", nil)
 	default:
-		if kind == sandboxprobe.KindLiveness {
-			return sandboxprobe.Passed(kind, "ProcdLive", "procd is live while runtime control reconnects", nil)
-		}
-		return sandboxprobe.Failed(kind, "RuntimeControlDisconnected", "runtime control stream is disconnected", nil)
+		return sandboxprobe.Suspended(kind, "RuntimePending", "runtime assignment has not been activated", nil)
 	}
 }
 
-// HandleSnapshot applies a complete desired snapshot. Deterministic activation
-// errors are reported as failed and remain level-triggered until the manifest
-// changes or the process restarts.
-func (c *Controller) HandleSnapshot(ctx context.Context, snapshot runtimecontrol.Snapshot, report Reporter) error {
+// Activate applies the process's immutable assignment exactly once.
+func (c *Controller) Activate(ctx context.Context, assignment runtimecontrol.Assignment) error {
 	if c == nil {
 		return errors.New("runtime controller is not configured")
 	}
-	if report == nil {
-		return errors.New("runtime observation reporter is required")
-	}
-	c.applyMu.Lock()
-	defer c.applyMu.Unlock()
-
-	switch snapshot.State {
-	case runtimecontrol.DesiredStandby:
-		return c.observe(report, snapshot, runtimecontrol.ObservedStandby, "")
-	case runtimecontrol.DesiredWaitingRootFS:
-		if snapshot.Assignment == nil {
-			return c.failActiveSnapshot(report, snapshot, errors.New("runtime assignment is missing"))
-		}
-		return c.observe(report, snapshot, runtimecontrol.ObservedWaitingRootFS, "runtime assignment is waiting for storage")
-	case runtimecontrol.DesiredActive:
-		return c.activate(ctx, snapshot, report)
-	case runtimecontrol.DesiredRevoked:
-		c.setState(snapshot, runtimecontrol.ObservedDisconnected, snapshot.Reason)
-		return nil
-	default:
-		return fmt.Errorf("unsupported desired runtime state %q", snapshot.State)
-	}
-}
-
-func (c *Controller) activate(ctx context.Context, snapshot runtimecontrol.Snapshot, report Reporter) error {
-	assignment := snapshot.Assignment
-	if assignment == nil {
-		return c.failActiveSnapshot(report, snapshot, errors.New("runtime assignment is missing"))
-	}
 	if err := assignment.Validate(); err != nil {
-		return c.failActiveSnapshot(report, snapshot, err)
+		return err
 	}
 	revision, err := assignment.Revision()
 	if err != nil {
-		return c.failActiveSnapshot(report, snapshot, err)
-	}
-	if revision != snapshot.Revision {
-		return c.failActiveSnapshot(report, snapshot, errors.New("runtime assignment revision does not match snapshot"))
-	}
-	current := c.State()
-	if current.Observed == runtimecontrol.ObservedReady &&
-		current.Revision == snapshot.Revision &&
-		current.RuntimeGeneration == assignment.RuntimeGeneration {
-		return c.observe(report, snapshot, runtimecontrol.ObservedReady, "")
+		return err
 	}
 
-	if err := c.observe(report, snapshot, runtimecontrol.ObservedLoading, "runtime assignment is loading"); err != nil {
-		return err
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	current := c.State()
+	if current.Phase == PhaseReady {
+		if current.Revision == revision && current.RuntimeGeneration == assignment.RuntimeGeneration {
+			return nil
+		}
+		return errors.New("runtime assignment is immutable after activation")
 	}
-	if err := c.configureAssignment(*assignment); err != nil {
-		return c.failActiveSnapshot(report, snapshot, err)
+	if current.Revision != "" && current.Revision != revision {
+		return errors.New("runtime assignment changed during activation")
 	}
-	if err := c.observe(report, snapshot, runtimecontrol.ObservedRecovering, "runtime processes are recovering"); err != nil {
-		return err
+	c.setState(PhaseActivating, revision, assignment.RuntimeGeneration, "runtime assignment is activating")
+
+	if err := ctx.Err(); err != nil {
+		return c.failActivation(revision, assignment.RuntimeGeneration, err)
+	}
+	if err := c.configureAssignment(assignment); err != nil {
+		return c.failActivation(revision, assignment.RuntimeGeneration, err)
 	}
 	if c.sessionSupervisor != nil {
 		err := c.sessionSupervisor.Activate(session.Activation{
@@ -213,13 +159,35 @@ func (c *Controller) activate(ctx context.Context, snapshot runtimecontrol.Snaps
 			ResetCopiedSessionState: assignment.ResetCopiedSessionState,
 		})
 		if err != nil {
-			return c.failActiveSnapshot(report, snapshot, err)
+			return c.failActivation(revision, assignment.RuntimeGeneration, err)
 		}
 	}
-	if err := c.enqueueSandboxReady(ctx, *assignment); err != nil {
-		return c.failActiveSnapshot(report, snapshot, err)
+	if err := c.enqueueSandboxReady(assignment); err != nil {
+		return c.failActivation(revision, assignment.RuntimeGeneration, err)
 	}
-	return c.observe(report, snapshot, runtimecontrol.ObservedReady, "")
+	c.setState(PhaseReady, revision, assignment.RuntimeGeneration, "")
+	return nil
+}
+
+func (c *Controller) failActivation(revision string, generation int64, cause error) error {
+	reason := "runtime activation failed"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		reason = cause.Error()
+	}
+	c.setState(PhaseFailed, revision, generation, reason)
+	c.logger.Error("Runtime activation failed", zap.Error(cause))
+	return fmt.Errorf("activate runtime assignment: %w", cause)
+}
+
+func (c *Controller) setState(phase Phase, revision string, generation int64, reason string) {
+	c.mu.Lock()
+	c.state = State{
+		Phase:             phase,
+		Revision:          revision,
+		RuntimeGeneration: generation,
+		Reason:            strings.TrimSpace(reason),
+	}
+	c.mu.Unlock()
 }
 
 func (c *Controller) configureAssignment(assignment runtimecontrol.Assignment) error {
@@ -298,7 +266,7 @@ func (c *Controller) configureWebhookWatch(webhookURL, watchDir string) error {
 	return nil
 }
 
-func (c *Controller) enqueueSandboxReady(_ context.Context, assignment runtimecontrol.Assignment) error {
+func (c *Controller) enqueueSandboxReady(assignment runtimecontrol.Assignment) error {
 	if c.dispatcher == nil || assignment.Webhook == nil || strings.TrimSpace(assignment.Webhook.URL) == "" {
 		return nil
 	}
@@ -319,49 +287,6 @@ func (c *Controller) enqueueSandboxReady(_ context.Context, assignment runtimeco
 	}
 	c.readySentKey = key
 	return nil
-}
-
-func (c *Controller) observe(
-	report Reporter,
-	snapshot runtimecontrol.Snapshot,
-	state runtimecontrol.ObservedState,
-	reason string,
-) error {
-	c.setState(snapshot, state, reason)
-	observation := runtimecontrol.Observation{State: state, Reason: reason}
-	if snapshot.Assignment != nil {
-		observation.Revision = snapshot.Revision
-		observation.RuntimeGeneration = snapshot.Assignment.RuntimeGeneration
-	}
-	return report(observation)
-}
-
-func (c *Controller) failActiveSnapshot(report Reporter, snapshot runtimecontrol.Snapshot, cause error) error {
-	reason := "runtime activation failed"
-	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
-		reason = cause.Error()
-	}
-	if err := c.observe(report, snapshot, runtimecontrol.ObservedFailed, reason); err != nil {
-		return err
-	}
-	c.logger.Error("Runtime activation failed", zap.Error(cause))
-	return nil
-}
-
-func (c *Controller) setState(snapshot runtimecontrol.Snapshot, observed runtimecontrol.ObservedState, reason string) {
-	generation := int64(0)
-	if snapshot.Assignment != nil {
-		generation = snapshot.Assignment.RuntimeGeneration
-	}
-	c.mu.Lock()
-	c.state = State{
-		Desired:           snapshot.State,
-		Observed:          observed,
-		Revision:          snapshot.Revision,
-		RuntimeGeneration: generation,
-		Reason:            strings.TrimSpace(reason),
-	}
-	c.mu.Unlock()
 }
 
 func (c *Controller) Close() {

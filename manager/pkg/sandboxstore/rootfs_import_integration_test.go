@@ -10,38 +10,8 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 
-	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
-	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
-
-func TestRootFSImportMigrationDownAndUpIntegration(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPoolThrough(t, "00043")
-	assertRootFSImportSchema(t, ctx, pool, false)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
-	assertRootFSImportSchema(t, ctx, pool, true)
-	require.NoError(t, migrate.Down(ctx, pool, ".",
-		migrate.WithBaseFS(storemigrations.FS),
-		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
-		migrate.WithSchema(sandboxStoreSchemaName),
-	))
-	assertRootFSImportSchema(t, ctx, pool, true)
-	require.NoError(t, migrate.Down(ctx, pool, ".",
-		migrate.WithBaseFS(storemigrations.FS),
-		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
-		migrate.WithSchema(sandboxStoreSchemaName),
-	))
-	assertRootFSImportSchema(t, ctx, pool, true)
-	require.NoError(t, migrate.Down(ctx, pool, ".",
-		migrate.WithBaseFS(storemigrations.FS),
-		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
-		migrate.WithSchema(sandboxStoreSchemaName),
-	))
-	assertRootFSImportSchema(t, ctx, pool, false)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
-	assertRootFSImportSchema(t, ctx, pool, true)
-}
 
 func TestRootFSImportOperationLeaseJournalAndReadyCAS(t *testing.T) {
 	ctx := context.Background()

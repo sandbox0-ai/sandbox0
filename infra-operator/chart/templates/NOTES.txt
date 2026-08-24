@@ -1,9 +1,0 @@
-Congratulations! The Sandbox0 Infra Operator has been installed.
-
-To get started, you can create a Sandbox0Infra resource to deploy the Sandbox0 infrastructure.
-
-If you have already created a Sandbox0Infra resource and enabled the initial admin user, you can retrieve the admin password using the following command:
-
-  kubectl get secret admin-password -n <namespace> -o jsonpath='{.data.password}' | base64 -d
-
-Replace <namespace> with the namespace where your Sandbox0Infra resource is located.

@@ -246,7 +246,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 				ID: operationID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
 				Phase: SandboxLifecyclePhasePreparing, Source: source, Cancelable: false,
 				FromGeneration: record.RuntimeGeneration, FromRuntimeNamespace: record.RuntimeNamespace,
-				FromRuntimeID: record.RuntimeID, ExpectedHeadLayerID: grant.InitialGenerationID,
+				FromRuntimeID: record.RuntimeID, ExpectedGenerationID: grant.InitialGenerationID,
 			}
 			if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 				return nil, fmt.Errorf("begin Nomad planned pause lifecycle: %w", err)
@@ -290,8 +290,8 @@ func nomadCommittedPlannedPauseLifecycleMatches(
 		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto) &&
 		!txn.Cancelable && txn.CancelRequestedAt.IsZero() && txn.Phase == SandboxLifecyclePhaseCommitted &&
 		txn.FromGeneration == record.RuntimeGeneration && txn.FromRuntimeNamespace == slot.AllocationNamespace &&
-		txn.FromRuntimeID == slot.AllocationID && txn.ExpectedHeadLayerID == grant.InitialGenerationID &&
-		txn.PreparedHeadLayerID != ""
+		txn.FromRuntimeID == slot.AllocationID && txn.ExpectedGenerationID == grant.InitialGenerationID &&
+		txn.PreparedGenerationID != ""
 }
 
 func nomadPlannedPauseLifecycleMatches(
@@ -311,5 +311,5 @@ func nomadPlannedPauseLifecycleMatches(
 			txn.Phase == SandboxLifecyclePhasePublishing || txn.Phase == SandboxLifecyclePhaseCommitting) &&
 		txn.FromGeneration == record.RuntimeGeneration &&
 		txn.FromRuntimeNamespace == record.RuntimeNamespace && txn.FromRuntimeID == record.RuntimeID &&
-		txn.ExpectedHeadLayerID == grant.InitialGenerationID && txn.PreparedHeadLayerID == ""
+		txn.ExpectedGenerationID == grant.InitialGenerationID && txn.PreparedGenerationID == ""
 }

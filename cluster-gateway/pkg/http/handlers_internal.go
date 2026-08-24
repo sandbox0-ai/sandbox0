@@ -12,32 +12,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// === Internal API Handlers (for scheduler) ===
-
-// getClusterSummary proxies cluster summary request to manager
-func (s *Server) getClusterSummary(c *gin.Context) {
-	s.proxySchedulerManagerRequest(c, "/internal/v1/cluster/summary")
-}
-
-// getTemplateStats proxies template stats request to manager
-func (s *Server) getTemplateStats(c *gin.Context) {
-	s.proxySchedulerManagerRequest(c, "/internal/v1/templates/stats")
-}
-
-// proxyInternalTemplateRequest forwards scheduler template sync requests to manager.
-func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
-	s.proxyInternalManagerRequest(c)
-}
-
 // proxyInternalManagerRequest forwards a trusted control-plane request to the
 // manager while preserving its internal path and caller team context.
 func (s *Server) proxyInternalManagerRequest(c *gin.Context) {
-	s.proxySchedulerManagerRequest(c, "")
-}
-
-// proxySchedulerManagerRequest forwards a scheduler request to the manager.
-// An empty managerPath preserves the incoming internal path.
-func (s *Server) proxySchedulerManagerRequest(c *gin.Context, managerPath string) {
 	authCtx := middleware.GetAuthContext(c)
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
@@ -57,10 +34,6 @@ func (s *Server) proxySchedulerManagerRequest(c *gin.Context, managerPath string
 
 	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
-
-	if managerPath != "" {
-		c.Request.URL.Path = managerPath
-	}
 
 	s.proxy2Mgr.ProxyToTarget(c)
 }

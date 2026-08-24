@@ -7,8 +7,6 @@ on:
 
 env:
   IMAGE_REPO: sandbox0ai/infra
-  HELM_REPO_URL: https://charts.sandbox0.ai
-  HELM_REPO_DOMAIN: charts.sandbox0.ai
 
 permissions:
   actions: read
@@ -47,7 +45,6 @@ jobs:
     uses: ./.github/workflows/release-package.yml
     with:
       version: ${{ needs.prepare-release.outputs.version }}
-      upload_artifacts: true
 
   publish-images:
     name: Publish infra images
@@ -59,108 +56,6 @@ jobs:
       version: ${{ needs.prepare-release.outputs.version }}
       publish_latest: ${{ needs.prepare-release.outputs.is_prerelease != 'true' }}
     secrets: inherit
-
-  publish-helm:
-    name: Publish infra-operator Helm chart
-    runs-on: ubuntu-latest
-    needs:
-      - prepare-release
-      - package
-      - publish-images
-    steps:
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
-      - name: Download Helm chart artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: infra-operator-chart-${{ needs.prepare-release.outputs.version }}
-          path: .cr-release-packages
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ needs.package.outputs.artifact_run_id }}
-
-      - name: Login to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" \
-            --password-stdin
-
-      - name: Publish chart to GitHub Packages (GHCR OCI)
-        run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          OWNER_LOWER="${GITHUB_REPOSITORY_OWNER,,}"
-          helm push ".cr-release-packages/infra-operator-${VERSION}.tgz" "oci://ghcr.io/${OWNER_LOWER}/charts"
-
-      - name: Ensure gh-pages branch exists
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          if git ls-remote --exit-code --heads "${remote_url}" gh-pages >/dev/null 2>&1; then
-            exit 0
-          fi
-
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "${tmp_dir}"' EXIT
-
-          pushd "${tmp_dir}"
-          git init -b gh-pages
-          touch .nojekyll
-          printf '%s\n' "${HELM_REPO_DOMAIN}" > CNAME
-          cat > index.yaml <<'EOF'
-          apiVersion: v1
-          entries: {}
-          EOF
-          git add .nojekyll CNAME index.yaml
-          git \
-            -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m 'Initialize gh-pages branch'
-          git remote add origin "${remote_url}"
-          git push origin gh-pages
-          popd
-
-      - name: Publish chart to Helm repo
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          CHART_PACKAGE=".cr-release-packages/infra-operator-${VERSION}.tgz"
-          PAGES_URL="${HELM_REPO_URL}"
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "${tmp_dir}"' EXIT
-
-          git clone --branch gh-pages --single-branch \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "${tmp_dir}/gh-pages"
-
-          cp "${CHART_PACKAGE}" "${tmp_dir}/gh-pages/"
-          touch "${tmp_dir}/gh-pages/.nojekyll"
-          printf '%s\n' "${HELM_REPO_DOMAIN}" > "${tmp_dir}/gh-pages/CNAME"
-
-          if [[ -f "${tmp_dir}/gh-pages/index.yaml" ]]; then
-            helm repo index "${tmp_dir}/gh-pages" \
-              --url "${PAGES_URL}" \
-              --merge "${tmp_dir}/gh-pages/index.yaml"
-          else
-            helm repo index "${tmp_dir}/gh-pages" --url "${PAGES_URL}"
-          fi
-
-          pushd "${tmp_dir}/gh-pages"
-          if git diff --quiet --exit-code -- .; then
-            echo "Helm repo already up to date"
-            exit 0
-          fi
-
-          git add .nojekyll CNAME index.yaml "infra-operator-${VERSION}.tgz"
-          git \
-            -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Publish infra-operator chart ${VERSION}"
-          git push origin gh-pages
-          popd
 
   create-draft-release:
     name: Create or update draft GitHub Release
@@ -176,14 +71,11 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          OWNER_LOWER="${GITHUB_REPOSITORY_OWNER,,}"
           NOTES=$(cat <<EOF
           Automated release for ${TAG}.
 
           Published artifacts:
           - Docker image: docker.io/${IMAGE_REPO}:${{ needs.prepare-release.outputs.version }}
-          - Helm OCI: oci://ghcr.io/${OWNER_LOWER}/charts/infra-operator
-          - Helm repo: https://sandbox0-ai.github.io/sandbox0
           EOF
           )
 
@@ -217,7 +109,6 @@ jobs:
       - package
       - create-draft-release
       - publish-images
-      - publish-helm
     steps:
       - name: Publish draft GitHub Release
         env:

@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"go.uber.org/zap"
 )
 
 func TestManagerControllerSetNomadDoesNotStartKubernetesRuntimeControllers(t *testing.T) {
-	cfg := &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad}
+	cfg := &config.ManagerConfig{}
 	cfg.RootFSMaintenance.Disabled = true
 	controllers := &managerControllerSet{
 		cfg: cfg, logger: zap.NewNop(),
@@ -27,7 +27,7 @@ func TestManagerControllerSetNomadDoesNotStartKubernetesRuntimeControllers(t *te
 
 func TestManagerControllerSetDoesNotStartAbsentTemplateReconciler(t *testing.T) {
 	controllers := &managerControllerSet{
-		cfg:    &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad},
+		cfg:    &config.ManagerConfig{},
 		logger: zap.NewNop(),
 	}
 	controllers.cfg.RootFSMaintenance.Disabled = true
@@ -39,34 +39,10 @@ func TestManagerControllerSetDoesNotStartAbsentTemplateReconciler(t *testing.T) 
 	})
 }
 
-func TestManagerUsesKubernetesSandboxRuntimeOnlyForLegacyBackend(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *config.ManagerConfig
-		want bool
-	}{
-		{name: "nil config", want: true},
-		{name: "legacy default", cfg: &config.ManagerConfig{}, want: true},
-		{name: "kubernetes", cfg: &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendKubernetes}, want: true},
-		{name: "nomad", cfg: &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad}, want: false},
-		{name: "unsupported", cfg: &config.ManagerConfig{SandboxRuntimeBackend: "containerd"}, want: false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := managerUsesKubernetesSandboxRuntime(test.cfg); got != test.want {
-				t.Fatalf("managerUsesKubernetesSandboxRuntime() = %v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestNomadManagerNetworkComponentsDoNotRequireKubernetesRuntime(t *testing.T) {
 	components := buildNomadManagerNetworkComponents(zap.NewNop())
-	if components.policyService == nil || components.provider == nil {
+	if components.policyService == nil {
 		t.Fatalf("Nomad network components = %+v", components)
-	}
-	if components.namespacePolicy != nil {
-		t.Fatal("Nomad network components unexpectedly configured a Kubernetes namespace reconciler")
 	}
 }
 

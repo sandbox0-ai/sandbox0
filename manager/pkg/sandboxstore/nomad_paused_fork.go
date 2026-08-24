@@ -129,7 +129,7 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 		Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceManual,
 		FromGeneration: source.RuntimeGeneration, ToGeneration: source.RuntimeGeneration,
 		TargetSandboxID: normalized.Target.ID, TargetGenerationID: filesystem.HeadGenerationID,
-		TargetRecordDigest: normalized.TargetRecordDigest, ExpectedHeadLayerID: filesystem.HeadGenerationID,
+		TargetRecordDigest: normalized.TargetRecordDigest, ExpectedGenerationID: filesystem.HeadGenerationID,
 	}
 	locked := sandboxStoreTx{tx: tx}
 	if err := locked.BeginLifecycleTxn(ctx, lifecycle); err != nil {
@@ -145,7 +145,7 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 }
 
 func validateNomadPausedForkSource(source *SandboxRecord) error {
-	if source == nil || source.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if source == nil ||
 		source.DesiredState != SandboxDesiredStatePaused || !source.DeletedAt.IsZero() ||
 		source.RuntimeGeneration < 0 || source.RuntimeID != "" || source.RuntimeNamespace != "" {
 		return fmt.Errorf("%w: source is not a canonical paused Nomad sandbox", ErrNomadSandboxForkNotReady)
@@ -178,10 +178,10 @@ func loadCompletedNomadPausedFork(
 		lifecycle.FromRuntimeNamespace != "" || lifecycle.FromRuntimeID != "" ||
 		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != request.Target.ID ||
-		lifecycle.TargetGenerationID != lifecycle.PreparedHeadLayerID ||
+		lifecycle.TargetGenerationID != lifecycle.PreparedGenerationID ||
 		!bytes.Equal(lifecycle.TargetRecordDigest, request.TargetRecordDigest) ||
-		lifecycle.ExpectedHeadLayerID == "" ||
-		lifecycle.PreparedHeadLayerID != lifecycle.ExpectedHeadLayerID {
+		lifecycle.ExpectedGenerationID == "" ||
+		lifecycle.PreparedGenerationID != lifecycle.ExpectedGenerationID {
 		return nil, fmt.Errorf("%w: paused-fork lifecycle changed", ErrNomadSandboxForkConflict)
 	}
 	target, err := lockNomadForkTarget(ctx, tx, request)
@@ -193,8 +193,8 @@ func loadCompletedNomadPausedFork(
 		return nil, fmt.Errorf("load completed Nomad paused-fork RootFS: %w", err)
 	}
 	if filesystem.ID != target.ID || filesystem.TeamID != target.TeamID ||
-		filesystem.SourceFilesystemID == "" || filesystem.HeadGenerationID != lifecycle.PreparedHeadLayerID ||
-		generation.ID != lifecycle.PreparedHeadLayerID {
+		filesystem.SourceFilesystemID == "" || filesystem.HeadGenerationID != lifecycle.PreparedGenerationID ||
+		generation.ID != lifecycle.PreparedGenerationID {
 		return nil, fmt.Errorf("%w: paused-fork target RootFS changed", ErrNomadSandboxForkConflict)
 	}
 	return target, nil

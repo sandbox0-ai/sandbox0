@@ -295,14 +295,14 @@ func testNodeClaimControlRequest() NodeClaimControlRequest {
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         "sha256:" + strings.Repeat("a", 64), InitialGeneration: "generation-1",
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ClaimID: "claim-1",
-			NetworkEpoch: 4, PolicyDigest: NetworkPolicyDigest(networkPolicy), PodIP: "192.0.2.2",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", ClaimID: "claim-1",
+			NetworkEpoch: 4, PolicyDigest: NetworkPolicyDigest(networkPolicy), SourceIP: "192.0.2.2",
 			CtldGeneration: "ctld-1", NetNSIdentity: "1:2",
 		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: "node-uid-1", BootID: "boot-1", RuntimeGeneration: "runtime-1",
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ContainerName: "slot",
-			Image: "procd-image-1", Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", TaskName: "slot",
+			SourceOCIDigest: "procd-image-1", RootFSDriver: "nomad-driver", RuntimeClass: "sandbox0-gvisor",
 			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
 			RootFSID: "filesystem-1", WriterEpoch: 4, WriterGrantID: "grant-1",
 			WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),

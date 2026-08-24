@@ -52,7 +52,7 @@ func TestNewAssemblesSharedNodeAuthorityAndClaimPlanner(t *testing.T) {
 		CertFile: certFile, KeyFile: keyFile, ClientCAFile: caFile,
 		Identities: []nodeauth.CertificateIdentity{{
 			CommonName: "node-agent", ClusterID: "cluster-1", NodeID: "node-1",
-			NodeUID: "node-uid-1", PodUID: "agent-1",
+			NodeUID: "node-uid-1", AgentUID: "agent-1",
 		}},
 	})
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestNewRejectsSilentlyIgnoredTerminalCatalog(t *testing.T) {
 		CertFile: certFile, KeyFile: keyFile, ClientCAFile: caFile,
 		Identities: []nodeauth.CertificateIdentity{{
 			CommonName: "node-agent", ClusterID: "cluster-1", NodeID: "node-1",
-			NodeUID: "node-uid-1", PodUID: "agent-1",
+			NodeUID: "node-uid-1", AgentUID: "agent-1",
 		}},
 		Terminal: runtimeslotterminal.Config{NomadEndpointsFile: "/etc/sandbox0/nomad.json"},
 	})

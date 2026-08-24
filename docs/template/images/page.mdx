@@ -1,268 +1,159 @@
 # Custom Images
 
-Every Template references a container image. Sandbox0 supports two types of images:
+Every image-based template names a normalized, SHA-256 digest-pinned OCI image.
+Sandbox0 accepts public images and team-scoped private images and imports their
+RootFS into the regional block store before runtime use. Mutable tags are
+rejected rather than resolved during template creation.
 
-| Type | Description | Example |
-|------|-------------|---------|
-| **Public image** | Any image from a public registry | `python:3.12-slim`, `node:20-alpine` |
-| **Private image** | Your own image pushed to the Sandbox0 registry | `registry.example.com/t-<team-key>/my-app:v1.2.3` |
-
-For private images, Sandbox0 provides a built-in registry and a CLI workflow to build and push images securely. Authentication is handled automatically — your images are protected and only accessible to your team. You can also [create a template from an existing sandbox](/docs/sandbox/template#create-template-from-a-sandbox); Sandbox0 retains the sandbox's immutable block-COW RootFS capture without requiring a local Docker daemon or another registry push.
+The Nomad task driver does not pull the template image. Manager's durable OCI
+importer authenticates to the registry, unpacks the digest-pinned RootFS,
+injects the pinned `procd` artifact, builds the block artifact, and publishes it
+to the regional S3-compatible RootFS store.
 
 <Callout variant="info">
-If a template will run [Sandbox Functions](/docs/sandbox/functions), its image must include `python3` in `PATH` and use Python 3.9 or later. Sandbox0 injects the function runner, but the runner executes the Python interpreter from the template image, not from the manager image.
+If a template runs [Sandbox Functions](/docs/sandbox/functions), its image must
+include `python3` in `PATH` and use Python 3.9 or later. Sandbox0 injects the
+function runner, but the runner uses the template's Python interpreter.
 </Callout>
 
----
+## Public Images
 
-## Using a Public Image
-
-To use a public image, simply reference it in your template's `mainContainer.image` field:
+Reference a public image by its canonical registry, repository, and digest:
 
 ```yaml
 spec:
     mainContainer:
-        image: python:3.12-slim
+        image: docker.io/library/python@sha256:<64-hex-digest>
         resources:
             memory: 2Gi
-    pool:
-        minIdle: 2
-        maxIdle: 10
 ```
 
----
+The name must already be normalized. For example, use
+`docker.io/library/python@sha256:...`, not the Docker shorthand `python@...`.
+A registry tag change therefore cannot alter either a queued import or an
+already committed RootFS generation.
 
-## Using a Private Image
+## Private Image Workflow
 
-When you already have a Dockerfile or another reproducible image build, private images use a two-step workflow with the `s0` CLI:
+When you have a Dockerfile or another reproducible build, use the `s0` CLI.
 
-<Callout variant="info">
-If the desired environment already exists inside a sandbox, use `s0 template create --from-sandbox` instead. The server retains a region-durable block-COW capture while preserving the source template's digest-pinned base image, so you do not run `image build`, `image push`, or choose a repository.
-</Callout>
-
-### Step 1 — Build Your Image
-
-Build a container image from a Dockerfile using your local Docker daemon. You can use either method:
+### 1. Build
 
 ```bash
-# Option 1: Using s0 CLI (recommended for convenience)
 s0 template image build . -t my-app:v1.2.3
-
-# Option 2: Using docker build directly
-docker build . -t my-app:v1.2.3
 ```
 
-Both commands are equivalent — `s0 template image build` is a thin wrapper around `docker build`.
+This command wraps the local Docker build. You can also use `docker build`
+directly.
 
-**Build options:**
-
-| Flag | Description |
-|------|-------------|
-| `-t, --tag` | Image name and tag (required) |
-| `-f, --file` | Path to Dockerfile (default: `Dockerfile`) |
-| `--platform` | Target platform (e.g., `linux/amd64`) |
-| `--no-cache` | Disable build cache |
-| `--pull` | Always pull a newer base image |
-
-```bash
-# Build with a custom Dockerfile
-s0 template image build . -t my-app:v1.2.3 -f docker/Dockerfile.prod
-
-# Build for a specific platform
-s0 template image build . -t my-app:v1.2.3 --platform linux/amd64
-
-# Full rebuild without cache
-s0 template image build . -t my-app:v1.2.3 --no-cache
-```
-
-<Callout variant="info">
-Both methods use your local Docker daemon to build the image. Make sure Docker is running before executing these commands.
-</Callout>
-
-### Step 2 — Push to the Sandbox0 Registry
-
-Push the locally built image to the Sandbox0 registry. The CLI automatically retrieves short-lived credentials and a team-scoped destination from the API:
+### 2. Push
 
 ```bash
 s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-t, --tag` | Target image name and tag in the Sandbox0 registry (required) |
+The CLI:
 
-The push command:
-1. Calls `POST /api/v1/registry/credentials` to obtain short-lived credentials
-2. Re-tags the local image with the complete provider-specific `pushImage` reference returned by Sandbox0
-3. Pushes the image using your Docker daemon
+1. calls `POST /api/v1/registry/credentials`;
+2. receives a provider-specific, team-scoped destination and credential;
+3. retags the local image; and
+4. pushes with the local Docker daemon.
 
-<Callout variant="info">
-Credentials are short-lived and fetched automatically each time you push. You do not need to run `docker login` manually.
-</Callout>
+Use the returned **Template image reference** rather than reconstructing a
+provider path yourself.
 
-### Step 3 — Reference the Pull Image in Your Template
+Resolve that pushed reference to the registry-reported manifest digest and
+replace its tag with `@sha256:<digest>`. Keep the exact pull hostname returned
+by Sandbox0; push and manager-side pull endpoints may differ. Standard registry
+tools such as `docker buildx imagetools inspect` or `skopeo inspect` can report
+the manifest digest.
 
-After `s0 template image push`, use the `Template image reference` value in your template spec.
-This is the node-reachable pull address configured by the platform operator. It may
-differ from the address manager uses internally to publish images.
-
-```bash
-$ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
-...
-Image pushed successfully: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
-Template image reference: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
-```
-
-Use that `Template image reference` value:
+### 3. Create The Template
 
 ```yaml
+# template.yaml
 spec:
     mainContainer:
-        image: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
+        image: registry.example.com/t-<team-key>/my-app@sha256:<64-hex-digest>
         resources:
             memory: 8Gi
-    pool:
-        minIdle: 2
-        maxIdle: 10
 ```
-
-Then create or update the template:
 
 ```bash
 s0 template create --id my-app --spec-file template.yaml
-# or update an existing template:
-s0 template update my-app --spec-file template.yaml
-```
-
----
-
-## Full Workflow Example
-
-```bash
-# 1. Build the image (either method works)
-s0 template image build . -t my-app:v1.2.3
-# or: docker build . -t my-app:v1.2.3
-
-# 2. Push to Sandbox0 registry
-s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
-
-# 3. Create the template using "Template image reference"
-cat > template.yaml << 'EOF'
-spec:
-    mainContainer:
-        image: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
-        resources:
-            memory: 8Gi
-    pool:
-        minIdle: 2
-        maxIdle: 10
-EOF
-
-s0 template create --id my-app --spec-file template.yaml
-
-# 4. Create a sandbox from your template
 s0 sandbox create --template my-app
 ```
 
----
+If the desired environment already exists in a sandbox, use
+`/api/v1/templates/from-sandbox` instead. That route retains the sandbox's
+immutable block-COW generation and does not require a new image push.
 
-## Registry Providers (beta)
+## Registry Providers
 
-Sandbox0 supports multiple container registry backends. The registry provider is configured by the platform operator:
+Sandbox0 supports these manager-side registry credential providers:
 
-| Provider | Backend | Notes |
-|----------|---------|-------|
-| `builtin` | Self-hosted Docker Registry v2 | Default. Deployed and managed within the cluster. |
-| `aws` | Amazon ECR | Short-lived tokens (12h). Can optionally use `AssumeRole` + session policy for team-scoped pushes. |
-| `gcp` | Google Artifact Registry / GCR | Uses service account credentials. |
-| `azure` | Azure Container Registry | Uses ACR credentials. |
-| `aliyun` | Alibaba Cloud Container Registry | Uses a fixed namespace, one private repository per team, and repository-scoped STS credentials. |
-| `harbor` | Harbor | Uses Harbor robot/user credentials from Kubernetes Secret. |
+| Provider | Backend |
+| --- | --- |
+| `builtin` | A directly configured OCI Registry v2 endpoint |
+| `aws` | Amazon ECR, optionally with AssumeRole and a team-scoped session policy |
+| `gcp` | Google Artifact Registry or GCR |
+| `azure` | Azure Container Registry |
+| `aliyun` | Alibaba Cloud Container Registry with repository-scoped STS |
+| `harbor` | Harbor |
 
-For all providers, the `s0 template image push` command handles credential retrieval transparently — you always use the same CLI command regardless of the backend.
+External push and node/private pull endpoints may differ. Configure
+`push_registry` for developers and CI, `pull_registry` for manager's durable
+RootFS importer, and `internal_registry` for server-side registry operations
+when needed. Template image references use the pull address returned by the
+credential API.
 
-For the `builtin` provider, configure `spec.registry.builtin.pushEndpoint` or
-Ingress with an address that every sandbox node can reach. Sandbox0 uses that
-advertised address in Template image references and keeps the registry Service
-DNS name for manager's server-side publication only. Do not put a Kubernetes
-Service DNS name in a Template image reference: node container runtimes do not
-normally use cluster DNS.
-
-Aliyun ACR can expose separate internet and VPC hostnames. Configure `registry`
-with the internet hostname so external developers and CI can push images, and
-configure `pullRegistry` plus `internalRegistry` with the VPC hostname so
-sandbox nodes and Sandbox0 services stay on the private path. The configured
-RAM role must allow Sandbox0 to mint repository-scoped STS sessions. Sandbox0
-creates `t-<team-key>` repositories on demand inside the fixed namespace:
+Self-hosted registry credentials are direct manager configuration inputs. Each
+secret may be supplied by its documented value field or file field, but never
+both. The durable importer uses `registry.pull_credentials_file`, a root-owned
+Docker `config.json`/`dockerconfigjson` file, when the source registry requires
+static pull authentication.
 
 ```yaml
-spec:
-    registry:
-        provider: aliyun
-        aliyun:
-            registry: registry.example.com
-            pullRegistry: registry-vpc.example.com
-            internalRegistry: registry-vpc.example.com
-            namespace: sandbox0aliue1
-            region: us-east-1
-            instanceId: cri-example
-            assumeRoleArn: acs:ram::123456789012:role/sandbox0_acr_upload
-            sessionDurationSeconds: 21600
-            pullSecret:
-                name: acr-pull-secret
-            credentialsSecret:
-                name: aliyun-credentials
+registry:
+    provider: builtin
+    push_registry: registry.example.com
+    pull_registry: registry.internal.example.com
+    pull_credentials_file: /etc/sandbox0/registry/pull-config.json
+    builtin:
+        username_file: /etc/sandbox0/registry/push-username
+        password_file: /etc/sandbox0/registry/push-password
 ```
 
-Aliyun ACR image paths have the fixed shape
-`<registry>/<namespace>/<repository>:<tag>`. Sandbox0 therefore maps a logical
-target such as `my-app:v1.2.3` to a deterministic tag in the team's repository.
-Do not reconstruct this address yourself; use the `Image pushed successfully`
-and `Template image reference` values printed by the CLI. The push reference
-uses the internet endpoint, while the template reference uses the VPC endpoint.
+The files must be readable by manager and must not be exposed to a sandbox.
+There is no per-allocation registry secret and no runtime-mounted registry
+credential.
 
-The upload role may allow Push/Pull across the shared namespace, but every
-issued STS session is restricted again to exactly one team repository. A
-customer upload credential cannot pull or push another team's repository.
+## Import Safety
 
----
+The durable importer is active-active across manager replicas. PostgreSQL
+leases exactly one builder for an import attempt. Publication uses conditional
+object creation and compare-and-swap state transitions so retries cannot
+silently replace a committed artifact.
 
-## How Authentication Works
+The importer validates:
 
-Sandbox0 handles image pull authentication at the cluster level — you do not need to configure credentials in each template.
+- canonical OCI digest and target platform;
+- bounded layer count and unpacked size;
+- the pinned `procd` digest and protocol;
+- the block filesystem artifact; and
+- conditional publication to the configured RootFS object store.
 
-```mermaid
-flowchart LR
-    cli["s0 CLI"]
-    api["POST /registry/credentials"]
-    creds["Short-lived creds"]
-    docker["docker push"]
-    registry["Registry"]
-    secret["Cluster-managed imagePullSecret"]
-    kubelet["Node kubelet / container runtime"]
-    stored["image stored"]
-
-    cli -->|"image push"| api
-    api --> creds
-    creds --> docker
-    docker --> registry
-    secret --> kubelet
-    kubelet --> registry
-    registry --> stored
-```
-
-The platform operator maintains a cluster-managed `imagePullSecret` and references it from sandbox pod specs. The node kubelet/container runtime consumes that secret while pulling the image; it is not mounted into the sandbox container or exposed through the Sandbox0 API. As a template author, you only need to reference the correct image name — no credential configuration is required in the template spec.
-
-<Callout variant="info">
-For self-hosted deployments, the `builtin` registry provider automatically provisions and manages the pull secret. For external registries (ECR, GCP, ACR, Aliyun, Harbor), the platform operator pre-configures the credentials once during cluster setup.
-</Callout>
-
----
+An unavailable registry or failed import leaves the sandbox creation operation
+unready or failed; the task driver never falls back to pulling and running an
+unattested tag.
 
 ## Next Steps
 
 <CardGroup>
-  <Card title="Warm Pool" href="/docs/sandbox/template/pool" cta="Continue">
-    Use warm pools to reduce startup latency for common templates.
+  <Card title="Template Configuration" href="/docs/sandbox/template/configuration" cta="Continue">
+    Configure image, resources, environment, and network defaults.
+  </Card>
+  <Card title="Create From A Sandbox" href="/docs/sandbox/template#create-from-a-sandbox" cta="Continue">
+    Reuse an initialized block-COW RootFS without publishing an image layer.
   </Card>
 </CardGroup>

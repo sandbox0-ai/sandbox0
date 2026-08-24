@@ -113,7 +113,7 @@ func (f *fakeGrantStore) RenewRootFSWriterGrant(
 }
 
 func TestBatchRenewAuthenticatesNodeOnceAndReturnsPerGrantLeases(t *testing.T) {
-	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}}
+	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}}
 	store := &fakeGrantStore{}
 	handler, err := NewHandler(HandlerConfig{Verifier: verifier, Store: store, LeaseTTL: 5 * time.Minute})
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestRunningForkAuthenticatesLiveWriterAndPublishesExactCheckpoint(t *testin
 }
 
 func TestHandlerDerivesConsumerAndLeasePolicy(t *testing.T) {
-	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}}
+	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}}
 	store := &fakeGrantStore{}
 	handler, err := NewHandler(HandlerConfig{Verifier: verifier, Store: store, LeaseTTL: 5 * time.Minute})
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestHandlerRejectsMissingBearerBeforeConsuming(t *testing.T) {
 }
 
 func TestRenewHTTPClientDerivesLiveNodeAndUsesServerPolicy(t *testing.T) {
-	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}}
+	verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}}
 	store := &fakeGrantStore{}
 	policy := sandboxstore.RootFSWriterLeaseRenewalPolicy{LeaseTTL: 90 * time.Second, GracePeriod: time.Second}
 	handler, err := NewHandler(HandlerConfig{
@@ -318,7 +318,7 @@ func TestRenewHTTPClientDerivesLiveNodeAndUsesServerPolicy(t *testing.T) {
 func TestRenewHandlerRejectsClientLeasePolicy(t *testing.T) {
 	store := &fakeGrantStore{}
 	handler, err := NewHandler(HandlerConfig{
-		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}},
+		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}},
 		Store:    store, LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
@@ -339,7 +339,7 @@ func TestRenewHandlerRejectsClientLeasePolicy(t *testing.T) {
 func TestHandlerDoesNotTreatGrantIDOrEncodedSlashAsRenewAction(t *testing.T) {
 	store := &fakeGrantStore{}
 	handler, err := NewHandler(HandlerConfig{
-		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}},
+		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}},
 		Store:    store, LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
@@ -387,7 +387,7 @@ func TestRenewHandlerPreservesRetryableErrorClassification(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store := &fakeGrantStore{renewErr: test.err}
 			handler, err := NewHandler(HandlerConfig{
-				Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", PodUID: "ctld-pod-uid"}},
+				Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "node-uid", AgentUID: "ctld-pod-uid"}},
 				Store:    store, LeaseTTL: time.Minute,
 			})
 			require.NoError(t, err)
@@ -412,7 +412,7 @@ func TestTerminalHandlerAcceptsExactTerminalRetryWithEncodedGrantID(t *testing.T
 	} {
 		t.Run(state, func(t *testing.T) {
 			grantID := "grant id+percent%"
-			verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "issued-node", PodUID: "ctld-pod"}}
+			verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "issued-node", AgentUID: "ctld-pod"}}
 			store := &fakeGrantStore{grant: terminalTestGrant(grantID, state)}
 			handler, err := NewHandler(HandlerConfig{
 				Verifier: verifier, Store: store, LeaseTTL: time.Minute,

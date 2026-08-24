@@ -32,7 +32,6 @@ import (
 
 func TestRootFSConfigRequiresCtldNodeRuntimeOnly(t *testing.T) {
 	config := defaultPluginConfig()
-	config.RootFSEnabled = true
 	require.NoError(t, validateRootFSConfig(config))
 
 	config.RootFSNodeSocket = ""
@@ -66,7 +65,6 @@ func TestPluginFingerprintRequiresHealthyCtldNomadRuntime(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
-	plugin.config.RootFSEnabled = true
 	plugin.config.RootFSNodeSocket = socket
 	fingerprint := plugin.buildFingerprint()
 	require.Equal(t, drivers.HealthStateHealthy, fingerprint.Health)

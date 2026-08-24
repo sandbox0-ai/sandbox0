@@ -9,16 +9,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 func TestNomadSandboxNetworkPolicyServiceReadsAndUpdatesPausedPolicy(t *testing.T) {
@@ -57,6 +57,18 @@ func TestNomadSandboxNetworkPolicyServiceReadsAndUpdatesPausedPolicy(t *testing.
 		record.Config.Network.CredentialBindings != nil {
 		t.Fatalf("persisted request policy = %+v", record.Config.Network)
 	}
+}
+
+func testCredentialBindings(ref, authHeader string) []v1alpha1.CredentialBinding {
+	return []v1alpha1.CredentialBinding{{
+		Ref: ref, SourceRef: ref,
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &v1alpha1.HTTPHeadersProjection{Headers: []v1alpha1.ProjectedHeader{{
+				Name: "Authorization", ValueTemplate: authHeader,
+			}}},
+		},
+	}}
 }
 
 func TestNomadSandboxNetworkPolicyServiceFencesActiveSlotDigest(t *testing.T) {
@@ -116,7 +128,7 @@ func TestNomadSandboxNetworkPolicyServiceFencesUpdatesAndPublishesPausedCredenti
 		ID: "resume-a", SandboxID: "sandbox-a", Kind: sandboxstore.SandboxLifecycleKindResume,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing,
 	}
-	if _, err := service.UpdateNetworkPolicy(context.Background(), "sandbox-a", &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeBlockAll}); !apierrors.IsConflict(err) {
+	if _, err := service.UpdateNetworkPolicy(context.Background(), "sandbox-a", &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeBlockAll}); !apierror.IsConflict(err) {
 		t.Fatalf("lifecycle update error = %v", err)
 	}
 	delete(store.lifecycleTxns, "resume-a")
@@ -136,10 +148,6 @@ func TestNomadSandboxNetworkPolicyServiceFencesUpdatesAndPublishesPausedCredenti
 	if len(credentialResult.CredentialBindings) != 1 ||
 		credentialResult.CredentialBindings[0].Ref != "api-auth" {
 		t.Fatalf("credential update result = %+v", credentialResult)
-	}
-	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
-	if _, err := service.GetNetworkPolicy(context.Background(), "sandbox-a"); !apierrors.IsConflict(err) {
-		t.Fatalf("foreign runtime get error = %v", err)
 	}
 	if _, err := service.UpdateNetworkPolicy(context.Background(), "sandbox-a", nil); err == nil {
 		t.Fatal("nil network policy was accepted")
@@ -343,8 +351,7 @@ func nomadNetworkPolicyTestStore(desiredState string) *memorySandboxStore {
 	return &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: desiredState, RuntimeNamespace: "default", RuntimeID: "allocation-a",
+				ID: "sandbox-a", TeamID: "team-a", DesiredState: desiredState, RuntimeNamespace: "default", RuntimeID: "allocation-a",
 				TemplateSpec: v1alpha1.SandboxTemplateSpec{Network: &v1alpha1.SandboxNetworkPolicy{
 					Mode:   v1alpha1.NetworkModeBlockAll,
 					Egress: &v1alpha1.NetworkEgressPolicy{AllowedCIDRs: []string{"192.0.2.0/24"}},
@@ -506,14 +513,14 @@ func (p *nomadNetworkPreparerTest) Prepare(
 		return rootfshandoff.NetworkPolicyToken{}, p.err
 	}
 	token := rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID,
-		PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		AllocationID: request.AllocationID,
+		NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 			NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 			NetNSIdentity: request.NetNSIdentity,
 		}),
 		ClaimID: request.ClaimID, NetworkEpoch: 2, PolicyDigest: request.PolicyDigest,
-		PodIP: "192.0.2.2", CtldGeneration: "ctld-generation-2",
+		SourceIP: "192.0.2.2", CtldGeneration: "ctld-generation-2",
 		NetNSIdentity: request.NetNSIdentity,
 	}
 	if p.mutateToken != nil {

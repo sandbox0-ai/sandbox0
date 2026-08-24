@@ -59,9 +59,11 @@ object bound does not use the number of terminal batch rows still retained at
 the end: production garbage collection may delete those journal rows at the
 24-hour retention boundary while generation-referenced content objects remain
 valid. The default invocation is the fixed 24-hour diagnostic profile, not a
-cutover prerequisite. Shorter duration, lower generation count, and reduced
-maximum delay are only smoke-test controls and must not be reported as 24-hour
-evidence.
+cutover prerequisite. An explicitly accepted accelerated profile may reduce
+duration and maximum delay while retaining all 10,000 generations and the
+same failure/recovery and growth checks. It must be labeled accelerated and
+must not be reported as 24-hour evidence. Lower-generation runs are smoke
+tests only.
 
 Run the production runtime-slot Bolt journal companion for the same active-time
 window. Compile one fixed test executable so every reboot uses the same digest:
@@ -126,7 +128,10 @@ sha256sum /usr/local/libexec/soak-evidence-verify
 
 When a configuration digest was fixed in the supervisor manifest, also pass it
 with `--expected-config-sha256`. The verifier refuses an active writer, a
-partial tail, a broken identity or hash chain, a non-final log, less than 24
-hours of active time, or final state outside the exact production contract.
+partial tail, a broken identity or hash chain, a non-final log, or final state
+outside the selected contract. It defaults to the 24-hour endurance profile.
+To audit explicitly accepted accelerated evidence, pass the exact configured
+duration, for example `--minimum-active-duration 60s`; this does not convert
+the report into 24-hour evidence.
 The generated report is an audit artifact; it does not replace either gate's
 hash-bound `final` event.

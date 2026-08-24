@@ -143,7 +143,6 @@ func forkRunningRootFSFilesystem(
 		return retry, err
 	}
 	if sourceSandbox == nil || sourceSandbox.ID != req.SourceSandboxID || !sourceSandbox.DeletedAt.IsZero() ||
-		sourceSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		sourceSandbox.DesiredState != SandboxDesiredStateActive {
 		return nil, fmt.Errorf("%w: source sandbox is not active", ErrRootFSFilesystemConflict)
 	}
@@ -160,7 +159,6 @@ func forkRunningRootFSFilesystem(
 		teamID = sourceSandbox.TeamID
 	}
 	if sourceSandbox.TeamID == "" || targetSandbox.TeamID != sourceSandbox.TeamID || targetSandbox.TeamID != teamID ||
-		targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
 		targetSandbox.RuntimeID != "" || targetSandbox.RuntimeNamespace != "" ||
 		!targetSandbox.DeletedAt.IsZero() {
@@ -182,7 +180,7 @@ func forkRunningRootFSFilesystem(
 		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != req.TargetSandboxID ||
 		lifecycle.TargetGenerationID != req.Generation.ID ||
-		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID || lifecycle.PreparedHeadLayerID != "" {
+		lifecycle.ExpectedGenerationID != req.ExpectedSourceGenerationID || lifecycle.PreparedGenerationID != "" {
 		return nil, fmt.Errorf("%w: source running-fork lifecycle changed", ErrRootFSFilesystemConflict)
 	}
 	targetRecordDigest, err := NomadSandboxForkTargetRecordDigest(targetSandbox)
@@ -226,7 +224,7 @@ func forkRunningRootFSFilesystem(
 	if err != nil {
 		return nil, err
 	}
-	if source.StorageFormat != RootFSStorageFormatBlockCOWV1 || source.TeamID != teamID ||
+	if source.TeamID != teamID ||
 		source.HeadGenerationID != req.ExpectedSourceGenerationID || source.WriterEpoch != req.SourceWriterEpoch ||
 		sourceGeneration.ID != req.ExpectedSourceGenerationID {
 		return nil, fmt.Errorf("%w: source head or writer epoch changed", ErrRootFSFilesystemConflict)
@@ -265,14 +263,13 @@ func forkRunningRootFSFilesystem(
 
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_filesystems (
-			filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			head_generation_id, writer_epoch, storage_format, base_image_ref,
-			base_image_digest, base_artifact_digest, format_generation,
+			filesystem_id, team_id, source_filesystem_id,
+			head_generation_id, writer_epoch, base_artifact_digest, format_generation,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, NULL, NULL, $4, 'block-cow-v1', $5, $6, $7, $8, NOW(), NOW())
+		) VALUES ($1, $2, $3, NULL, $4, $5, $6, NOW(), NOW())
 		ON CONFLICT (filesystem_id) DO NOTHING
 	`, req.TargetSandboxID, teamID, source.ID, req.SourceWriterEpoch,
-		source.BaseImageRef, source.BaseImageDigest, source.BaseArtifactDigest, source.FormatGeneration)
+		source.BaseArtifactDigest, source.FormatGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("create running fork filesystem: %w", err)
 	}
@@ -323,13 +320,7 @@ func forkRunningRootFSFilesystem(
 	if err := (sandboxStoreTx{tx: tx}).CommitLifecycleTxn(ctx, req.OperationID, checkpoint.ID); err != nil {
 		return nil, fmt.Errorf("commit running-fork lifecycle: %w", err)
 	}
-	return scanRootFSFilesystem(tx.QueryRow(ctx, `
-		SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			writer_epoch, base_image_ref, base_image_digest, storage_format,
-			base_artifact_digest, format_generation, head_generation_id,
-			created_at, updated_at
-		FROM manager.rootfs_filesystems WHERE filesystem_id = $1
-	`, req.TargetSandboxID))
+	return getRootFSFilesystemByID(ctx, tx, req.TargetSandboxID)
 }
 
 func loadRunningRootFSForkRetry(
@@ -382,8 +373,8 @@ func loadRunningRootFSForkRetry(
 	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindFork ||
 		lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.Source != SandboxLifecycleSourceManual ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
-		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID ||
-		lifecycle.PreparedHeadLayerID != checkpointGenerationID ||
+		lifecycle.ExpectedGenerationID != req.ExpectedSourceGenerationID ||
+		lifecycle.PreparedGenerationID != checkpointGenerationID ||
 		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != req.TargetSandboxID ||
 		lifecycle.TargetGenerationID != checkpointGenerationID {
@@ -395,7 +386,7 @@ func loadRunningRootFSForkRetry(
 	if err != nil {
 		return nil, fmt.Errorf("load running-fork target retry: %w", err)
 	}
-	if targetSandbox == nil || targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if targetSandbox == nil ||
 		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
 		targetSandbox.RuntimeID != "" || targetSandbox.RuntimeNamespace != "" ||
 		!targetSandbox.DeletedAt.IsZero() {
@@ -425,13 +416,7 @@ func loadRunningRootFSForkRetry(
 	if !runningForkGenerationMatches(storedGeneration, req.Generation) {
 		return nil, fmt.Errorf("%w: running fork checkpoint fields changed", ErrRootFSGenerationConflict)
 	}
-	target, err := scanRootFSFilesystem(tx.QueryRow(ctx, `
-		SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			writer_epoch, base_image_ref, base_image_digest, storage_format,
-			base_artifact_digest, format_generation, head_generation_id,
-			created_at, updated_at
-		FROM manager.rootfs_filesystems WHERE filesystem_id = $1
-	`, targetFilesystemID))
+	target, err := getRootFSFilesystemByID(ctx, tx, targetFilesystemID)
 	if err != nil {
 		return nil, fmt.Errorf("load running fork target retry: %w", err)
 	}

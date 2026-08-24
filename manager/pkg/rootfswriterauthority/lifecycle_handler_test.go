@@ -146,7 +146,7 @@ func TestPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T) {
 		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceAuto,
 		FromGeneration: 7, FromRuntimeNamespace: record.RuntimeNamespace,
-		FromRuntimeID: record.RuntimeID, ExpectedHeadLayerID: "generation-1",
+		FromRuntimeID: record.RuntimeID, ExpectedGenerationID: "generation-1",
 	}}
 
 	err := preparePlannedPublishLifecycle(
@@ -166,7 +166,7 @@ func TestPreparePlannedPublishLifecycleRejectsAnotherRuntime(t *testing.T) {
 		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceManual,
 		FromGeneration: 7, FromRuntimeNamespace: record.RuntimeNamespace,
-		FromRuntimeID: "another-allocation", ExpectedHeadLayerID: "generation-1",
+		FromRuntimeID: "another-allocation", ExpectedGenerationID: "generation-1",
 	}}
 
 	err := preparePlannedPublishLifecycle(

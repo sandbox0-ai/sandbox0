@@ -1,12 +1,12 @@
 package networkpolicy
 
 import (
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
 )
 
-// NetworkPolicyService builds network policy specs for pod annotations.
+// NetworkPolicyService builds canonical node-runtime network policy specs.
 type NetworkPolicyService struct {
 	logger *zap.Logger
 }

@@ -8,8 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 func TestRewriteMQTTConnectPacketInjectsUsernamePassword(t *testing.T) {
@@ -96,7 +95,7 @@ func TestProxySOCKS5SessionInjectsUsernamePassword(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 	}
 
@@ -208,7 +207,7 @@ func TestProxyMQTTSessionInjectsUsernamePassword(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 	}
 
@@ -316,7 +315,7 @@ func TestProxyRedisSessionInjectsUsernamePassword(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 	}
 

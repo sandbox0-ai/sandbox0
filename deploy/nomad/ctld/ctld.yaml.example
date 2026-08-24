@@ -49,3 +49,4 @@ nomad_runtime:
   nomad_key_file: /etc/sandbox0/pki/nomad-key.pem
   node_uid: ${SANDBOX0_NODE_UID}
   control_root: /run/sandbox0/nomad-slots
+  node_control_timeout: 10s

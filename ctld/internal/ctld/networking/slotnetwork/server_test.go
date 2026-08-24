@@ -40,7 +40,7 @@ func TestControlServerAndClientApplyThenRemoveExactPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	token, err := client.Prepare(t.Context(), testPrepareRequest())
-	if err != nil || token.PodIP != "192.0.2.8" {
+	if err != nil || token.SourceIP != "192.0.2.8" {
 		t.Fatalf("Prepare() = %+v, %v", token, err)
 	}
 	if err := client.Cleanup(t.Context(), testCleanupRequest()); err != nil {

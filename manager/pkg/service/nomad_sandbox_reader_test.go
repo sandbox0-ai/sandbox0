@@ -17,9 +17,8 @@ func TestNomadSandboxReaderProjectsRuntimeSlotAndLifecycleFence(t *testing.T) {
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID: "sandbox-a", TeamID: "team-a", TemplateID: "default",
-				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState:   sandboxstore.SandboxDesiredStateActive,
-				RuntimeID:      "allocation-a", CreatedAt: now,
+				DesiredState: sandboxstore.SandboxDesiredStateActive,
+				RuntimeID:    "allocation-a", CreatedAt: now,
 			},
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
@@ -62,26 +61,14 @@ func TestNomadSandboxReaderProjectsRuntimeSlotAndLifecycleFence(t *testing.T) {
 	}
 }
 
-func TestNomadSandboxReaderFailsClosedForMissingOrForeignRecords(t *testing.T) {
-	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
-		"kubernetes-a": {
-			ID: "kubernetes-a", TeamID: "team-a",
-			RuntimeBackend: "kubernetes",
-			DesiredState:   sandboxstore.SandboxDesiredStateActive,
-		},
-	}}
+func TestNomadSandboxReaderFailsClosedForInvalidRequests(t *testing.T) {
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	reader, err := NewNomadSandboxReader(store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reader.GetSandbox(context.Background(), "missing"); !errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		t.Fatalf("missing error = %v", err)
-	}
-	if _, err := reader.GetSandbox(context.Background(), "kubernetes-a"); err == nil {
-		t.Fatal("Kubernetes record was accepted by the Nomad reader")
-	}
-	if _, err := reader.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"}); err == nil {
-		t.Fatal("mixed-backend list was accepted by the Nomad reader")
 	}
 	if _, err := reader.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{Offset: -1}); err == nil {
 		t.Fatal("negative list offset was accepted")

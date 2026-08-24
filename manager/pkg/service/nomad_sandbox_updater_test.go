@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 func TestNomadSandboxUpdaterPersistsLifecycleFields(t *testing.T) {
@@ -66,7 +66,6 @@ func TestNomadSandboxUpdaterRejectsUnorchestratedRuntimeFields(t *testing.T) {
 		{name: "environment", config: &SandboxUpdateConfig{EnvVars: map[string]string{"NEW": "value"}}},
 		{name: "resources", config: &SandboxUpdateConfig{Resources: &managerapi.SandboxResourceConfig{Memory: "1Gi"}}},
 		{name: "network", config: &SandboxUpdateConfig{Network: &v1alpha1.SandboxNetworkPolicy{}}},
-		{name: "services", config: &SandboxUpdateConfig{Services: []managerapi.SandboxAppService{{ID: "web", Port: 8080}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -93,6 +92,35 @@ func TestNomadSandboxUpdaterRejectsUnorchestratedRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestNomadSandboxUpdaterPersistsNormalizedServices(t *testing.T) {
+	now := time.Date(2026, time.August, 21, 3, 0, 0, 0, time.UTC)
+	store := newNomadSandboxUpdaterTestStore(now, sandboxstore.SandboxDesiredStateActive)
+	updater, err := NewNomadSandboxUpdater(store, time.Minute, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{
+		Services: []managerapi.SandboxAppService{{
+			ID: "WEB", Port: 8080,
+			Ingress: managerapi.SandboxAppServiceIngress{Public: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("UpdateSandbox() error = %v", err)
+	}
+	if len(updated.Services) != 1 || updated.Services[0].ID != "web" || len(updated.Services[0].Ingress.Routes) != 1 {
+		t.Fatalf("services = %+v", updated.Services)
+	}
+	updated.Services[0].Ingress.Routes[0].PathPrefix = "/mutated"
+	record, err := store.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Config.Services[0].Ingress.Routes[0].PathPrefix != "/" {
+		t.Fatalf("stored services shared response memory: %+v", record.Config.Services)
+	}
+}
+
 func TestNomadSandboxUpdaterFailsClosed(t *testing.T) {
 	if _, err := NewNomadSandboxUpdater(nil, time.Minute, nil); err == nil {
 		t.Fatal("nil mutation store was accepted")
@@ -110,17 +138,12 @@ func TestNomadSandboxUpdaterFailsClosed(t *testing.T) {
 	}
 
 	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStateTerminating
-	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); !k8serrors.IsConflict(err) {
+	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); !apierror.IsConflict(err) {
 		t.Fatalf("terminating update error = %v", err)
 	}
 	store.records["sandbox-a"].DesiredState = "recovering"
-	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); !k8serrors.IsConflict(err) {
+	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); !apierror.IsConflict(err) {
 		t.Fatalf("non-mutable state error = %v", err)
-	}
-	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStateActive
-	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
-	if _, err := updater.UpdateSandbox(context.Background(), "sandbox-a", &SandboxUpdateConfig{}); err == nil {
-		t.Fatal("foreign runtime record was accepted")
 	}
 }
 
@@ -194,8 +217,7 @@ func newNomadSandboxUpdaterTestStore(now time.Time, desiredState string) *memory
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID: "sandbox-a", TeamID: "team-a", TemplateID: "default",
-				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState:   desiredState, RuntimeID: "allocation-a",
+				DesiredState: desiredState, RuntimeID: "allocation-a",
 				Config: sandboxstore.SandboxConfig{
 					TTL: &ttl, HardTTL: &hardTTL, AutoResume: &autoResume,
 					EnvVars: map[string]string{"OLD": "value"},

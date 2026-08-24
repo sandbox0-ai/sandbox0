@@ -23,9 +23,8 @@ func TestNomadLifecycleProjectorCommitsDurableHistoryAndResumesAfterRestartInteg
 	record := &sandboxstore.SandboxRecord{
 		ID: "sandbox-nomad-metering", TeamID: "team-1", UserID: "user-1",
 		TemplateID: "template-1", TemplateName: "template-1", TemplateNamespace: "default",
-		ClusterID: "cluster-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState: sandboxstore.SandboxDesiredStateActive,
-		RuntimeID:    "allocation-1", RuntimeNamespace: "default", RuntimeGeneration: 1,
+		ClusterID: "cluster-1", DesiredState: sandboxstore.SandboxDesiredStateActive,
+		RuntimeID: "allocation-1", RuntimeNamespace: "default", RuntimeGeneration: 1,
 		ResourceMillicpu: 1000, ResourceMemoryMiB: 1024,
 		ClaimedAt: claimedAt, CreatedAt: claimedAt,
 	}
@@ -152,7 +151,7 @@ func commitNomadMeteringResume(
 		}
 		if err := tx.SaveRuntime(
 			lockCtx, sandboxID, "default", "allocation-2", generation,
-			time.Time{}, time.Time{}, sandboxstore.SandboxRuntimeMetadata{},
+			time.Time{}, time.Time{}, "",
 		); err != nil {
 			return err
 		}

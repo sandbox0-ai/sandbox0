@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 type failingAuditSink struct{}
@@ -52,7 +51,7 @@ func TestRunAdapterPassThroughUsesGenericTCPRelay(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 	}
 	adapter := &trackingAdapter{
@@ -153,7 +152,7 @@ func TestProbeServerFirstSSHReclassifiesUnknownTraffic(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 			ProxyHeaderLimit:     1024,
 		},
 	}
@@ -256,7 +255,7 @@ func TestProbeServerFirstSSHDoesNotDialBeforeCanonicalAudit(t *testing.T) {
 	defer listener.Close()
 	address := listener.Addr().(*net.TCPAddr)
 	server := &Server{
-		cfg:     &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second}, ProxyHeaderLimit: 1024},
+		cfg:     &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: config.Duration{Duration: time.Second}, ProxyHeaderLimit: 1024},
 		auditor: &auditLogger{sink: failingAuditSink{}, now: func() time.Time { return time.Now().UTC() }},
 	}
 	req := &adapterRequest{
@@ -305,7 +304,7 @@ func TestRunPassThroughUsesPreconnectedUpstreamPrefix(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: time.Second},
 		},
 	}
 	adapter := &trackingAdapter{

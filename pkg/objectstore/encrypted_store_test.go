@@ -72,7 +72,7 @@ func TestEncryptedStorePlaintextRange(t *testing.T) {
 	}
 }
 
-func TestEncryptedStoreReadsExistingPlaintextObject(t *testing.T) {
+func TestEncryptedStoreRejectsPlaintextObject(t *testing.T) {
 	base := NewMemoryStore(t.Name())
 	if err := base.Put("rootfs/plain.tar", strings.NewReader("plaintext")); err != nil {
 		t.Fatalf("raw Put() error = %v", err)
@@ -84,15 +84,12 @@ func TestEncryptedStoreReadsExistingPlaintextObject(t *testing.T) {
 
 	reader, err := store.Get("rootfs/plain.tar", 5, -1)
 	if err != nil {
-		t.Fatalf("Get() error = %v", err)
+		return
 	}
-	got, err := io.ReadAll(reader)
+	_, err = io.ReadAll(reader)
 	_ = reader.Close()
-	if err != nil {
-		t.Fatalf("read plaintext object: %v", err)
-	}
-	if string(got) != "text" {
-		t.Fatalf("plaintext range = %q, want text", got)
+	if err == nil {
+		t.Fatal("read accepted a plaintext object while encryption is required")
 	}
 }
 

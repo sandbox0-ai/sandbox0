@@ -24,14 +24,17 @@ import (
 )
 
 type specOptions struct {
-	Command   string
-	Args      []string
-	Env       []string
-	AllocID   string
-	TaskID    string
-	NetNSPath string
-	Resources *driversResources
+	Command                       string
+	Args                          []string
+	Env                           []string
+	AllocID                       string
+	TaskID                        string
+	NetNSPath                     string
+	ProcdInternalJWTPublicKeyFile string
+	Resources                     *driversResources
 }
+
+const procdInternalJWTPublicKeyDestination = "/config/internal_jwt_public.key"
 
 // driversResources avoids exporting Nomad types through the OCI helper API.
 type driversResources struct {
@@ -105,17 +108,27 @@ func buildSpec(options specOptions) specs.Spec {
 		linux.CgroupsPath = options.Resources.CgroupPath
 	}
 
+	mounts := []specs.Mount{
+		{Destination: "/proc", Type: "proc", Source: "proc"},
+		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs"},
+		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+	}
+	if options.ProcdInternalJWTPublicKeyFile != "" {
+		mounts = append(mounts, specs.Mount{
+			Destination: procdInternalJWTPublicKeyDestination,
+			Type:        "bind",
+			Source:      options.ProcdInternalJWTPublicKeyFile,
+			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
+	}
+
 	return specs.Spec{
 		Version:  specs.Version,
 		Process:  &process,
 		Root:     &specs.Root{Path: "rootfs", Readonly: false},
 		Hostname: "sandbox0",
-		Mounts: []specs.Mount{
-			{Destination: "/proc", Type: "proc", Source: "proc"},
-			{Destination: "/dev", Type: "tmpfs", Source: "tmpfs"},
-			{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
-		},
-		Linux: linux,
+		Mounts:   mounts,
+		Linux:    linux,
 		Annotations: map[string]string{
 			"com.sandbox0.alloc-id":   options.AllocID,
 			"com.sandbox0.task-id":    options.TaskID,

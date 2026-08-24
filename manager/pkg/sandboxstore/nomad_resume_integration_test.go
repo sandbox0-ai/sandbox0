@@ -39,7 +39,6 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NotEqual(t, pause.OperationID, requested.OperationID)
 	initialClaimLimit := int64(1)
 	other := rootFSTestSandboxRecord("sandbox-blocked-by-resume", "team-slot")
-	other.RuntimeBackend = SandboxRuntimeBackendNomad
 	other.ClusterID = "cluster-a"
 	other.RuntimeGeneration = 1
 	_, err = fixture.store.ReserveSandboxClaim(fixture.ctx, &ReserveSandboxClaimRequest{

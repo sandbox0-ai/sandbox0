@@ -723,31 +723,6 @@ func TestNormalizeNetworkingAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	}
 }
 
-func TestNormalizeNetworkingAuditCanonicalizesLegacyProducerDuringRollout(t *testing.T) {
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
-		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
-		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
-	}))
-	events := []sandboxobservability.Event{{
-		EventID: "88888888-8888-4888-8888-888888888888", TeamID: "team-1", SandboxID: "sb-1",
-		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
-		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Phase:      sandboxobservability.EventPhaseAttempt, Outcome: sandboxobservability.OutcomeAccepted,
-		OperationID: "99999999-9999-4999-8999-999999999999",
-		Attributes:  map[string]any{"action": "connect", "host": "example.com"},
-	}}
-	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{
-		Caller: internalauth.ServiceLegacyNetworkRuntime, TeamID: "team-1", SandboxID: "sb-1",
-	})
-	if err := handler.normalizeAuditEvents(ctx, events); err != nil {
-		t.Fatalf("normalizeAuditEvents() error = %v", err)
-	}
-	if events[0].Source != sandboxobservability.SourceCtld || events[0].Producer.Service != internalauth.ServiceCtld {
-		t.Fatalf("legacy producer was not canonicalized: %#v", events[0])
-	}
-}
-
 func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{

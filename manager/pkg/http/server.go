@@ -11,20 +11,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -48,13 +46,10 @@ type Server struct {
 	sandboxRootFSRebaser    service.SandboxRootFSRebaser
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
-	templateService         *templateservice.TemplateService
 	registryService         *registryservice.RegistryService
 	templateStore           store.TemplateStore
-	templateReconciler      TemplateReconciler
 	templateStoreEnabled    bool
 	templateHandler         *templatehttp.Handler
-	clusterService          *clusterservice.ClusterService
 	quotaRepo               *quota.Repository
 	authValidator           *internalauth.Validator
 	logger                  *zap.Logger
@@ -81,7 +76,7 @@ type updateSandboxCapabilityRequest struct {
 type capabilityBodyInspector func(target any) bool
 
 // SandboxReader owns the durable public sandbox projections consumed by the
-// manager HTTP API. Implementations must not require a Kubernetes Pod cache.
+// manager HTTP API. Implementations must use durable runtime-slot state.
 type SandboxReader interface {
 	ListSandboxes(context.Context, *sandboxstore.ListSandboxesRequest) (*service.ListSandboxesResponse, error)
 	GetSandbox(context.Context, string) (*managerapi.Sandbox, error)
@@ -111,11 +106,6 @@ type SandboxRootFSService interface {
 	RestoreSandboxRootFS(context.Context, string, string, *service.RestoreSandboxRootFSRequest) (*service.RestoreSandboxRootFSResponse, error)
 }
 
-// TemplateReconciler exposes minimal reconcile controls for template syncing.
-type TemplateReconciler interface {
-	TriggerReconcile(ctx context.Context)
-}
-
 // ServerDependencies names the manager capabilities exposed over HTTP. Using
 // this struct keeps composition changes local and avoids order-dependent
 // constructor calls as features are added or removed.
@@ -133,14 +123,11 @@ type ServerDependencies struct {
 	SandboxRootFSRebaser    service.SandboxRootFSRebaser
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
-	TemplateService         *templateservice.TemplateService
 	PrivateRegistryHosts    []string
 	RegistryService         *registryservice.RegistryService
 	TemplateStore           store.TemplateStore
-	TemplateReconciler      TemplateReconciler
 	TemplateStoreEnabled    bool
 	TemplateResourcePolicy  template.ResourcePolicy
-	ClusterService          *clusterservice.ClusterService
 	QuotaRepository         *quota.Repository
 	AuthValidator           *internalauth.Validator
 	Logger                  *zap.Logger
@@ -192,12 +179,9 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		sandboxRootFSRebaser:    deps.SandboxRootFSRebaser,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
-		templateService:         deps.TemplateService,
 		registryService:         deps.RegistryService,
 		templateStore:           deps.TemplateStore,
-		templateReconciler:      deps.TemplateReconciler,
 		templateStoreEnabled:    deps.TemplateStoreEnabled,
-		clusterService:          deps.ClusterService,
 		quotaRepo:               deps.QuotaRepository,
 		authValidator:           deps.AuthValidator,
 		logger:                  deps.Logger,
@@ -209,16 +193,11 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	}
 	if deps.TemplateStoreEnabled {
 		registryHosts := append([]string(nil), deps.PrivateRegistryHosts...)
-		if len(registryHosts) == 0 && deps.TemplateService != nil {
-			registryHosts = deps.TemplateService.RegistryHosts()
-		}
 		buildStore, _ := deps.TemplateStore.(store.TemplateBuildStore)
 		server.templateHandler = &templatehttp.Handler{
 			Store:                deps.TemplateStore,
 			BuildStore:           buildStore,
 			SourceResolver:       deps.SandboxSourceResolver,
-			Reconciler:           deps.TemplateReconciler,
-			StatsProvider:        &clusterTemplateStatsProvider{clusterService: deps.ClusterService},
 			ResourcePolicy:       deps.TemplateResourcePolicy,
 			PrivateRegistryHosts: registryHosts,
 			Logger:               deps.Logger,
@@ -309,25 +288,6 @@ func (s *Server) setupRoutes() {
 		{
 			internalSandboxes.GET("/:id", s.getSandboxInternal)
 			internalSandboxes.GET("/:id/template-source", s.getSandboxTemplateSourceInternal)
-		}
-
-		// Template management (scheduler sync)
-		internalTemplates := internal.Group("/templates")
-		internalTemplates.Use(s.requireLegacyTemplateServiceCapability())
-		{
-			internalTemplates.GET("", s.listTemplatesLegacy)
-			internalTemplates.GET("/stats", s.getTemplateStats)
-			internalTemplates.GET("/:id", s.getTemplateLegacy)
-			internalTemplates.POST("", s.createTemplateLegacy)
-			internalTemplates.PUT("/:id", s.updateTemplateLegacy)
-			internalTemplates.DELETE("/:id", s.deleteTemplateLegacy)
-		}
-
-		// Cluster management
-		internalCluster := internal.Group("/cluster")
-		internalCluster.Use(s.requireClusterServiceCapability())
-		{
-			internalCluster.GET("/summary", s.getClusterSummary)
 		}
 
 		internalEgressAuth := internal.Group("/egress-auth")
@@ -509,18 +469,6 @@ func (s *Server) requireTemplateStoreCapability() gin.HandlerFunc {
 	return s.requireCapability(func() bool {
 		return s.templateHandler != nil
 	}, "template store is disabled")
-}
-
-func (s *Server) requireLegacyTemplateServiceCapability() gin.HandlerFunc {
-	return s.requireCapability(func() bool {
-		return s.templateService != nil
-	}, "legacy template projection is unavailable in this deployment")
-}
-
-func (s *Server) requireClusterServiceCapability() gin.HandlerFunc {
-	return s.requireCapability(func() bool {
-		return s.clusterService != nil
-	}, "legacy cluster summary is unavailable in this deployment")
 }
 
 func (s *Server) requireRegistryCapability() gin.HandlerFunc {

@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"go.uber.org/zap"
 )
 
@@ -42,7 +42,7 @@ func buildManagerNodeAuthority(
 	for _, identity := range nodeConfig.Identities {
 		identities = append(identities, nodeauth.CertificateIdentity{
 			CommonName: identity.CommonName, ClusterID: identity.ClusterID,
-			NodeID: identity.NodeID, NodeUID: identity.NodeUID, PodUID: identity.PodUID,
+			NodeID: identity.NodeID, NodeUID: identity.NodeUID, AgentUID: identity.AgentUID,
 		})
 	}
 	return nodeauthority.New(nodeauthority.Config{

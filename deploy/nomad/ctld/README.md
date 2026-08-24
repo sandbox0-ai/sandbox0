@@ -35,6 +35,19 @@ sudo ./deploy/nomad/ctld/install-node.sh \
   --start
 ```
 
+The Nomad client's `alloc_dir` and `alloc_mounts_dir` must resolve beneath
+`nomad_runtime.consumer_mount_root` (`/opt/nomad` in the supplied config).
+Keeping Nomad's default allocation directory beneath another `data_dir`
+causes ctld to reject the task driver's stable RootFS mount. The optional
+`nomad_runtime.node_control_timeout` defaults to `10s` and may be increased
+only for a demonstrably slow node-local runtime. Increasing it does not change
+the regional command-ready SLO or turn a late claim into a pass.
+The driver-level `runsc_operation_timeout_seconds` separately bounds each
+`runsc create` and `runsc start`; it defaults to 30 seconds and is capped at
+120 seconds. Keep the node-control and claim-lease deadlines above the
+observed runsc duration. A larger value is a diagnostic accommodation for
+software-emulated nodes, not an SLO relaxation.
+
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
 64-device NBD pool, applies required networking sysctls, installs tmpfiles
 rules for the reboot-volatile runtime directories, and places the task driver

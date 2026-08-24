@@ -96,6 +96,13 @@ func (c *Controller) Purge(
 	if err := c.Stop(ctx, request); err != nil {
 		return err
 	}
+	present, err := c.api.ClientAllocationPresent(ctx, request.Target)
+	if err != nil {
+		return fmt.Errorf("observe direct Nomad client allocation before garbage collection: %w", err)
+	}
+	if !present {
+		return nil
+	}
 	if err := c.api.GarbageCollectAllocation(ctx, request.Target); err != nil {
 		return fmt.Errorf("garbage collect direct Nomad client allocation: %w", err)
 	}

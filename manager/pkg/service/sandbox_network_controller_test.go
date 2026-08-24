@@ -8,8 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 )
 
 func TestSandboxNetworkMutationControllerDiscoversAndRetriesPendingOperation(t *testing.T) {
@@ -48,8 +47,8 @@ func TestSandboxNetworkMutationControllerDiscoversAndRetriesPendingOperation(t *
 func TestSandboxNetworkMutationControllerForgetsPreemptedOperation(t *testing.T) {
 	store := &sandboxNetworkControllerTestStore{}
 	reconciler := &sandboxNetworkControllerTestReconciler{
-		errors: []error{apierrors.NewConflict(
-			schema.GroupResource{Resource: "sandbox"}, "sandbox-a", errors.New("preempted"),
+		errors: []error{apierror.NewConflict(
+			"sandbox", "sandbox-a", errors.New("preempted"),
 		)},
 		calls: make(chan string, 2),
 	}

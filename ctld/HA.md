@@ -1,46 +1,38 @@
 # ctld node-local high availability
 
-ctld runs as two independent DaemonSets, `ctld-a` and `ctld-b`, on every
-sandbox node. A kernel-backed `flock` elects one primary per node. The primary
-owns rootfs checkpoint/restore and the node-local network runtime; the standby
-waits for promotion.
+Each dedicated Nomad client node runs `sandbox0-ctld@a.service` and
+`sandbox0-ctld@b.service` directly in the host mount and network namespaces.
+Both instances share `/var/lib/sandbox0/ctld`; a kernel-backed `flock` on
+`ha/primary.lock` elects the only instance allowed to own NBD devices, Bolt
+state, slot control sockets, network state, and per-lease cgroups.
 
 ## Invariants
 
-- Exactly one process holds the node-local primary lock.
-- Promotion starts only after the previous primary releases, or the kernel
-  releases, that lock.
-- The elected process increments a persisted epoch before starting primary
+- Exactly one instance holds the node-local primary lock.
+- Promotion starts only after the previous primary releases the lock, or the
+  kernel releases it when that process exits.
+- The winner durably increments the shared epoch before starting privileged
   services.
-- A returning process joins as a standby. Role changes do not automatically
-  fail back.
-- A fatal primary-service error shuts down the process and releases the same
+- A standby is ready only after it observes a committed epoch in the shared
+  state directory.
+- A fatal primary-service error terminates the instance and releases the same
   lock used for promotion.
+- An incomplete privileged shutdown retains the lock and fails closed rather
+  than allowing overlapping ownership.
 
-## Process layout
-
-Both slots share `/var/lib/sandbox0/ctld` and the containerd host mounts, but
-have independent Pod lifecycles. Each slot attempts a non-blocking exclusive
-lock on `/var/lib/sandbox0/ctld/ha/primary.lock`. The winner increments the
-persisted epoch, starts rootfs and network services, and reports ready after the
-network runtime completes its initial synchronization.
-
-The standby does not serve rootfs or network operations. When it acquires the
-lock after a primary exit, it reloads durable state from PostgreSQL and object
-storage and starts a fresh node-local runtime. In-flight requests can fail
-during handoff and must be retried; persisted sandbox rootfs state remains
-recoverable because the node-local cache is not the source of truth.
+The primary lock and epoch file are the complete HA coordination state. Runtime
+and RootFS truth remain in PostgreSQL, encrypted object storage, and the shared
+node journal; no process-local cache is authoritative.
 
 ## Rollout
 
-Upgrade one slot at a time. Wait until every node again reports exactly one
-primary before upgrading the other slot. Scrape both DaemonSets and group HA
-checks by the `node` label:
+Use `deploy/nomad/ctld/rollout-node.sh`. It restarts slot B and then slot A,
+waiting for each instance to become primary-ready or synchronized-standby-ready
+before touching its peer. Roll nodes one at a time for changes to runtime
+compatibility, RootFS format, NBD capacity, or network policy format.
 
-- `ctld_ha_primary` identifies the elected peer; alert when
-  `sum by (node) (ctld_ha_primary) != 1` remains true.
-- `ctld_ha_role`, `ctld_ha_epoch`, and `ctld_ha_role_transitions_total` show
-  election and failover history.
-- `ctld_ha_state_duration_seconds` shows how long a peer has held its role.
-- `ctld_ha_lock_info` exposes the shared lock device and inode; both peers on a
-  node should report the same identity.
+Scrape each slot's dedicated HA metrics endpoint and alert unless every node
+has one primary and one synchronized peer. The relevant metrics are
+`ctld_ha_primary`, `ctld_ha_role`, `ctld_ha_epoch`, `ctld_ha_synchronized`,
+`ctld_ha_state_duration_seconds`, `ctld_ha_role_transitions_total`, and
+`ctld_ha_lock_info`.

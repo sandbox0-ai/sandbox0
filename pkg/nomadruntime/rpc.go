@@ -119,6 +119,14 @@ func NewClient(socketPath string) (*Client, error) {
 	return &Client{http: &http.Client{Transport: transport}}, nil
 }
 
+// Close releases idle Unix-socket transports owned by the client.
+func (c *Client) Close() error {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+	return nil
+}
+
 // RequestRunningRootFSFork asks the root-owned ctld node runtime to capture and
 // regionally publish one exact live checkpoint. It is the narrow control
 // entrypoint used by node administration tooling; the socket remains the

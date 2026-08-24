@@ -23,13 +23,6 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
-// Defines values for AppArmorProfileType.
-const (
-	AppArmorProfileTypeLocalhost      AppArmorProfileType = "Localhost"
-	AppArmorProfileTypeRuntimeDefault AppArmorProfileType = "RuntimeDefault"
-	AppArmorProfileTypeUnconfined     AppArmorProfileType = "Unconfined"
-)
-
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders             CredentialProjectionType = "http_headers"
@@ -391,13 +384,6 @@ const (
 	SandboxRuntimeMetricUnitSeconds        SandboxRuntimeMetricUnit = "seconds"
 )
 
-// Defines values for SeccompProfileType.
-const (
-	SeccompProfileTypeLocalhost      SeccompProfileType = "Localhost"
-	SeccompProfileTypeRuntimeDefault SeccompProfileType = "RuntimeDefault"
-	SeccompProfileTypeUnconfined     SeccompProfileType = "Unconfined"
-)
-
 // Defines values for SuccessAPIKeyListResponseSuccess.
 const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
@@ -737,9 +723,8 @@ const (
 
 // Defines values for TemplateCreationStatusStage.
 const (
-	TemplateCreationStatusStageCapturing   TemplateCreationStatusStage = "capturing"
-	TemplateCreationStatusStagePublishing  TemplateCreationStatusStage = "publishing"
-	TemplateCreationStatusStageReconciling TemplateCreationStatusStage = "reconciling"
+	TemplateCreationStatusStageCapturing  TemplateCreationStatusStage = "capturing"
+	TemplateCreationStatusStagePublishing TemplateCreationStatusStage = "publishing"
 )
 
 // Defines values for TemplateCreationStatusState.
@@ -806,21 +791,6 @@ type AddTeamMemberRequest struct {
 // AddTeamMemberRequestRole defines model for AddTeamMemberRequest.Role.
 type AddTeamMemberRequestRole string
 
-// Affinity defines model for Affinity.
-type Affinity struct {
-	NodeAffinity *NodeAffinity `json:"nodeAffinity,omitempty"`
-	PodAffinity  *PodAffinity  `json:"podAffinity,omitempty"`
-}
-
-// AppArmorProfile defines model for AppArmorProfile.
-type AppArmorProfile struct {
-	LocalhostProfile *string             `json:"localhostProfile,omitempty"`
-	Type             AppArmorProfileType `json:"type"`
-}
-
-// AppArmorProfileType defines model for AppArmorProfile.Type.
-type AppArmorProfileType string
-
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
 	BrowserLoginEnabled bool `json:"browser_login_enabled"`
@@ -837,12 +807,6 @@ type AuthProvider struct {
 type CachePolicySpec struct {
 	// Ttl Override for the broker-side cache TTL of resolved auth material.
 	Ttl *string `json:"ttl,omitempty"`
-}
-
-// Capabilities defines model for Capabilities.
-type Capabilities struct {
-	Add  *[]string `json:"add,omitempty"`
-	Drop *[]string `json:"drop,omitempty"`
 }
 
 // ChangePasswordRequest defines model for ChangePasswordRequest.
@@ -873,11 +837,11 @@ type ClaimResponse struct {
 
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
-	Env             *[]EnvVar        `json:"env,omitempty"`
-	Image           string           `json:"image"`
-	ImagePullPolicy *string          `json:"imagePullPolicy,omitempty"`
-	Resources       ResourceQuota    `json:"resources"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	Env *[]EnvVar `json:"env,omitempty"`
+
+	// Image Canonical normalized OCI reference pinned by a lowercase SHA-256 digest. Mutable tags are rejected.
+	Image     string        `json:"image"`
+	Resources ResourceQuota `json:"resources"`
 }
 
 // ContextExecResponse defines model for ContextExecResponse.
@@ -1165,14 +1129,6 @@ type EgressProxyType string
 
 // EgressTLSMode defines model for EgressTLSMode.
 type EgressTLSMode string
-
-// EmptyDirMountSpec defines model for EmptyDirMountSpec.
-type EmptyDirMountSpec struct {
-	MountPath string `json:"mountPath"`
-
-	// SizeLimit Optional size limit for the Kubernetes emptyDir volume.
-	SizeLimit *string `json:"sizeLimit,omitempty"`
-}
 
 // EnvVar defines model for EnvVar.
 type EnvVar struct {
@@ -1508,19 +1464,6 @@ type Identity struct {
 	Provider  string `json:"provider"`
 }
 
-// LabelSelector defines model for LabelSelector.
-type LabelSelector struct {
-	MatchExpressions *[]LabelSelectorRequirement `json:"matchExpressions,omitempty"`
-	MatchLabels      *map[string]string          `json:"matchLabels,omitempty"`
-}
-
-// LabelSelectorRequirement defines model for LabelSelectorRequirement.
-type LabelSelectorRequirement struct {
-	Key      string    `json:"key"`
-	Operator string    `json:"operator"`
-	Values   *[]string `json:"values,omitempty"`
-}
-
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
 	Email    openapi_types.Email `json:"email"`
@@ -1603,30 +1546,6 @@ type NetworkEgressPolicy struct {
 	TrafficRules *[]TrafficRule `json:"trafficRules,omitempty"`
 }
 
-// NodeAffinity defines model for NodeAffinity.
-type NodeAffinity struct {
-	PreferredDuringSchedulingIgnoredDuringExecution *[]PreferredSchedulingTerm `json:"preferredDuringSchedulingIgnoredDuringExecution,omitempty"`
-	RequiredDuringSchedulingIgnoredDuringExecution  *NodeSelector              `json:"requiredDuringSchedulingIgnoredDuringExecution,omitempty"`
-}
-
-// NodeSelector defines model for NodeSelector.
-type NodeSelector struct {
-	NodeSelectorTerms *[]NodeSelectorTerm `json:"nodeSelectorTerms,omitempty"`
-}
-
-// NodeSelectorRequirement defines model for NodeSelectorRequirement.
-type NodeSelectorRequirement struct {
-	Key      string    `json:"key"`
-	Operator string    `json:"operator"`
-	Values   *[]string `json:"values,omitempty"`
-}
-
-// NodeSelectorTerm defines model for NodeSelectorTerm.
-type NodeSelectorTerm struct {
-	MatchExpressions *[]NodeSelectorRequirement `json:"matchExpressions,omitempty"`
-	MatchFields      *[]NodeSelectorRequirement `json:"matchFields,omitempty"`
-}
-
 // ObservabilityEventSource defines model for ObservabilityEventSource.
 type ObservabilityEventSource string
 
@@ -1668,45 +1587,11 @@ type PlaceholderSubstitutionProjection struct {
 	Replacements *[]PlaceholderReplacement `json:"replacements,omitempty"`
 }
 
-// PodAffinity defines model for PodAffinity.
-type PodAffinity struct {
-	PreferredDuringSchedulingIgnoredDuringExecution *[]WeightedPodAffinityTerm `json:"preferredDuringSchedulingIgnoredDuringExecution,omitempty"`
-	RequiredDuringSchedulingIgnoredDuringExecution  *[]PodAffinityTerm         `json:"requiredDuringSchedulingIgnoredDuringExecution,omitempty"`
-}
-
-// PodAffinityTerm defines model for PodAffinityTerm.
-type PodAffinityTerm struct {
-	LabelSelector *LabelSelector `json:"labelSelector,omitempty"`
-	Namespaces    *[]string      `json:"namespaces,omitempty"`
-	TopologyKey   string         `json:"topologyKey"`
-}
-
-// PodSpecOverride defines model for PodSpecOverride.
-type PodSpecOverride struct {
-	Affinity           *Affinity            `json:"affinity,omitempty"`
-	EmptyDirMounts     *[]EmptyDirMountSpec `json:"emptyDirMounts,omitempty"`
-	NodeSelector       *map[string]string   `json:"nodeSelector,omitempty"`
-	ServiceAccountName *string              `json:"serviceAccountName,omitempty"`
-	Tolerations        *[]Toleration        `json:"tolerations,omitempty"`
-}
-
-// PoolStrategy defines model for PoolStrategy.
-type PoolStrategy struct {
-	MaxIdle int32 `json:"maxIdle"`
-	MinIdle int32 `json:"minIdle"`
-}
-
 // PortSpec defines model for PortSpec.
 type PortSpec struct {
 	EndPort  *int32  `json:"endPort,omitempty"`
 	Port     int32   `json:"port"`
 	Protocol *string `json:"protocol,omitempty"`
-}
-
-// PreferredSchedulingTerm defines model for PreferredSchedulingTerm.
-type PreferredSchedulingTerm struct {
-	Preference NodeSelectorTerm `json:"preference"`
-	Weight     int32            `json:"weight"`
 }
 
 // ProcessType defines model for ProcessType.
@@ -1882,7 +1767,7 @@ type ResizeContextRequest struct {
 
 // ResourceQuota defines model for ResourceQuota.
 type ResourceQuota struct {
-	// EphemeralStorage Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
+	// EphemeralStorage Immutable RootFS block-device size. Defaults to 8Gi when omitted; it must be an exact byte quantity between 300Mi and 1Ti and aligned to 4096 bytes.
 	EphemeralStorage *string `json:"ephemeralStorage,omitempty"`
 
 	// Memory Memory limit used by default when a sandbox claim does not provide a memory override. It cannot exceed the platform sandbox maximum, which defaults to 16Gi. Sandbox0 derives the internal CPU limit from platform configuration.
@@ -1963,7 +1848,7 @@ type Sandbox struct {
 	// Paused True when status is paused.
 	Paused bool `json:"paused"`
 
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
@@ -2162,7 +2047,7 @@ type SandboxConfig struct {
 	HardTtl *int32                `json:"hard_ttl,omitempty"`
 	Network *SandboxNetworkPolicy `json:"network,omitempty"`
 
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 	Services  *[]SandboxAppService   `json:"services,omitempty"`
 
@@ -2360,7 +2245,7 @@ type SandboxRefreshRequest struct {
 	Duration *int32 `json:"duration,omitempty"`
 }
 
-// SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
+// SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
 type SandboxResourceConfig struct {
 	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 16Gi. The same maximum applies to template defaults and every sandbox lifecycle operation.
 	Memory *string `json:"memory,omitempty"`
@@ -2534,46 +2419,28 @@ type SandboxSummary struct {
 	UpdatedAt         time.Time              `json:"updated_at"`
 }
 
-// SandboxTemplateCondition defines model for SandboxTemplateCondition.
-type SandboxTemplateCondition struct {
-	LastTransitionTime *time.Time `json:"lastTransitionTime,omitempty"`
-	Message            *string    `json:"message,omitempty"`
-	Reason             *string    `json:"reason,omitempty"`
-	Status             *string    `json:"status,omitempty"`
-	Type               *string    `json:"type,omitempty"`
-}
-
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	ClusterId     *string               `json:"clusterId,omitempty"`
 	Description   *string               `json:"description,omitempty"`
 	DisplayName   *string               `json:"displayName,omitempty"`
 	EnvVars       *map[string]string    `json:"envVars,omitempty"`
-	MainContainer *ContainerSpec        `json:"mainContainer,omitempty"`
+	MainContainer ContainerSpec         `json:"mainContainer"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
-	Pod           *PodSpecOverride      `json:"pod,omitempty"`
-	Pool          *PoolStrategy         `json:"pool,omitempty"`
 	Tags          *[]string             `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
 type SandboxTemplateStatus struct {
-	ActiveCount *int32                      `json:"activeCount,omitempty"`
-	Conditions  *[]SandboxTemplateCondition `json:"conditions,omitempty"`
-
 	// Creation Asynchronous creation status for templates built from a sandbox.
 	// Traditional image-based templates omit this object and are ready
-	// immediately after creation. Ready means the template is visible in at
-	// least one data-plane cluster and the claim API accepts it; when the
-	// pool is zero, it does not imply that a sandbox image has already been
-	// pulled.
-	Creation       *TemplateCreationStatus `json:"creation,omitempty"`
-	IdleCount      *int32                  `json:"idleCount,omitempty"`
-	LastUpdateTime *time.Time              `json:"lastUpdateTime"`
+	// immediately after creation. Ready means the regional template source
+	// has been committed and the claim API may consume it.
+	Creation *TemplateCreationStatus `json:"creation,omitempty"`
 }
 
-// SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-// Note: env_vars only affect new processes. webhook is not included as it requires restart.
+// SandboxUpdateConfig Durable lifecycle and service fields that can be updated without replacing
+// the current runtime allocation. Network policy uses the dedicated network
+// endpoint. Environment, resource, and webhook changes require a new runtime.
 type SandboxUpdateConfig struct {
 	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
 	// make an inactive sandbox available. This setting does not control platform-initiated
@@ -2582,18 +2449,9 @@ type SandboxUpdateConfig struct {
 	// `503 sandbox_resume_failed` when that resume attempt has ended unsuccessfully.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
-	// EnvVars Sandbox-level environment variables used as defaults for new procd-managed
-	// processes. Omitting this field preserves the existing environment map; passing
-	// an empty object clears it.
-	EnvVars *map[string]string `json:"env_vars,omitempty"`
-
 	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
-	HardTtl *int32                `json:"hard_ttl,omitempty"`
-	Network *SandboxNetworkPolicy `json:"network,omitempty"`
-
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
-	Resources *SandboxResourceConfig `json:"resources,omitempty"`
-	Services  *[]SandboxAppService   `json:"services,omitempty"`
+	HardTtl  *int32               `json:"hard_ttl,omitempty"`
+	Services *[]SandboxAppService `json:"services,omitempty"`
 
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`
@@ -2601,31 +2459,10 @@ type SandboxUpdateConfig struct {
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
 type SandboxUpdateRequest struct {
-	// Config Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-	// Note: env_vars only affect new processes. webhook is not included as it requires restart.
+	// Config Durable lifecycle and service fields that can be updated without replacing
+	// the current runtime allocation. Network policy uses the dedicated network
+	// endpoint. Environment, resource, and webhook changes require a new runtime.
 	Config *SandboxUpdateConfig `json:"config,omitempty"`
-}
-
-// SeccompProfile defines model for SeccompProfile.
-type SeccompProfile struct {
-	LocalhostProfile *string            `json:"localhostProfile,omitempty"`
-	Type             SeccompProfileType `json:"type"`
-}
-
-// SeccompProfileType defines model for SeccompProfile.Type.
-type SeccompProfileType string
-
-// SecurityContext defines model for SecurityContext.
-type SecurityContext struct {
-	AllowPrivilegeEscalation *bool            `json:"allowPrivilegeEscalation,omitempty"`
-	AppArmorProfile          *AppArmorProfile `json:"appArmorProfile,omitempty"`
-	Capabilities             *Capabilities    `json:"capabilities,omitempty"`
-	Privileged               *bool            `json:"privileged,omitempty"`
-	ReadOnlyRootFilesystem   *bool            `json:"readOnlyRootFilesystem,omitempty"`
-	RunAsGroup               *int64           `json:"runAsGroup,omitempty"`
-	RunAsNonRoot             *bool            `json:"runAsNonRoot,omitempty"`
-	RunAsUser                *int64           `json:"runAsUser,omitempty"`
-	SeccompProfile           *SeccompProfile  `json:"seccompProfile,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.
@@ -3390,17 +3227,12 @@ type TemplateCreateRequest struct {
 
 // TemplateCreationStatus Asynchronous creation status for templates built from a sandbox.
 // Traditional image-based templates omit this object and are ready
-// immediately after creation. Ready means the template is visible in at
-// least one data-plane cluster and the claim API accepts it; when the
-// pool is zero, it does not imply that a sandbox image has already been
-// pulled.
+// immediately after creation. Ready means the regional template source
+// has been committed and the claim API may consume it.
 type TemplateCreationStatus struct {
-	CapturedAt  *time.Time `json:"capturedAt,omitempty"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
-	Message     *string    `json:"message,omitempty"`
-
-	// OutputImage Optional digest-pinned image produced by image-publisher backends. Runtime-native block-COW captures omit this field.
-	OutputImage *string                     `json:"outputImage,omitempty"`
+	CapturedAt  *time.Time                  `json:"capturedAt,omitempty"`
+	CompletedAt *time.Time                  `json:"completedAt,omitempty"`
+	Message     *string                     `json:"message,omitempty"`
 	Reason      *string                     `json:"reason,omitempty"`
 	Stage       TemplateCreationStatusStage `json:"stage"`
 	StartedAt   *time.Time                  `json:"startedAt,omitempty"`
@@ -3417,34 +3249,21 @@ type TemplateCreationStatusState string
 type TemplateFromSandboxCreateRequest struct {
 	SandboxId string `json:"sandbox_id"`
 
-	// SpecOverrides Safe template fields that may override values inherited from the source
-	// sandbox's originating template. Pool defaults to zero idle sandboxes
-	// when omitted.
+	// SpecOverrides Safe template fields that may override values inherited from the source sandbox's originating template.
 	SpecOverrides *TemplateFromSandboxSpecOverrides `json:"spec_overrides,omitempty"`
 	TemplateId    string                            `json:"template_id"`
 }
 
-// TemplateFromSandboxSpecOverrides Safe template fields that may override values inherited from the source
-// sandbox's originating template. Pool defaults to zero idle sandboxes
-// when omitted.
+// TemplateFromSandboxSpecOverrides Safe template fields that may override values inherited from the source sandbox's originating template.
 type TemplateFromSandboxSpecOverrides struct {
-	Description *string       `json:"description,omitempty"`
-	DisplayName *string       `json:"displayName,omitempty"`
-	Pool        *PoolStrategy `json:"pool,omitempty"`
-	Tags        *[]string     `json:"tags,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	DisplayName *string   `json:"displayName,omitempty"`
+	Tags        *[]string `json:"tags,omitempty"`
 }
 
 // TemplateUpdateRequest defines model for TemplateUpdateRequest.
 type TemplateUpdateRequest struct {
 	Spec SandboxTemplateSpec `json:"spec"`
-}
-
-// Toleration defines model for Toleration.
-type Toleration struct {
-	Effect   *string `json:"effect,omitempty"`
-	Key      *string `json:"key,omitempty"`
-	Operator *string `json:"operator,omitempty"`
-	Value    *string `json:"value,omitempty"`
 }
 
 // TrafficRule defines model for TrafficRule.
@@ -3565,12 +3384,6 @@ type WebhookConfig struct {
 
 	// WatchDir Optional. When set, procd subscribes to file events under this directory (same semantics as the file watch WebSocket API) and emits file.modified events.
 	WatchDir *string `json:"watch_dir,omitempty"`
-}
-
-// WeightedPodAffinityTerm defines model for WeightedPodAffinityTerm.
-type WeightedPodAffinityTerm struct {
-	PodAffinityTerm PodAffinityTerm `json:"podAffinityTerm"`
-	Weight          int32           `json:"weight"`
 }
 
 // APIKeyID defines model for APIKeyID.

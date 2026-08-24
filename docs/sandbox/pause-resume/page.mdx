@@ -1,267 +1,189 @@
 # Pause And Resume
 
-Sandbox0 can pause an idle sandbox without deleting it. Pause checkpoints the writable root filesystem, releases the runtime pod, and keeps the sandbox identity and durable state. Resume creates a new runtime generation and restores the latest rootfs checkpoint.
-
-Use this page when you need to:
-
-- pause a sandbox explicitly
-- resume a paused sandbox explicitly
-- understand how `ttl`, `auto_resume`, service routes, and SSH interact with pause state
-- inspect whether a sandbox is running or paused
+Sandbox0 can release runtime compute without deleting a sandbox. Pause
+publishes the writable block-COW RootFS head and retires the current runtime
+allocation. Resume claims a fresh resource-neutral carrier and starts a new
+runtime generation from the latest committed head.
 
 <Callout variant="info">
-Pause is a runtime lifecycle operation. It checkpoints the writable rootfs and deletes the runtime pod; it does not freeze cgroups or preserve running processes, memory, sockets, PID state, or live REPL sessions.
-</Callout>
-
-<Callout variant="warning">
-Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. Pause saves the writable rootfs checkpoint and releases the runtime pod; it does not preserve process state.
+Pause preserves files, identity, and durable configuration. It does not
+preserve processes, memory, sockets, PIDs, open file descriptors, or live REPL
+connections.
 </Callout>
 
 ## What Persists
 
-| State | Across pause/resume | After sandbox delete or `hard_ttl` |
-|-------|---------------------|-------------------------------------|
-| Sandbox identity and configuration | Preserved | Deleted |
-| Writable root filesystem | Latest checkpoint is restored | Deleted with the sandbox identity |
-| Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
+| State | Across a successful pause/resume | After delete or `hard_ttl` |
+| --- | --- | --- |
+| Sandbox ID and configuration | Preserved | Deleted |
+| Writable RootFS | Latest committed generation is restored | Deleted with the sandbox |
+| Named RootFS snapshots | Preserved independently until deleted/expired | Follow snapshot retention |
+| Processes, memory, sockets, and live sessions | Not preserved | Deleted |
+| `runtime_id` | Replaced | Removed |
+| `runtime_generation` | Incremented on resume | Removed |
 
-The rootfs checkpoint covers files written inside the sandbox filesystem. It is tied to the sandbox lifecycle. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
+The writable RootFS is a block-COW filesystem. `/tmp`, `/var/tmp`, workspace
+paths, and other ordinary RootFS paths persist after a successful checkpoint.
+Virtual mounts such as `/proc`, `/dev`, and `/sys` are recreated for each
+runtime generation. Do not treat process state under virtual filesystems as
+durable data.
 
-On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
+For named restore points, fork, and rebase, see
+[Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-## Pause A Sandbox
-
-Pause a sandbox to release compute while keeping its identity, configuration, services, and latest writable rootfs checkpoint available for a later resume.
-
-The pause request is asynchronous. Poll sandbox details until `status` is `paused` and `paused` is `true` before treating the checkpoint as resume-ready.
-
-| Situation | Behavior |
-|-----------|----------|
-| Pause request accepted | The API returns the current committed state while checkpoint upload and runtime pod deletion continue |
-| Pause not yet committed | Sandbox details still show the previous committed state, usually `running` |
-| File, context, service, or SSH access during a transition | The request uses the committed runtime generation or waits for the transaction, then continues after resume |
-| Runtime access reaches an automatic TTL pause before commit | Sandbox0 cancels the automatic pause and continues on the existing runtime generation |
-| Runtime access reaches an explicit pause | The explicit pause commits; access can then resume the sandbox when auto-resume is allowed |
-
-`pausing` and `resuming` are not caller-visible states. A lifecycle transaction in progress is not a `409 Conflict`; that status is reserved for actual policy or state conflicts such as disabled auto-resume, non-restartable routes, quota limits, deletion, or paused-only operations.
-
-## Runtime Failure Recovery
-
-Sandbox0 uses the durable pause flow to replace a failed runtime.
-
-| Failure or condition | Recovery behavior |
-|----------------------|-------------------|
-| `procd` exits unexpectedly, including OOM | Manager starts a non-cancelable recovery pause; ctld checkpoints the terminated containerd snapshot, then manager atomically commits the new rootfs head and paused state before deleting the old pod |
-| Runtime liveness failure is transient | The existing runtime is not replaced |
-| Runtime liveness fails continuously for 90 seconds | Manager starts the same durable pause flow and reconstructs the sandbox with a new `runtime_generation` |
-| Runtime Pod disappears, including while manager is restarting | Manager confirms the absence through the Kubernetes API and reconstructs the same sandbox identity from its last committed rootfs head. A periodic anti-entropy scan covers missed Pod events |
-| Kubernetes API is unavailable | Manager waits and retries; API unavailability is never treated as proof that a runtime is missing |
-| Runtime cannot produce a checkpoint within the bounded attempt | Recovery keeps the last committed rootfs head and replaces the stuck runtime |
-| Explicit delete or `hard_ttl` occurs | Deletion takes precedence over crash recovery |
-
-Recovery is independent of the sandbox `auto_resume` access policy. A supported runtime request waits for recovery to commit, then resumes when auto-resume is allowed.
-
-<Callout variant="warning">
-Recovering the latest writes requires the terminated containerd snapshot to remain available on the same node. If the old pod or snapshot disappears first, Sandbox0 falls back to the last committed rootfs checkpoint and records degraded recovery. Files written after that checkpoint may be lost.
-</Callout>
+## Pause Transaction
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
 </Endpoint>
 
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Pause requested")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `client.pause_sandbox(sandbox.id)
-print("Pause requested")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `await client.sandboxes.pause(sandbox.id);
-console.log("Pause requested");`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox pause sb_abc123`
-    }
-  ]}
-/>
+```bash
+s0 sandbox pause sb_abc123
+```
 
-## Resume A Sandbox
+Pause is asynchronous:
 
-Resume a sandbox that was paused manually or by TTL expiry.
+1. manager records planned retirement for the exact sandbox generation,
+   allocation, slot, writer grant, and resource lease;
+2. manager requests an idempotent stop for the exact Nomad allocation;
+3. the elected ctld primary fences guest writes, syncs and seals the local
+   block branch, and publishes immutable generation descriptors;
+4. PostgreSQL atomically advances the RootFS head and commits the sandbox as
+   paused; and
+5. the plugin-independent terminal reconciler proves runsc, writer, mount,
+   network state, allocation directory, and lease cgroup absent before
+   returning node capacity.
 
-| Situation | Restore behavior |
-|-----------|------------------|
-| Normal resume | Creates a runtime pod from the current template image and restores the latest committed rootfs checkpoint |
-| Restore fails against the current template image | Retries once with the checkpoint's recorded base image digest; kubelet manages that image normally |
-| Existing runtime pod is terminal | Waits for crash recovery to commit, then restores the recovered rootfs head |
-| Terminated snapshot is unavailable | Restores the last committed checkpoint |
+The initial response can report `starting`/`paused: false` while this work
+continues. Poll sandbox details until `status` is `paused` and `paused` is
+`true` before treating the checkpoint as resume-ready.
 
-## Persistent And Ephemeral Paths
+```bash
+s0 sandbox get sb_abc123
+```
 
-The writable rootfs persists across pause and resume except for runtime-owned ephemeral paths:
+`pausing` is an internal lifecycle transaction, not a public status. Repeating
+the pause request is safe: retries recover the same durable operation instead
+of creating a second RootFS publication.
 
-- `/tmp` is recreated from the clean carrier or template state. Files written there do not survive pause and resume.
-- `/var/tmp` remains part of the persistent rootfs.
-- Other writable rootfs paths, such as `/root` and workspace directories, remain persistent.
+If S3 or PostgreSQL is unavailable after local seal, Sandbox0 keeps the exact
+retirement retryable and keeps its capacity fenced. It does not silently mark
+the sandbox paused or release a writer before the regional transaction commits.
 
-This policy is applied while saving checkpoints, restoring checkpoint layers, and capturing incremental baselines. Sandbox0 also filters `/tmp` from older checkpoint layers during restore. The first restore of a large older checkpoint can still take time because the layer must be read once; the next pause writes a checkpoint without those `/tmp` contents.
-
-<Callout variant="warning">
-Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path.
-</Callout>
+## Resume Transaction
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
 </Endpoint>
 
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `_, err := client.ResumeSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Resume requested")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `client.resume_sandbox(sandbox.id)
-print("Resume requested")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `await client.sandboxes.resume(sandbox.id);
-console.log("Resume requested");`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox resume sb_abc123`
-    }
-  ]}
-/>
+```bash
+s0 sandbox resume sb_abc123
+```
 
-## Inspect Pause State
+Resume:
 
-After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
+1. locks the paused sandbox and reserves the next runtime generation;
+2. resolves the same attested image/platform and latest committed RootFS head;
+3. atomically leases a compatible ready carrier and exact node CPU/memory;
+4. asks ctld to attach RootFS, prepare the lease cgroup, and apply network
+   policy;
+5. starts stock runsc and procd; and
+6. commits `running` only after an authenticated first-command readiness proof.
 
-During asynchronous pause, `paused` remains `false` and `status` continues to reflect the cached runtime Pod state, usually `running`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
+Resume returns only after the new command-ready binding commits. The new
+`runtime_id` names a different physical allocation and `runtime_generation`
+increases by one.
 
-During resume, callers may wait while Sandbox0 creates and initializes a new runtime generation. After the resume transaction commits, `status` is `running`, `paused` is `false`, and `runtime_generation` has advanced. If an automatic pause is canceled before commit, `status` remains `running`, `paused` remains `false`, and `runtime_generation` does not change.
+A resume can fail as unavailable when there is no compatible carrier, node
+capacity, NBD device, node channel, or object-store access. The sandbox remains
+paused and its committed RootFS head is unchanged.
 
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `sb, err := client.GetSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("paused=%v\n", sb.Paused)
-fmt.Printf("status=%s\n", sb.Status)
-fmt.Printf("runtime_generation=%d\n", sb.RuntimeGeneration)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `sb = client.get_sandbox(sandbox.id)
+## Runtime Failure Recovery
+
+A crash is not treated as a successful pause.
+
+| Condition | Behavior |
+| --- | --- |
+| Driver process disappears | Regional reconciliation remains authoritative; cleanup does not depend on the plugin returning. |
+| runsc/procd or allocation fails without a planned retirement | ctld fences the old writer and the regional transaction crash-abandons its uncommitted branch. Resume uses the last committed RootFS head. |
+| ctld primary fails | The synchronized standby is promoted and resumes the durable node operation. |
+| Manager restarts | Another replica recovers the PostgreSQL lifecycle/terminal operation. |
+| Node reboots | Only the authenticated successor boot for the same durable node UID can reconcile the old incarnation, after proving old runtime state absent. |
+| Nomad server record is purged early | The trusted exact client allocation directory and node absence proof remain required; server-record absence alone is insufficient. |
+
+<Callout variant="warning">
+Writes after the last committed RootFS head can be lost after an unplanned
+runtime or node failure. Local dirty tail is never promoted without the exact
+writer and publication proof. Use explicit pause, snapshot, or application
+sync points when a workflow needs a stronger durability point.
+</Callout>
+
+Capacity stays reserved until terminal proof is complete. This avoids running a
+replacement sandbox on CPU, memory, writer, mount, or network state that may
+still belong to the failed generation.
+
+## Inspect State
+
+Sandbox details expose:
+
+- `status` and the equivalent `paused` convenience boolean;
+- empty `runtime_id` while paused;
+- the current `runtime_generation`;
+- soft and hard expiration timestamps; and
+- the durable sandbox configuration.
+
+```python
+sb = client.get_sandbox("sb_abc123")
 print("paused=", sb.paused)
 print("status=", sb.status)
-print("runtime_generation=", sb.runtime_generation)`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const sb = await client.sandboxes.get(sandbox.id);
-console.log("paused=", sb.paused);
-console.log("status=", sb.status);
-console.log("runtimeGeneration=", sb.runtimeGeneration);`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox get sb_abc123`
-    }
-  ]}
-/>
+print("runtime_id=", sb.runtime_id)
+print("runtime_generation=", sb.runtime_generation)
+```
+
+During planned pause, the previous generation is not reusable once retirement
+begins. During resume, supported access may wait for the lifecycle transaction;
+callers never receive a mixed old/new runtime binding.
 
 ## TTL And Auto Resume
 
-`ttl` and `hard_ttl` interact with pause differently:
-
 | Field | Behavior |
-|-------|----------|
-| `ttl` | Runtime soft timeout. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute. |
-| `hard_ttl` | Sandbox hard timeout. When it expires, Sandbox0 deletes the sandbox identity and durable state, including rootfs checkpoints, even if the sandbox is already paused. |
+| --- | --- |
+| `ttl` | Soft runtime timeout. Expiry requests the same planned pause transaction. |
+| `hard_ttl` | Hard sandbox timeout. Expiry durably requests deletion of identity and RootFS state. |
 
-`auto_resume` is the sandbox-level gate for whether inbound access can wake a paused sandbox:
+`auto_resume` controls whether supported inbound access may wake a paused
+sandbox. It does not disable platform-initiated crash fencing.
 
-- when `auto_resume` is `true`, supported access paths can resume the sandbox automatically
-- when `auto_resume` is `false`, you must call resume explicitly
+Common auto-resume entry points include sandbox runtime APIs, SSH, and
+restartable public routes configured with `resume: true`. A public route also
+needs sandbox `auto_resume: true` and a restartable `cmd` or `function` runtime.
+Public URLs stay stable across runtime generations.
 
-Common auto-resume entrypoints:
+Caller-visible temporary results are:
 
-- sandbox runtime APIs such as files, contexts, and supervised sessions
-- service routes configured with `resume: true`; public service requests require sandbox `auto_resume: true`, route `resume: true`, and a restartable service runtime (`cmd` or `function`)
-- SSH access through Sandbox0 SSH Gateway
+- `503 unavailable` with `sandbox is waking up`: an accepted resume has not yet
+  committed; and
+- `503 sandbox_resume_failed`: that resume attempt ended unsuccessfully.
 
-For a paused sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved rootfs checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted or `hard_ttl` expires.
-
-Supported runtime access distinguishes an accepted resume from a failed attempt:
-
-- `503 unavailable` with `sandbox is waking up` means the accepted lifecycle transition has not committed yet; poll sandbox details before retrying the runtime request
-- `503 sandbox_resume_failed` with `sandbox resume failed` means that resume attempt ended unsuccessfully; clients may perform a bounded retry, but should not treat the failed attempt as still in progress
-
-Running PIDs, memory, sockets, and client attachments do not survive pause. A [supervised session](/docs/sandbox/session-supervisor) keeps its logical identity and retained journal, then follows its `runtime_recovery` policy in the new runtime generation.
-
-See [Sandbox Services](/docs/sandbox/services), [Sandbox Functions](/docs/sandbox/functions), and [SSH](/docs/sandbox/ssh) for the user-facing flows.
+A supervised session preserves its logical identity and retained event journal,
+then follows its `runtime_recovery` policy in the new generation. Its old PID
+and sockets do not survive.
 
 ## Typical Pattern
 
-For long-running workflows, a common pattern is:
-
-1. claim a sandbox with `ttl` set
-2. do active work through contexts and files
-3. let idle sandboxes pause automatically
-4. resume on the next user action, SSH session, or service route hit
-5. use `hard_ttl` to cap the maximum lifetime
+1. claim a sandbox with a soft `ttl`;
+2. perform active work and create explicit snapshots at important milestones;
+3. let the sandbox pause after idle time;
+4. resume explicitly or through an allowed access path; and
+5. set `hard_ttl` when durable state must have a maximum lifetime.
 
 ## Next Steps
 
 <CardGroup>
-  <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">
-    Run REPL and command contexts inside a sandbox and stream process output.
-  </Card>
-
-  <Card title="Supervised Sessions" href="/docs/sandbox/session-supervisor" cta="Continue">
-    Preserve logical process identity and replayable events across reconnects and runtime replacement.
-  </Card>
-
-  <Card title="Files" href="/docs/sandbox/files" cta="Continue">
-    Read, write, watch, and manage files inside a sandbox workspace.
-  </Card>
-
   <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
-    Create named restore points and fork sandbox rootfs state.
+    Create named restore points, fork running or paused state, and rebase a paused RootFS.
+  </Card>
+  <Card title="Supervised Sessions" href="/docs/sandbox/session-supervisor" cta="Continue">
+    Preserve logical process identity and replayable events across reconnects.
   </Card>
 </CardGroup>

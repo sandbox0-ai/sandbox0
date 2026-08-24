@@ -95,7 +95,11 @@ The browser API is provided by Steel Browser and Chromium inside the image:
 | Downloads and files | Steel file service path `/files` |
 | Live view | Steel `debugUrl`, `sessionViewerUrl`, and cast WebSocket routes |
 
-The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: browser` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed Steel Browser image.
+Platform administrators manage a public `browser` template through the normal
+template API with a system identity. Self-hosted teams can instead create a
+private template that pins a reviewed Steel Browser digest. Warm capacity comes
+from the shared resource-neutral carrier pool and is not configured on this
+template.
 
 ## Next Steps
 

@@ -17,71 +17,22 @@ package driver
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
-
-func TestStartTaskReturnsWarmSlotAndServesControlSocket(t *testing.T) {
-	tempDir := t.TempDir()
-	runner := newFakeRunsc()
-	config := defaultPluginConfig()
-	config.ControlDir = filepath.Join(tempDir, "control")
-	config.AllowedRootfsDir = filepath.Join(tempDir, "rootfs")
-
-	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return runner }).(*Plugin)
-	plugin.config = config
-
-	taskConfig := &drivers.TaskConfig{
-		ID:       "plugin-task-1",
-		AllocID:  "plugin-alloc-1",
-		Name:     "warm-slot",
-		AllocDir: filepath.Join(tempDir, "alloc"),
-	}
-	if err := taskConfig.EncodeConcreteDriverConfig(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
-		t.Fatalf("encode task config: %v", err)
-	}
-	handle, network, err := plugin.StartTask(taskConfig)
-	if err != nil {
-		t.Fatalf("StartTask() error = %v", err)
-	}
-	if network != nil {
-		t.Fatalf("network = %+v, want nil", network)
-	}
-	var persisted PersistedState
-	if err := handle.GetDriverState(&persisted); err != nil {
-		t.Fatalf("get persisted state: %v", err)
-	}
-	if persisted.Phase != phaseWarm || persisted.ContainerID == "" {
-		t.Fatalf("persisted state = %+v, want warm slot with container ID", persisted)
-	}
-
-	client := unixHTTPClient(controlSocketPath(config.ControlDir, taskConfig.ID))
-	response, err := awaitControl(client, http.MethodGet, "/status", nil, 2*time.Second)
-	if err != nil {
-		t.Fatalf("control status: %v", err)
-	}
-	var status statusResponse
-	if err := json.Unmarshal(response, &status); err != nil {
-		t.Fatalf("decode control status: %v", err)
-	}
-	if status.Phase != string(phaseWarm) || status.ContainerID != persisted.ContainerID {
-		t.Fatalf("status = %+v, want warm slot with persisted container ID", status)
-	}
-	if err := plugin.DestroyTask(taskConfig.ID, true); err != nil {
-		t.Fatalf("DestroyTask() error = %v", err)
-	}
-}
 
 func TestDestroyTaskRetainsHandleUntilCleanupSucceeds(t *testing.T) {
 	runner := newFakeRunsc()
@@ -115,30 +66,6 @@ func TestDestroyTaskRetainsHandleUntilCleanupSucceeds(t *testing.T) {
 	}
 }
 
-func TestControlClaimStartsSlot(t *testing.T) {
-	fixture := newTestFixture(t)
-	if err := fixture.handle.Prepare(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
-		t.Fatalf("Prepare() error = %v", err)
-	}
-	go fixture.handle.ServeControl(context.Background())
-	client := unixHTTPClient(fixture.socketPath)
-	body := fmt.Sprintf(`{"rootfs_path":%q,"policy_token":"token","writer_epoch":"epoch"}`, fixture.rootfs)
-	response, err := awaitControl(client, http.MethodPut, "/claim", []byte(body), 2*time.Second)
-	if err != nil {
-		t.Fatalf("control claim: %v", err)
-	}
-	var result claimResponse
-	if err := json.Unmarshal(response, &result); err != nil {
-		t.Fatalf("decode control claim: %v", err)
-	}
-	if result.Phase != string(phaseActive) {
-		t.Fatalf("claim response = %+v, want active", result)
-	}
-	if err := fixture.handle.Close(true); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-}
-
 func TestSetConfigRejectsNilConfig(t *testing.T) {
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
 	if err := plugin.SetConfig(nil); err == nil {
@@ -146,27 +73,72 @@ func TestSetConfigRejectsNilConfig(t *testing.T) {
 	}
 }
 
-func TestStartTaskRejectsDevSmokeByDefault(t *testing.T) {
-	tempDir := t.TempDir()
+func TestSetConfigLoadsProcdInternalJWTPublicKey(t *testing.T) {
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
-	config := defaultPluginConfig()
-	config.ControlDir = filepath.Join(tempDir, "control")
-	config.AllowedRootfsDir = filepath.Join(tempDir, "rootfs")
-	plugin.config = config
+	config := validPluginConfigForSetConfig(t)
+	var encoded []byte
+	if err := base.MsgPackEncode(&encoded, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.SetConfig(&base.Config{PluginConfig: encoded}); err != nil {
+		t.Fatalf("SetConfig() error = %v", err)
+	}
+	if plugin.config.ProcdInternalJWTPublicKeyFile != config.ProcdInternalJWTPublicKeyFile {
+		t.Fatalf("configured procd public key path = %q", plugin.config.ProcdInternalJWTPublicKeyFile)
+	}
+}
 
-	taskConfig := &drivers.TaskConfig{
-		ID:       "dev-smoke-rejected",
-		AllocID:  "alloc",
-		Name:     "warm-slot",
-		AllocDir: filepath.Join(tempDir, "alloc"),
+func TestSetConfigRejectsInvalidProcdInternalJWTPublicKey(t *testing.T) {
+	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
+	config := validPluginConfigForSetConfig(t)
+	if err := os.WriteFile(config.ProcdInternalJWTPublicKeyFile, []byte("not a public key\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if err := taskConfig.EncodeConcreteDriverConfig(TaskConfig{
-		Command: "/bin/sh", WaitForClaim: false, RootfsPath: "/bin",
-	}); err != nil {
-		t.Fatalf("encode task config: %v", err)
+	var encoded []byte
+	if err := base.MsgPackEncode(&encoded, config); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, err := plugin.StartTask(taskConfig); err == nil || !strings.Contains(err.Error(), "dev_smoke_enabled") {
-		t.Fatalf("StartTask() error = %v, want dev smoke rejection", err)
+	err := plugin.SetConfig(&base.Config{PluginConfig: encoded})
+	if err == nil || !strings.Contains(err.Error(), "load procd internal JWT public key") {
+		t.Fatalf("SetConfig() error = %v", err)
+	}
+}
+
+func validPluginConfigForSetConfig(t *testing.T) *PluginConfig {
+	t.Helper()
+	directory := t.TempDir()
+	_, publicKey, err := internalauth.GenerateEd25519KeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPath := filepath.Join(directory, "data-public.pem")
+	if err := os.WriteFile(publicKeyPath, publicKey, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := defaultPluginConfig()
+	config.RootFSAuthorityURL = "https://manager.internal:9444"
+	config.RootFSAuthorityCAFile = filepath.Join(directory, "ca.pem")
+	config.RootFSAuthorityClientCertFile = filepath.Join(directory, "client.pem")
+	config.RootFSAuthorityClientKeyFile = filepath.Join(directory, "client-key.pem")
+	config.RootFSAuthorityTokenFile = filepath.Join(directory, "manager.token")
+	config.ProcdInternalJWTPublicKeyFile = publicKeyPath
+	config.RuntimeSlotClusterID = "cluster-1"
+	return config
+}
+
+func TestRunscOperationTimeoutBounds(t *testing.T) {
+	if got := defaultPluginConfig().RunscOperationTimeoutSeconds; got != 30 {
+		t.Fatalf("default runsc operation timeout = %d seconds", got)
+	}
+	for _, seconds := range []int64{1, 30, 120} {
+		if err := validateRunscOperationTimeout(seconds); err != nil {
+			t.Fatalf("validateRunscOperationTimeout(%d) error = %v", seconds, err)
+		}
+	}
+	for _, seconds := range []int64{0, 121} {
+		if err := validateRunscOperationTimeout(seconds); err == nil {
+			t.Fatalf("validateRunscOperationTimeout(%d) succeeded", seconds)
+		}
 	}
 }
 

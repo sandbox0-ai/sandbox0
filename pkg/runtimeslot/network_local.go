@@ -186,9 +186,9 @@ func (c *RuntimeSlotNetworkClient) Prepare(
 	if err := token.Validate(); err != nil {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("validate ctld network policy token: %w: %w", err, errdefs.ErrUnavailable)
 	}
-	if token.PodUID != request.Request.AllocationID || token.ClaimID != request.Request.ClaimID ||
+	if token.AllocationID != request.Request.AllocationID || token.ClaimID != request.Request.ClaimID ||
 		token.PolicyDigest != request.Request.PolicyDigest || token.NetNSIdentity != request.Request.NetNSIdentity ||
-		token.PodSandboxID != RuntimeSlotNetworkIncarnationID(request.Request) {
+		token.NetworkIncarnationID != RuntimeSlotNetworkIncarnationID(request.Request) {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("ctld network policy token belongs to another request: %w", errdefs.ErrUnavailable)
 	}
 	return token, nil

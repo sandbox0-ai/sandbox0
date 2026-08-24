@@ -36,8 +36,8 @@ type runtimeSlotJournalRegistration = nomadruntime.RuntimeSlotRegistration
 const runtimeSlotJournalVersion = nomadruntime.RuntimeSlotJournalVersion
 
 func newRootFSRuntime(config *PluginConfig, _ hclog.Logger) (RootFSRuntime, error) {
-	if config == nil || !config.RootFSEnabled {
-		return nil, nil
+	if config == nil {
+		return nil, fmt.Errorf("plugin config is required")
 	}
 	return nomadruntime.NewClient(config.RootFSNodeSocket)
 }
@@ -47,8 +47,8 @@ func newNodeRuntimeClient(socketPath string) (*nomadruntime.Client, error) {
 }
 
 func validateRootFSConfig(config *PluginConfig) error {
-	if config == nil || !config.RootFSEnabled {
-		return nil
+	if config == nil {
+		return fmt.Errorf("plugin config is required")
 	}
 	for name, value := range map[string]string{
 		"rootfs_node_socket": config.RootFSNodeSocket,

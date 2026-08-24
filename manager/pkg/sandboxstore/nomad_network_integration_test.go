@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -322,14 +322,14 @@ func nomadNetworkMutationToken(
 	mutation *NomadSandboxNetworkMutation,
 ) rootfshandoff.NetworkPolicyToken {
 	return rootfshandoff.NetworkPolicyToken{
-		PodUID: slot.AllocationID,
-		PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		AllocationID: slot.AllocationID,
+		NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: slot.ID, ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
 			NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
 			NetNSIdentity: slot.NetNSIdentity,
 		}),
 		ClaimID: mutation.ClaimID, NetworkEpoch: 2,
-		PolicyDigest: mutation.DesiredPolicyDigest, PodIP: "192.0.2.2",
+		PolicyDigest: mutation.DesiredPolicyDigest, SourceIP: "192.0.2.2",
 		CtldGeneration: "ctld-generation-2", NetNSIdentity: slot.NetNSIdentity,
 	}
 }

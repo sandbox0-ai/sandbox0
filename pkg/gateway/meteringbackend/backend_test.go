@@ -4,9 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestOpenConfigPreservesGatewayMeteringConfiguration(t *testing.T) {
@@ -19,7 +18,7 @@ func TestOpenConfigPreservesGatewayMeteringConfiguration(t *testing.T) {
 		SandboxStateTable:   "sandbox_state",
 		StorageStateTable:   "storage_state",
 		SkipSchemaMigration: true,
-		ConnectTimeout:      metav1.Duration{Duration: 3 * time.Second},
+		ConnectTimeout:      config.Duration{Duration: 3 * time.Second},
 	}
 
 	got := openConfig(cfg)

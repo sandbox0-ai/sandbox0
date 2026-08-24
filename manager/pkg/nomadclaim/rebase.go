@@ -13,12 +13,11 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const defaultNomadPausedRebaseRollbackTTL = 24 * time.Hour
@@ -39,8 +38,8 @@ func (s *Service) RebaseSandboxRootFS(
 	if err != nil {
 		return nil, mapNomadPausedRebaseError("load paused rebase sandbox", sandboxID, err)
 	}
-	if record == nil || record.TeamID != teamID || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+	if record == nil || record.TeamID != teamID {
+		return nil, apierror.NewNotFound("sandbox", sandboxID)
 	}
 
 	target, err := s.pausedRebaseWorkerTarget(ctx, record, normalized.OperationID,
@@ -56,7 +55,7 @@ func (s *Service) RebaseSandboxRootFS(
 	}, target)
 	if err != nil {
 		if candidate != nil && candidate.Rejected {
-			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return nil, apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox termination rejected the RootFS rebase"))
 		}
 		if candidate != nil && candidate.Completed {
@@ -66,7 +65,7 @@ func (s *Service) RebaseSandboxRootFS(
 		return nil, err
 	}
 	if candidate.Rejected {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return nil, apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("sandbox termination rejected the RootFS rebase"))
 	}
 	return nomadPausedRebaseResponse(candidate), nil
@@ -93,7 +92,7 @@ func (s *Service) CompleteSandboxRootFSRebase(ctx context.Context, sandboxID str
 	if err != nil {
 		return fmt.Errorf("load Nomad paused-rebase sandbox for recovery: %w", err)
 	}
-	if record == nil || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
+	if record == nil ||
 		record.TeamID == "" || record.ClusterID != lifecycle.WorkerClusterID {
 		return fmt.Errorf("pending Nomad paused rebase lost its sandbox identity")
 	}
@@ -122,11 +121,11 @@ func (s *Service) completeNomadPausedRebase(
 		return nil, mapNomadPausedRebaseError("request Nomad paused rebase", storeRequest.SandboxID, err)
 	}
 	if err := validateNomadPausedRebaseCandidate(candidate, storeRequest); err != nil {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, storeRequest.SandboxID, err)
+		return nil, apierror.NewConflict("sandbox", storeRequest.SandboxID, err)
 	}
 	workerRequest, err := nomadPausedRebaseWorkerRequest(storeRequest.OperationID, candidate)
 	if err != nil {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, storeRequest.SandboxID, err)
+		return nil, apierror.NewConflict("sandbox", storeRequest.SandboxID, err)
 	}
 	if candidate.Rejected {
 		if candidate.WorkerAcknowledgedAt.IsZero() {
@@ -300,8 +299,8 @@ func (s *Service) pausedRebaseWorkerTarget(
 		lifecycle.TargetBaseArtifactDigest != targetBaseArtifactDigest ||
 		!lifecycle.RollbackExpiresAt.Equal(rollbackExpiresAt) ||
 		lifecycle.WorkerClusterID != record.ClusterID || lifecycle.WorkerNodeID == "" || lifecycle.WorkerNodeUID == "" {
-		return protocol.NodeChannelTarget{}, k8serrors.NewConflict(
-			schema.GroupResource{Resource: "sandbox"}, record.ID,
+		return protocol.NodeChannelTarget{}, apierror.NewConflict(
+			"sandbox", record.ID,
 			fmt.Errorf("signed operation already identifies a different RootFS rebase"),
 		)
 	}
@@ -430,7 +429,7 @@ func validatePendingNomadPausedRebaseLifecycle(lifecycle *sandboxstore.SandboxLi
 		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.FromGeneration != lifecycle.ToGeneration ||
 		lifecycle.FromRuntimeNamespace != "" || lifecycle.FromRuntimeID != "" || lifecycle.ToRuntimeNamespace != "" ||
 		lifecycle.ToRuntimeID != "" || lifecycle.TargetSandboxID != "" || len(lifecycle.TargetRecordDigest) != 0 ||
-		lifecycle.TargetGenerationID == "" || lifecycle.ExpectedHeadLayerID == "" ||
+		lifecycle.TargetGenerationID == "" || lifecycle.ExpectedGenerationID == "" ||
 		lifecycle.SourceBaseArtifactDigest == "" || lifecycle.TargetBaseArtifactDigest == "" ||
 		lifecycle.WorkerClusterID == "" || lifecycle.WorkerNodeID == "" || lifecycle.WorkerNodeUID == "" ||
 		lifecycle.RollbackExpiresAt.IsZero() {
@@ -441,16 +440,16 @@ func validatePendingNomadPausedRebaseLifecycle(lifecycle *sandboxstore.SandboxLi
 		sandboxstore.SandboxLifecyclePhaseBarriered,
 		sandboxstore.SandboxLifecyclePhasePublishing,
 		sandboxstore.SandboxLifecyclePhaseCommitting:
-		if lifecycle.PreparedHeadLayerID != "" || len(lifecycle.WorkerProofDigest) != 0 {
+		if lifecycle.PreparedGenerationID != "" || len(lifecycle.WorkerProofDigest) != 0 {
 			return errors.New("active Nomad paused-rebase lifecycle contains committed output")
 		}
 	case sandboxstore.SandboxLifecyclePhaseCommitted:
-		if lifecycle.PreparedHeadLayerID != lifecycle.TargetGenerationID ||
+		if lifecycle.PreparedGenerationID != lifecycle.TargetGenerationID ||
 			len(lifecycle.WorkerProofDigest) != sha256.Size || !lifecycle.WorkerAcknowledgedAt.IsZero() {
 			return errors.New("committed Nomad paused-rebase lifecycle is not pending acknowledgement")
 		}
 	case sandboxstore.SandboxLifecyclePhaseAborted:
-		if lifecycle.PreparedHeadLayerID != "" || len(lifecycle.WorkerProofDigest) != sha256.Size ||
+		if lifecycle.PreparedGenerationID != "" || len(lifecycle.WorkerProofDigest) != sha256.Size ||
 			!lifecycle.WorkerAcknowledgedAt.IsZero() || lifecycle.Error != "sandbox termination requested" {
 			return errors.New("rejected Nomad paused-rebase lifecycle is not pending acknowledgement")
 		}
@@ -487,14 +486,14 @@ func mapNomadPausedRebaseError(operation, sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound),
 		errors.Is(err, sandboxstore.ErrRootFSBaseArtifactNotFound):
-		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return apierror.NewNotFound("sandbox", sandboxID)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxRebaseConflict),
 		errors.Is(err, sandboxstore.ErrNomadSandboxRebaseNotReady),
 		errors.Is(err, sandboxstore.ErrRootFSGenerationConflict),
 		errors.Is(err, sandboxstore.ErrRootFSBaseArtifactConflict),
 		errors.Is(err, sandboxstore.ErrRootFSFilesystemConflict),
 		errors.Is(err, sandboxstore.ErrRootFSWriterGrantConflict):
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	default:
 		return fmt.Errorf("%w: %s: %v", service.ErrSandboxLifecycleUnavailable, operation, err)
 	}
@@ -502,7 +501,7 @@ func mapNomadPausedRebaseError(operation, sandboxID string, err error) error {
 
 func mapNomadPausedRebaseDispatchError(sandboxID, action string, err error) error {
 	if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) || errdefs.IsFailedPrecondition(err) {
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	}
 	return fmt.Errorf("%w: %s paused-rebase worker: %v", service.ErrSandboxLifecycleUnavailable, action, err)
 }

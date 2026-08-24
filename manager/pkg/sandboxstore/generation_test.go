@@ -1,13 +1,134 @@
 package sandboxstore
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	"github.com/stretchr/testify/require"
 )
+
+// PutReadyRootFSBaseArtifactRequest and the method below exist only in the
+// sandboxstore test binary. Production publication must use the fenced durable
+// importer and PublishReadyRootFSImport CAS.
+type PutReadyRootFSBaseArtifactRequest struct {
+	ArtifactDigest   string
+	SourceOCIRef     string
+	SourceOCIDigest  string
+	BaseBlockRoot    string
+	FormatGeneration int
+	Platform         RootFSArtifactPlatform
+	ProcdProtocol    string
+	ProcdDigest      string
+	LogicalSizeBytes int64
+	Descriptor       []byte
+}
+
+func (s *PGSandboxStore) PutReadyRootFSBaseArtifact(
+	ctx context.Context,
+	req *PutReadyRootFSBaseArtifactRequest,
+) (*RootFSBaseArtifact, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("rootfs generation store is not configured")
+	}
+	normalized, err := validateReadyRootFSBaseArtifact(req)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO manager.rootfs_base_artifacts (
+			artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
+			format_generation, oci_os, oci_architecture, oci_variant,
+			procd_protocol, procd_digest, logical_size_bytes,
+			state, descriptor, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ready', $12, NOW(), NOW())
+		ON CONFLICT (artifact_digest) DO NOTHING
+	`, normalized.ArtifactDigest, normalized.SourceOCIRef, normalized.SourceOCIDigest,
+		normalized.BaseBlockRoot, normalized.FormatGeneration, normalized.Platform.OS,
+		normalized.Platform.Architecture, normalized.Platform.Variant,
+		normalized.ProcdProtocol, normalized.ProcdDigest, normalized.LogicalSizeBytes,
+		normalized.Descriptor)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx,
+		rootFSBaseArtifactSelectSQL()+" WHERE artifact_digest = $1", normalized.ArtifactDigest))
+	if err != nil {
+		return nil, err
+	}
+	if !rootFSBaseArtifactMatchesRequest(artifact, normalized) {
+		return nil, ErrRootFSBaseArtifactConflict
+	}
+	return artifact, nil
+}
+
+func validateReadyRootFSBaseArtifact(req *PutReadyRootFSBaseArtifactRequest) (*PutReadyRootFSBaseArtifactRequest, error) {
+	if req == nil {
+		return nil, fmt.Errorf("rootfs base artifact request is required")
+	}
+	normalized := *req
+	normalized.ArtifactDigest = strings.TrimSpace(req.ArtifactDigest)
+	normalized.SourceOCIRef = strings.TrimSpace(req.SourceOCIRef)
+	normalized.SourceOCIDigest = strings.TrimSpace(req.SourceOCIDigest)
+	normalized.BaseBlockRoot = strings.TrimSpace(req.BaseBlockRoot)
+	normalized.Descriptor = append([]byte(nil), req.Descriptor...)
+	for field, value := range map[string]string{
+		"source_oci_ref": normalized.SourceOCIRef, "base_block_root": normalized.BaseBlockRoot,
+	} {
+		if value == "" {
+			return nil, fmt.Errorf("%s is required", field)
+		}
+	}
+	for field, value := range map[string]string{
+		"artifact_digest": normalized.ArtifactDigest, "source_oci_digest": normalized.SourceOCIDigest,
+	} {
+		if _, err := digest.Parse(value); err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
+		}
+	}
+	if normalized.FormatGeneration <= 0 {
+		return nil, fmt.Errorf("format_generation must be positive")
+	}
+	if err := normalized.Platform.Validate(); err != nil {
+		return nil, err
+	}
+	if err := rootfsimporter.ValidateProcdProtocol(normalized.ProcdProtocol); err != nil {
+		return nil, err
+	}
+	procdDigest, err := digest.Parse(normalized.ProcdDigest)
+	if err != nil || rootfsimporter.ValidateArtifactSHA256Digest(procdDigest) != nil {
+		return nil, fmt.Errorf("procd_digest must be canonical SHA-256")
+	}
+	if len(normalized.Descriptor) == 0 || len(normalized.Descriptor) > RootFSGenerationDescriptorMaxBytes {
+		return nil, fmt.Errorf("descriptor must contain 1..%d bytes", RootFSGenerationDescriptorMaxBytes)
+	}
+	descriptor, err := rootfsblock.DecodeDescriptor(normalized.Descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("descriptor: %w", err)
+	}
+	if descriptor.MappingRoot.RootDigest != normalized.BaseBlockRoot || descriptor.CompositeTail != nil {
+		return nil, fmt.Errorf("base artifact descriptor must point at the exact S3-materialized base block root")
+	}
+	if normalized.LogicalSizeBytes != 0 && normalized.LogicalSizeBytes != descriptor.LogicalSizeBytes {
+		return nil, fmt.Errorf("logical_size_bytes must match the immutable descriptor")
+	}
+	normalized.LogicalSizeBytes = descriptor.LogicalSizeBytes
+	return &normalized, nil
+}
+
+func rootFSBaseArtifactMatchesRequest(artifact *RootFSBaseArtifact, req *PutReadyRootFSBaseArtifactRequest) bool {
+	return artifact != nil && req != nil && artifact.ArtifactDigest == req.ArtifactDigest &&
+		artifact.SourceOCIRef == req.SourceOCIRef && artifact.SourceOCIDigest == req.SourceOCIDigest &&
+		artifact.BaseBlockRoot == req.BaseBlockRoot && artifact.FormatGeneration == req.FormatGeneration &&
+		artifact.Platform == req.Platform && artifact.ProcdProtocol == req.ProcdProtocol &&
+		artifact.ProcdDigest == req.ProcdDigest && artifact.LogicalSizeBytes == req.LogicalSizeBytes &&
+		artifact.State == RootFSBaseArtifactStateReady && string(artifact.Descriptor) == string(req.Descriptor)
+}
 
 func TestValidateReadyRootFSBaseArtifactRequiresImmutableDigests(t *testing.T) {
 	req := readyRootFSBaseArtifactTestRequest()
@@ -58,6 +179,8 @@ func readyRootFSBaseArtifactTestRequest() *PutReadyRootFSBaseArtifactRequest {
 		BaseBlockRoot:    rootDigest,
 		FormatGeneration: 1,
 		Platform:         RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
+		ProcdProtocol:    "sandbox0.procd.test.v1",
+		ProcdDigest:      "sha256:" + strings.Repeat("c", 64),
 		Descriptor:       descriptor,
 	}
 }

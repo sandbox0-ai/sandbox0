@@ -409,7 +409,7 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: netnsIdentity},
 		Identity: rootfshandoff.Identity{
 			NodeUID: request.NodeUID, BootID: request.NodeBootID, RuntimeGeneration: "7",
-			PodUID: request.AllocationID, PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
+			AllocationID: request.AllocationID, NetworkIncarnationID: "allocation-network-1", TaskName: protocol.NomadTaskName,
 			SlotNonce: request.SlotID, ClaimID: "claim-1", RootFSID: "filesystem-1",
 			WriterEpoch: 9, WriterGrantID: request.WriterGrantID,
 		},
@@ -534,7 +534,7 @@ func testNodeRuntimeCleansUnconsumedWriterFromJournal(t *testing.T, retireKind s
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: netnsIdentity},
 		Identity: rootfshandoff.Identity{
 			NodeUID: request.NodeUID, BootID: request.NodeBootID, RuntimeGeneration: "7",
-			PodUID: request.AllocationID, PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
+			AllocationID: request.AllocationID, NetworkIncarnationID: "allocation-network-1", TaskName: protocol.NomadTaskName,
 			SlotNonce: request.SlotID, ClaimID: "claim-unconsumed", RootFSID: "filesystem-1",
 			WriterEpoch: 9, WriterGrantID: request.WriterGrantID,
 		},
@@ -674,7 +674,7 @@ func TestNodeRuntimeFinishesMatchingPlannedSessionBeforeProof(t *testing.T) {
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: netnsIdentity},
 		Identity: rootfshandoff.Identity{
 			NodeUID: request.NodeUID, BootID: request.NodeBootID, RuntimeGeneration: "7",
-			PodUID: request.AllocationID, PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
+			AllocationID: request.AllocationID, NetworkIncarnationID: "allocation-network-1", TaskName: protocol.NomadTaskName,
 			SlotNonce: request.SlotID, ClaimID: "claim-1", RootFSID: "filesystem-1",
 			WriterEpoch: 9, WriterGrantID: request.WriterGrantID,
 		},
@@ -735,7 +735,7 @@ func TestNodeRuntimeRejectsJournalFallbackWhenAnotherWriterOwnsSlot(t *testing.T
 		fakeRootFSRuntime: &fakeRootFSRuntime{},
 		recovery: []rootfssession.RecoverySession{{
 			Stage: rootfshandoff.StageRequest{Identity: rootfshandoff.Identity{
-				SlotNonce: request.SlotID, PodUID: request.AllocationID,
+				SlotNonce: request.SlotID, AllocationID: request.AllocationID,
 				WriterGrantID: "another-grant",
 			}},
 		}},
@@ -977,7 +977,7 @@ func TestNodeRuntimeCapturesOnlyTheExactLiveRunningForkWriter(t *testing.T) {
 		BindingVersion:    rootfshandoff.WriterBindingVersion,
 		InitialGeneration: "generation-source-1",
 		Identity: rootfshandoff.Identity{
-			SlotNonce: registration.SlotID, PodUID: registration.AllocationID,
+			SlotNonce: registration.SlotID, AllocationID: registration.AllocationID,
 			NodeUID: "node-uid-1", BootID: registration.NodeBootID,
 			RootFSID: "filesystem-1", WriterGrantID: "writer-grant-1", WriterEpoch: 7,
 		},
@@ -1096,9 +1096,9 @@ func TestNodeRuntimeRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t *testing
 	stage := rootfshandoff.StageRequest{
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: identity},
 		Identity: rootfshandoff.Identity{
-			SlotNonce: request.SlotID, PodUID: request.AllocationID, NodeUID: request.NodeUID,
+			SlotNonce: request.SlotID, AllocationID: request.AllocationID, NodeUID: request.NodeUID,
 			BootID: request.NodeBootID, WriterGrantID: request.WriterGrantID,
-			ContainerName: protocol.NomadTaskName,
+			TaskName: protocol.NomadTaskName,
 		},
 	}
 	consumer := &rootfssession.ConsumerRegistration{
@@ -1160,12 +1160,12 @@ func testLocalCrashProof(
 		InitialGeneration: stage.InitialGeneration, InitialBlockHead: stage.Generation.CurrentBlockHead,
 		HeadAction: rootfshandoff.CrashFenceHeadKeepInitial, NodeUID: stage.Identity.NodeUID,
 		BootID: stage.Identity.BootID, RuntimeGeneration: stage.Identity.RuntimeGeneration,
-		HostMountNamespaceID: hostMountNamespace, PodUID: stage.Identity.PodUID,
-		PodSandboxID: stage.Identity.PodSandboxID, ContainerName: stage.Identity.ContainerName,
+		HostMountNamespaceID: hostMountNamespace, AllocationID: stage.Identity.AllocationID,
+		NetworkIncarnationID: stage.Identity.NetworkIncarnationID, TaskName: stage.Identity.TaskName,
 		SlotNonce: stage.Identity.SlotNonce, ActiveKey: consumer.ActiveKey,
 		ConsumerBound: true, ContainerID: consumer.ContainerID,
 		ContainerAbsent: true, TaskAbsent: true, FrontendSnapshotAbsent: true, StableMountAbsent: true,
-		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: observedAt,
+		RootFSState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: observedAt,
 	}
 }
 
@@ -1193,11 +1193,11 @@ func testUnboundLocalCrashProof(
 		InitialGeneration: stage.InitialGeneration, InitialBlockHead: stage.Generation.CurrentBlockHead,
 		HeadAction: rootfshandoff.CrashFenceHeadKeepInitial, NodeUID: stage.Identity.NodeUID,
 		BootID: stage.Identity.BootID, RuntimeGeneration: stage.Identity.RuntimeGeneration,
-		HostMountNamespaceID: hostMountNamespace, PodUID: stage.Identity.PodUID,
-		PodSandboxID: stage.Identity.PodSandboxID, ContainerName: stage.Identity.ContainerName,
+		HostMountNamespaceID: hostMountNamespace, AllocationID: stage.Identity.AllocationID,
+		NetworkIncarnationID: stage.Identity.NetworkIncarnationID, TaskName: stage.Identity.TaskName,
 		SlotNonce: stage.Identity.SlotNonce, ActiveKey: stage.Identity.ClaimID,
 		ContainerAbsent: true, TaskAbsent: true, FrontendSnapshotAbsent: true, StableMountAbsent: true,
-		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: observedAt,
+		RootFSState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: observedAt,
 	}
 }
 

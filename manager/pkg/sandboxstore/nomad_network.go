@@ -12,11 +12,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -501,7 +501,7 @@ func nomadSandboxNetworkMutationCancellationReason(
 	slotErr error,
 	mutation *NomadSandboxNetworkMutation,
 ) (string, error) {
-	if record == nil || mutation == nil || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if record == nil || mutation == nil ||
 		record.DesiredState != SandboxDesiredStateActive || !record.DeletedAt.IsZero() {
 		return "sandbox is no longer active", nil
 	}
@@ -547,7 +547,7 @@ func cancelNomadSandboxNetworkMutation(ctx context.Context, tx pgx.Tx, operation
 
 func cancelPendingNomadSandboxNetworkMutationForSandbox(
 	ctx context.Context,
-	exec rootFSStateExecutor,
+	exec sqlExecutor,
 	sandboxID, reason string,
 ) error {
 	reason = strings.TrimSpace(reason)
@@ -585,9 +585,9 @@ func validateNomadSandboxNetworkPolicyToken(
 	if err := token.Validate(); err != nil {
 		return fmt.Errorf("applied network policy token: %w", err)
 	}
-	if mutation == nil || token.PodUID != mutation.AllocationID || token.ClaimID != mutation.ClaimID ||
+	if mutation == nil || token.AllocationID != mutation.AllocationID || token.ClaimID != mutation.ClaimID ||
 		token.NetNSIdentity != mutation.NetNSIdentity || token.PolicyDigest != mutation.DesiredPolicyDigest ||
-		token.PodSandboxID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		token.NetworkIncarnationID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: mutation.SlotID, ClusterID: mutation.ClusterID,
 			AllocationID: mutation.AllocationID, NodeID: mutation.NodeID,
 			NodeUID: mutation.NodeUID, NodeBootID: mutation.NodeBootID,
@@ -596,7 +596,7 @@ func validateNomadSandboxNetworkPolicyToken(
 		return fmt.Errorf("%w: applied token belongs to another runtime slot",
 			ErrNomadSandboxNetworkMutationConflict)
 	}
-	if _, err := protocol.NomadProcdAddress(token.PodIP); err != nil {
+	if _, err := protocol.NomadProcdAddress(token.SourceIP); err != nil {
 		return fmt.Errorf("applied network policy token: %w", err)
 	}
 	return nil

@@ -22,47 +22,6 @@ type nomadPausedRebaseStoreFixture struct {
 	targetArtifact *RootFSBaseArtifact
 }
 
-func TestRebaseWorkerIdentityMigrationAbortsLegacyActiveOperationIntegration(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPoolThrough(t, "00034")
-	record := rootFSTestSandboxRecord("sandbox-rebase-worker-migration", "team-rebase")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
-	record.DesiredState = SandboxDesiredStatePaused
-	_, err := pool.Exec(ctx, `
-		INSERT INTO manager.sandboxes (
-			sandbox_id, team_id, user_id, template_id, template_name,
-			template_namespace, runtime_backend, desired_state, config, template_spec
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '{}'::jsonb)
-	`, record.ID, record.TeamID, record.UserID, record.TemplateID,
-		record.TemplateName, record.TemplateNamespace, record.RuntimeBackend, record.DesiredState)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `
-		INSERT INTO manager.sandbox_lifecycle_txns (
-			txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
-			from_generation, to_generation, target_generation_id,
-			source_base_artifact_digest, target_base_artifact_digest,
-			expected_head_layer_id, rollback_expires_at
-		) VALUES ($1, $2, 'rebase', 'preparing', 'manual', FALSE, 1,
-			0, 0, $3, $4, $5, $6, NOW() + INTERVAL '1 hour')
-	`, "legacy-rebase-worker-operation", record.ID, "generation-target",
-		digest.FromString("legacy-source-base").String(), digest.FromString("legacy-target-base").String(),
-		"generation-source")
-	require.NoError(t, err)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
-
-	var phase, reason, workerNodeID string
-	var abortedAt *time.Time
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT phase, error, worker_node_id, aborted_at
-		FROM manager.sandbox_lifecycle_txns
-		WHERE txn_id = $1
-	`, "legacy-rebase-worker-operation").Scan(&phase, &reason, &workerNodeID, &abortedAt))
-	require.Equal(t, SandboxLifecyclePhaseAborted, phase)
-	require.Contains(t, reason, "pre-worker-identity")
-	require.Empty(t, workerNodeID)
-	require.NotNil(t, abortedAt)
-}
-
 func TestRequestNomadPausedRebaseRejectsChangedRetryIdentityIntegration(t *testing.T) {
 	fixture := newNomadPausedRebaseStoreFixture(t, "changed-retry")
 	deadline := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
@@ -270,7 +229,6 @@ func newNomadPausedRebaseStoreFixture(t *testing.T, suffix string) *nomadPausedR
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-rebase-"+suffix, "team-rebase")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.DesiredState = SandboxDesiredStatePaused
 	record.ClusterID = "cluster-rebase"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
@@ -348,7 +306,7 @@ func assertNomadPausedRebaseLifecycle(
 	var rollbackExpiresAt time.Time
 	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
 		SELECT phase, source_base_artifact_digest, target_base_artifact_digest,
-			target_generation_id, expected_head_layer_id, rollback_expires_at
+			target_generation_id, expected_generation_id, rollback_expires_at
 		FROM manager.sandbox_lifecycle_txns
 		WHERE txn_id = $1
 	`, operationID).Scan(

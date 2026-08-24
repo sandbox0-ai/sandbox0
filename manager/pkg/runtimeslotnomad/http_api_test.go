@@ -50,6 +50,7 @@ type nomadTestServerState struct {
 	serverPresent   bool
 	clientPresent   bool
 	gcNotEligible   bool
+	gcMissing       bool
 	stopCalls       int
 	gcCalls         int
 	lastIdempotency string
@@ -137,6 +138,19 @@ func TestHTTPAPIReturnsClientGCEligibilityFence(t *testing.T) {
 
 	err = api.GarbageCollectAllocation(t.Context(), testTarget())
 	require.ErrorIs(t, err, runtimeslotreconciler.ErrAllocationStillPresent)
+}
+
+func TestHTTPAPIResolvesAmbiguousClientGCMissingResponseByDirectObservation(t *testing.T) {
+	state := &nomadTestServerState{
+		token: "token", desiredStatus: "stop", serverPresent: true,
+		clientPresent: false, gcMissing: true,
+	}
+	server, resolver, _ := newNomadMTLSTestServer(t, state)
+	defer server.Close()
+	api, err := NewHTTPAPI(resolver)
+	require.NoError(t, err)
+
+	require.NoError(t, api.GarbageCollectAllocation(t.Context(), testTarget()))
 }
 
 func TestHTTPAPIRejectsWrongPeerAndResolverTarget(t *testing.T) {
@@ -242,6 +256,10 @@ func newNomadMTLSTestServer(
 				return
 			}
 			state.gcCalls++
+			if state.gcMissing {
+				http.Error(writer, "No such allocation on client, or allocation not eligible for GC", http.StatusInternalServerError)
+				return
+			}
 			if !state.clientPresent {
 				http.NotFound(writer, request)
 				return

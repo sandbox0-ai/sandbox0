@@ -236,14 +236,14 @@ func crashAbandonClientTestStage() rootfshandoff.StageRequest {
 		Parent:            "sha256:" + strings.Repeat("1", 64),
 		InitialGeneration: "generation-1",
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
-			PodUID: "allocation-1", PodSandboxID: "sandbox-1", ClaimID: "claim-1",
+			AllocationID: "allocation-1", NetworkIncarnationID: "sandbox-1", ClaimID: "claim-1",
 			NetworkEpoch: 1, PolicyDigest: "sha256:" + strings.Repeat("2", 64),
-			PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
+			SourceIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
 		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: "node-1", BootID: "boot-1", RuntimeGeneration: "1",
-			PodUID: "allocation-1", PodSandboxID: "sandbox-1", ContainerName: "slot",
-			Image: "image-1", Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			AllocationID: "allocation-1", NetworkIncarnationID: "sandbox-1", TaskName: "slot",
+			SourceOCIDigest: "image-1", RootFSDriver: "nomad-driver", RuntimeClass: "sandbox0-gvisor",
 			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
 			RootFSID: "rootfs-1", WriterEpoch: 3, WriterGrantID: "grant-1",
 			WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest("writer-token"),

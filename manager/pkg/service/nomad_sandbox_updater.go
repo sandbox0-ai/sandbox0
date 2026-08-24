@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // NomadSandboxMutationStore is the durable transaction boundary used by
@@ -19,8 +17,9 @@ type NomadSandboxMutationStore interface {
 	WithSandboxLock(context.Context, string, func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error
 }
 
-// NomadSandboxUpdater persists runtime-neutral Nomad sandbox mutations. It
-// deliberately rejects updates that still lack explicit runtime orchestration.
+// NomadSandboxUpdater persists runtime-neutral Nomad sandbox mutations. Fields
+// that alter a running runtime remain fail-closed until their exact node-side
+// mutation has committed.
 type NomadSandboxUpdater struct {
 	store      NomadSandboxMutationStore
 	reader     *NomadSandboxReader
@@ -61,22 +60,19 @@ func (u *NomadSandboxUpdater) UpdateSandbox(
 	if config == nil {
 		return nil, fmt.Errorf("sandbox config is required")
 	}
-	if config.EnvVars != nil || config.Resources != nil || config.Network != nil || config.Services != nil {
-		return nil, fmt.Errorf("%w: Nomad env, resource, network, and service updates require runtime orchestration",
+	if config.EnvVars != nil || config.Resources != nil || config.Network != nil {
+		return nil, fmt.Errorf("%w: Nomad env, resource, and network updates require runtime orchestration",
 			ErrSandboxRuntimeUpdateUnavailable)
 	}
 	err := u.store.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-			return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
-		}
-		if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-			return fmt.Errorf("sandbox runtime backend changed during update")
+			return apierror.NewNotFound("sandbox", sandboxID)
 		}
 		if record.DesiredState == sandboxstore.SandboxDesiredStateTerminating {
-			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox termination is in progress"))
+			return apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("sandbox termination is in progress"))
 		}
 		if record.DesiredState != sandboxstore.SandboxDesiredStateActive && record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
-			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox state %s does not accept updates", record.DesiredState))
 		}
 		updated := cloneSandboxRecordForLifecycle(record)
@@ -105,8 +101,11 @@ func (u *NomadSandboxUpdater) UpdateSandbox(
 		if config.AutoResume != nil {
 			merged.AutoResume = cloneBoolPtr(config.AutoResume)
 		}
-		if merged.AutoResume != nil && !*merged.AutoResume && appservice.SandboxAppServicesHaveResumeRoute(merged.Services) {
-			return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
+		if config.Services != nil {
+			merged.Services = cloneSandboxAppServices(config.Services)
+		}
+		if err := NormalizeSandboxConfigForPersistence(merged); err != nil {
+			return err
 		}
 		updated.Config = *merged
 		return tx.SaveSandbox(lockCtx, updated)
@@ -118,7 +117,7 @@ func (u *NomadSandboxUpdater) UpdateSandbox(
 }
 
 // RefreshSandbox refreshes soft and hard expiration from one locked durable
-// record without consulting a runtime Pod.
+// record without consulting ephemeral runtime process state.
 func (u *NomadSandboxUpdater) RefreshSandbox(
 	ctx context.Context,
 	sandboxID string,
@@ -127,13 +126,10 @@ func (u *NomadSandboxUpdater) RefreshSandbox(
 	var plan sandboxRefreshPlan
 	err := u.store.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-			return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
-		}
-		if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-			return fmt.Errorf("sandbox runtime backend changed during refresh")
+			return apierror.NewNotFound("sandbox", sandboxID)
 		}
 		if record.DesiredState == sandboxstore.SandboxDesiredStateTerminating {
-			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox termination is in progress"))
+			return apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("sandbox termination is in progress"))
 		}
 		var err error
 		plan, err = buildSandboxRefreshPlan(record.Config, u.defaultTTL, u.now(), request)

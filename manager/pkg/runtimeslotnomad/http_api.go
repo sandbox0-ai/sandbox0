@@ -176,7 +176,15 @@ func (a *HTTPAPI) GarbageCollectAllocation(
 		return nil
 	}
 	message := strings.ToLower(string(payload))
-	if strings.Contains(message, "not eligible for gc") {
+	if strings.Contains(message, "no such allocation on client") ||
+		strings.Contains(message, "not eligible for gc") {
+		present, observeErr := a.ClientAllocationPresent(ctx, target)
+		if observeErr != nil {
+			return fmt.Errorf("resolve ambiguous Nomad client GC response: %w", observeErr)
+		}
+		if !present {
+			return nil
+		}
 		return runtimeslotreconciler.ErrAllocationStillPresent
 	}
 	return nomadResponseError("garbage collect client allocation", status, payload)

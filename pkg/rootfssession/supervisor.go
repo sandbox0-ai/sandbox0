@@ -12,7 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
-// RequestSource exposes tokenless durable Stage bindings from the Snapshotter
+// RequestSource exposes tokenless durable Stage bindings from the rootfs runtime
 // journal after regional writer lease recovery has completed.
 type RequestSource interface {
 	AttachableRequests(context.Context) ([]rootfshandoff.StageRequest, error)
@@ -35,8 +35,8 @@ type SupervisorConfig struct {
 }
 
 // Supervisor coalesces Stage notifications and periodically reconciles the
-// Snapshotter journal. It owns no lifecycle truth: Stage remains authoritative
-// in the Snapshotter, while Manager owns the physical device and mounts.
+// rootfs journal. It owns no lifecycle truth: Stage remains authoritative
+// in the rootfs runtime, while Manager owns the physical device and mounts.
 type Supervisor struct {
 	config  SupervisorConfig
 	trigger chan struct{}

@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // NomadSandboxRootFSStore is the durable block-COW product boundary used by
@@ -23,8 +22,8 @@ type NomadSandboxRootFSStore interface {
 }
 
 // NomadSandboxRootFSService exposes snapshots only for stable paused
-// block-COW heads. Running checkpoints remain owned by explicit Nomad
-// lifecycle orchestration rather than a Kubernetes runtime adapter.
+// block-COW heads. Running checkpoints remain owned by explicit lifecycle
+// orchestration.
 type NomadSandboxRootFSService struct {
 	store NomadSandboxRootFSStore
 	now   func() time.Time
@@ -80,7 +79,7 @@ func (s *NomadSandboxRootFSService) CreateSandboxRootFSSnapshot(
 			return err
 		}
 		if activeTxn != nil {
-			return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox lifecycle %s is %s", activeTxn.Kind, activeTxn.Phase))
 		}
 		creator := sandboxRootFSSnapshotCreator(s.store)
@@ -102,7 +101,7 @@ func (s *NomadSandboxRootFSService) CreateSandboxRootFSSnapshot(
 }
 
 // ListSandboxRootFSSnapshots lists public snapshots for one owned Nomad
-// sandbox and rejects mixed legacy storage records.
+// sandbox.
 func (s *NomadSandboxRootFSService) ListSandboxRootFSSnapshots(
 	ctx context.Context,
 	sandboxID, teamID string,
@@ -219,7 +218,7 @@ func (s *NomadSandboxRootFSService) RestoreSandboxRootFS(
 			return err
 		}
 		if activeTxn != nil {
-			return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox lifecycle %s is %s", activeTxn.Kind, activeTxn.Phase))
 		}
 		restorer := sandboxRootFSRestorer(s.store)
@@ -251,8 +250,8 @@ func (s *NomadSandboxRootFSService) requirePausedBlockSandbox(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	if filesystem == nil || filesystem.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 ||
-		strings.TrimSpace(filesystem.HeadGenerationID) == "" || strings.TrimSpace(filesystem.HeadLayerID) != "" {
+	if filesystem == nil ||
+		strings.TrimSpace(filesystem.HeadGenerationID) == "" {
 		return fmt.Errorf("%w: sandbox %s has no block-COW head", sandboxstore.ErrRootFSFilesystemNotFound, sandboxID)
 	}
 	return nil
@@ -262,16 +261,12 @@ func validateNomadRootFSSandboxRecord(record *sandboxstore.SandboxRecord, sandbo
 	if err := validateRootFSSandboxRecord(record, sandboxID, teamID, requirePaused); err != nil {
 		return err
 	}
-	if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
-			fmt.Errorf("sandbox is not owned by the Nomad runtime"))
-	}
 	return nil
 }
 
 func validateNomadRootFSSnapshot(snapshot *sandboxstore.RootFSSnapshot) error {
-	if snapshot == nil || snapshot.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 ||
-		strings.TrimSpace(snapshot.HeadGenerationID) == "" || strings.TrimSpace(snapshot.HeadLayerID) != "" {
+	if snapshot == nil ||
+		strings.TrimSpace(snapshot.HeadGenerationID) == "" {
 		return sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	return nil

@@ -14,26 +14,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/apply"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/conntrack"
 	networkmetering "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/metering"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/proxy"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/redirect"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/slotnetwork"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
 type Daemon struct {
@@ -43,11 +38,9 @@ type Daemon struct {
 	metricsServer            *http.Server
 	proxyServer              *proxy.Server
 	obsProvider              *observability.Provider
-	runtimeWatchTCPPorts     []int
 	runtimeSlotStatePath     string
 	runtimeSlotControlSocket string
 	runtimeSlotNetNSRoot     string
-	kubernetesPolicySource   bool
 	runtimeMu                sync.Mutex
 	conntrackCloser          runtimeResource
 	meteringCloser           runtimeResource
@@ -58,14 +51,9 @@ type Daemon struct {
 }
 
 type Options struct {
-	RuntimeWatchTCPPorts     []int
 	RuntimeSlotStatePath     string
 	RuntimeSlotControlSocket string
 	RuntimeSlotNetNSRoot     string
-	// RuntimeSlotsOnly disables the Kubernetes Pod/Service/Endpoints watcher.
-	// Nomad host deployments set this because their complete desired state is
-	// supplied by the durable runtime-slot registry.
-	RuntimeSlotsOnly bool
 }
 
 type runtimeResource interface {
@@ -98,11 +86,9 @@ func New(cfg *config.NetworkRuntimeConfig, logger *zap.Logger, obsProvider *obse
 		cfg:                      cfg,
 		logger:                   logger,
 		obsProvider:              obsProvider,
-		runtimeWatchTCPPorts:     append([]int(nil), options.RuntimeWatchTCPPorts...),
 		runtimeSlotStatePath:     strings.TrimSpace(options.RuntimeSlotStatePath),
 		runtimeSlotControlSocket: strings.TrimSpace(options.RuntimeSlotControlSocket),
 		runtimeSlotNetNSRoot:     strings.TrimSpace(options.RuntimeSlotNetNSRoot),
-		kubernetesPolicySource:   !options.RuntimeSlotsOnly,
 	}
 }
 
@@ -167,23 +153,6 @@ func (d *Daemon) shutdownContext() (context.Context, context.CancelFunc) {
 func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, proxyExitCh chan<- error) error {
 	if d.cfg.NodeName == "" {
 		return fmt.Errorf("node name is required")
-	}
-	var client kubernetes.Interface
-	var networkWatcher *watcher.Watcher
-	if d.kubernetesPolicySource {
-		k8sConfig, err := rest.InClusterConfig()
-		if err != nil {
-			return fmt.Errorf("load Kubernetes policy source config: %w", err)
-		}
-		s0k8s.ApplyDefaultRateLimit(k8sConfig)
-		if d.obsProvider != nil {
-			d.obsProvider.K8s.WrapConfig(k8sConfig)
-		}
-		client, err = kubernetes.NewForConfig(k8sConfig)
-		if err != nil {
-			return fmt.Errorf("create Kubernetes policy source client: %w", err)
-		}
-		networkWatcher = watcher.NewWatcher(client, d.cfg.ResyncPeriod.Duration, d.logger)
 	}
 	policyStore := policy.NewStore(d.logger)
 	platformState := newPlatformPolicyState(d.cfg, policyStore, d.logger)
@@ -275,41 +244,6 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 		}()
 	}
 
-	if networkWatcher != nil {
-		networkWatcher.SetSandboxHandlers(func(info *watcher.SandboxInfo) {
-			if info == nil {
-				return
-			}
-			d.logger.Info("Sandbox policy change observed",
-				zap.String("sandbox", info.Namespace+"/"+info.Name),
-				zap.String("pod_ip", info.PodIP),
-				zap.String("policy_hash", info.NetworkPolicyHash),
-			)
-			triggerSync()
-		}, func(info *watcher.SandboxInfo) {
-			if info != nil {
-				d.logger.Info("Sandbox policy delete observed",
-					zap.String("sandbox", info.Namespace+"/"+info.Name),
-					zap.String("pod_ip", info.PodIP),
-				)
-			}
-			triggerSync()
-		})
-		networkWatcher.SetServiceHandlers(func(*watcher.ServiceInfo) {
-			triggerSync()
-		}, func(*watcher.ServiceInfo) {
-			triggerSync()
-		})
-		networkWatcher.SetEndpointsHandlers(func(*watcher.EndpointsInfo) {
-			triggerSync()
-		}, func(*watcher.EndpointsInfo) {
-			triggerSync()
-		})
-		if err := networkWatcher.Start(ctx); err != nil {
-			return err
-		}
-	}
-
 	proxyOpts := []proxy.ServerOption{}
 	if quotaRepo != nil {
 		if strings.TrimSpace(d.cfg.RedisURL) == "" {
@@ -368,15 +302,10 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 	}
 
 	redirectManager := redirect.NewManager(redirect.Config{
-		PreferNFT:            d.cfg.PreferNFT != nil && *d.cfg.PreferNFT,
-		ProxyHTTPPort:        d.cfg.ProxyHTTPPort,
-		ProxyHTTPSPort:       d.cfg.ProxyHTTPSPort,
-		RuntimeWatchTCPPorts: d.runtimeWatchTCPPorts,
+		PreferNFT:      d.cfg.PreferNFT != nil && *d.cfg.PreferNFT,
+		ProxyHTTPPort:  d.cfg.ProxyHTTPPort,
+		ProxyHTTPSPort: d.cfg.ProxyHTTPSPort,
 	}, d.logger)
-	var patcher *apply.Patcher
-	if client != nil {
-		patcher = apply.NewPatcher(client, d.logger)
-	}
 
 	syncOnce := make(chan struct{}, 1)
 	go func() {
@@ -392,7 +321,7 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 				forceRedirectSync = true
 			case <-syncTrigger:
 			}
-			syncErr := d.syncRedirect(ctx, networkWatcher, runtimeSlotRegistry, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer, forceRedirectSync)
+			syncErr := d.syncRedirect(ctx, runtimeSlotRegistry, policyStore, platformState, redirectManager, tracker, conntrackManager, proxyServer, forceRedirectSync)
 			if syncErr == nil && forceRedirectSync && runtimeSlotRegistry != nil {
 				pruned, err := runtimeSlotRegistry.Prune(time.Now())
 				if err != nil {
@@ -600,7 +529,7 @@ func (d *Daemon) startRuntimeSlotNetworkControl(notify func()) (*slotnetwork.Reg
 	}
 	registry, err := slotnetwork.NewRegistry(slotnetwork.Config{
 		StatePath: d.runtimeSlotStatePath, NetNSRoot: d.runtimeSlotNetNSRoot,
-		NodeName: d.cfg.NodeName,
+		NodeID: d.cfg.NodeName,
 	}, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize runtime slot network registry: %w", err)
@@ -674,12 +603,10 @@ func closeRuntimeResource(resource runtimeResource) {
 
 func (d *Daemon) syncRedirect(
 	ctx context.Context,
-	networkWatcher *watcher.Watcher,
 	runtimeSlots *slotnetwork.Registry,
 	policyStore *policy.Store,
 	platformState *platformPolicyState,
 	redirectManager redirect.Manager,
-	patcher *apply.Patcher,
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
 	proxyServer *proxy.Server,
@@ -693,232 +620,104 @@ func (d *Daemon) syncRedirect(
 		}
 		daemonMetrics.RecordRedirectSync(result, time.Since(started))
 	}()
-	if redirectManager == nil || policyStore == nil {
-		return fmt.Errorf("missing redirect manager or policy store")
+	if redirectManager == nil || policyStore == nil || runtimeSlots == nil {
+		return fmt.Errorf("runtime-slot registry, redirect manager, and policy store are required")
 	}
-	// Redirect rules only need local source pods, while platform peer deny must
-	// know every active sandbox so cross-node private traffic is still blocked.
+
 	stageStarted := time.Now()
-	var kubernetesLocalSandboxes []*watcher.SandboxInfo
-	var kubernetesAllSandboxes []*watcher.SandboxInfo
-	var services []*watcher.ServiceInfo
-	var endpoints []*watcher.EndpointsInfo
-	if networkWatcher != nil {
-		kubernetesLocalSandboxes = networkWatcher.ListSandboxesByNode(d.cfg.NodeName)
-		kubernetesAllSandboxes = kubernetesLocalSandboxes
-		if d.cfg.NodeName != "" {
-			kubernetesAllSandboxes = networkWatcher.ListSandboxesByNode("")
-		}
-		services = networkWatcher.ListServices()
-		endpoints = networkWatcher.ListEndpoints()
-	}
-	runtimeSlotSandboxes := []*watcher.SandboxInfo(nil)
-	runtimeSlotRevision := uint64(0)
-	if runtimeSlots != nil {
-		var err error
-		runtimeSlotSandboxes, runtimeSlotRevision, err = runtimeSlots.Snapshot()
-		if err != nil {
-			return fmt.Errorf("snapshot runtime slot network policies: %w", err)
-		}
-		stats := runtimeSlots.Stats()
-		daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_warm", stats.Warm)
-		daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_claimed", stats.Claimed)
-		daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_terminal", stats.Terminal)
-		pendingRevisions := uint64(0)
-		if stats.Revision > stats.AppliedRevision {
-			pendingRevisions = stats.Revision - stats.AppliedRevision
-		}
-		daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_pending_revisions", int(pendingRevisions))
-	}
-	localSandboxes, err := mergeSandboxInputs(kubernetesLocalSandboxes, runtimeSlotSandboxes)
+	sandboxes, revision, err := runtimeSlots.Snapshot()
 	if err != nil {
-		return err
+		return fmt.Errorf("snapshot runtime-slot network policies: %w", err)
 	}
-	allSandboxes, err := mergeSandboxInputs(kubernetesAllSandboxes, runtimeSlotSandboxes)
-	if err != nil {
-		return err
+	stats := runtimeSlots.Stats()
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_warm", stats.Warm)
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_claimed", stats.Claimed)
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_terminal", stats.Terminal)
+	pendingRevisions := uint64(0)
+	if stats.Revision > stats.AppliedRevision {
+		pendingRevisions = stats.Revision - stats.AppliedRevision
 	}
-	sandboxIPs := make([]string, 0, len(localSandboxes))
-	for _, sandbox := range localSandboxes {
-		if sandbox.PodIP == "" {
-			continue
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_pending_revisions", int(pendingRevisions))
+
+	sourceIPs := make([]string, 0, len(sandboxes))
+	for _, sandbox := range sandboxes {
+		if sandbox != nil && sandbox.SourceIP != "" {
+			sourceIPs = append(sourceIPs, sandbox.SourceIP)
 		}
-		sandboxIPs = append(sandboxIPs, sandbox.PodIP)
 	}
 	daemonMetrics.RecordRedirectSyncStage("list_inputs", "success", time.Since(stageStarted))
-	daemonMetrics.SetRedirectSyncObjectCount("local_sandboxes", len(localSandboxes))
-	daemonMetrics.SetRedirectSyncObjectCount("total_sandboxes", len(allSandboxes))
-	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_sandboxes", len(runtimeSlotSandboxes))
-	daemonMetrics.SetRedirectSyncObjectCount("services", len(services))
-	daemonMetrics.SetRedirectSyncObjectCount("endpoints", len(endpoints))
-	daemonMetrics.SetRedirectSyncObjectCount("sandbox_ips", len(sandboxIPs))
+	daemonMetrics.SetRedirectSyncObjectCount("local_sandboxes", len(sandboxes))
+	daemonMetrics.SetRedirectSyncObjectCount("total_sandboxes", len(sandboxes))
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_sandboxes", len(sandboxes))
+	daemonMetrics.SetRedirectSyncObjectCount("sandbox_ips", len(sourceIPs))
 
-	policyChanged := 0
-	policyRemovedIPs := 0
-	if policyStore != nil {
-		stageStarted = time.Now()
-		result := policyStore.ReconcileSandboxes(localSandboxes)
-		policyChanged = len(result.Changed)
-		policyRemovedIPs = len(result.RemovedIPs)
-		for _, podIP := range result.RemovedIPs {
-			if proxyServer != nil {
-				proxyServer.ForgetSandboxDNS(podIP)
-			}
-			cleanupTrackedFlows(ctx, tracker, conntrackManager, podIP)
+	stageStarted = time.Now()
+	result := policyStore.ReconcileSandboxes(sandboxes)
+	for _, sourceIP := range result.RemovedIPs {
+		if proxyServer != nil {
+			proxyServer.ForgetSandboxDNS(sourceIP)
 		}
-		for _, change := range result.Changed {
-			if change.Initial || change.PodIP == "" {
-				continue
-			}
-			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, change.PodIP)
-		}
-		for _, sandbox := range runtimeSlotSandboxes {
-			compiled := policyStore.GetByIP(sandbox.PodIP)
-			if compiled == nil || compiled.OwnerKind != sandbox.OwnerKind ||
-				compiled.SandboxID != sandbox.SandboxID || compiled.TeamID != sandbox.TeamID {
-				return fmt.Errorf("runtime slot network policy %s/%s was not compiled into the exact source IP", sandbox.Namespace, sandbox.Name)
-			}
-		}
-		daemonMetrics.RecordRedirectSyncStage("policy_reconcile", "success", time.Since(stageStarted))
+		cleanupTrackedFlows(ctx, tracker, conntrackManager, sourceIP)
 	}
-	daemonMetrics.SetRedirectSyncObjectCount("policy_changed", policyChanged)
-	daemonMetrics.SetRedirectSyncObjectCount("policy_removed_ips", policyRemovedIPs)
+	for _, change := range result.Changed {
+		if change.Initial || change.SourceIP == "" {
+			continue
+		}
+		cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, change.SourceIP)
+	}
+	for _, sandbox := range sandboxes {
+		compiled := policyStore.GetByIP(sandbox.SourceIP)
+		if compiled == nil || compiled.OwnerKind != sandbox.OwnerKind ||
+			compiled.SandboxID != sandbox.SandboxID || compiled.TeamID != sandbox.TeamID {
+			return fmt.Errorf("runtime-slot network policy %s was not compiled into the exact source IP", sandbox.Key())
+		}
+	}
+	daemonMetrics.RecordRedirectSyncStage("policy_reconcile", "success", time.Since(stageStarted))
+	daemonMetrics.SetRedirectSyncObjectCount("policy_changed", len(result.Changed))
+	daemonMetrics.SetRedirectSyncObjectCount("policy_removed_ips", len(result.RemovedIPs))
 
 	if platformState != nil {
 		stageStarted = time.Now()
-		platformState.Reconcile(allSandboxes, services, endpoints)
+		platformState.Reconcile(sandboxes)
 		daemonMetrics.RecordRedirectSyncStage("platform_reconcile", "success", time.Since(stageStarted))
 	}
 
-	dnsCIDRs := clusterDNSCIDRs(d.cfg.ClusterDNSCIDR, services, endpoints)
-	configuredBypassCIDRs := []string{}
-	if len(d.cfg.PlatformAllowedCIDRs) > 0 {
-		configuredBypassCIDRs = append(configuredBypassCIDRs, d.cfg.PlatformAllowedCIDRs...)
-	}
-	platformBypassCIDRs := []string{}
-	if policyStore != nil {
-		platformBypassCIDRs = append(platformBypassCIDRs, policyStore.AllowedPlatformCIDRs()...)
-	}
-	bypassCIDRs := redirectBypassCIDRs(dnsCIDRs, configuredBypassCIDRs, platformBypassCIDRs)
+	configuredBypassCIDRs := append([]string(nil), d.cfg.DNSResolverCIDRs...)
+	configuredBypassCIDRs = append(configuredBypassCIDRs, d.cfg.PlatformAllowedCIDRs...)
+	platformBypassCIDRs := policyStore.AllowedPlatformCIDRs()
+	bypassCIDRs := redirectBypassCIDRs(configuredBypassCIDRs, platformBypassCIDRs)
 	daemonMetrics.SetRedirectSyncObjectCount("bypass_cidrs", len(bypassCIDRs))
 
-	d.logger.Info(
-		"Syncing redirect rules",
-		zap.Int("sandboxes_local", len(localSandboxes)),
-		zap.Int("sandboxes_total", len(allSandboxes)),
-		zap.Int("sandbox_ips", len(sandboxIPs)),
-		zap.Strings("sandbox_ips", sandboxIPs),
+	d.logger.Info("Syncing redirect rules",
+		zap.Int("sandboxes", len(sandboxes)),
+		zap.Strings("source_ips", sourceIPs),
 		zap.Strings("bypass_cidrs", bypassCIDRs),
 	)
 	stageStarted = time.Now()
 	var redirectErr error
 	if forceRedirectSync {
-		redirectErr = redirectManager.ForceSync(ctx, sandboxIPs, bypassCIDRs)
+		redirectErr = redirectManager.ForceSync(ctx, sourceIPs, bypassCIDRs)
 	} else {
-		redirectErr = redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs)
+		redirectErr = redirectManager.Sync(ctx, sourceIPs, bypassCIDRs)
 	}
 	if redirectErr != nil {
 		daemonMetrics.RecordRedirectSyncStage("redirect_sync", "error", time.Since(stageStarted))
 		return redirectErr
 	}
 	daemonMetrics.RecordRedirectSyncStage("redirect_sync", "success", time.Since(stageStarted))
-
-	patchedCount := 0
-	stageStarted = time.Now()
-	if patcher == nil {
-		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "disabled", time.Since(stageStarted))
-	} else if err := patcher.SyncAppliedHashes(ctx, kubernetesLocalSandboxes); err != nil {
-		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "error", time.Since(stageStarted))
-		d.logger.Warn("Failed to sync applied hashes", zap.Error(err))
-	} else {
-		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "success", time.Since(stageStarted))
-		for _, sandbox := range kubernetesLocalSandboxes {
-			if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash == sandbox.NetworkAppliedHash {
-				patchedCount++
-			}
-		}
-	}
-	daemonMetrics.SetRedirectSyncObjectCount("patched_hashes", patchedCount)
-	if runtimeSlots != nil {
-		runtimeSlots.Acknowledge(runtimeSlotRevision)
-	}
-	d.logger.Info("Redirect rules synced",
-		zap.Int("sandboxes_patched", patchedCount),
-		zap.Int("sandboxes_local", len(localSandboxes)),
-		zap.Int("sandboxes_total", len(allSandboxes)),
-	)
+	runtimeSlots.Acknowledge(revision)
+	d.logger.Info("Redirect rules synced", zap.Int("sandboxes", len(sandboxes)))
 	return nil
 }
 
-func redirectBypassCIDRs(dnsCIDRs, configuredCIDRs, platformCIDRs []string) []string {
-	out := make([]string, 0, len(dnsCIDRs)+len(configuredCIDRs)+len(platformCIDRs))
-	out = append(out, dnsCIDRs...)
-	out = append(out, configuredCIDRs...)
-	out = append(out, platformCIDRs...)
-	return out
-}
-
-func mergeSandboxInputs(
-	base []*watcher.SandboxInfo,
-	runtimeSlots []*watcher.SandboxInfo,
-) ([]*watcher.SandboxInfo, error) {
-	result := make([]*watcher.SandboxInfo, 0, len(base)+len(runtimeSlots))
-	keys := make(map[string]struct{}, len(base)+len(runtimeSlots))
-	ips := make(map[string]string, len(base)+len(runtimeSlots))
-	appendSandbox := func(sandbox *watcher.SandboxInfo) error {
-		if sandbox == nil {
-			return nil
-		}
-		key := sandbox.Namespace + "/" + sandbox.Name
-		if sandbox.Namespace == "" || sandbox.Name == "" || sandbox.PodIP == "" {
-			return fmt.Errorf("network sandbox identity and source IP are required")
-		}
-		if _, exists := keys[key]; exists {
-			return fmt.Errorf("network sandbox key %q is duplicated", key)
-		}
-		if existing := ips[sandbox.PodIP]; existing != "" {
-			return fmt.Errorf("network source IP %q is shared by %q and %q", sandbox.PodIP, existing, key)
-		}
-		keys[key] = struct{}{}
-		ips[sandbox.PodIP] = key
-		result = append(result, sandbox)
-		return nil
+func redirectBypassCIDRs(parts ...[]string) []string {
+	var size int
+	for _, values := range parts {
+		size += len(values)
 	}
-	for _, sandbox := range base {
-		if err := appendSandbox(sandbox); err != nil {
-			return nil, err
-		}
-	}
-	for _, sandbox := range runtimeSlots {
-		if err := appendSandbox(sandbox); err != nil {
-			return nil, err
-		}
-	}
-	return result, nil
-}
-
-func clusterDNSCIDRs(configured string, services []*watcher.ServiceInfo, endpoints []*watcher.EndpointsInfo) []string {
-	out := []string{}
-	if strings.TrimSpace(configured) != "" {
-		out = append(out, configured)
-	}
-	endpointsByService := make(map[string]*watcher.EndpointsInfo, len(endpoints))
-	for _, endpoint := range endpoints {
-		if endpoint == nil {
-			continue
-		}
-		endpointsByService[endpoint.Namespace+"/"+endpoint.Name] = endpoint
-	}
-	for _, service := range services {
-		if !isClusterDNSService(service) {
-			continue
-		}
-		if service.ClusterIP != "" && strings.ToLower(service.ClusterIP) != "none" {
-			out = append(out, service.ClusterIP)
-		}
-		if endpoint := endpointsByService[service.Namespace+"/"+service.Name]; endpoint != nil {
-			out = append(out, endpoint.Addresses...)
-		}
+	out := make([]string, 0, size)
+	for _, values := range parts {
+		out = append(out, values...)
 	}
 	return out
 }
@@ -927,12 +726,12 @@ func cleanupTrackedFlows(
 	ctx context.Context,
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
-	podIP string,
+	sourceIP string,
 ) int {
-	if tracker == nil || podIP == "" {
+	if tracker == nil || sourceIP == "" {
 		return 0
 	}
-	flows := tracker.PopBySrc(podIP)
+	flows := tracker.PopBySrc(sourceIP)
 	if len(flows) > 0 && conntrackManager != nil {
 		conntrackManager.CleanupFlows(ctx, flows)
 	}
@@ -944,13 +743,13 @@ func cleanupDeniedTrackedFlows(
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
 	policyStore *policy.Store,
-	podIP string,
+	sourceIP string,
 ) int {
-	if tracker == nil || policyStore == nil || podIP == "" {
+	if tracker == nil || policyStore == nil || sourceIP == "" {
 		return 0
 	}
-	flows := tracker.PopBySrc(podIP)
-	p := policyStore.GetByIP(podIP)
+	flows := tracker.PopBySrc(sourceIP)
+	p := policyStore.GetByIP(sourceIP)
 	var flowsToKill []conntrack.FlowKey
 	// Only kill flows that are denied by the new policy.
 	// This prevents a race condition where a new connection established

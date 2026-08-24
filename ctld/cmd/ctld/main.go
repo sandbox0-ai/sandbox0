@@ -10,58 +10,31 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus"
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
-	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
-	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
-	ctldruntimewatch "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimewatch"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
-	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
-	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 )
 
 var (
-	httpAddr                       = ":8095"
-	runtimeWatchAddr               = fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort)
-	kubeconfig                     = ""
-	criEndpoint                    = "/host-run/containerd/containerd.sock"
-	containerdEndpoint             = "/host-run/containerd/containerd.sock"
-	containerdRoot                 = "/host-run/containerd"
-	containerdHostRoot             = "/run/containerd"
-	containerdDataRoot             = "/host-var-lib/containerd"
-	containerdHostDataRoot         = "/var/lib/containerd"
-	containerdNamespace            = "k8s.io"
-	nodeName                       = os.Getenv("NODE_NAME")
-	stateRoot                      = "/var/lib/sandbox0/ctld"
-	rootFSObjectCacheMaxBytes      = "20Gi"
-	rootFSObjectCacheMinFreeBytes  = "0"
-	rootFSObjectCacheMaxAge        time.Duration
-	rootFSObjectCacheSweepInterval = time.Minute
-	podName                        = os.Getenv("POD_NAME")
-	haSlot                         = os.Getenv("CTLD_HA_SLOT")
-	haProbe                        string
-	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
-	haMetricsAddr                  string
-	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH"))
-	runtimeSlotNetworkSocket       = "/host-run/sandbox0/ctld-runtime-slot-network.sock"
-	runtimeSlotNetNSRoot           = "/host-run/netns"
+	httpAddr                 = ":8095"
+	nodeName                 = os.Getenv("NODE_NAME")
+	stateRoot                = "/var/lib/sandbox0/ctld"
+	haSlot                   = os.Getenv("CTLD_HA_SLOT")
+	haProbe                  string
+	haProbeSocket            = "/run/sandbox0/ctld-ha.sock"
+	haMetricsAddr            string
+	networkRuntimeConfigPath = strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH"))
+	runtimeSlotNetworkSocket = "/host-run/sandbox0/ctld-runtime-slot-network.sock"
+	runtimeSlotNetNSRoot     = "/host-run/netns"
 )
 
 const (
@@ -81,38 +54,20 @@ var retainedPrimaryLeases struct {
 }
 
 func main() {
-	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
-	flag.StringVar(
-		&runtimeWatchAddr,
-		"runtime-watch-addr",
-		fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort),
-		"dedicated HTTP listen address for the procd runtime event stream",
-	)
-	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
-	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
-	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
-	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
-	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
-	flag.StringVar(&containerdDataRoot, "containerd-data-root", "/host-var-lib/containerd", "host containerd data root mounted into ctld")
-	flag.StringVar(&containerdHostDataRoot, "containerd-host-data-root", "/var/lib/containerd", "host containerd data root path returned by containerd snapshotters")
-	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
-	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
-	flag.StringVar(&stateRoot, "state-root", "/var/lib/sandbox0/ctld", "host-local root for ctld rootfs state and cache")
-	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
-	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
-	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
-	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
+	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and metrics")
+	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "Nomad node name")
+	flag.StringVar(&stateRoot, "state-root", "/var/lib/sandbox0/ctld", "host-local root for ctld state")
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
 	flag.StringVar(&haMetricsAddr, "ha-metrics-addr", "", "dedicated pre-election HTTP listen address for ctld HA metrics; empty disables it")
-	flag.StringVar(&networkRuntimeConfigPath, "ctld-networking-config-path", strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
-	flag.StringVar(&runtimeSlotNetworkSocket, "runtime-slot-network-socket", "/host-run/sandbox0/ctld-runtime-slot-network.sock", "host-visible root-only Unix socket for Nomad runtime-slot network policy control")
+	flag.StringVar(&networkRuntimeConfigPath, "ctld-networking-config-path", strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH")), "ctld network runtime config path")
+	flag.StringVar(&runtimeSlotNetworkSocket, "runtime-slot-network-socket", "/host-run/sandbox0/ctld-runtime-slot-network.sock", "host-visible root-only runtime-slot network control socket")
 	flag.StringVar(&runtimeSlotNetNSRoot, "runtime-slot-netns-root", "/host-run/netns", "ctld mount of the host Nomad network namespace root")
 	flag.Parse()
 
 	log.Println("Starting ctld")
-	defer func() { log.Println("Stopped ctld") }()
+	defer log.Println("Stopped ctld")
 	if err := run(); err != nil {
 		log.Fatalf("ctld stopped with error: %v", err)
 	}
@@ -126,26 +81,29 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
-	ctldCfg, err := apiconfig.LoadCtldConfigStrict()
+	cfg, err := config.LoadCtldConfigStrict()
 	if err != nil {
 		return err
 	}
-	nomadHostMode := ctldCfg != nil && ctldCfg.NomadRuntime.Enabled
-	networkFactory, err := configuredNetworkRuntimeFactory(
-		networkRuntimeConfigPath, httpAddr, runtimeWatchAddr, nomadHostMode,
-	)
+	if !cfg.NomadRuntime.Enabled {
+		return fmt.Errorf("ctld requires nomad_runtime.enabled=true")
+	}
+	if strings.TrimSpace(nodeName) == "" {
+		return fmt.Errorf("ctld node name is required")
+	}
+	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr)
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
-	if nomadHostMode && networkFactory == nil {
-		return fmt.Errorf("ctld Nomad runtime requires ctld network policy enforcement")
-	}
-	nomadFactory, err := configuredNomadRuntimeFactory(ctldCfg, runtimeSlotNetworkSocket)
+	nomadFactory, err := configuredNomadRuntimeFactory(cfg, runtimeSlotNetworkSocket)
 	if err != nil {
 		return fmt.Errorf("validate ctld Nomad runtime config: %w", err)
 	}
+	if nomadFactory == nil {
+		return fmt.Errorf("ctld Nomad runtime factory is required")
+	}
 	primaryFn := func(ctx context.Context, options primaryRunOptions) error {
-		options.ctldConfig = ctldCfg
+		options.ctldConfig = cfg
 		options.nomadRuntimeFactory = nomadFactory
 		return runPrimary(ctx, options)
 	}
@@ -198,15 +156,10 @@ func runHAPrimary(
 		}
 		return err
 	}
-	runErr := runPrimaryFn(ctx, primaryRunOptions{
-		setReady:       setReady,
-		networkFactory: networkFactory,
-	})
+	runErr := runPrimaryFn(ctx, primaryRunOptions{setReady: setReady, networkFactory: networkFactory})
 	// A timed-out privileged service may still own NBD, mount, Bolt, or network
-	// resources. Keep the flock file reachable and open until log.Fatalf
-	// terminates this process; unlocking first would allow the standby to overlap
-	// ownership, while dropping the last reference could let an os.File finalizer
-	// release the lock before process termination.
+	// resources. Keep the flock open until the process exits so the standby
+	// cannot overlap ownership.
 	if errors.Is(runErr, errPrimaryShutdownIncomplete) {
 		retainPrimaryLeaseUntilExit(lease)
 		return runErr
@@ -227,297 +180,155 @@ type primaryRunOptions struct {
 	setReady            func(bool)
 	networkFactory      primaryServiceFactory
 	nomadRuntimeFactory nomadRuntimeFactory
-	ctldConfig          *apiconfig.CtldConfig
+	ctldConfig          *config.CtldConfig
 }
+
+type healthController struct {
+	ready   func() bool
+	healthy func() bool
+}
+
+func (c healthController) Ready() bool   { return c.ready == nil || c.ready() }
+func (c healthController) Healthy() bool { return c.healthy == nil || c.healthy() }
 
 func runPrimary(parent context.Context, options primaryRunOptions) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	if options.ctldConfig == nil || options.networkFactory == nil || options.nomadRuntimeFactory == nil {
+		return fmt.Errorf("ctld primary requires config, network runtime, and Nomad runtime")
+	}
 
-	zapLogger, err := observability.NewLogger(observability.LoggerConfig{
-		ServiceName: "ctld",
-		Level:       "info",
-	})
+	logger, err := observability.NewLogger(observability.LoggerConfig{ServiceName: "ctld", Level: "info"})
 	if err != nil {
-		log.Printf("ctld observability disabled: create zap logger: %v", err)
+		return fmt.Errorf("create ctld logger: %w", err)
 	}
-	var obsProvider *observability.Provider
-	if zapLogger != nil {
-		defer zapLogger.Sync()
-		obsProvider, err = observability.New(observability.ConfigFromEnv("ctld", zapLogger))
-		if err != nil {
-			log.Printf("ctld observability disabled: %v", err)
-			obsProvider = nil
-		} else {
-			defer obsProvider.Shutdown(ctx)
-		}
+	defer logger.Sync()
+	obsProvider, err := observability.New(observability.ConfigFromEnv("ctld", logger))
+	if err != nil {
+		return fmt.Errorf("create ctld observability: %w", err)
 	}
+	defer obsProvider.Shutdown(context.WithoutCancel(ctx))
 
-	ctldCfg := options.ctldConfig
-	if ctldCfg == nil {
-		return fmt.Errorf("ctld config is required for the HA primary")
-	}
-	nomadHostMode := ctldCfg != nil && ctldCfg.NomadRuntime.Enabled
-	var k8sClient kubernetes.Interface
-	if !nomadHostMode {
-		if client, err := k8s.NewClientWithObservability(kubeconfig, obsProvider); err != nil {
-			log.Printf("ctld kubernetes client disabled: %v", err)
-		} else {
-			k8sClient = client
-		}
-	}
 	var dbPool *pgxpool.Pool
-	if ctldCfg.DatabaseURL != "" {
-		dbPool, err = initCtldDatabase(ctx, ctldCfg, obsProvider)
+	if options.ctldConfig.DatabaseURL != "" {
+		dbPool, err = initCtldDatabase(ctx, options.ctldConfig, obsProvider)
 		if err != nil {
-			log.Printf("ctld object store request metering disabled: %v", err)
-		} else {
+			log.Printf("ctld object-store request metering disabled: %v", err)
+		} else if dbPool != nil {
 			defer dbPool.Close()
 		}
 	}
-	objectStoreRequestMeter := startCtldObjectStoreRequestMetering(
-		ctx,
-		ctldCfg,
-		dbPool,
-		nodeName,
-		zapLogger,
-	)
-	defer flushCtldObjectStoreRequestMetering(objectStoreRequestMeter, zapLogger)
-	var ctldMetricsRegistry prometheus.Registerer
-	if obsProvider != nil {
-		ctldMetricsRegistry = obsProvider.MetricsRegistryOrNil()
-	}
+	objectStoreMeter := startCtldObjectStoreRequestMetering(ctx, options.ctldConfig, dbPool, nodeName, logger)
+	defer flushCtldObjectStoreRequestMetering(objectStoreMeter, logger)
 
-	serviceErrors := make(chan error, 2)
-	networkRequired := options.networkFactory != nil
-	nomadRuntimeRequired := options.nomadRuntimeFactory != nil
-	var networkHandle *primaryServiceHandle
-	var nomadRuntimeHandle *primaryServiceHandle
-	serviceHealthy := func() bool {
-		return ctx.Err() == nil
+	serviceErrors := make(chan error, 1)
+	var networkHandle, nomadHandle *primaryServiceHandle
+	healthy := func() bool { return ctx.Err() == nil }
+	ready := func() bool {
+		return healthy() && networkHandle != nil && networkHandle.Ready() && nomadHandle != nil && nomadHandle.Ready()
 	}
-	serviceReady := func() bool {
-		return serviceHealthy() &&
-			(!networkRequired || (networkHandle != nil && networkHandle.Ready())) &&
-			(!nomadRuntimeRequired || (nomadRuntimeHandle != nil && nomadRuntimeHandle.Ready()))
-	}
-
-	var runtimeWatchServer *ctldruntimewatch.Server
-	var runtimeWatchHTTPServer *http.Server
-	var runtimeWatchHandler cache.ResourceEventHandler
-	if !nomadHostMode && k8sClient != nil {
-		runtimeHub := ctldruntimewatch.NewHub(ctldruntimewatch.NewPodStatusSink(k8sClient))
-		runtimeWatchServer = ctldruntimewatch.NewServer(runtimeHub)
-		runtimeWatchHTTPServer = &http.Server{
-			Addr:              runtimeWatchAddr,
-			Handler:           runtimeWatchServer,
-			ReadHeaderTimeout: 5 * time.Second,
-		}
-		runtimeWatchHandler = runtimeHub.PodEventHandler()
-		go runtimeHub.Run(ctx, 4)
-	}
-	var podCache *ctldpower.PodCache
-	probeController := ctldserver.Controller(ctldserver.NotImplementedController{})
-	var rootFSController rootFSHandler
-	var runtimeMetricsHandle *ctldRuntimeMetricsHandle
-	if !nomadHostMode {
-		podCache = buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
-		probeController = buildProbeController(k8sClient, obsProvider, podCache)
-		rootFSObserver := ctldrootfs.NewObserver(ctldMetricsRegistry, zapLogger)
-		containerdRuntime := buildContainerdRuntime(rootFSObserver)
-		defer containerdRuntime.Close()
-		runtimeMetricsHandle = startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
-		rootFSController = buildRootFSController(
-			ctx, &ctldCfg.RootFSObjectStorage, objectStoreRequestMeter, containerdRuntime, rootFSObserver,
-		)
-	}
-	httpServer := newHTTPServer(httpAddr, combinedController{
-		Controller:  probeController,
-		RootFS:      rootFSController,
-		ReadyCheck:  serviceReady,
-		HealthCheck: serviceHealthy,
-	})
-	if obsProvider != nil {
-		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
-		httpServer.ConnState = httpobs.NewConnStateTracker(obsProvider.HTTPServerConfig(nil)).Wrap(httpServer.ConnState)
-	}
+	httpServer := newHTTPServer(httpAddr, healthController{ready: ready, healthy: healthy})
+	httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(logger))(httpServer.Handler)
+	httpServer.ConnState = httpobs.NewConnStateTracker(obsProvider.HTTPServerConfig(nil)).Wrap(httpServer.ConnState)
 	httpListener, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		return fmt.Errorf("listen for ctld HTTP server: %w", err)
 	}
-	var runtimeWatchListener net.Listener
-	if runtimeWatchHTTPServer != nil {
-		runtimeWatchListener, err = net.Listen("tcp", runtimeWatchAddr)
-		if err != nil {
-			_ = httpListener.Close()
-			return fmt.Errorf("listen for ctld runtime watch server: %w", err)
-		}
+	defer httpListener.Close()
+
+	networkService, err := options.networkFactory()
+	if err != nil || networkService == nil {
+		return fmt.Errorf("initialize ctld network runtime: %w", errors.Join(err, nilServiceError(networkService)))
 	}
-	if options.networkFactory != nil {
-		networkService, err := options.networkFactory()
-		if err != nil {
-			_ = httpListener.Close()
-			if runtimeWatchListener != nil {
-				_ = runtimeWatchListener.Close()
-			}
-			return fmt.Errorf("initialize ctld network runtime: %w", err)
-		}
-		if networkService == nil {
-			_ = httpListener.Close()
-			if runtimeWatchListener != nil {
-				_ = runtimeWatchListener.Close()
-			}
-			return fmt.Errorf("initialize ctld network runtime: factory returned a nil service")
-		}
-		networkHandle = startPrimaryService(ctx, networkService)
-		log.Printf("ctld primary started network runtime")
+	networkHandle = startPrimaryService(ctx, networkService)
+	log.Printf("ctld primary started network runtime")
+
+	nomadService, err := options.nomadRuntimeFactory(logger)
+	if err != nil || nomadService == nil {
+		cancel()
+		shutdownErr := waitPrimaryService(networkHandle, networkRuntimeShutdownTimeout)
+		return errors.Join(fmt.Errorf("initialize ctld Nomad runtime: %w", errors.Join(err, nilServiceError(nomadService))), shutdownErr)
 	}
-	if options.nomadRuntimeFactory != nil {
-		nomadRuntime, err := options.nomadRuntimeFactory(zapLogger)
-		if err != nil {
-			_ = httpListener.Close()
-			if runtimeWatchListener != nil {
-				_ = runtimeWatchListener.Close()
-			}
-			cancel()
-			if networkHandle != nil {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
-				shutdownErr := networkHandle.Wait(shutdownCtx)
-				shutdownCancel()
-				if shutdownErr != nil {
-					err = errors.Join(err, fmt.Errorf("shutdown ctld network runtime: %w", shutdownErr))
-				}
-				if errors.Is(shutdownErr, context.DeadlineExceeded) {
-					err = errors.Join(err, errPrimaryShutdownIncomplete)
-				}
-			}
-			return fmt.Errorf("initialize ctld Nomad runtime: %w", err)
-		}
-		if nomadRuntime == nil {
-			_ = httpListener.Close()
-			if runtimeWatchListener != nil {
-				_ = runtimeWatchListener.Close()
-			}
-			cancel()
-			nilErr := fmt.Errorf("initialize ctld Nomad runtime: factory returned a nil service")
-			if networkHandle != nil {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
-				shutdownErr := networkHandle.Wait(shutdownCtx)
-				shutdownCancel()
-				if shutdownErr != nil {
-					nilErr = errors.Join(nilErr, fmt.Errorf("shutdown ctld network runtime: %w", shutdownErr))
-				}
-				if errors.Is(shutdownErr, context.DeadlineExceeded) {
-					nilErr = errors.Join(nilErr, errPrimaryShutdownIncomplete)
-				}
-			}
-			return nilErr
-		}
-		nomadRuntimeHandle = startPrimaryService(ctx, nomadRuntime)
-		log.Printf("ctld primary started Nomad runtime")
-	}
+	nomadHandle = startPrimaryService(ctx, nomadService)
+	log.Printf("ctld primary started Nomad runtime")
+
+	runtimeMetricsHandle := startCtldRuntimeMetrics(
+		ctx, options.ctldConfig, options.ctldConfig.NomadRuntime.SocketPath, obsProvider, logger,
+	)
 	go func() {
 		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
 			serviceErrors <- fmt.Errorf("ctld HTTP server: %w", err)
 		}
 	}()
-	if runtimeWatchHTTPServer != nil {
-		go func() {
-			if err := runtimeWatchHTTPServer.Serve(runtimeWatchListener); err != nil &&
-				!errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-				serviceErrors <- fmt.Errorf("ctld runtime watch server: %w", err)
-			}
-		}()
-	}
 	if options.setReady != nil {
-		options.setReady(serviceReady())
+		options.setReady(ready())
 		defer options.setReady(false)
-		go func() {
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					options.setReady(serviceReady())
-				}
-			}
-		}()
+		go publishReadiness(ctx, options.setReady, ready)
 	}
-	var networkErrors <-chan error
-	if networkHandle != nil {
-		networkErrors = networkHandle.Errors()
-	}
-	var nomadRuntimeErrors <-chan error
-	if nomadRuntimeHandle != nil {
-		nomadRuntimeErrors = nomadRuntimeHandle.Errors()
-	}
+
 	var runErr error
-	networkFailed := false
-	nomadRuntimeFailed := false
+	networkFailed, nomadFailed := false, false
 	select {
 	case <-parent.Done():
 		log.Printf("ctld primary shutting down: %v", parent.Err())
 	case runErr = <-serviceErrors:
-		log.Printf("ctld primary service failed: %v", runErr)
-	case err := <-networkErrors:
-		if networkRunErr, failed := networkRuntimeExitError(parent.Err(), err); !failed {
-			log.Printf("ctld primary shutting down: %v", parent.Err())
-		} else {
-			networkFailed = true
-			runErr = networkRunErr
-			log.Printf("ctld primary service failed: %v", runErr)
+	case serviceErr := <-networkHandle.Errors():
+		if err, failed := networkRuntimeExitError(parent.Err(), serviceErr); failed {
+			networkFailed, runErr = true, err
 		}
-	case err := <-nomadRuntimeErrors:
-		if runtimeErr, failed := primaryServiceExitError("Nomad runtime", parent.Err(), err); !failed {
-			log.Printf("ctld primary shutting down: %v", parent.Err())
-		} else {
-			nomadRuntimeFailed = true
-			runErr = runtimeErr
-			log.Printf("ctld primary service failed: %v", runErr)
+	case serviceErr := <-nomadHandle.Errors():
+		if err, failed := primaryServiceExitError("Nomad runtime", parent.Err(), serviceErr); failed {
+			nomadFailed, runErr = true, err
 		}
 	}
 	cancel()
 	if options.setReady != nil {
 		options.setReady(false)
 	}
-	var networkShutdownCtx context.Context
-	var networkShutdownCancel context.CancelFunc
-	if networkHandle != nil {
-		networkShutdownCtx, networkShutdownCancel = context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
-		defer networkShutdownCancel()
+
+	metricsCtx, metricsCancel := context.WithTimeout(context.Background(), runtimeMetricsShutdownTimeout)
+	runErr = errors.Join(runErr, runtimeMetricsHandle.Shutdown(metricsCtx))
+	metricsCancel()
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	runErr = errors.Join(runErr, httpServer.Shutdown(httpCtx))
+	httpCancel()
+	if !networkFailed {
+		runErr = errors.Join(runErr, waitPrimaryService(networkHandle, networkRuntimeShutdownTimeout))
 	}
-	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
-	_ = httpServer.Shutdown(httpShutdownCtx)
-	if runtimeWatchHTTPServer != nil {
-		_ = runtimeWatchHTTPServer.Shutdown(httpShutdownCtx)
-	}
-	httpShutdownCancel()
-	runtimeMetricsShutdownCtx, runtimeMetricsShutdownCancel := context.WithTimeout(context.Background(), runtimeMetricsShutdownTimeout)
-	if err := runtimeMetricsHandle.Shutdown(runtimeMetricsShutdownCtx); err != nil {
-		log.Printf("ctld runtime metric producer shutdown completed with errors: %v", err)
-	}
-	runtimeMetricsShutdownCancel()
-	if networkHandle != nil {
-		if err := networkHandle.Wait(networkShutdownCtx); err != nil && !networkFailed {
-			if errors.Is(err, context.DeadlineExceeded) {
-				runErr = errors.Join(runErr, errPrimaryShutdownIncomplete)
-			}
-			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld network runtime: %w", err))
-		}
-	}
-	if nomadRuntimeHandle != nil {
-		nomadShutdownCtx, nomadShutdownCancel := context.WithTimeout(context.Background(), nomadRuntimeShutdownTimeout)
-		if err := nomadRuntimeHandle.Wait(nomadShutdownCtx); err != nil && !nomadRuntimeFailed {
-			if errors.Is(err, context.DeadlineExceeded) {
-				runErr = errors.Join(runErr, errPrimaryShutdownIncomplete)
-			}
-			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld Nomad runtime: %w", err))
-		}
-		nomadShutdownCancel()
+	if !nomadFailed {
+		runErr = errors.Join(runErr, waitPrimaryService(nomadHandle, nomadRuntimeShutdownTimeout))
 	}
 	return runErr
+}
+
+func nilServiceError(service primaryService) error {
+	if service == nil {
+		return fmt.Errorf("factory returned a nil service")
+	}
+	return nil
+}
+
+func publishReadiness(ctx context.Context, publish func(bool), ready func() bool) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			publish(ready())
+		}
+	}
+}
+
+func waitPrimaryService(handle *primaryServiceHandle, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := handle.Wait(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(errPrimaryShutdownIncomplete, err)
+	}
+	return err
 }
 
 func primaryServiceExitError(name string, parentErr, serviceErr error) (error, bool) {
@@ -541,172 +352,10 @@ func networkRuntimeExitError(parentErr, networkErr error) (error, bool) {
 }
 
 func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
-	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
+	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller), ReadHeaderTimeout: 5 * time.Second}
 }
 
-func buildProbeController(k8sClient kubernetes.Interface, obsProvider *observability.Provider, podCache *ctldpower.PodCache) ctldserver.Controller {
-	if k8sClient == nil {
-		log.Printf("ctld probe control disabled: kubernetes client unavailable")
-		return ctldserver.NotImplementedController{}
-	}
-	resolver := ctldpower.NewPodResolver(k8sClient, nodeName)
-	controller := ctldpower.NewController(resolver)
-	if obsProvider != nil {
-		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
-	}
-
-	if podCache != nil {
-		resolver.SetPodCache(podCache.PodLister(), podCache.PodIndexer())
-	}
-	return controller
-}
-
-func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface, handlers ...cache.ResourceEventHandler) *ctldpower.PodCache {
-	if k8sClient == nil {
-		return nil
-	}
-	podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0)
-	if err != nil {
-		log.Printf("ctld pod cache disabled: %v", err)
-		return nil
-	}
-	for _, handler := range handlers {
-		if handler == nil {
-			continue
-		}
-		if err := podCache.AddEventHandler(handler); err != nil {
-			log.Printf("ctld pod cache handler disabled: %v", err)
-			return nil
-		}
-	}
-	podCache.Start(ctx)
-	go func() {
-		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
-			log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
-		}
-	}()
-	return podCache
-}
-
-func buildRootFSController(
-	ctx context.Context,
-	storageCfg *apiconfig.RootFSObjectStorageConfig,
-	requestObserver objectstore.RequestObserver,
-	runtime *ctldrootfs.ContainerdRuntime,
-	observer *ctldrootfs.Observer,
-) rootFSHandler {
-	store, cacheEncryption, err := buildRootFSObjectStore(storageCfg, requestObserver)
-	if err != nil {
-		log.Printf("ctld rootfs object store disabled: %v", err)
-	}
-	objectCache := buildRootFSObjectCache(ctx, observer, cacheEncryption)
-	return ctldrootfs.NewController(ctldrootfs.Config{
-		Runtime:     runtime,
-		Store:       store,
-		SnapshotDir: filepath.Join(stateRoot, "rootfs", "prepared"),
-		ObjectCache: objectCache,
-		Observer:    observer,
-	})
-}
-
-func buildContainerdRuntime(observer *ctldrootfs.Observer) *ctldrootfs.ContainerdRuntime {
-	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
-		CRIEndpoint:            criEndpoint,
-		ContainerdEndpoint:     containerdEndpoint,
-		ContainerdRoot:         containerdRoot,
-		ContainerdHostRoot:     containerdHostRoot,
-		ContainerdDataRoot:     containerdDataRoot,
-		ContainerdHostDataRoot: containerdHostDataRoot,
-		RootFSCacheDir:         filepath.Join(stateRoot, "rootfs"),
-		Namespace:              containerdNamespace,
-		Observer:               observer,
-	})
-}
-
-func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer, encryption objectstore.EncryptionConfig) *ctldrootfs.ObjectCache {
-	maxBytes, err := parseByteQuantity(rootFSObjectCacheMaxBytes)
-	if err != nil {
-		log.Printf("ctld rootfs object cache disabled: %v", err)
-		return nil
-	}
-	minFreeBytes, err := parseByteQuantity(rootFSObjectCacheMinFreeBytes)
-	if err != nil {
-		log.Printf("ctld rootfs object cache disabled: %v", err)
-		return nil
-	}
-	cache := ctldrootfs.NewObjectCache(ctldrootfs.ObjectCacheConfig{
-		Dir:           filepath.Join(stateRoot, "rootfs", "objects"),
-		MaxBytes:      maxBytes,
-		MinFreeBytes:  minFreeBytes,
-		MaxAge:        rootFSObjectCacheMaxAge,
-		SweepInterval: rootFSObjectCacheSweepInterval,
-		Observer:      observer,
-		Encryption:    encryption,
-	})
-	if cache != nil {
-		cache.Start(ctx)
-		log.Printf("ctld rootfs object cache enabled: max_bytes=%d min_free_bytes=%d max_age=%s sweep_interval=%s", maxBytes, minFreeBytes, rootFSObjectCacheMaxAge, rootFSObjectCacheSweepInterval)
-	}
-	return cache
-}
-
-func parseByteQuantity(raw string) (int64, error) {
-	value := strings.TrimSpace(raw)
-	switch strings.ToLower(value) {
-	case "", "0", "off", "disabled", "false":
-		return 0, nil
-	}
-	quantity, err := resource.ParseQuantity(value)
-	if err != nil {
-		return 0, fmt.Errorf("parse %q as byte quantity: %w", raw, err)
-	}
-	bytes := quantity.Value()
-	if bytes < 0 {
-		return 0, fmt.Errorf("byte quantity must be non-negative: %q", raw)
-	}
-	return bytes, nil
-}
-
-func buildRootFSObjectStore(cfg *apiconfig.RootFSObjectStorageConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, objectstore.EncryptionConfig, error) {
-	if cfg == nil {
-		return nil, objectstore.EncryptionConfig{}, fmt.Errorf("storage config is not configured")
-	}
-	store, err := objectstore.Create(objectstore.Config{
-		Type:            cfg.Type,
-		Bucket:          cfg.Bucket,
-		Region:          cfg.Region,
-		Endpoint:        cfg.Endpoint,
-		AccessKey:       cfg.AccessKey,
-		SecretKey:       cfg.SecretKey,
-		SessionToken:    cfg.SessionToken,
-		RequestObserver: requestObserver,
-	})
-	if err != nil {
-		return nil, objectstore.EncryptionConfig{}, err
-	}
-	encryption := objectstore.EncryptionConfig{}
-	if cfg.ObjectEncryptionEnabled {
-		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
-		if err != nil {
-			return nil, objectstore.EncryptionConfig{}, err
-		}
-		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase)
-		if err != nil {
-			return nil, objectstore.EncryptionConfig{}, err
-		}
-		encryption = objectstore.EncryptionConfig{
-			Enabled:      true,
-			Algorithm:    cfg.ObjectEncryptionAlgo,
-			KeyEncryptor: keyEncryptor,
-		}
-		store = objectstore.Encrypting(store, encryption)
-	}
-	return store, encryption, nil
-}
-
-func initCtldDatabase(ctx context.Context, cfg *apiconfig.CtldConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+func initCtldDatabase(ctx context.Context, cfg *config.CtldConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	if cfg == nil || cfg.DatabaseURL == "" {
 		return nil, nil
 	}
@@ -715,77 +364,7 @@ func initCtldDatabase(ctx context.Context, cfg *apiconfig.CtldConfig, obsProvide
 		modifier = obsProvider.Pgx.ConfigModifier()
 	}
 	return dbpool.New(ctx, dbpool.Options{
-		DatabaseURL:     cfg.DatabaseURL,
-		MaxConns:        int32(cfg.DatabaseMaxConns),
-		MinConns:        int32(cfg.DatabaseMinConns),
-		DefaultMaxConns: 5,
-		DefaultMinConns: 1,
-		ConfigModifier:  modifier,
+		DatabaseURL: cfg.DatabaseURL, MaxConns: int32(cfg.DatabaseMaxConns), MinConns: int32(cfg.DatabaseMinConns),
+		DefaultMaxConns: 5, DefaultMinConns: 1, ConfigModifier: modifier,
 	})
-}
-
-type combinedController struct {
-	ctldserver.Controller
-	RootFS      rootFSHandler
-	ReadyCheck  func() bool
-	HealthCheck func() bool
-}
-
-func (c combinedController) Ready() bool {
-	return c.ReadyCheck == nil || c.ReadyCheck()
-}
-
-func (c combinedController) Healthy() bool {
-	return c.HealthCheck == nil || c.HealthCheck()
-}
-
-func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
-	return c.Controller.Probe(r, sandboxID, kind)
-}
-
-func (c combinedController) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.InspectRootFS(r, req)
-}
-
-func (c combinedController) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.SaveRootFS(r, req)
-}
-
-func (c combinedController) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.PrepareRootFSSnapshot(r, req)
-}
-
-func (c combinedController) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.PublishRootFSSnapshot(r, req)
-}
-
-func (c combinedController) AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.AbortRootFSSnapshot(r, req)
-}
-
-func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.ApplyRootFS(r, req)
-}
-
-type rootFSHandler interface {
-	ctldserver.RootFSController
-	ctldserver.RootFSSnapshotController
 }

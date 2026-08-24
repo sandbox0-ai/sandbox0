@@ -6,19 +6,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-
-	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
-	dnsLabelMaxLen   = 63
-	podRandSuffixLen = 5
+	dnsLabelMaxLen = 63
 	// Exposure host label format: <sandboxName>--p<port>.
 	// Keep sandbox name shorter than full DNS label to reserve suffix budget.
 	exposurePortDelimiter = "--p"
 	maxPortDigits         = 5
 	sandboxNameMaxLen     = dnsLabelMaxLen - len(exposurePortDelimiter) - maxPortDigits
-	replicaSetMaxLen      = sandboxNameMaxLen - 1 - podRandSuffixLen
 	defaultClusterID      = "default"
 	nameHashLength        = 8
 	clusterKeyMaxLen      = 32
@@ -31,7 +27,7 @@ const DefaultClusterID = defaultClusterID
 // ClusterIDMaxLen is the longest cluster ID that can be encoded into sandbox names.
 const ClusterIDMaxLen = clusterIDMaxLen
 
-// DNSLabelMaxLen is the Kubernetes DNS-1123 label length limit.
+// DNSLabelMaxLen is the DNS-1123 label length limit.
 const DNSLabelMaxLen = dnsLabelMaxLen
 
 // ClusterIDOrDefault returns the cluster ID or a default value.
@@ -47,8 +43,17 @@ var (
 )
 
 func validateDNSLabel(name string) error {
-	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
-		return fmt.Errorf("invalid DNS-1123 label '%s': %v", name, errs)
+	if name == "" || len(name) > dnsLabelMaxLen {
+		return fmt.Errorf("invalid DNS-1123 label %q", name)
+	}
+	for index, char := range name {
+		alphanumeric := char >= 'a' && char <= 'z' || char >= '0' && char <= '9'
+		if !alphanumeric && char != '-' {
+			return fmt.Errorf("invalid DNS-1123 label %q", name)
+		}
+		if (index == 0 || index == len(name)-1) && !alphanumeric {
+			return fmt.Errorf("invalid DNS-1123 label %q", name)
+		}
 	}
 	return nil
 }

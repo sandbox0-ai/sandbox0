@@ -19,13 +19,12 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	bbolt "go.etcd.io/bbolt"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -53,7 +52,7 @@ var (
 type Config struct {
 	StatePath         string
 	NetNSRoot         string
-	NodeName          string
+	NodeID            string
 	TerminalRetention time.Duration
 	MaxRecords        int
 }
@@ -65,20 +64,20 @@ type NamespaceInspector interface {
 }
 
 type registryRecord struct {
-	Version        int                                            `json:"version"`
-	State          string                                         `json:"state"`
-	Registration   protocol.RuntimeSlotNetworkRegistrationRequest `json:"registration"`
-	Prepare        *protocol.NodeNetworkPrepareControlRequest     `json:"prepare,omitempty"`
-	PodSandboxID   string                                         `json:"pod_sandbox_id"`
-	PodIP          string                                         `json:"pod_ip"`
-	NetworkEpoch   int64                                          `json:"network_epoch"`
-	CtldGeneration string                                         `json:"ctld_generation"`
-	SandboxID      string                                         `json:"sandbox_id,omitempty"`
-	TeamID         string                                         `json:"team_id,omitempty"`
-	Cleanup        *protocol.NodeCleanupControlRequest            `json:"cleanup,omitempty"`
-	CreatedAt      string                                         `json:"created_at"`
-	UpdatedAt      string                                         `json:"updated_at"`
-	TerminalAt     string                                         `json:"terminal_at,omitempty"`
+	Version              int                                            `json:"version"`
+	State                string                                         `json:"state"`
+	Registration         protocol.RuntimeSlotNetworkRegistrationRequest `json:"registration"`
+	Prepare              *protocol.NodeNetworkPrepareControlRequest     `json:"prepare,omitempty"`
+	NetworkIncarnationID string                                         `json:"network_incarnation_id"`
+	SourceIP             string                                         `json:"source_ip"`
+	NetworkEpoch         int64                                          `json:"network_epoch"`
+	CtldGeneration       string                                         `json:"ctld_generation"`
+	SandboxID            string                                         `json:"sandbox_id,omitempty"`
+	TeamID               string                                         `json:"team_id,omitempty"`
+	Cleanup              *protocol.NodeCleanupControlRequest            `json:"cleanup,omitempty"`
+	CreatedAt            string                                         `json:"created_at"`
+	UpdatedAt            string                                         `json:"updated_at"`
+	TerminalAt           string                                         `json:"terminal_at,omitempty"`
 }
 
 type registryEntry struct {
@@ -142,8 +141,8 @@ func NewRegistry(config Config, inspector NamespaceInspector) (*Registry, error)
 	}
 	config.StatePath = statePath
 	config.NetNSRoot = netnsRoot
-	config.NodeName = strings.TrimSpace(config.NodeName)
-	if config.NodeName == "" || len(config.NodeName) > 512 {
+	config.NodeID = strings.TrimSpace(config.NodeID)
+	if config.NodeID == "" || len(config.NodeID) > 512 {
 		return nil, fmt.Errorf("runtime slot network node name is required and at most 512 bytes: %w", errdefs.ErrInvalidArgument)
 	}
 	if config.TerminalRetention <= 0 {
@@ -305,7 +304,7 @@ func (r *Registry) Register(
 		}
 		return r.waitForRegistration(ctx, request, revision)
 	}
-	podIP, err := r.waitForRegistrationAddress(ctx, request)
+	sourceIP, err := r.waitForRegistrationAddress(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -343,7 +342,7 @@ func (r *Registry) Register(
 		}
 		record = registryRecord{
 			Version: registryVersion, State: recordStateWarm, Registration: request,
-			PodSandboxID: request.IncarnationID(), PodIP: podIP, NetworkEpoch: int64(epoch),
+			NetworkIncarnationID: request.IncarnationID(), SourceIP: sourceIP, NetworkEpoch: int64(epoch),
 			CtldGeneration: r.generation, CreatedAt: now, UpdatedAt: now,
 		}
 		if err := validateRecord(record); err != nil {
@@ -373,9 +372,9 @@ func (r *Registry) waitForRegistrationAddress(
 	backoff := 10 * time.Millisecond
 	var lastErr error
 	for {
-		podIP, err := r.inspectRegistration(request)
+		sourceIP, err := r.inspectRegistration(request)
 		if err == nil {
-			return podIP, nil
+			return sourceIP, nil
 		}
 		if !errdefs.IsUnavailable(err) {
 			return "", err
@@ -462,7 +461,7 @@ func (r *Registry) Prepare(
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	podIP, err := r.inspector.Inspect(
+	sourceIP, err := r.inspector.Inspect(
 		filepath.Join(r.config.NetNSRoot, request.NetNSRelativePath),
 		request.Request.NetNSIdentity,
 	)
@@ -488,7 +487,7 @@ func (r *Registry) Prepare(
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	if err := matchWarmPrepare(entry.record, request, podIP); err != nil {
+	if err := matchWarmPrepare(entry.record, request, sourceIP); err != nil {
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, err
 	}
@@ -568,12 +567,12 @@ func (r *Registry) prepareState(
 	}
 }
 
-func matchWarmPrepare(record registryRecord, request protocol.RuntimeSlotNetworkPrepareRequest, podIP string) error {
+func matchWarmPrepare(record registryRecord, request protocol.RuntimeSlotNetworkPrepareRequest, sourceIP string) error {
 	if record.State != recordStateWarm || !record.Registration.MatchesPrepare(request.Request) ||
 		record.Registration.NetNSRelativePath != request.NetNSRelativePath {
 		return fmt.Errorf("runtime slot network claim belongs to another registration: %w", errdefs.ErrFailedPrecondition)
 	}
-	if record.PodIP != podIP {
+	if record.SourceIP != sourceIP {
 		return fmt.Errorf("runtime slot network source IP changed before claim: %w", errdefs.ErrFailedPrecondition)
 	}
 	return nil
@@ -695,7 +694,7 @@ func recordMatchesCleanup(record registryRecord, request protocol.NodeCleanupCon
 
 // Snapshot returns the exact warm and claimed desired set and the revision that
 // an external redirect reconciliation may acknowledge.
-func (r *Registry) Snapshot() ([]*watcher.SandboxInfo, uint64, error) {
+func (r *Registry) Snapshot() ([]*model.SandboxInfo, uint64, error) {
 	if r == nil {
 		return nil, 0, fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
 	}
@@ -711,14 +710,14 @@ func (r *Registry) Snapshot() ([]*watcher.SandboxInfo, uint64, error) {
 		}
 	}
 	sort.Strings(keys)
-	sandboxes := make([]*watcher.SandboxInfo, 0, len(keys))
+	sandboxes := make([]*model.SandboxInfo, 0, len(keys))
 	for _, key := range keys {
 		record := r.entries[key].record
 		raw, digest, sandboxID, teamID := recordPolicy(record)
-		sandboxes = append(sandboxes, &watcher.SandboxInfo{
-			Namespace: runtimeSlotNamespace, Name: record.Registration.SlotID,
-			UID: types.UID(record.PodSandboxID), ResourceVersion: fmt.Sprintf("%d", record.NetworkEpoch),
-			PodIP: record.PodIP, NodeName: r.config.NodeName,
+		sandboxes = append(sandboxes, &model.SandboxInfo{
+			Scope: runtimeSlotNamespace, Name: record.Registration.SlotID,
+			IncarnationID: record.NetworkIncarnationID, Revision: fmt.Sprintf("%d", record.NetworkEpoch),
+			SourceIP: record.SourceIP, NodeID: r.config.NodeID,
 			SandboxID: sandboxID, TeamID: teamID, OwnerKind: runtimeSlotOwnerKind,
 			NetworkPolicy: raw, NetworkPolicyHash: digest,
 		})
@@ -878,18 +877,18 @@ func (r *Registry) Close() error {
 }
 
 func (r *Registry) inspectRegistration(request protocol.RuntimeSlotNetworkRegistrationRequest) (string, error) {
-	podIP, err := r.inspector.Inspect(
+	sourceIP, err := r.inspector.Inspect(
 		filepath.Join(r.config.NetNSRoot, request.NetNSRelativePath),
 		request.NetNSIdentity,
 	)
 	if err != nil {
 		return "", fmt.Errorf("inspect runtime slot network namespace: %w", err)
 	}
-	parsed := net.ParseIP(podIP)
-	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.String() != podIP {
+	parsed := net.ParseIP(sourceIP)
+	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.String() != sourceIP {
 		return "", fmt.Errorf("runtime slot network inspector returned a non-canonical routable IPv4 address: %w", errdefs.ErrFailedPrecondition)
 	}
-	return podIP, nil
+	return sourceIP, nil
 }
 
 func validatePolicy(request protocol.RuntimeSlotNetworkPrepareRequest) (*v1alpha1.NetworkPolicySpec, error) {
@@ -928,9 +927,9 @@ func validateRecord(record registryRecord) error {
 	if err := record.Registration.Validate(); err != nil {
 		return err
 	}
-	parsed := net.ParseIP(record.PodIP)
-	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.String() != record.PodIP ||
-		record.NetworkEpoch <= 0 || record.PodSandboxID != record.Registration.IncarnationID() ||
+	parsed := net.ParseIP(record.SourceIP)
+	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.String() != record.SourceIP ||
+		record.NetworkEpoch <= 0 || record.NetworkIncarnationID != record.Registration.IncarnationID() ||
 		strings.TrimSpace(record.CtldGeneration) != record.CtldGeneration || record.CtldGeneration == "" ||
 		len(record.CtldGeneration) > 128 {
 		return fmt.Errorf("runtime slot network physical identity is invalid")
@@ -1011,9 +1010,9 @@ func policyToken(record registryRecord) rootfshandoff.NetworkPolicyToken {
 		return rootfshandoff.NetworkPolicyToken{}
 	}
 	return rootfshandoff.NetworkPolicyToken{
-		PodUID: record.Registration.AllocationID, PodSandboxID: record.PodSandboxID,
+		AllocationID: record.Registration.AllocationID, NetworkIncarnationID: record.NetworkIncarnationID,
 		ClaimID: record.Prepare.ClaimID, NetworkEpoch: record.NetworkEpoch,
-		PolicyDigest: record.Prepare.PolicyDigest, PodIP: record.PodIP,
+		PolicyDigest: record.Prepare.PolicyDigest, SourceIP: record.SourceIP,
 		CtldGeneration: record.CtldGeneration, NetNSIdentity: record.Registration.NetNSIdentity,
 	}
 }

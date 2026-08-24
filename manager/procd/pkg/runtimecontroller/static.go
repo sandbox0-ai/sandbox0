@@ -2,53 +2,38 @@ package runtimecontroller
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 const maxStaticAssignmentBytes = 64 << 10
 
-// StaticAssignmentFromEnv selects the one-shot Nomad activation mode. An
-// absent mode preserves the Kubernetes CTLD stream path.
-func StaticAssignmentFromEnv() (*runtimecontrol.Assignment, bool, error) {
-	mode, modeSet := os.LookupEnv(runtimecontrol.EnvControlMode)
-	raw, assignmentSet := os.LookupEnv(runtimecontrol.EnvStaticAssignment)
-	if !modeSet {
-		if assignmentSet && raw != "" {
-			return nil, false, fmt.Errorf("%s requires %s=%s",
-				runtimecontrol.EnvStaticAssignment, runtimecontrol.EnvControlMode, runtimecontrol.ControlModeStatic)
-		}
-		return nil, false, nil
-	}
-	if mode == "" {
-		if assignmentSet && raw != "" {
-			return nil, false, fmt.Errorf("%s requires %s=%s",
-				runtimecontrol.EnvStaticAssignment, runtimecontrol.EnvControlMode, runtimecontrol.ControlModeStatic)
-		}
-		return nil, false, nil
-	}
+// AssignmentFromEnv loads the immutable assignment injected by the Nomad
+// driver. Procd has no orchestrator fallback.
+func AssignmentFromEnv() (*runtimecontrol.Assignment, error) {
+	mode := strings.TrimSpace(os.Getenv(runtimecontrol.EnvControlMode))
 	if mode != runtimecontrol.ControlModeStatic {
-		return nil, false, fmt.Errorf("unsupported runtime control mode %q", mode)
+		if mode == "" {
+			return nil, fmt.Errorf("%s=%s is required", runtimecontrol.EnvControlMode, runtimecontrol.ControlModeStatic)
+		}
+		return nil, fmt.Errorf("unsupported runtime control mode %q", mode)
 	}
-	if !assignmentSet || raw == "" {
-		return nil, false, fmt.Errorf("%s is required in static runtime control mode", runtimecontrol.EnvStaticAssignment)
+	raw := os.Getenv(runtimecontrol.EnvStaticAssignment)
+	if raw == "" {
+		return nil, fmt.Errorf("%s is required", runtimecontrol.EnvStaticAssignment)
 	}
-	assignment, err := decodeStaticAssignment(raw)
-	if err != nil {
-		return nil, false, err
-	}
-	return assignment, true, nil
+	return decodeStaticAssignment(raw)
 }
 
 func decodeStaticAssignment(raw string) (*runtimecontrol.Assignment, error) {
 	if len(raw) > maxStaticAssignmentBytes {
-		return nil, fmt.Errorf("static runtime assignment exceeds 64 KiB")
+		return nil, errors.New("static runtime assignment exceeds 64 KiB")
 	}
 	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
 	decoder.DisallowUnknownFields()
@@ -63,7 +48,7 @@ func decodeStaticAssignment(raw string) (*runtimecontrol.Assignment, error) {
 		return nil, fmt.Errorf("validate static runtime assignment: %w", err)
 	}
 	if assignment.EnvVars[runtimecontrol.EnvSandboxID] != assignment.SandboxID {
-		return nil, fmt.Errorf("static runtime assignment sandbox environment does not match sandbox_id")
+		return nil, errors.New("static runtime assignment sandbox environment does not match sandbox_id")
 	}
 	return &assignment, nil
 }
@@ -78,30 +63,4 @@ func requireJSONEOF(decoder *json.Decoder) error {
 		return err
 	}
 	return errors.New("trailing JSON value")
-}
-
-// ActivateStatic applies an immutable assignment before the Nomad procd HTTP
-// server starts accepting requests.
-func ActivateStatic(ctx context.Context, controller *Controller, assignment runtimecontrol.Assignment) error {
-	if controller == nil {
-		return errors.New("runtime controller is required")
-	}
-	revision, err := assignment.Revision()
-	if err != nil {
-		return fmt.Errorf("derive static runtime assignment revision: %w", err)
-	}
-	snapshot := runtimecontrol.Snapshot{
-		State: runtimecontrol.DesiredActive, Revision: revision, Assignment: &assignment,
-	}
-	if err := controller.HandleSnapshot(ctx, snapshot, func(runtimecontrol.Observation) error { return nil }); err != nil {
-		return fmt.Errorf("activate static runtime assignment: %w", err)
-	}
-	if ready, reason := controller.CanServe(); !ready {
-		return fmt.Errorf("activate static runtime assignment: %s", reason)
-	}
-	state := controller.State()
-	if state.Revision != revision || state.RuntimeGeneration != assignment.RuntimeGeneration {
-		return errors.New("static runtime activation acknowledged another assignment")
-	}
-	return nil
 }

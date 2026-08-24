@@ -10,10 +10,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 func (s *Server) createSandboxRootFSSnapshot(c *gin.Context) {
@@ -211,11 +211,11 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		zap.Error(err),
 	)
 	switch {
-	case apierrors.IsNotFound(err), errors.Is(err, sandboxstore.ErrSandboxRecordNotFound), errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound):
+	case apierror.IsNotFound(err), errors.Is(err, sandboxstore.ErrSandboxRecordNotFound), errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
-	case apierrors.IsForbidden(err):
+	case apierror.IsForbidden(err):
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "forbidden")
-	case apierrors.IsConflict(err):
+	case apierror.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, service.ErrSandboxRootFSRequiresPausedSandbox):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs operation requires a paused sandbox")

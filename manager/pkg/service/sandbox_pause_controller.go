@@ -7,9 +7,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/workqueue"
 )
 
 const (
@@ -34,7 +31,7 @@ type sandboxPauseLifecycleStore interface {
 type SandboxPauseController struct {
 	store          sandboxPauseLifecycleStore
 	logger         *zap.Logger
-	queue          workqueue.TypedRateLimitingInterface[sandboxPauseItem]
+	queue          *retryQueue[sandboxPauseItem]
 	resyncInterval time.Duration
 	scanLimit      int
 	complete       func(context.Context, string) error
@@ -52,7 +49,7 @@ func NewSandboxPauseController(
 	controller := &SandboxPauseController{
 		store:          store,
 		logger:         logger,
-		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]()),
+		queue:          newRetryQueue[sandboxPauseItem](),
 		resyncInterval: defaultSandboxPauseResyncPeriod,
 		scanLimit:      defaultSandboxPauseScanLimit,
 	}
@@ -97,7 +94,7 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 		workers = 1
 	}
 	if c.queue == nil {
-		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]())
+		c.queue = newRetryQueue[sandboxPauseItem]()
 	}
 	if c.scanLimit <= 0 {
 		c.scanLimit = defaultSandboxPauseScanLimit
@@ -106,13 +103,12 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 		c.resyncInterval = defaultSandboxPauseResyncPeriod
 	}
 
-	defer runtime.HandleCrash()
 	defer c.queue.ShutDown()
 
 	c.logger.Info("Starting sandbox pause controller", zap.Int("workers", workers))
 	c.enqueuePausingSandboxes(ctx)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		go c.runWorker(ctx)
 	}
 
 	ticker := time.NewTicker(c.resyncInterval)

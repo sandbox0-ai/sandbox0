@@ -221,7 +221,7 @@ func authenticate(verifier nodeauth.Verifier, writer http.ResponseWriter, reques
 		return nodeauth.Identity{}, false
 	}
 	identity.NodeUID = strings.TrimSpace(identity.NodeUID)
-	identity.PodUID = strings.TrimSpace(identity.PodUID)
+	identity.AgentUID = strings.TrimSpace(identity.AgentUID)
 	if identity.NodeUID == "" || len(identity.NodeUID) > 512 {
 		writeError(writer, http.StatusForbidden, protocol.ErrorPermissionDenied, "authenticated node identity is invalid")
 		return nodeauth.Identity{}, false

@@ -6,11 +6,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/workqueue"
 )
 
 const (
@@ -32,7 +29,7 @@ type SandboxNetworkMutationController struct {
 	store          sandboxNetworkMutationStore
 	reconciler     sandboxNetworkMutationReconciler
 	logger         *zap.Logger
-	queue          workqueue.TypedRateLimitingInterface[string]
+	queue          *retryQueue[string]
 	resyncInterval time.Duration
 	scanLimit      int
 }
@@ -47,9 +44,7 @@ func NewSandboxNetworkMutationController(
 	}
 	return &SandboxNetworkMutationController{
 		store: store, reconciler: reconciler, logger: logger,
-		queue: workqueue.NewTypedRateLimitingQueue(
-			workqueue.DefaultTypedControllerRateLimiter[string](),
-		),
+		queue:          newRetryQueue[string](),
 		resyncInterval: defaultSandboxNetworkMutationResyncPeriod,
 		scanLimit:      defaultSandboxNetworkMutationScanLimit,
 	}
@@ -80,13 +75,12 @@ func (c *SandboxNetworkMutationController) Run(ctx context.Context, workers int)
 	if c.resyncInterval <= 0 {
 		c.resyncInterval = defaultSandboxNetworkMutationResyncPeriod
 	}
-	defer runtime.HandleCrash()
 	defer c.queue.ShutDown()
 
 	c.logger.Info("Starting sandbox network mutation controller", zap.Int("workers", workers))
 	c.enqueuePending(ctx)
 	for range workers {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		go c.runWorker(ctx)
 	}
 	ticker := time.NewTicker(c.resyncInterval)
 	defer ticker.Stop()
@@ -126,8 +120,8 @@ func (c *SandboxNetworkMutationController) processNextWorkItem(ctx context.Conte
 	}
 	defer c.queue.Done(sandboxID)
 	err := c.reconciler.CompleteNomadSandboxNetworkMutation(ctx, sandboxID)
-	if err == nil || apierrors.IsConflict(err) {
-		if apierrors.IsConflict(err) {
+	if err == nil || apierror.IsConflict(err) {
+		if apierror.IsConflict(err) {
 			c.logger.Info("Sandbox network mutation was preempted",
 				zap.String("sandboxID", sandboxID), zap.Error(err))
 		}

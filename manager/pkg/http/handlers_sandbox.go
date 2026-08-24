@@ -11,18 +11,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type updateSandboxRequest struct {
@@ -83,7 +83,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if apierrors.IsNotFound(err) || errors.Is(err, service.ErrTemplateNotFound) ||
+		if apierror.IsNotFound(err) || errors.Is(err, service.ErrTemplateNotFound) ||
 			errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
 			return
@@ -431,11 +431,11 @@ func (s *Server) updateSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return
 		}
-		if apierrors.IsConflict(err) {
+		if apierror.IsConflict(err) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox conflicts with another lifecycle operation")
 			return
 		}
-		if apierrors.IsNotFound(err) {
+		if apierror.IsNotFound(err) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}
@@ -573,9 +573,9 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 	switch {
 	case errors.Is(err, service.ErrSandboxLifecycleUnavailable):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
-	case apierrors.IsConflict(err):
+	case apierror.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
-	case apierrors.IsNotFound(err):
+	case apierror.IsNotFound(err):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 	case errors.Is(err, service.ErrQuotaExceeded):
 		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
@@ -621,10 +621,10 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 		case errors.Is(err, service.ErrInvalidClaimRequest):
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
-		case apierrors.IsConflict(err):
+		case apierror.IsConflict(err):
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox termination is in progress")
 			return
-		case apierrors.IsNotFound(err):
+		case apierror.IsNotFound(err):
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}

@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -61,18 +60,14 @@ var (
 // RootFSWriterGrant is the regional single-writer ownership record. The raw
 // bearer token is deliberately absent; PostgreSQL stores only its SHA-256.
 type RootFSWriterGrant struct {
-	ID               string
-	FilesystemID     string
-	SandboxID        string
-	ClaimID          string
-	SlotID           string
-	IssueOperationID string
-	WriterEpoch      int64
-	State            string
-	// InitialHeadLayerID is the historical column name retained for rolling
-	// compatibility. InitialGenerationID is the canonical opaque durable head
-	// identity and does not imply a rootfs_layers row.
-	InitialHeadLayerID   string
+	ID                   string
+	FilesystemID         string
+	SandboxID            string
+	ClaimID              string
+	SlotID               string
+	IssueOperationID     string
+	WriterEpoch          int64
+	State                string
 	InitialGenerationID  string
 	BindingVersion       int
 	BindingDigest        []byte
@@ -84,8 +79,8 @@ type RootFSWriterGrant struct {
 	NodeName             string
 	GateParent           string
 	RuntimeGeneration    string
-	// ConsumerNodeUID is durable ownership. ConsumerAgentUID records only
-	// the first authenticated ctld Pod that completed Consume for audit.
+	// ConsumerNodeUID is durable ownership. ConsumerAgentUID records only the
+	// first authenticated ctld instance that completed Consume for audit.
 	ConsumerNodeUID  string
 	ConsumerAgentUID string
 	ConsumeExpiresAt time.Time
@@ -136,7 +131,6 @@ type IssueRootFSWriterGrantRequest struct {
 	NodeName             string
 	GateParent           string
 	RuntimeGeneration    string
-	InitialHeadLayerID   string
 	InitialGenerationID  string
 	ExpectedWriterEpoch  int64
 	ConsumeExpiresAt     time.Time
@@ -162,12 +156,12 @@ type CancelRootFSWriterGrantRequest struct {
 }
 
 type BeginRootFSWriterRetireRequest struct {
-	GrantID                string
-	WriterEpoch            int64
-	OperationID            string
-	BindingVersion         int
-	BindingDigest          []byte
-	ExpectedOldHeadLayerID string
+	GrantID                 string
+	WriterEpoch             int64
+	OperationID             string
+	BindingVersion          int
+	BindingDigest           []byte
+	ExpectedOldGenerationID string
 }
 
 // BeginRootFSWriterCrashAbandonRequest establishes the regional fencing point
@@ -191,13 +185,13 @@ type BeginRootFSWriterCrashAbandonRequest struct {
 // tombstoned. The method is transaction-only so callers also hold the sandbox
 // lifecycle lock while removing regional ownership.
 type CompleteRootFSWriterPrelaunchAbortRequest struct {
-	GrantID                string
-	WriterEpoch            int64
-	OperationID            string
-	BindingVersion         int
-	BindingDigest          []byte
-	ProofDigest            []byte
-	ExpectedOldHeadLayerID string
+	GrantID                 string
+	WriterEpoch             int64
+	OperationID             string
+	BindingVersion          int
+	BindingDigest           []byte
+	ProofDigest             []byte
+	ExpectedOldGenerationID string
 }
 
 // CompleteRootFSWriterCrashAbandonRequest terminally abandons an unsealed
@@ -223,25 +217,8 @@ type CompleteRootFSWriterCrashAbandonRequest struct {
 	ExpectedOldGenerationID string
 }
 
-// CompleteRootFSWriterRetireAndPublishRequest binds the detach-and-seal proof
-// to one immutable layer and the filesystem head observed when the writer was
-// issued. Lifecycle state remains in sandbox_lifecycle_txns; callers can use
-// this method through RootFSWriterGrantTx and commit that txn atomically.
-type CompleteRootFSWriterRetireAndPublishRequest struct {
-	LifecycleTxnID         string
-	GrantID                string
-	WriterEpoch            int64
-	OperationID            string
-	BindingVersion         int
-	BindingDigest          []byte
-	ProofDigest            []byte
-	ExpectedOldHeadLayerID string
-	RootFSState            *SandboxRootFSState
-}
-
 // CompleteRootFSWriterRetireAndPublishGenerationRequest publishes one sealed
-// block-COW generation. It is separate from the legacy layer request so the
-// two storage formats cannot accidentally share a head mutation path.
+// block-COW generation.
 type CompleteRootFSWriterRetireAndPublishGenerationRequest struct {
 	LifecycleTxnID          string
 	GrantID                 string
@@ -307,7 +284,6 @@ type RootFSWriterGrantTx interface {
 	BeginRootFSWriterRetire(context.Context, *BeginRootFSWriterRetireRequest) (*RootFSWriterGrant, error)
 	BeginRootFSWriterPrelaunchAbort(context.Context, *BeginRootFSWriterRetireRequest) (*RootFSWriterGrant, error)
 	RenewRootFSWriterGrant(context.Context, *RenewRootFSWriterGrantRequest, RootFSWriterLeaseRenewalPolicy) (*RootFSWriterGrant, error)
-	CompleteRootFSWriterRetireAndPublish(context.Context, *CompleteRootFSWriterRetireAndPublishRequest) (*RootFSWriterGrant, error)
 	CompleteRootFSWriterRetireAndPublishGeneration(context.Context, *CompleteRootFSWriterRetireAndPublishGenerationRequest) (*RootFSWriterGrant, error)
 	CompleteRootFSWriterPrelaunchAbort(context.Context, *CompleteRootFSWriterPrelaunchAbortRequest) (*RootFSWriterGrant, error)
 }
@@ -458,10 +434,6 @@ func (t sandboxStoreTx) RenewRootFSWriterGrant(ctx context.Context, req *RenewRo
 	return renewRootFSWriterGrant(ctx, t.tx, req, policy)
 }
 
-func (t sandboxStoreTx) CompleteRootFSWriterRetireAndPublish(ctx context.Context, req *CompleteRootFSWriterRetireAndPublishRequest) (*RootFSWriterGrant, error) {
-	return completeRootFSWriterRetireAndPublish(ctx, t.tx, req)
-}
-
 func (t sandboxStoreTx) CompleteRootFSWriterRetireAndPublishGeneration(
 	ctx context.Context,
 	req *CompleteRootFSWriterRetireAndPublishGenerationRequest,
@@ -566,7 +538,7 @@ func issueRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *Is
 	var currentHead, filesystemTeamID string
 	var currentEpoch int64
 	if err := db.QueryRow(ctx, `
-		SELECT COALESCE(head_generation_id, head_layer_id, ''), writer_epoch, team_id
+		SELECT COALESCE(head_generation_id, ''), writer_epoch, team_id
 		FROM manager.rootfs_filesystems
 		WHERE filesystem_id = $1
 		FOR UPDATE
@@ -627,16 +599,16 @@ func issueRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *Is
 	_, err = db.Exec(ctx, `
 		INSERT INTO manager.rootfs_writer_grants (
 			grant_id, filesystem_id, sandbox_id, claim_id, slot_id,
-			issue_operation_id, writer_epoch, state, initial_head_layer_id, initial_generation_id,
+			issue_operation_id, writer_epoch, state, initial_generation_id,
 			binding_version, binding_digest, token_digest, node_uid, node_boot_id,
 			runtime_namespace, runtime_id, runtime_incarnation_id,
 			runtime_node_name, runtime_gate_parent, runtime_generation,
 			consume_expires_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			$16, $17, $18, $19, $20, $21, $22, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+			$15, $16, $17, $18, $19, $20, $21, NOW(), NOW())
 	`, normalized.GrantID, filesystemID, normalized.SandboxID, normalized.ClaimID, normalized.SlotID,
-		normalized.OperationID, writerEpoch, RootFSWriterGrantStateIssued, normalized.InitialHeadLayerID, normalized.InitialGenerationID,
+		normalized.OperationID, writerEpoch, RootFSWriterGrantStateIssued, normalized.InitialGenerationID,
 		normalized.BindingVersion, normalized.BindingDigest, tokenDigest[:], normalized.NodeUID,
 		normalized.NodeBootID, normalized.RuntimeNamespace, normalized.RuntimeID, normalized.RuntimeIncarnationID,
 		normalized.NodeName, normalized.GateParent, normalized.RuntimeGeneration, normalized.ConsumeExpiresAt)
@@ -660,36 +632,15 @@ func ensureRootFSWriterFilesystem(ctx context.Context, db rootFSWriterGrantDB, s
 	if err == nil {
 		return filesystemID, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: sandbox %s has no rootfs generation binding",
+			ErrRootFSFilesystemNotFound, sandboxID)
+	}
+	if err != nil {
 		return "", fmt.Errorf("load sandbox rootfs binding for writer grant: %w", err)
 	}
-	filesystemID = sandboxID
-	if _, err := db.Exec(ctx, `
-		INSERT INTO manager.rootfs_filesystems (
-			filesystem_id, team_id, created_at, updated_at
-		)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (filesystem_id) DO NOTHING
-	`, filesystemID, teamID); err != nil {
-		return "", fmt.Errorf("ensure rootfs filesystem for writer grant: %w", err)
-	}
-	if _, err := db.Exec(ctx, `
-		INSERT INTO manager.sandbox_rootfs_bindings (
-			sandbox_id, filesystem_id, team_id, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, NOW(), NOW())
-		ON CONFLICT (sandbox_id) DO NOTHING
-	`, sandboxID, filesystemID, teamID); err != nil {
-		return "", fmt.Errorf("ensure sandbox rootfs binding for writer grant: %w", err)
-	}
-	if err := db.QueryRow(ctx, `
-		SELECT filesystem_id
-		FROM manager.sandbox_rootfs_bindings
-		WHERE sandbox_id = $1
-	`, sandboxID).Scan(&filesystemID); err != nil {
-		return "", fmt.Errorf("reload sandbox rootfs binding for writer grant: %w", err)
-	}
-	return filesystemID, nil
+	return "", fmt.Errorf("%w: sandbox %s has no rootfs generation binding",
+		ErrRootFSFilesystemNotFound, sandboxID)
 }
 
 func consumeRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *ConsumeRootFSWriterGrantRequest) (*RootFSWriterGrant, error) {
@@ -1042,10 +993,10 @@ func beginRootFSWriterRetire(
 			AND g.lease_expires_at > NOW()
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
-			AND COALESCE(filesystem.head_generation_id, filesystem.head_layer_id, '') = $8
+			AND COALESCE(filesystem.head_generation_id, '') = $8
 	`, normalized.GrantID, RootFSWriterGrantStateRetiring, normalized.OperationID,
 		RootFSWriterGrantStateConsumed, normalized.WriterEpoch, normalized.BindingVersion,
-		normalized.BindingDigest, normalized.ExpectedOldHeadLayerID, retireKind)
+		normalized.BindingDigest, normalized.ExpectedOldGenerationID, retireKind)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("begin rootfs writer retire", err)
 	}
@@ -1056,9 +1007,9 @@ func beginRootFSWriterRetire(
 	if !rootFSWriterGrantMatchesRetireBase(record, normalized.GrantID, normalized.WriterEpoch, normalized.BindingVersion, normalized.BindingDigest) {
 		return nil, fmt.Errorf("%w: retire request does not match grant %s", ErrRootFSWriterGrantConflict, normalized.GrantID)
 	}
-	if record.InitialGenerationID != normalized.ExpectedOldHeadLayerID {
+	if record.InitialGenerationID != normalized.ExpectedOldGenerationID {
 		return nil, fmt.Errorf("%w: grant %s was issued at head %q, not %q", ErrRootFSHeadConflict,
-			normalized.GrantID, record.InitialGenerationID, normalized.ExpectedOldHeadLayerID)
+			normalized.GrantID, record.InitialGenerationID, normalized.ExpectedOldGenerationID)
 	}
 	if tag.RowsAffected() > 0 {
 		return cloneRootFSWriterGrant(&record.RootFSWriterGrant), nil
@@ -1140,8 +1091,8 @@ func beginRootFSWriterCrashAbandon(
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting ||
 		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromRuntimeNamespace) == "" ||
 		strings.TrimSpace(lifecycle.FromRuntimeID) == "" ||
-		lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
-		lifecycle.PreparedHeadLayerID != "" {
+		lifecycle.ExpectedGenerationID != "" && lifecycle.ExpectedGenerationID != normalized.ExpectedOldGenerationID ||
+		lifecycle.PreparedGenerationID != "" {
 		return nil, fmt.Errorf("%w: lifecycle txn %s cannot begin crash abandon",
 			ErrRootFSWriterGrantInvalidState, normalized.OperationID)
 	}
@@ -1197,186 +1148,6 @@ func beginRootFSWriterCrashAbandon(
 	return cloneRootFSWriterGrant(&record.RootFSWriterGrant), nil
 }
 
-func completeRootFSWriterRetireAndPublish(ctx context.Context, db rootFSWriterGrantDB, req *CompleteRootFSWriterRetireAndPublishRequest) (*RootFSWriterGrant, error) {
-	normalized, err := validateCompleteRootFSWriterRetireAndPublishRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	record, err := getRootFSWriterGrantForUpdate(ctx, db, normalized.GrantID)
-	if err != nil {
-		return nil, err
-	}
-	if !rootFSWriterGrantMatchesRetire(record, normalized.GrantID, normalized.WriterEpoch, normalized.OperationID,
-		normalized.BindingVersion, normalized.BindingDigest) {
-		return nil, fmt.Errorf("%w: retire-and-publish request does not match grant %s", ErrRootFSWriterGrantConflict, normalized.GrantID)
-	}
-	if record.RetireKind != RootFSWriterRetireKindPlannedPublish {
-		return nil, fmt.Errorf("%w: grant %s retire kind is %q", ErrRootFSWriterGrantConflict, normalized.GrantID, record.RetireKind)
-	}
-	if record.InitialGenerationID != normalized.ExpectedOldHeadLayerID {
-		return nil, fmt.Errorf("%w: grant %s was issued at head %q, not %q", ErrRootFSHeadConflict,
-			normalized.GrantID, record.InitialGenerationID, normalized.ExpectedOldHeadLayerID)
-	}
-	if record.SandboxID != normalized.RootFSState.SandboxID {
-		return nil, fmt.Errorf("%w: grant sandbox %s does not match layer sandbox %s", ErrRootFSWriterGrantConflict,
-			record.SandboxID, normalized.RootFSState.SandboxID)
-	}
-	lifecycle, err := lockRootFSWriterLifecycleTxn(ctx, db, normalized.LifecycleTxnID)
-	if err != nil {
-		return nil, err
-	}
-	if lifecycle.SandboxID != record.SandboxID || lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldHeadLayerID {
-		return nil, fmt.Errorf("%w: lifecycle txn %s does not match grant sandbox and expected head",
-			ErrRootFSWriterGrantConflict, normalized.LifecycleTxnID)
-	}
-	if lifecycle.PreparedHeadLayerID != "" && lifecycle.PreparedHeadLayerID != normalized.RootFSState.LayerID {
-		return nil, fmt.Errorf("%w: lifecycle txn %s prepared head %q, not %q", ErrRootFSHeadConflict,
-			normalized.LifecycleTxnID, lifecycle.PreparedHeadLayerID, normalized.RootFSState.LayerID)
-	}
-
-	var filesystemTeamID, currentHead string
-	var currentEpoch int64
-	err = db.QueryRow(ctx, `
-		SELECT filesystem.team_id, COALESCE(filesystem.head_generation_id, filesystem.head_layer_id, ''), filesystem.writer_epoch
-		FROM manager.rootfs_filesystems AS filesystem
-		JOIN manager.sandbox_rootfs_bindings AS binding
-			ON binding.filesystem_id = filesystem.filesystem_id
-		WHERE filesystem.filesystem_id = $1
-			AND binding.sandbox_id = $2
-		FOR UPDATE OF filesystem
-	`, record.FilesystemID, record.SandboxID).Scan(&filesystemTeamID, &currentHead, &currentEpoch)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("%w: filesystem binding for grant %s", ErrRootFSWriterGrantConflict, normalized.GrantID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock rootfs filesystem for retire-and-publish: %w", err)
-	}
-	if filesystemTeamID != normalized.RootFSState.TeamID {
-		return nil, fmt.Errorf("%w: filesystem team %s does not match layer team %s", ErrRootFSWriterGrantConflict,
-			filesystemTeamID, normalized.RootFSState.TeamID)
-	}
-	if currentEpoch != normalized.WriterEpoch {
-		return nil, fmt.Errorf("%w: expected %d, got %d", ErrRootFSWriterEpochConflict, normalized.WriterEpoch, currentEpoch)
-	}
-
-	if record.State == RootFSWriterGrantStateRetired {
-		if lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.PreparedHeadLayerID != normalized.RootFSState.LayerID {
-			return nil, fmt.Errorf("%w: retired grant %s is not paired with committed lifecycle txn %s",
-				ErrRootFSWriterGrantConflict, normalized.GrantID, normalized.LifecycleTxnID)
-		}
-		if !bytes.Equal(record.RetireProofDigest, normalized.ProofDigest) {
-			return nil, fmt.Errorf("%w: grant %s was retired with different proof", ErrRootFSWriterGrantConflict, normalized.GrantID)
-		}
-		if currentHead != normalized.RootFSState.LayerID {
-			return nil, fmt.Errorf("%w: retired grant %s published head %q, not %q", ErrRootFSHeadConflict,
-				normalized.GrantID, currentHead, normalized.RootFSState.LayerID)
-		}
-		matches, matchErr := rootFSWriterLayerMatchesState(ctx, db, normalized.RootFSState)
-		if matchErr != nil {
-			return nil, matchErr
-		}
-		if !matches {
-			return nil, fmt.Errorf("%w: published layer %s has different immutable fields", ErrRootFSWriterGrantConflict,
-				normalized.RootFSState.LayerID)
-		}
-		return cloneRootFSWriterGrant(&record.RootFSWriterGrant), nil
-	}
-	if record.State != RootFSWriterGrantStateRetiring {
-		return nil, rootFSWriterGrantStateError(record)
-	}
-	if lifecycle.CancelRequested || (lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting) {
-		return nil, fmt.Errorf("%w: lifecycle txn %s is not publishable", ErrRootFSWriterGrantInvalidState,
-			normalized.LifecycleTxnID)
-	}
-	if len(record.RetireProofDigest) != 0 {
-		return nil, fmt.Errorf("%w: retiring grant %s already has a proof", ErrRootFSWriterGrantConflict, normalized.GrantID)
-	}
-	if currentHead != normalized.ExpectedOldHeadLayerID {
-		return nil, fmt.Errorf("%w: expected %q, got %q", ErrRootFSHeadConflict,
-			normalized.ExpectedOldHeadLayerID, currentHead)
-	}
-
-	if err := saveRootFSLayer(ctx, db, normalized.RootFSState); err != nil {
-		return nil, err
-	}
-	matches, err := rootFSWriterLayerMatchesState(ctx, db, normalized.RootFSState)
-	if err != nil {
-		return nil, err
-	}
-	if !matches {
-		return nil, fmt.Errorf("%w: layer %s has different immutable fields", ErrRootFSWriterGrantConflict,
-			normalized.RootFSState.LayerID)
-	}
-
-	tag, err := db.Exec(ctx, `
-		UPDATE manager.rootfs_filesystems
-		SET head_layer_id = $2,
-			base_image_ref = $3,
-			base_image_digest = $4,
-			updated_at = NOW()
-		WHERE filesystem_id = $1
-			AND writer_epoch = $5
-			AND COALESCE(head_layer_id, '') = $6
-	`, record.FilesystemID, normalized.RootFSState.LayerID, normalized.RootFSState.BaseImageRef,
-		normalized.RootFSState.BaseImageDigest, normalized.WriterEpoch, normalized.ExpectedOldHeadLayerID)
-	if err != nil {
-		return nil, fmt.Errorf("publish rootfs writer head: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: filesystem %s", ErrRootFSHeadConflict, record.FilesystemID)
-	}
-	tag, err = db.Exec(ctx, `
-		UPDATE manager.rootfs_writer_grants
-		SET state = $2,
-			retire_proof_digest = $3,
-			retired_at = NOW(),
-			lease_expires_at = NULL,
-			updated_at = NOW()
-		WHERE grant_id = $1
-			AND state = $4
-			AND writer_epoch = $5
-			AND retire_operation_id = $6
-			AND retire_kind = $7
-			AND binding_version = $8
-			AND binding_digest = $9
-	`, normalized.GrantID, RootFSWriterGrantStateRetired, normalized.ProofDigest,
-		RootFSWriterGrantStateRetiring, normalized.WriterEpoch, normalized.OperationID,
-		RootFSWriterRetireKindPlannedPublish, normalized.BindingVersion, normalized.BindingDigest)
-	if err != nil {
-		return nil, fmt.Errorf("retire published rootfs writer grant: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: grant %s changed during publish", ErrRootFSWriterGrantInvalidState, normalized.GrantID)
-	}
-	tag, err = db.Exec(ctx, `
-		UPDATE manager.sandbox_lifecycle_txns
-		SET phase = $2,
-			prepared_head_layer_id = $3,
-			committed_at = NOW(),
-			updated_at = NOW()
-		WHERE txn_id = $1
-			AND sandbox_id = $4
-			AND expected_head_layer_id = $5
-			AND phase IN ($6, $7)
-			AND cancel_requested_at IS NULL
-			AND (prepared_head_layer_id = '' OR prepared_head_layer_id = $3)
-	`, normalized.LifecycleTxnID, SandboxLifecyclePhaseCommitted, normalized.RootFSState.LayerID,
-		record.SandboxID, normalized.ExpectedOldHeadLayerID,
-		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting)
-	if err != nil {
-		return nil, fmt.Errorf("commit rootfs writer lifecycle txn: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: lifecycle txn %s changed during publish", ErrRootFSWriterGrantInvalidState,
-			normalized.LifecycleTxnID)
-	}
-	record, err = getRootFSWriterGrant(ctx, db, normalized.GrantID)
-	if err != nil {
-		return nil, err
-	}
-	return cloneRootFSWriterGrant(&record.RootFSWriterGrant), nil
-}
-
 func completeRootFSWriterRetireAndPublishGeneration(
 	ctx context.Context,
 	db rootFSWriterGrantDB,
@@ -1410,18 +1181,17 @@ func completeRootFSWriterRetireAndPublishGeneration(
 		return nil, err
 	}
 	if lifecycle.SandboxID != record.SandboxID ||
-		lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
-		lifecycle.PreparedHeadLayerID != "" && lifecycle.PreparedHeadLayerID != generation.ID {
+		lifecycle.ExpectedGenerationID != "" && lifecycle.ExpectedGenerationID != normalized.ExpectedOldGenerationID ||
+		lifecycle.PreparedGenerationID != "" && lifecycle.PreparedGenerationID != generation.ID {
 		return nil, fmt.Errorf("%w: lifecycle txn %s does not match generation publish",
 			ErrRootFSWriterGrantConflict, normalized.LifecycleTxnID)
 	}
 
-	var storageFormat, currentHead, baseArtifact string
+	var currentHead, baseArtifact string
 	var currentEpoch int64
 	var formatGeneration int
 	err = db.QueryRow(ctx, `
-		SELECT filesystem.storage_format,
-			COALESCE(filesystem.head_generation_id, ''), filesystem.writer_epoch,
+		SELECT COALESCE(filesystem.head_generation_id, ''), filesystem.writer_epoch,
 			COALESCE(filesystem.base_artifact_digest, ''), COALESCE(filesystem.format_generation, 0)
 		FROM manager.rootfs_filesystems AS filesystem
 		JOIN manager.sandbox_rootfs_bindings AS binding
@@ -1430,7 +1200,7 @@ func completeRootFSWriterRetireAndPublishGeneration(
 			AND binding.sandbox_id = $2
 		FOR UPDATE OF filesystem
 	`, record.FilesystemID, record.SandboxID).Scan(
-		&storageFormat, &currentHead, &currentEpoch, &baseArtifact, &formatGeneration,
+		&currentHead, &currentEpoch, &baseArtifact, &formatGeneration,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: filesystem binding for grant %s", ErrRootFSWriterGrantConflict, normalized.GrantID)
@@ -1438,7 +1208,7 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	if err != nil {
 		return nil, fmt.Errorf("lock block-cow rootfs filesystem for publish: %w", err)
 	}
-	if storageFormat != RootFSStorageFormatBlockCOWV1 || currentEpoch != normalized.WriterEpoch ||
+	if currentEpoch != normalized.WriterEpoch ||
 		baseArtifact != generation.BaseArtifactDigest ||
 		formatGeneration != generation.FormatGeneration {
 		return nil, fmt.Errorf("%w: block-cow filesystem head or format changed", ErrRootFSHeadConflict)
@@ -1469,8 +1239,8 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	}
 
 	if record.State == RootFSWriterGrantStateRetired {
-		if lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
-			lifecycle.PreparedHeadLayerID != generation.ID || !bytes.Equal(record.RetireProofDigest, normalized.ProofDigest) ||
+		if lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.ExpectedGenerationID != normalized.ExpectedOldGenerationID ||
+			lifecycle.PreparedGenerationID != generation.ID || !bytes.Equal(record.RetireProofDigest, normalized.ProofDigest) ||
 			currentHead != generation.ID {
 			return nil, fmt.Errorf("%w: retired generation publish is not an exact retry",
 				ErrRootFSWriterGrantConflict)
@@ -1526,10 +1296,9 @@ func completeRootFSWriterRetireAndPublishGeneration(
 		UPDATE manager.rootfs_filesystems
 		SET head_generation_id = $2, updated_at = NOW()
 		WHERE filesystem_id = $1
-			AND storage_format = $3
-			AND writer_epoch = $4
-			AND head_generation_id = $5
-	`, record.FilesystemID, generation.ID, RootFSStorageFormatBlockCOWV1,
+			AND writer_epoch = $3
+			AND head_generation_id = $4
+	`, record.FilesystemID, generation.ID,
 		normalized.WriterEpoch, normalized.ExpectedOldGenerationID)
 	if err != nil {
 		return nil, fmt.Errorf("publish sealed rootfs generation: %w", err)
@@ -1556,12 +1325,12 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	}
 	tag, err = db.Exec(ctx, `
 		UPDATE manager.sandbox_lifecycle_txns
-		SET phase = $2, expected_head_layer_id = $3, prepared_head_layer_id = $4,
+		SET phase = $2, expected_generation_id = $3, prepared_generation_id = $4,
 			committed_at = NOW(), updated_at = NOW()
 		WHERE txn_id = $1 AND sandbox_id = $5
-			AND (expected_head_layer_id = '' OR expected_head_layer_id = $3)
+			AND (expected_generation_id = '' OR expected_generation_id = $3)
 			AND phase IN ($6, $7) AND cancel_requested_at IS NULL
-			AND (prepared_head_layer_id = '' OR prepared_head_layer_id = $4)
+			AND (prepared_generation_id = '' OR prepared_generation_id = $4)
 	`, normalized.LifecycleTxnID, SandboxLifecyclePhaseCommitted,
 		normalized.ExpectedOldGenerationID, generation.ID, record.SandboxID,
 		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting)
@@ -1623,14 +1392,14 @@ func completeRootFSWriterPrelaunchAbort(
 		normalized.BindingVersion, normalized.BindingDigest) || record.RetireKind != RootFSWriterRetireKindPrelaunchAbort {
 		return nil, fmt.Errorf("%w: prelaunch abort does not match grant %s", ErrRootFSWriterGrantConflict, normalized.GrantID)
 	}
-	if record.InitialGenerationID != normalized.ExpectedOldHeadLayerID {
+	if record.InitialGenerationID != normalized.ExpectedOldGenerationID {
 		return nil, fmt.Errorf("%w: grant %s was issued at head %q, not %q", ErrRootFSHeadConflict,
-			normalized.GrantID, record.InitialGenerationID, normalized.ExpectedOldHeadLayerID)
+			normalized.GrantID, record.InitialGenerationID, normalized.ExpectedOldGenerationID)
 	}
 	var currentHead string
 	var currentEpoch int64
 	if err := db.QueryRow(ctx, `
-		SELECT COALESCE(head_generation_id, head_layer_id, ''), writer_epoch
+		SELECT COALESCE(head_generation_id, ''), writer_epoch
 		FROM manager.rootfs_filesystems
 		WHERE filesystem_id = $1
 		FOR UPDATE
@@ -1640,9 +1409,9 @@ func completeRootFSWriterPrelaunchAbort(
 	if currentEpoch != normalized.WriterEpoch {
 		return nil, fmt.Errorf("%w: expected %d, got %d", ErrRootFSWriterEpochConflict, normalized.WriterEpoch, currentEpoch)
 	}
-	if currentHead != normalized.ExpectedOldHeadLayerID {
+	if currentHead != normalized.ExpectedOldGenerationID {
 		return nil, fmt.Errorf("%w: expected unchanged head %q, got %q", ErrRootFSHeadConflict,
-			normalized.ExpectedOldHeadLayerID, currentHead)
+			normalized.ExpectedOldGenerationID, currentHead)
 	}
 	if record.State == RootFSWriterGrantStateRetired {
 		if !bytes.Equal(record.RetireProofDigest, normalized.ProofDigest) {
@@ -1746,8 +1515,8 @@ func completeRootFSWriterCrashAbandon(
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting ||
 		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromRuntimeNamespace) == "" ||
 		strings.TrimSpace(lifecycle.FromRuntimeID) == "" ||
-		lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != normalized.ExpectedOldGenerationID ||
-		lifecycle.PreparedHeadLayerID != "" {
+		lifecycle.ExpectedGenerationID != "" && lifecycle.ExpectedGenerationID != normalized.ExpectedOldGenerationID ||
+		lifecycle.PreparedGenerationID != "" {
 		return nil, fmt.Errorf("%w: lifecycle txn %s cannot abandon a crashed runtime",
 			ErrRootFSWriterGrantInvalidState, normalized.LifecycleTxnID)
 	}
@@ -1892,12 +1661,11 @@ func lockRootFSWriterCrashFallbackGeneration(
 	expectedOldGenerationID string,
 	allowMissingBinding bool,
 ) error {
-	var storageFormat, currentHead string
+	var currentHead string
 	var currentEpoch int64
 	var bindingExists bool
 	err := db.QueryRow(ctx, `
-		SELECT filesystem.storage_format, COALESCE(filesystem.head_generation_id, ''),
-			filesystem.writer_epoch,
+		SELECT COALESCE(filesystem.head_generation_id, ''), filesystem.writer_epoch,
 			EXISTS (
 				SELECT 1 FROM manager.sandbox_rootfs_bindings AS binding
 				WHERE binding.filesystem_id = filesystem.filesystem_id AND binding.sandbox_id = $2
@@ -1905,7 +1673,7 @@ func lockRootFSWriterCrashFallbackGeneration(
 		FROM manager.rootfs_filesystems AS filesystem
 		WHERE filesystem.filesystem_id = $1
 		FOR UPDATE OF filesystem
-	`, record.FilesystemID, record.SandboxID).Scan(&storageFormat, &currentHead, &currentEpoch, &bindingExists)
+	`, record.FilesystemID, record.SandboxID).Scan(&currentHead, &currentEpoch, &bindingExists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: filesystem binding for grant %s",
 			ErrRootFSWriterGrantConflict, record.ID)
@@ -1917,8 +1685,7 @@ func lockRootFSWriterCrashFallbackGeneration(
 		return fmt.Errorf("%w: filesystem binding for grant %s",
 			ErrRootFSWriterGrantConflict, record.ID)
 	}
-	if storageFormat != RootFSStorageFormatBlockCOWV1 ||
-		currentEpoch != record.WriterEpoch || currentHead != expectedOldGenerationID {
+	if currentEpoch != record.WriterEpoch || currentHead != expectedOldGenerationID {
 		return fmt.Errorf("%w: crashed writer durable head changed", ErrRootFSHeadConflict)
 	}
 	var oldGenerationExists bool
@@ -1958,19 +1725,7 @@ func validateIssueRootFSWriterGrantRequest(req *IssueRootFSWriterGrantRequest) (
 	normalized.NodeName = strings.TrimSpace(req.NodeName)
 	normalized.GateParent = strings.TrimSpace(req.GateParent)
 	normalized.RuntimeGeneration = strings.TrimSpace(req.RuntimeGeneration)
-	normalized.InitialHeadLayerID = strings.TrimSpace(req.InitialHeadLayerID)
 	normalized.InitialGenerationID = strings.TrimSpace(req.InitialGenerationID)
-	if normalized.InitialGenerationID == "" {
-		normalized.InitialGenerationID = normalized.InitialHeadLayerID
-	}
-	if normalized.InitialHeadLayerID == "" {
-		// Keep the legacy column populated during the mixed-format migration. It
-		// is an opaque identity and is not a foreign key to rootfs_layers.
-		normalized.InitialHeadLayerID = normalized.InitialGenerationID
-	}
-	if normalized.InitialHeadLayerID != normalized.InitialGenerationID {
-		return nil, [sha256.Size]byte{}, fmt.Errorf("initial head and generation must match")
-	}
 	normalized.BindingDigest = append([]byte(nil), req.BindingDigest...)
 	normalized.ConsumeExpiresAt = req.ConsumeExpiresAt.UTC().Truncate(time.Microsecond)
 	for name, value := range map[string]string{
@@ -1981,6 +1736,7 @@ func validateIssueRootFSWriterGrantRequest(req *IssueRootFSWriterGrantRequest) (
 		"runtime_namespace": normalized.RuntimeNamespace, "runtime_id": normalized.RuntimeID,
 		"runtime_incarnation_id": normalized.RuntimeIncarnationID, "node_name": normalized.NodeName,
 		"gate_parent": normalized.GateParent, "runtime_generation": normalized.RuntimeGeneration,
+		"initial_generation_id": normalized.InitialGenerationID,
 	} {
 		if value == "" {
 			return nil, empty, fmt.Errorf("%s is required", name)
@@ -2097,7 +1853,7 @@ func validateBeginRootFSWriterRetireRequest(req *BeginRootFSWriterRetireRequest)
 	normalized := *req
 	normalized.GrantID = strings.TrimSpace(req.GrantID)
 	normalized.OperationID = strings.TrimSpace(req.OperationID)
-	normalized.ExpectedOldHeadLayerID = strings.TrimSpace(req.ExpectedOldHeadLayerID)
+	normalized.ExpectedOldGenerationID = strings.TrimSpace(req.ExpectedOldGenerationID)
 	normalized.BindingDigest = append([]byte(nil), req.BindingDigest...)
 	if normalized.GrantID == "" || normalized.OperationID == "" {
 		return nil, fmt.Errorf("grant_id and operation_id are required")
@@ -2140,56 +1896,6 @@ func validateBeginRootFSWriterCrashAbandonRequest(
 	if err := validateRootFSWriterDigest("binding_digest", normalized.BindingDigest); err != nil {
 		return nil, err
 	}
-	return &normalized, nil
-}
-
-func validateCompleteRootFSWriterRetireAndPublishRequest(req *CompleteRootFSWriterRetireAndPublishRequest) (*CompleteRootFSWriterRetireAndPublishRequest, error) {
-	if req == nil {
-		return nil, fmt.Errorf("complete rootfs writer retire-and-publish request is required")
-	}
-	normalized := *req
-	normalized.LifecycleTxnID = strings.TrimSpace(req.LifecycleTxnID)
-	normalized.GrantID = strings.TrimSpace(req.GrantID)
-	normalized.OperationID = strings.TrimSpace(req.OperationID)
-	normalized.BindingDigest = append([]byte(nil), req.BindingDigest...)
-	normalized.ProofDigest = append([]byte(nil), req.ProofDigest...)
-	normalized.ExpectedOldHeadLayerID = strings.TrimSpace(req.ExpectedOldHeadLayerID)
-	if normalized.LifecycleTxnID == "" || normalized.GrantID == "" || normalized.OperationID == "" {
-		return nil, fmt.Errorf("lifecycle_txn_id, grant_id, and operation_id are required")
-	}
-	if normalized.WriterEpoch <= 0 {
-		return nil, fmt.Errorf("writer_epoch must be positive")
-	}
-	if err := validateRootFSWriterBindingVersion(normalized.BindingVersion); err != nil {
-		return nil, err
-	}
-	if err := validateRootFSWriterDigest("binding_digest", normalized.BindingDigest); err != nil {
-		return nil, err
-	}
-	if err := validateRootFSWriterDigest("proof_digest", normalized.ProofDigest); err != nil {
-		return nil, err
-	}
-	if req.RootFSState == nil {
-		return nil, fmt.Errorf("rootfs_state is required")
-	}
-	state := *req.RootFSState
-	state.LayerChain = append([]*SandboxRootFSLayer(nil), req.RootFSState.LayerChain...)
-	state.SnapshotParentChain = append([]string(nil), req.RootFSState.SnapshotParentChain...)
-	if err := validateRootFSState(&state); err != nil {
-		return nil, err
-	}
-	expectedOldHead := normalized.ExpectedOldHeadLayerID
-	if state.ExpectedHeadLayerID != "" && strings.TrimSpace(state.ExpectedHeadLayerID) != expectedOldHead {
-		return nil, fmt.Errorf("expected_head_layer_id %q does not match expected old head %q",
-			state.ExpectedHeadLayerID, expectedOldHead)
-	}
-	state.SandboxID = strings.TrimSpace(state.SandboxID)
-	state.TeamID = strings.TrimSpace(state.TeamID)
-	state.LayerID = strings.TrimSpace(state.LayerID)
-	state.ParentLayerID = strings.TrimSpace(state.ParentLayerID)
-	state.ExpectedHeadLayerID = expectedOldHead
-	normalized.ExpectedOldHeadLayerID = expectedOldHead
-	normalized.RootFSState = &state
 	return &normalized, nil
 }
 
@@ -2294,7 +2000,7 @@ func validateCompleteRootFSWriterPrelaunchAbortRequest(
 	normalized := *req
 	normalized.GrantID = strings.TrimSpace(req.GrantID)
 	normalized.OperationID = strings.TrimSpace(req.OperationID)
-	normalized.ExpectedOldHeadLayerID = strings.TrimSpace(req.ExpectedOldHeadLayerID)
+	normalized.ExpectedOldGenerationID = strings.TrimSpace(req.ExpectedOldGenerationID)
 	normalized.BindingDigest = append([]byte(nil), req.BindingDigest...)
 	normalized.ProofDigest = append([]byte(nil), req.ProofDigest...)
 	if normalized.GrantID == "" || normalized.OperationID == "" {
@@ -2466,8 +2172,8 @@ type rootFSWriterLifecycleTxnRecord struct {
 	FromGeneration       int64
 	FromRuntimeNamespace string
 	FromRuntimeID        string
-	ExpectedHeadLayerID  string
-	PreparedHeadLayerID  string
+	ExpectedGenerationID string
+	PreparedGenerationID string
 	Error                string
 	CancelRequested      bool
 }
@@ -2477,7 +2183,7 @@ func lockRootFSWriterLifecycleTxn(ctx context.Context, db rootFSWriterGrantDB, t
 	err := db.QueryRow(ctx, `
 		SELECT sandbox_id, kind, source, phase, from_generation,
 			from_runtime_namespace, from_runtime_id,
-			expected_head_layer_id, prepared_head_layer_id, error,
+			expected_generation_id, prepared_generation_id, error,
 			cancel_requested_at IS NOT NULL
 		FROM manager.sandbox_lifecycle_txns
 		WHERE txn_id = $1
@@ -2485,7 +2191,7 @@ func lockRootFSWriterLifecycleTxn(ctx context.Context, db rootFSWriterGrantDB, t
 	`, strings.TrimSpace(txnID)).Scan(
 		&lifecycle.SandboxID, &lifecycle.Kind, &lifecycle.Source, &lifecycle.Phase,
 		&lifecycle.FromGeneration, &lifecycle.FromRuntimeNamespace, &lifecycle.FromRuntimeID,
-		&lifecycle.ExpectedHeadLayerID, &lifecycle.PreparedHeadLayerID, &lifecycle.Error,
+		&lifecycle.ExpectedGenerationID, &lifecycle.PreparedGenerationID, &lifecycle.Error,
 		&lifecycle.CancelRequested,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2495,47 +2201,6 @@ func lockRootFSWriterLifecycleTxn(ctx context.Context, db rootFSWriterGrantDB, t
 		return nil, fmt.Errorf("lock rootfs writer lifecycle txn: %w", err)
 	}
 	return &lifecycle, nil
-}
-
-func rootFSWriterLayerMatchesState(ctx context.Context, db rootFSWriterGrantDB, state *SandboxRootFSState) (bool, error) {
-	if state == nil {
-		return false, nil
-	}
-	layer, err := scanRootFSLayer(db.QueryRow(ctx, `
-		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, platform_os, platform_architecture,
-			platform_variant, created_at
-		FROM manager.rootfs_layers
-		WHERE layer_id = $1
-	`, state.LayerID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("load published rootfs layer %s: %w", state.LayerID, err)
-	}
-	return layer.ID == state.LayerID &&
-		layer.ParentLayerID == state.ParentLayerID &&
-		layer.SourceSandboxID == state.SandboxID &&
-		layer.TeamID == state.TeamID &&
-		layer.RuntimeGeneration == state.RuntimeGeneration &&
-		layer.Runtime == state.Runtime &&
-		layer.RuntimeHandler == state.RuntimeHandler &&
-		layer.BaseImageRef == state.BaseImageRef &&
-		layer.BaseImageDigest == state.BaseImageDigest &&
-		layer.PlatformOS == state.PlatformOS &&
-		layer.PlatformArchitecture == state.PlatformArchitecture &&
-		layer.PlatformVariant == state.PlatformVariant &&
-		layer.Snapshotter == state.Snapshotter &&
-		layer.SnapshotParent == state.SnapshotParent &&
-		slices.Equal(layer.SnapshotParentChain, state.SnapshotParentChain) &&
-		layer.DiffDigest == state.DiffDigest &&
-		layer.DiffID == state.DiffID &&
-		layer.DiffMediaType == state.DiffMediaType &&
-		layer.DiffSize == state.DiffSize &&
-		layer.DiffObjectKey == state.DiffObjectKey, nil
 }
 
 func getRootFSWriterGrantByOperation(ctx context.Context, db rootFSWriterGrantDB, operationID string) (*rootFSWriterGrantRecord, error) {
@@ -2549,7 +2214,7 @@ func getRootFSWriterGrantByOperation(ctx context.Context, db rootFSWriterGrantDB
 func rootFSWriterGrantSelectSQL() string {
 	return `
 		SELECT grant_id, filesystem_id, sandbox_id, claim_id, slot_id,
-			issue_operation_id, writer_epoch, state, initial_head_layer_id, initial_generation_id,
+			issue_operation_id, writer_epoch, state, initial_generation_id,
 			binding_version, binding_digest, token_digest, node_uid, node_boot_id,
 			runtime_namespace, runtime_id, runtime_incarnation_id,
 			runtime_node_name, runtime_gate_parent, runtime_generation,
@@ -2569,7 +2234,7 @@ func scanRootFSWriterGrant(row rootFSWriterGrantScanner) (*rootFSWriterGrantReco
 	var consumedAt, leaseExpiresAt, retireStartedAt, retiredAt, canceledAt pgtype.Timestamptz
 	if err := row.Scan(
 		&record.ID, &record.FilesystemID, &record.SandboxID, &record.ClaimID, &record.SlotID,
-		&record.IssueOperationID, &record.WriterEpoch, &record.State, &record.InitialHeadLayerID, &record.InitialGenerationID,
+		&record.IssueOperationID, &record.WriterEpoch, &record.State, &record.InitialGenerationID,
 		&record.BindingVersion, &record.BindingDigest, &record.tokenDigest, &record.NodeUID, &record.NodeBootID,
 		&record.RuntimeNamespace, &record.RuntimeID, &record.RuntimeIncarnationID,
 		&record.NodeName, &record.GateParent, &record.RuntimeGeneration,

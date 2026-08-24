@@ -45,8 +45,9 @@ s0 sandbox get "$SANDBOX_ID"
 ## Persistence
 
 Files under `/home/node/.openclaw` use the same persistence boundary as the
-rest of the writable rootfs. Pause checkpoints them; resume restores them into
-the replacement runtime Pod. Deleting the sandbox deletes its rootfs state.
+rest of the writable RootFS. Pause checkpoints them; resume restores them into
+the replacement runtime generation. Deleting the sandbox deletes its RootFS
+state.
 
 Create a named [rootfs snapshot](/docs/sandbox/snapshot-restore) before deletion
 when you need a reusable restore point or want to claim another sandbox from

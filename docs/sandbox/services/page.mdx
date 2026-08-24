@@ -554,7 +554,12 @@ Public service auto-resume has three requirements:
 
 All three requirements are needed for public URL requests to wake a paused sandbox and make the backing service available.
 
-For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity and restores the latest rootfs checkpoint. The sandbox ID and service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
+For a paused sandbox, Sandbox0 claims a fresh runtime allocation for the same
+sandbox identity and restores the latest RootFS generation. The sandbox ID and
+service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl`
+expires. For `cmd` services, the command starts again in the new runtime
+generation. For `function` services, there is no long-running listener; each
+request executes the handler after the sandbox runtime is available.
 
 ## Notes
 
@@ -562,7 +567,9 @@ For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox id
 - Public traffic must match a route on a public service.
 - If `methods` is empty, all methods are allowed.
 - Route auth stores SHA-256 digests, not plaintext tokens.
-- Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory; configure `Sandbox0Infra.spec.redis` for shared Redis-backed limits across gateway replicas.
+- Route rate limits use the gateway rate-limit backend. Self-hosted deployments
+  default to process-local memory; configure `rate_limit_backend: redis` and
+  one shared `rate_limit_redis_url`/key prefix across gateway replicas.
 
 ## Next Steps
 

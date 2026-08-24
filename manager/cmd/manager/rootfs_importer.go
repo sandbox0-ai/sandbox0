@@ -6,15 +6,40 @@ import (
 	"fmt"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportdiscovery"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportworker"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ocirootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 )
+
+func configureRootFSImportDiscovery(
+	cfg *config.ManagerConfig,
+	sources templatestore.ImageSourceStore,
+	store *sandboxstore.PGSandboxStore,
+	platforms []sandboxstore.RootFSArtifactPlatform,
+) (*rootfsimportdiscovery.Worker, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("manager config is required")
+	}
+	worker, err := rootfsimportdiscovery.New(rootfsimportdiscovery.Config{
+		Sources: sources, Imports: store, Platforms: platforms,
+		FormatGeneration: rootfsblock.DescriptorVersion,
+		ProcdProtocol:    cfg.RootFSImporter.ProcdProtocol,
+		ProcdDigest:      cfg.RootFSImporter.ProcdDigest,
+		Interval:         cfg.RootFSImporter.DiscoveryInterval.Duration,
+		PageSize:         cfg.RootFSImporter.DiscoveryPageSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create template RootFS import discovery: %w", err)
+	}
+	return worker, nil
+}
 
 func configureRootFSImportWorker(
 	cfg *config.ManagerConfig,
@@ -23,9 +48,6 @@ func configureRootFSImportWorker(
 ) (*rootfsimportworker.Worker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
-	}
-	if cfg.SandboxRuntimeBackend != config.SandboxRuntimeBackendNomad {
-		return nil, nil
 	}
 	if cfg.RootFSImporter.Disabled {
 		return nil, fmt.Errorf("Nomad sandbox runtime requires the durable RootFS importer")
@@ -117,5 +139,26 @@ func logRootFSImportWorkerPass(logger *zap.Logger, result rootfsimportworker.Res
 	if result.Ready > 0 || result.RecoveredLeases > 0 || result.PurgedReady > 0 ||
 		result.PurgedAbandoned > 0 || result.EnqueuedObjects > 0 {
 		logger.Info("Rootfs import worker pass completed", fields...)
+	}
+}
+
+func logRootFSImportDiscoveryPass(logger *zap.Logger, result rootfsimportdiscovery.Result, err error) {
+	if logger == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int("templates", result.Templates),
+		zap.Int("requirements", result.Requirements),
+		zap.Int("ready", result.Ready),
+		zap.Int("ensured", result.Ensured),
+		zap.Int("failed", result.Failed),
+		zap.Bool("wrapped", result.Wrapped),
+	}
+	if err != nil {
+		logger.Warn("Template Rootfs import discovery pass completed with failures", append(fields, zap.Error(err))...)
+		return
+	}
+	if result.Ensured > 0 {
+		logger.Info("Template Rootfs import discovery pass completed", fields...)
 	}
 }

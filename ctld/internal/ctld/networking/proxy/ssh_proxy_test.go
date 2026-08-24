@@ -14,10 +14,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"golang.org/x/crypto/ssh"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
@@ -35,7 +34,7 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 	}
 	defer proxyListener.Close()
 
-	server := &Server{cfg: &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: 5 * time.Second}}}
+	server := &Server{cfg: &config.NetworkRuntimeConfig{ProxyUpstreamTimeout: config.Duration{Duration: 5 * time.Second}}}
 	done := make(chan error, 1)
 	go func() {
 		conn, err := proxyListener.Accept()

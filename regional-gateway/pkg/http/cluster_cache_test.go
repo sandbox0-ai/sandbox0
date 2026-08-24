@@ -9,13 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/schedulerapi"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestGetClusterGatewayURLForClusterRefreshesCacheWithSystemToken(t *testing.T) {
@@ -61,8 +60,8 @@ func TestGetClusterGatewayURLForClusterRefreshesCacheWithSystemToken(t *testing.
 	server := &Server{
 		cfg: &config.RegionalGatewayConfig{
 			SchedulerURL:    scheduler.URL,
-			ClusterCacheTTL: metav1.Duration{Duration: -time.Second},
-			ProxyTimeout:    metav1.Duration{Duration: time.Second},
+			ClusterCacheTTL: config.Duration{Duration: -time.Second},
+			ProxyTimeout:    config.Duration{Duration: time.Second},
 		},
 		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     internalauth.ServiceRegionalGateway,

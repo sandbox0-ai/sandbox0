@@ -613,12 +613,12 @@ func (r *rootfsRuntime) fenceLocalRootFSWriter(
 		NodeUID:          request.Identity.NodeUID, BootID: request.Identity.BootID,
 		RuntimeGeneration:    request.Identity.RuntimeGeneration,
 		HostMountNamespaceID: task.HostMountNamespaceID,
-		PodUID:               request.Identity.PodUID, PodSandboxID: request.Identity.PodSandboxID,
-		ContainerName: request.Identity.ContainerName, SlotNonce: request.Identity.SlotNonce,
+		AllocationID:         request.Identity.AllocationID, NetworkIncarnationID: request.Identity.NetworkIncarnationID,
+		TaskName: request.Identity.TaskName, SlotNonce: request.Identity.SlotNonce,
 		ActiveKey: task.ActiveKey, ConsumerBound: task.ContainerID != "", ContainerID: task.ContainerID,
 		ContainerAbsent: task.ContainerAbsent, TaskAbsent: task.TaskAbsent,
 		FrontendSnapshotAbsent: task.FrontendSnapshotAbsent, StableMountAbsent: task.StableMountAbsent,
-		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: session.ObservedAt,
+		RootFSState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: session.ObservedAt,
 	}
 	if err := proof.Validate(); err != nil {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("validate Nomad crash fence proof: %w", err)

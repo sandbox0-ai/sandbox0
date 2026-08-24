@@ -23,6 +23,9 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnomad"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 const minimumAcceptanceWidth = 8
@@ -81,7 +84,7 @@ func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T)
 	}
 }
 
-func TestNomadEndpointExampleUsesOperatorControlMount(t *testing.T) {
+func TestNomadEndpointExampleUsesDedicatedControlDirectory(t *testing.T) {
 	const (
 		clusterID = "cluster-uuid"
 		nodeID    = "00000000-0000-0000-0000-000000000000"
@@ -112,6 +115,43 @@ func TestNomadEndpointExampleUsesOperatorControlMount(t *testing.T) {
 				t.Fatalf("endpoint %d %s path %q is outside %s", index, name, path, mount)
 			}
 		}
+	}
+}
+
+func TestControlServiceUnitUsesDirectPerServiceConfiguration(t *testing.T) {
+	unit := readAsset(t, "control/sandbox0-control@.service")
+	for _, required := range []string{
+		"EnvironmentFile=-/etc/sandbox0/%i.env",
+		"Environment=CONFIG_PATH=/etc/sandbox0/%i.yaml",
+		"ExecStart=/usr/local/bin/%i",
+		"User=sandbox0",
+		"ProtectSystem=strict",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Fatalf("control unit is missing %q", required)
+		}
+	}
+	manager := readAsset(t, "control/manager.yaml.example")
+	for _, required := range []string{
+		"class_catalog_file: /etc/sandbox0/node-authority/claim/runtime-classes.json",
+		"writer_token_key_file: /etc/sandbox0/node-authority/claim/writer-token.key",
+		"nomad_endpoints_file: /etc/sandbox0/node-authority/control/nomad-endpoints.json",
+		"agent_uid: replace-with-node-agent-identity",
+	} {
+		if !strings.Contains(manager, required) {
+			t.Fatalf("manager example is missing %q", required)
+		}
+	}
+}
+
+func TestManagerExampleRespectsWriterRenewalGraceBound(t *testing.T) {
+	manager := readAsset(t, "control/manager.yaml.example")
+	var cfg config.ManagerConfig
+	if err := yaml.Unmarshal([]byte(manager), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NodeAuthority.WriterRenewalGrace.Duration; got < 0 || got > sandboxstore.RootFSWriterMaxRenewGrace {
+		t.Fatalf("writer renewal grace = %s, want between zero and %s", got, sandboxstore.RootFSWriterMaxRenewGrace)
 	}
 }
 

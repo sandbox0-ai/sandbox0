@@ -20,9 +20,9 @@ const (
 	defaultNodeChannelMaxEndpoints    = 64
 )
 
-// NodeChannelResolver resolves every address currently published by a
-// headless manager authority Service. Implementations must not return a
-// load-balanced virtual IP in addition to the exact manager Pod addresses.
+// NodeChannelResolver resolves every address currently published for a
+// manager authority hostname. Implementations must not return a load-balanced
+// virtual IP in addition to the exact manager endpoints.
 type NodeChannelResolver interface {
 	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
@@ -38,10 +38,10 @@ type NodeChannelAgentSetConfig struct {
 	MaxEndpoints    int
 }
 
-// NodeChannelAgentSet continuously resolves a headless authority Service and
+// NodeChannelAgentSet continuously resolves an authority hostname and
 // maintains one independently authenticated stream to every exact endpoint.
 // The HTTPS authority remains unchanged for HTTP Host and TLS verification;
-// only the underlying TCP destination is pinned to a resolved Pod IP.
+// only the underlying TCP destination is pinned to a resolved endpoint IP.
 type NodeChannelAgentSet struct {
 	config    NodeChannelAgentSetConfig
 	authority *url.URL
@@ -59,7 +59,7 @@ func NewNodeChannelAgentSet(config NodeChannelAgentSetConfig) (*NodeChannelAgent
 		return nil, err
 	}
 	if net.ParseIP(validated.baseURL.Hostname()) != nil {
-		return nil, fmt.Errorf("node channel agent set requires a headless Service hostname, not an IP: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("node channel agent set requires an authority hostname, not an IP: %w", errdefs.ErrInvalidArgument)
 	}
 	if config.ResolveInterval == 0 {
 		config.ResolveInterval = defaultNodeChannelResolveInterval

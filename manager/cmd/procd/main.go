@@ -34,7 +34,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
-	staticAssignment, staticControl, err := runtimecontroller.StaticAssignmentFromEnv()
+	runtimeAssignment, err := runtimecontroller.AssignmentFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid runtime control configuration: %v\n", err)
 		os.Exit(1)
@@ -173,8 +173,7 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Note: Network isolation is handled by the ctld network runtime through pod annotations.
-	// Procd no longer manages network policies.
+	// Network isolation is enforced by the node-local ctld runtime.
 
 	runtimeController := runtimecontroller.New(
 		contextManager,
@@ -184,31 +183,16 @@ func main() {
 		cfg.HTTPPort,
 		logger,
 	)
-	runtimeCancel := func() {}
-	if staticControl {
-		activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = runtimecontroller.ActivateStatic(activationCtx, runtimeController, *staticAssignment)
-		activationCancel()
-		if err != nil {
-			logger.Fatal("Failed to activate static runtime assignment", zap.Error(err))
-		}
-		logger.Info("Static runtime assignment activated",
-			zap.String("sandbox_id", staticAssignment.SandboxID),
-			zap.Int64("runtime_generation", staticAssignment.RuntimeGeneration),
-		)
-	} else {
-		runtimeIdentity, identityErr := runtimecontroller.IdentityFromEnv()
-		if identityErr != nil {
-			logger.Fatal("Failed to load runtime control identity", zap.Error(identityErr))
-		}
-		runtimeClient, clientErr := runtimecontroller.NewClient(runtimeIdentity, runtimeController, logger)
-		if clientErr != nil {
-			logger.Fatal("Failed to create runtime control client", zap.Error(clientErr))
-		}
-		runtimeCtx, cancel := context.WithCancel(context.Background())
-		runtimeCancel = cancel
-		go runtimeClient.Run(runtimeCtx)
+	activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = runtimeController.Activate(activationCtx, *runtimeAssignment)
+	activationCancel()
+	if err != nil {
+		logger.Fatal("Failed to activate runtime assignment", zap.Error(err))
 	}
+	logger.Info("Runtime assignment activated",
+		zap.String("sandbox_id", runtimeAssignment.SandboxID),
+		zap.Int64("runtime_generation", runtimeAssignment.RuntimeGeneration),
+	)
 
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
@@ -238,7 +222,6 @@ func main() {
 
 		cleanupCancel()
 		reaperCancel()
-		runtimeCancel()
 
 		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,

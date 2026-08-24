@@ -32,14 +32,55 @@ func TestInitialRootFSGenerationPersistenceIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, RootFSBaseArtifactStateReady, artifact.State)
 	require.Equal(t, artifactRequest.Platform, artifact.Platform)
-	selected, err := store.GetReadyRootFSBaseArtifact(ctx, artifact.SourceOCIDigest, artifact.Platform, artifact.FormatGeneration)
+	selected, err := store.GetReadyRootFSBaseArtifact(
+		ctx, artifact.SourceOCIDigest, artifact.Platform, ReadyRootFSArtifactRequirements{
+			FormatGeneration: artifact.FormatGeneration,
+			LogicalSizeBytes: artifact.LogicalSizeBytes,
+			ProcdProtocol:    artifact.ProcdProtocol,
+			ProcdDigest:      artifact.ProcdDigest,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
-	selected, err = store.GetReadyRootFSBaseArtifactByDigest(ctx, artifact.ArtifactDigest, artifact.Platform)
+	for name, requirements := range map[string]ReadyRootFSArtifactRequirements{
+		"logical size": {
+			FormatGeneration: artifact.FormatGeneration,
+			LogicalSizeBytes: 2 << 30,
+			ProcdProtocol:    artifact.ProcdProtocol,
+			ProcdDigest:      artifact.ProcdDigest,
+		},
+		"procd digest": {
+			FormatGeneration: artifact.FormatGeneration,
+			LogicalSizeBytes: artifact.LogicalSizeBytes,
+			ProcdProtocol:    artifact.ProcdProtocol,
+			ProcdDigest:      "sha256:" + strings.Repeat("d", 64),
+		},
+	} {
+		t.Run("reject mismatched "+name, func(t *testing.T) {
+			_, err := store.GetReadyRootFSBaseArtifact(
+				ctx, artifact.SourceOCIDigest, artifact.Platform, requirements,
+			)
+			require.ErrorIs(t, err, ErrRootFSBaseArtifactNotFound)
+		})
+	}
+	selected, err = store.GetReadyRootFSBaseArtifactByDigest(
+		ctx, artifact.ArtifactDigest, artifact.Platform, ReadyRootFSArtifactRequirements{
+			FormatGeneration: artifact.FormatGeneration,
+			LogicalSizeBytes: artifact.LogicalSizeBytes,
+			ProcdProtocol:    artifact.ProcdProtocol,
+			ProcdDigest:      artifact.ProcdDigest,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
 	_, err = store.GetReadyRootFSBaseArtifact(ctx, artifact.SourceOCIDigest,
-		RootFSArtifactPlatform{OS: "linux", Architecture: "arm64"}, artifact.FormatGeneration)
+		RootFSArtifactPlatform{OS: "linux", Architecture: "arm64"},
+		ReadyRootFSArtifactRequirements{
+			FormatGeneration: artifact.FormatGeneration,
+			LogicalSizeBytes: artifact.LogicalSizeBytes,
+			ProcdProtocol:    artifact.ProcdProtocol,
+			ProcdDigest:      artifact.ProcdDigest,
+		})
 	require.ErrorIs(t, err, ErrRootFSBaseArtifactNotFound)
 
 	ensureRequest := &EnsureInitialRootFSGenerationRequest{
@@ -51,8 +92,6 @@ func TestInitialRootFSGenerationPersistenceIntegration(t *testing.T) {
 	}
 	filesystem, generation, err := store.EnsureInitialRootFSGeneration(ctx, ensureRequest)
 	require.NoError(t, err)
-	require.Equal(t, RootFSStorageFormatBlockCOWV1, filesystem.StorageFormat)
-	require.Empty(t, filesystem.HeadLayerID)
 	require.Equal(t, generation.ID, filesystem.HeadGenerationID)
 	require.Equal(t, artifact.BaseBlockRoot, generation.CurrentBlockHead)
 	require.Equal(t, RootFSGenerationStateS3Materialized, generation.DurabilityState)
@@ -185,13 +224,13 @@ func TestCompleteRootFSWriterRetirePublishesGenerationAndPauseAtomically(t *test
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, OperationID: "pause-txn",
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ExpectedOldHeadLayerID: initial.ID,
+		ExpectedOldGenerationID: initial.ID,
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pause", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
 		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 			ID: "pause-txn", SandboxID: "sandbox-pause", Kind: SandboxLifecycleKindPause,
-			Phase: SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: initial.ID,
+			Phase: SandboxLifecyclePhasePublishing, ExpectedGenerationID: initial.ID,
 		})
 	}))
 
@@ -282,7 +321,6 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	require.NoError(t, err)
 	require.Equal(t, source.ID, target.SourceFilesystemID)
 	require.Equal(t, initial.ID, target.HeadGenerationID)
-	require.Equal(t, RootFSStorageFormatBlockCOWV1, target.StorageFormat)
 	require.Equal(t, int64(0), target.WriterEpoch)
 
 	var generationCount int
@@ -310,13 +348,13 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
 		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, OperationID: "pause-fork-child",
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: issue.BindingDigest,
-		ExpectedOldHeadLayerID: initial.ID,
+		ExpectedOldGenerationID: initial.ID,
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-fork-target", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
 		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
 			ID: "pause-fork-child", SandboxID: "sandbox-fork-target", Kind: SandboxLifecycleKindPause,
-			Phase: SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: initial.ID,
+			Phase: SandboxLifecyclePhasePublishing, ExpectedGenerationID: initial.ID,
 		})
 	}))
 
@@ -755,7 +793,7 @@ func TestForkNomadPausedSandboxCommitsLogicalTargetAndRootFSAtomicallyIntegratio
 	var claimOperationID, claimPhase, lifecyclePhase, expectedHead, preparedHead string
 	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
 		SELECT claim.operation_id, claim.phase, lifecycle.phase,
-			lifecycle.expected_head_layer_id, lifecycle.prepared_head_layer_id
+			lifecycle.expected_generation_id, lifecycle.prepared_generation_id
 		FROM manager.sandbox_runtime_claims AS claim
 		JOIN manager.sandbox_lifecycle_txns AS lifecycle
 			ON lifecycle.target_sandbox_id = claim.sandbox_id
@@ -907,7 +945,7 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 			ID: operationID, SandboxID: target.ID, Kind: SandboxLifecycleKindPause,
 			Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceCrash,
 			FromGeneration: 7, FromRuntimeNamespace: "nomad", FromRuntimeID: "allocation-crashed",
-			ExpectedHeadLayerID: initial.ID,
+			ExpectedGenerationID: initial.ID,
 		})
 	}))
 	_, err = store.BeginRootFSWriterCrashAbandon(ctx, &BeginRootFSWriterCrashAbandonRequest{
@@ -1089,9 +1127,7 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 		SandboxID: sourceRecord.ID, SnapshotID: "snapshot-block-initial",
 	})
 	require.NoError(t, err)
-	require.Empty(t, snapshot.HeadLayerID)
 	require.Equal(t, initial.ID, snapshot.HeadGenerationID)
-	require.Equal(t, RootFSStorageFormatBlockCOWV1, snapshot.StorageFormat)
 	require.Equal(t, artifact.ArtifactDigest, snapshot.BaseArtifactDigest)
 	require.Equal(t, artifact.SourceOCIDigest, snapshot.SourceOCIDigest)
 
@@ -1133,7 +1169,6 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, initial.ID, copied.HeadGenerationID)
 	require.Equal(t, filesystem.ID, copied.SourceFilesystemID)
-	require.Equal(t, RootFSStorageFormatBlockCOWV1, copied.StorageFormat)
 
 	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, snapshot.ID, sourceRecord.TeamID)
 	require.NoError(t, err)
@@ -1173,7 +1208,6 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-rebase", "team-1")
 	record.DesiredState = SandboxDesiredStatePaused
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.ClusterID = "cluster-rebase"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 	_, err := pool.Exec(ctx, `

@@ -20,11 +20,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+)
+
+const (
+	defaultRuntimeSlotChannelOperationTimeout = 30 * time.Second
+	runtimeSlotChannelOperationTimeoutMargin  = 5 * time.Second
 )
 
 type nodeRuntimeChannelExecutor struct {
@@ -99,7 +105,10 @@ func newNodeRuntimeChannelAgent(
 	if err := os.MkdirAll(controlRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create runtime slot control root: %w", err)
 	}
-	control, err := protocol.NewNodeClient(protocol.NodeClientConfig{AllowedSocketRoot: controlRoot})
+	control, err := protocol.NewNodeClient(protocol.NodeClientConfig{
+		AllowedSocketRoot: controlRoot,
+		Timeout:           runtimeSlotNodeControlTimeout(nomadConfig),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot local control client: %w", err)
 	}
@@ -137,8 +146,9 @@ func newNodeRuntimeChannelAgent(
 		ClusterID:      executor.clusterID,
 		NodeID:         executor.nodeID,
 		NodeUID:        executor.nodeUID, NodeBootIDFile: config.RuntimeSlotNodeBootIDFile,
-		Executor: executor,
-		Capacity: runtimeNodeCapacity(nomadConfig),
+		Executor:         executor,
+		Capacity:         runtimeNodeCapacity(nomadConfig),
+		OperationTimeout: runtimeSlotNodeChannelOperationTimeout(nomadConfig),
 	}
 	if executor.forker != nil {
 		agentConfig.RunningForkExecutor = executor
@@ -154,6 +164,18 @@ func newNodeRuntimeChannelAgent(
 		return nil, fmt.Errorf("create runtime slot node channel agent set: %w", err)
 	}
 	return agent, nil
+}
+
+func runtimeSlotNodeControlTimeout(config NomadAllocationConfig) time.Duration {
+	if config.RuntimeSlotNodeControlTimeout == 0 {
+		return protocol.DefaultNodeControlTimeout
+	}
+	return config.RuntimeSlotNodeControlTimeout
+}
+
+func runtimeSlotNodeChannelOperationTimeout(config NomadAllocationConfig) time.Duration {
+	timeout := runtimeSlotNodeControlTimeout(config) + runtimeSlotChannelOperationTimeoutMargin
+	return max(timeout, defaultRuntimeSlotChannelOperationTimeout)
 }
 
 func (e *nodeRuntimeChannelExecutor) PrepareNetwork(

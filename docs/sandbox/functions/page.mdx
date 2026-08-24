@@ -27,7 +27,11 @@ Function services are different from listener-backed services:
 Python is the first supported function runtime. The sandbox image must include `python3` in `PATH` and use Python 3.9 or later for the supported function feature set.
 
 <Callout variant="info">
-Sandbox0 injects `python-runner` into each sandbox pod, but the runner executes `python3` from the sandbox template image. Custom templates and custom images therefore own the Python runtime used by Sandbox Functions. Older Python versions are not supported; async handlers, streaming responses, and WebSocket handlers depend on Python's modern `asyncio` runtime.
+Sandbox0 injects the pinned `python-runner` artifact into the sandbox RootFS,
+but the runner executes `python3` from the template image. Custom templates and
+images therefore own the Python runtime used by Sandbox Functions. Older
+Python versions are not supported; async handlers, streaming responses, and
+WebSocket handlers depend on Python's modern `asyncio` runtime.
 </Callout>
 
 ## Function Config
@@ -372,7 +376,11 @@ Public function auto-resume has two gates:
 - sandbox `auto_resume` must be true
 - matched route `resume` must be true
 
-Both gates are required for public URL requests to wake a paused sandbox. Sandbox0 creates a new runtime pod for the same sandbox identity, restores the latest rootfs checkpoint, and then executes the handler. The sandbox ID and function `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires.
+Both gates are required for public URL requests to wake a paused sandbox.
+Sandbox0 claims a fresh runtime allocation for the same sandbox identity,
+restores the latest RootFS generation, and then executes the handler. The
+sandbox ID and function `public_url` stay unchanged until the sandbox is
+deleted or `hard_ttl` expires.
 
 ## Notes
 

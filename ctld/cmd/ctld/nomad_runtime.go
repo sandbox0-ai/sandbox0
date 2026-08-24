@@ -17,7 +17,7 @@ package main
 import (
 	"strings"
 
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"go.uber.org/zap"
 )
@@ -75,22 +75,23 @@ func configuredNomadRuntimeFactory(
 	}
 	runtimeConfig.ApplyDefaults()
 	nomadConfig := nomadruntime.NomadAllocationConfig{
-		ClusterID:                    strings.TrimSpace(ctldConfig.DefaultClusterId),
-		Address:                      source.NomadAddress,
-		NodeID:                       source.NomadNodeID,
-		TokenFile:                    source.NomadTokenFile,
-		CAFile:                       source.NomadCAFile,
-		CertFile:                     source.NomadCertFile,
-		KeyFile:                      source.NomadKeyFile,
-		RuntimeSlotChannelEnabled:    true,
-		RuntimeSlotNodeUID:           source.NodeUID,
-		RuntimeSlotChannelPeerURISAN: source.AuthorityPeerURISAN,
-		RuntimeSlotControlRoot:       source.ControlRoot,
-		RuntimeSlotCtldNetworkSocket: networkSocket,
-		RuntimeResourceCPUMillicores: source.ResourceCPUMillicores,
-		RuntimeResourceMemoryBytes:   source.ResourceMemoryBytes,
-		RuntimeResourceCPUSetCPUs:    source.ResourceCPUSetCPUs,
-		RuntimeResourceCPUSetMems:    source.ResourceCPUSetMems,
+		ClusterID:                     strings.TrimSpace(ctldConfig.DefaultClusterId),
+		Address:                       source.NomadAddress,
+		NodeID:                        source.NomadNodeID,
+		TokenFile:                     source.NomadTokenFile,
+		CAFile:                        source.NomadCAFile,
+		CertFile:                      source.NomadCertFile,
+		KeyFile:                       source.NomadKeyFile,
+		RuntimeSlotChannelEnabled:     true,
+		RuntimeSlotNodeUID:            source.NodeUID,
+		RuntimeSlotChannelPeerURISAN:  source.AuthorityPeerURISAN,
+		RuntimeSlotControlRoot:        source.ControlRoot,
+		RuntimeSlotNodeControlTimeout: source.NodeControlTimeout.Duration,
+		RuntimeSlotCtldNetworkSocket:  networkSocket,
+		RuntimeResourceCPUMillicores:  source.ResourceCPUMillicores,
+		RuntimeResourceMemoryBytes:    source.ResourceMemoryBytes,
+		RuntimeResourceCPUSetCPUs:     source.ResourceCPUSetCPUs,
+		RuntimeResourceCPUSetMems:     source.ResourceCPUSetMems,
 	}
 	// NewService performs only static validation. Exclusive node resources are
 	// opened later, after this ctld instance acquires the HA primary lease.

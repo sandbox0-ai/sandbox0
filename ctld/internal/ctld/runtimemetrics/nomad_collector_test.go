@@ -303,6 +303,22 @@ type fakeRuntimeMetricClient struct {
 	maxActive   int
 }
 
+type recordingSampleSink struct {
+	mu      sync.Mutex
+	samples []sandboxobservability.RuntimeSample
+	accept  func(sandboxobservability.RuntimeSample) bool
+}
+
+func (s *recordingSampleSink) TryEnqueue(sample sandboxobservability.RuntimeSample) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accept != nil && !s.accept(sample) {
+		return false
+	}
+	s.samples = append(s.samples, sample)
+	return true
+}
+
 func newFakeRuntimeMetricClient(targets ...nomadruntime.RuntimeMetricTarget) *fakeRuntimeMetricClient {
 	return &fakeRuntimeMetricClient{
 		targets:     append([]nomadruntime.RuntimeMetricTarget(nil), targets...),

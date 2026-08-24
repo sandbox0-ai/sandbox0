@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
@@ -13,8 +13,8 @@ func configureSandboxClaimReconciler(
 	cfg *config.ManagerConfig,
 	store *sandboxstore.PGSandboxStore,
 ) (*sandboxclaimreconciler.Worker, error) {
-	if cfg == nil || cfg.SandboxRuntimeBackend != config.SandboxRuntimeBackendNomad {
-		return nil, nil
+	if cfg == nil {
+		return nil, fmt.Errorf("manager config is required")
 	}
 	if store == nil {
 		return nil, fmt.Errorf("Nomad sandbox claim cleanup requires the PostgreSQL sandbox store")

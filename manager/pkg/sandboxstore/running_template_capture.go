@@ -76,14 +76,12 @@ func captureRunningRootFSTemplate(
 
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_filesystems (
-			filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			head_generation_id, writer_epoch, storage_format, base_image_ref,
-			base_image_digest, base_artifact_digest, format_generation,
+			filesystem_id, team_id, source_filesystem_id,
+			head_generation_id, writer_epoch, base_artifact_digest, format_generation,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, NULL, NULL, $4, 'block-cow-v1', $5, $6, $7, $8, NOW(), NOW())
+		) VALUES ($1, $2, $3, NULL, $4, $5, $6, NOW(), NOW())
 		ON CONFLICT (filesystem_id) DO NOTHING
 	`, intent.TargetFilesystemID, intent.TeamID, writer.filesystem.ID, intent.SourceWriterEpoch,
-		writer.filesystem.BaseImageRef, writer.filesystem.BaseImageDigest,
 		writer.filesystem.BaseArtifactDigest, writer.filesystem.FormatGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("create template capture filesystem: %w", err)
@@ -108,8 +106,8 @@ func captureRunningRootFSTemplate(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_snapshots (
 			snapshot_id, filesystem_id, team_id, source_sandbox_id,
-			head_layer_id, head_generation_id, name, description, created_at, expires_at
-		) VALUES ($1, $2, $3, $4, NULL, $5,
+			head_generation_id, name, description, created_at, expires_at
+		) VALUES ($1, $2, $3, $4, $5,
 			'Template RootFS capture',
 			'Internal immutable live-writer checkpoint retained by a template.',
 			NOW(), NULL)
@@ -192,11 +190,17 @@ func loadRunningRootFSTemplateCaptureRetry(
 
 func getRootFSFilesystemByID(ctx context.Context, tx pgx.Tx, filesystemID string) (*RootFSFilesystem, error) {
 	filesystem, err := scanRootFSFilesystem(tx.QueryRow(ctx, `
-		SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			writer_epoch, base_image_ref, base_image_digest, storage_format,
-			base_artifact_digest, format_generation, head_generation_id,
-			created_at, updated_at
-		FROM manager.rootfs_filesystems WHERE filesystem_id = $1
+		SELECT filesystem.filesystem_id, filesystem.team_id,
+			filesystem.source_filesystem_id, filesystem.writer_epoch,
+			filesystem.head_generation_id, filesystem.base_artifact_digest,
+			filesystem.format_generation, artifact.source_oci_ref,
+			generation.source_oci_digest, filesystem.created_at, filesystem.updated_at
+		FROM manager.rootfs_filesystems filesystem
+		LEFT JOIN manager.rootfs_generations generation
+			ON generation.generation_id = filesystem.head_generation_id
+		JOIN manager.rootfs_base_artifacts artifact
+			ON artifact.artifact_digest = filesystem.base_artifact_digest
+		WHERE filesystem.filesystem_id = $1
 	`, filesystemID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrRootFSFilesystemNotFound, filesystemID)

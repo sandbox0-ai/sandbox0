@@ -1,16 +1,14 @@
 package runtimecontroller
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"go.uber.org/zap"
 )
 
-func TestStaticAssignmentFromEnv(t *testing.T) {
+func TestAssignmentFromEnv(t *testing.T) {
 	assignment := testStaticAssignment()
 	payload, err := json.Marshal(assignment)
 	if err != nil {
@@ -19,25 +17,24 @@ func TestStaticAssignmentFromEnv(t *testing.T) {
 	t.Setenv(runtimecontrol.EnvControlMode, runtimecontrol.ControlModeStatic)
 	t.Setenv(runtimecontrol.EnvStaticAssignment, string(payload))
 
-	got, static, err := StaticAssignmentFromEnv()
+	got, err := AssignmentFromEnv()
 	if err != nil {
-		t.Fatalf("StaticAssignmentFromEnv() error = %v", err)
+		t.Fatalf("AssignmentFromEnv() error = %v", err)
 	}
-	if !static || got == nil || got.SandboxID != assignment.SandboxID || got.RuntimeGeneration != assignment.RuntimeGeneration {
-		t.Fatalf("static assignment = %#v, static = %t", got, static)
+	if got == nil || got.SandboxID != assignment.SandboxID || got.RuntimeGeneration != assignment.RuntimeGeneration {
+		t.Fatalf("assignment = %#v", got)
 	}
 }
 
-func TestStaticAssignmentFromEnvPreservesStreamModeWhenAbsent(t *testing.T) {
+func TestAssignmentFromEnvRequiresNomadAssignment(t *testing.T) {
 	t.Setenv(runtimecontrol.EnvControlMode, "")
 	t.Setenv(runtimecontrol.EnvStaticAssignment, "")
-	assignment, static, err := StaticAssignmentFromEnv()
-	if err != nil || static || assignment != nil {
-		t.Fatalf("assignment = %#v, static = %t, error = %v", assignment, static, err)
+	if _, err := AssignmentFromEnv(); err == nil {
+		t.Fatal("AssignmentFromEnv() accepted missing Nomad assignment")
 	}
 }
 
-func TestStaticAssignmentFromEnvRejectsMalformedInput(t *testing.T) {
+func TestAssignmentFromEnvRejectsMalformedInput(t *testing.T) {
 	valid, err := json.Marshal(testStaticAssignment())
 	if err != nil {
 		t.Fatal(err)
@@ -59,30 +56,10 @@ func TestStaticAssignmentFromEnvRejectsMalformedInput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(runtimecontrol.EnvControlMode, test.mode)
 			t.Setenv(runtimecontrol.EnvStaticAssignment, test.raw)
-			if _, _, err := StaticAssignmentFromEnv(); err == nil {
+			if _, err := AssignmentFromEnv(); err == nil {
 				t.Fatal("invalid static runtime control input was accepted")
 			}
 		})
-	}
-}
-
-func TestActivateStaticMakesRuntimeServeable(t *testing.T) {
-	controller := New(nil, nil, nil, nil, 49983, zap.NewNop())
-	assignment := testStaticAssignment()
-	if err := ActivateStatic(context.Background(), controller, assignment); err != nil {
-		t.Fatalf("ActivateStatic() error = %v", err)
-	}
-	if ready, reason := controller.CanServe(); !ready {
-		t.Fatalf("static runtime is not serveable: %s", reason)
-	}
-	revision, err := assignment.Revision()
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := controller.State()
-	if state.Revision != revision || state.RuntimeGeneration != assignment.RuntimeGeneration ||
-		state.Observed != runtimecontrol.ObservedReady {
-		t.Fatalf("static runtime state = %#v", state)
 	}
 }
 

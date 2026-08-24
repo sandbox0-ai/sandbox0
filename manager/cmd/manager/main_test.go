@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -11,88 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
-	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
+	managerconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
-	"go.uber.org/zap"
-	"k8s.io/client-go/rest"
 )
-
-type recordingTemplateReconcilerQuiescer struct {
-	called  chan struct{}
-	release chan struct{}
-}
-
-func TestManagerDatabaseOptionsRequirePrimaryForNomad(t *testing.T) {
-	t.Parallel()
-
-	options := managerDatabaseOptions("postgres://manager/database", 20, 4, true)
-	if !options.RequirePrimary {
-		t.Fatal("Nomad manager database options did not require a primary")
-	}
-	if options.Schema != "scheduler" || options.MaxConns != 20 || options.MinConns != 4 {
-		t.Fatalf("unexpected manager database options: %+v", options)
-	}
-}
-
-func (q *recordingTemplateReconcilerQuiescer) Quiesce(context.Context) error {
-	close(q.called)
-	<-q.release
-	return nil
-}
-
-func TestServeTemplateReconcilerQuiesceSignals(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	signals := make(chan os.Signal, 1)
-	quiescer := &recordingTemplateReconcilerQuiescer{
-		called:  make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	tempDir := t.TempDir()
-	supportedMarkerPath := filepath.Join(tempDir, "supported")
-	quiescedMarkerPath := filepath.Join(tempDir, "quiesced")
-
-	go serveTemplateReconcilerQuiesceSignals(
-		ctx,
-		signals,
-		quiescer,
-		supportedMarkerPath,
-		quiescedMarkerPath,
-		zap.NewNop(),
-	)
-	waitForTestFile(t, supportedMarkerPath)
-	signals <- syscall.SIGUSR1
-
-	select {
-	case <-quiescer.called:
-	case <-time.After(time.Second):
-		t.Fatal("quiesce signal was not handled")
-	}
-	if _, err := os.Stat(quiescedMarkerPath); !os.IsNotExist(err) {
-		t.Fatalf("quiesced marker exists before reconciliation drained: %v", err)
-	}
-	close(quiescer.release)
-	waitForTestFile(t, quiescedMarkerPath)
-}
-
-func waitForTestFile(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("marker %q was not created", path)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
 
 func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -126,8 +48,8 @@ func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 		t.Fatalf("expected encrypted object store, got %q", managerStore.String())
 	}
 
-	const objectKey = "sandbox-rootfs/team/sandbox/layer.tar"
-	want := []byte("rootfs layer")
+	const objectKey = "rootfs/objects/sha256/pack"
+	want := []byte("rootfs block pack")
 	if err := ctldStore.Put(objectKey, bytes.NewReader(want)); err != nil {
 		t.Fatalf("put encrypted rootfs object: %v", err)
 	}
@@ -155,79 +77,5 @@ func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 	}
 	if rangeWant := want[2:7]; !bytes.Equal(rangeGot, rangeWant) {
 		t.Fatalf("rootfs object range = %q, want %q", rangeGot, rangeWant)
-	}
-
-	const legacyObjectKey = "sandbox-rootfs/team/sandbox/legacy-layer.tar"
-	if err := rawStore.Put(legacyObjectKey, bytes.NewReader(want)); err != nil {
-		t.Fatalf("put legacy rootfs object: %v", err)
-	}
-	legacyReader, err := managerStore.Get(legacyObjectKey, 0, -1)
-	if err != nil {
-		t.Fatalf("get legacy rootfs object: %v", err)
-	}
-	defer legacyReader.Close()
-	legacyGot, err := io.ReadAll(legacyReader)
-	if err != nil {
-		t.Fatalf("read legacy rootfs object: %v", err)
-	}
-	if !bytes.Equal(legacyGot, want) {
-		t.Fatalf("legacy rootfs object = %q, want %q", legacyGot, want)
-	}
-}
-
-func TestConfigureK8sClientRateLimiterUsesConfiguredValues(t *testing.T) {
-	cfg := &rest.Config{}
-
-	configureK8sClientRateLimiter(cfg, 25, 50)
-
-	if cfg.QPS != 25 {
-		t.Fatalf("qps = %v, want 25", cfg.QPS)
-	}
-	if cfg.Burst != 50 {
-		t.Fatalf("burst = %d, want 50", cfg.Burst)
-	}
-	if cfg.RateLimiter == nil {
-		t.Fatal("expected shared rate limiter")
-	}
-}
-
-func TestConfigureK8sClientRateLimiterDefaultsWhenUnset(t *testing.T) {
-	cfg := &rest.Config{}
-
-	configureK8sClientRateLimiter(cfg, 0, 0)
-
-	if cfg.QPS != s0k8s.DefaultClientQPS {
-		t.Fatalf("qps = %v, want %v", cfg.QPS, s0k8s.DefaultClientQPS)
-	}
-	if cfg.Burst != s0k8s.DefaultClientBurst {
-		t.Fatalf("burst = %d, want %d", cfg.Burst, s0k8s.DefaultClientBurst)
-	}
-	if cfg.RateLimiter == nil {
-		t.Fatal("expected shared rate limiter")
-	}
-}
-
-func TestIsolatedK8sClientConfigUsesIndependentRateBudget(t *testing.T) {
-	shared := &rest.Config{}
-	configureK8sClientRateLimiter(shared, 25, 50)
-
-	isolated := isolatedK8sClientConfig(shared)
-	if isolated == nil {
-		t.Fatal("isolatedK8sClientConfig() = nil")
-	}
-	if isolated.QPS != shared.QPS || isolated.Burst != shared.Burst {
-		t.Fatalf(
-			"isolated rate = %v/%d, want %v/%d",
-			isolated.QPS,
-			isolated.Burst,
-			shared.QPS,
-			shared.Burst,
-		)
-	}
-	if isolated.RateLimiter == nil {
-		t.Fatal("isolated rate limiter is nil")
-	}
-	if isolated.RateLimiter == shared.RateLimiter {
-		t.Fatal("isolated client reused the shared rate limiter")
 	}
 }

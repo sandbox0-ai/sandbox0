@@ -13,29 +13,22 @@ import (
 
 func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) {
 	cfg := Config{
-		ProxyHTTPPort:        18080,
-		ProxyHTTPSPort:       18443,
-		RuntimeWatchTCPPorts: []int{8096, 0, 8096, 65536},
+		ProxyHTTPPort:  18080,
+		ProxyHTTPSPort: 18443,
 	}
 
 	restore := buildIPTablesRestoreInput(cfg, []string{"10.0.0.0/8", "10.0.0.0/8", " 192.168.0.0/16 "})
 
-	runtimeWatchBypass := "-m set --match-set " + ipsetName + " src -p tcp --dport 8096 -m addrtype --dst-type LOCAL -j RETURN"
-	mustContain(t, restore, "-A "+chainName+" "+runtimeWatchBypass)
 	mustContain(t, restore, "-A "+chainName+" -d "+defaultLoopback+" -j RETURN")
 	mustContain(t, restore, "-A "+chainName+" -d 10.0.0.0/8 -j RETURN")
 	mustContain(t, restore, "-A "+chainName+" -d 192.168.0.0/16 -j RETURN")
 
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-i cali+ -m set --match-set "+ipsetName+" src -p tcp -m socket --transparent -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-i lxc+ -m set --match-set "+ipsetName+" src -p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-i lxc+ -m set --match-set "+ipsetName+" src -p tcp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-i lxc+ -m set --match-set "+ipsetName+" src -p tcp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-i lxc+ -m set --match-set "+ipsetName+" src -p tcp -m socket --transparent -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m socket --transparent -j TPROXY --on-port 18080")
 	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
 	mustContain(t, restore, "-p udp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
 	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
@@ -47,23 +40,15 @@ func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) 
 	mustContain(t, restore, "-p udp -m socket --transparent -j TPROXY --on-port 18080")
 
 	mustContain(t, restore, "-A "+natChainName+" -m mark --mark 0x1/0x1 -j ACCEPT")
-	mustContain(t, restore, "-A "+natChainName+" "+runtimeWatchBypass)
 	mustContain(t, restore, "-A "+natChainName+" -d "+defaultLoopback+" -j RETURN")
 	mustContain(t, restore, "-A "+natChainName+" -d 10.0.0.0/8 -j RETURN")
 	mustContain(t, restore, "-p tcp --dport 443 -j REDIRECT --to-ports 18443")
 	mustContain(t, restore, "-p tcp --dport 853 -j REDIRECT --to-ports 18443")
 	mustContain(t, restore, "-p tcp -j REDIRECT --to-ports 18080")
 
-	mustNotContain(t, restore, "-A "+chainName+" -m set --match-set "+ipsetName+" src -p tcp -m")
-
 	if strings.Count(restore, "-d 10.0.0.0/8 -j RETURN") != 2 {
 		t.Fatalf("expected duplicate bypass CIDRs to be normalized once per chain, got:\n%s", restore)
 	}
-	if strings.Count(restore, runtimeWatchBypass) != 2 {
-		t.Fatalf("expected one runtime watch bypass per redirect chain, got:\n%s", restore)
-	}
-	mustNotContain(t, restore, "--dport 8095 -m addrtype --dst-type LOCAL -j RETURN")
-	mustNotContain(t, restore, "--dport 65536")
 }
 
 func TestBuildIPSetRestoreInput(t *testing.T) {
@@ -79,27 +64,27 @@ func TestBuildIPSetRestoreInput(t *testing.T) {
 }
 
 func TestEnsureTopJumpInsertsMissingJumpAtFirstRule(t *testing.T) {
-	ipt := newFakeIPTables([]string{"-j CNI_PREROUTING"})
+	ipt := newFakeIPTables([]string{"-j OTHER_PREROUTING"})
 	manager := &iptablesManager{ipt: ipt}
 
 	if err := manager.ensureTopJump(context.Background(), mangleTable, "PREROUTING", chainName); err != nil {
 		t.Fatal(err)
 	}
 
-	wantRules := []string{"-j " + chainName, "-j CNI_PREROUTING"}
+	wantRules := []string{"-j " + chainName, "-j OTHER_PREROUTING"}
 	assertStringSlicesEqual(t, ipt.rulesFor(mangleTable, "PREROUTING"), wantRules)
 	assertStringSlicesEqual(t, ipt.ops, []string{"insert mangle/PREROUTING 1 -j " + chainName})
 }
 
 func TestEnsureTopJumpInsertsBeforeDeletingExistingLowerJump(t *testing.T) {
-	ipt := newFakeIPTables([]string{"-j CNI_PREROUTING", "-j " + chainName})
+	ipt := newFakeIPTables([]string{"-j OTHER_PREROUTING", "-j " + chainName})
 	manager := &iptablesManager{ipt: ipt}
 
 	if err := manager.ensureTopJump(context.Background(), mangleTable, "PREROUTING", chainName); err != nil {
 		t.Fatal(err)
 	}
 
-	wantRules := []string{"-j " + chainName, "-j CNI_PREROUTING"}
+	wantRules := []string{"-j " + chainName, "-j OTHER_PREROUTING"}
 	assertStringSlicesEqual(t, ipt.rulesFor(mangleTable, "PREROUTING"), wantRules)
 	assertStringSlicesEqual(t, ipt.ops, []string{
 		"insert mangle/PREROUTING 1 -j " + chainName,
@@ -108,14 +93,14 @@ func TestEnsureTopJumpInsertsBeforeDeletingExistingLowerJump(t *testing.T) {
 }
 
 func TestEnsureTopJumpDeletesDuplicateLowerJumpWithoutReinserting(t *testing.T) {
-	ipt := newFakeIPTables([]string{"-j " + chainName, "-j CNI_PREROUTING", "-j " + chainName})
+	ipt := newFakeIPTables([]string{"-j " + chainName, "-j OTHER_PREROUTING", "-j " + chainName})
 	manager := &iptablesManager{ipt: ipt}
 
 	if err := manager.ensureTopJump(context.Background(), mangleTable, "PREROUTING", chainName); err != nil {
 		t.Fatal(err)
 	}
 
-	wantRules := []string{"-j " + chainName, "-j CNI_PREROUTING"}
+	wantRules := []string{"-j " + chainName, "-j OTHER_PREROUTING"}
 	assertStringSlicesEqual(t, ipt.rulesFor(mangleTable, "PREROUTING"), wantRules)
 	assertStringSlicesEqual(t, ipt.ops, []string{"delete-by-id mangle/PREROUTING 3 -j " + chainName})
 }
@@ -124,7 +109,7 @@ func TestJumpRuleLineNumbersOnlyCountsRulesInTargetChain(t *testing.T) {
 	rules := []string{
 		"-P PREROUTING ACCEPT",
 		"-N " + chainName,
-		"-A PREROUTING -m comment --comment cni -j CNI_PREROUTING",
+		"-A PREROUTING -m comment --comment other -j OTHER_PREROUTING",
 		"-A PREROUTING -m comment --comment ctld-network -j " + chainName,
 		"-A OUTPUT -j " + chainName,
 		"-A PREROUTING -g " + chainName,
@@ -133,26 +118,6 @@ func TestJumpRuleLineNumbersOnlyCountsRulesInTargetChain(t *testing.T) {
 
 	got := jumpRuleLineNumbers(rules, "PREROUTING", chainName)
 	assertIntsEqual(t, got, []int{2, 4})
-}
-
-func TestCleanupLegacyChainsRemovesJumpsAndChains(t *testing.T) {
-	ipt := newFakeIPTables([]string{"-j " + legacyChainName, "-j " + chainName})
-	ipt.rules[fakeKey(mangleTable, legacyChainName)] = []string{"-j RETURN"}
-	ipt.rules[fakeKey(natTable, "PREROUTING")] = []string{"-j " + legacyNATChainName, "-j " + natChainName}
-	ipt.rules[fakeKey(natTable, legacyNATChainName)] = []string{"-j RETURN"}
-	manager := &iptablesManager{ipt: ipt}
-
-	if err := manager.cleanupLegacyChains(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	assertStringSlicesEqual(t, ipt.rulesFor(mangleTable, "PREROUTING"), []string{"-j " + chainName})
-	assertStringSlicesEqual(t, ipt.rulesFor(natTable, "PREROUTING"), []string{"-j " + natChainName})
-	if exists, _ := ipt.ChainExists(mangleTable, legacyChainName); exists {
-		t.Fatal("legacy mangle chain still exists")
-	}
-	if exists, _ := ipt.ChainExists(natTable, legacyNATChainName); exists {
-		t.Fatal("legacy NAT chain still exists")
-	}
 }
 
 func TestNormalizeInputsDeduplicateAndTrim(t *testing.T) {
@@ -219,7 +184,7 @@ func TestPlanRedirectSyncIgnoresInputOrder(t *testing.T) {
 	}
 }
 
-func TestRuleExistsRequiresPriorityBeforeCNISourceRules(t *testing.T) {
+func TestRuleExistsRequiresConfiguredPriority(t *testing.T) {
 	mask := uint32(1)
 	rules := []netlink.Rule{
 		{Mark: 1, Mask: &mask, Table: ruleTableID, Priority: 32765},
@@ -266,13 +231,6 @@ func mustContain(t *testing.T, got string, want string) {
 	t.Helper()
 	if !strings.Contains(got, want) {
 		t.Fatalf("expected output to contain %q, got:\n%s", want, got)
-	}
-}
-
-func mustNotContain(t *testing.T, got string, want string) {
-	t.Helper()
-	if strings.Contains(got, want) {
-		t.Fatalf("expected output not to contain %q, got:\n%s", want, got)
 	}
 }
 

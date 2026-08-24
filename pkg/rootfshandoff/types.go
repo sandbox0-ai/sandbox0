@@ -35,25 +35,25 @@ const (
 	StateTombstoned = "tombstoned"
 )
 
-// Identity binds a one-shot synthetic parent to one Kubernetes runtime
+// Identity binds a one-shot synthetic parent to one runtime
 // incarnation. The parent is an authorization capability only when every
 // field matches the node-local registry and the regional writer epoch.
 type Identity struct {
-	NodeUID           string `json:"node_uid"`
-	BootID            string `json:"boot_id"`
-	RuntimeGeneration string `json:"runtime_generation"`
-	PodUID            string `json:"pod_uid"`
-	PodSandboxID      string `json:"pod_sandbox_id"`
-	ContainerName     string `json:"container_name"`
-	Image             string `json:"image"`
-	Snapshotter       string `json:"snapshotter"`
-	RuntimeName       string `json:"runtime_name"`
-	SlotNonce         string `json:"slot_nonce"`
-	ClaimID           string `json:"claim_id"`
-	LaunchAttempt     string `json:"launch_attempt"`
-	RootFSID          string `json:"rootfs_id"`
-	WriterEpoch       int64  `json:"writer_epoch"`
-	WriterGrantID     string `json:"writer_grant_id"`
+	NodeUID              string `json:"node_uid"`
+	BootID               string `json:"boot_id"`
+	RuntimeGeneration    string `json:"runtime_generation"`
+	AllocationID         string `json:"allocation_id"`
+	NetworkIncarnationID string `json:"network_incarnation_id"`
+	TaskName             string `json:"task_name"`
+	SourceOCIDigest      string `json:"source_oci_digest"`
+	RootFSDriver         string `json:"rootfs_driver"`
+	RuntimeClass         string `json:"runtime_class"`
+	SlotNonce            string `json:"slot_nonce"`
+	ClaimID              string `json:"claim_id"`
+	LaunchAttempt        string `json:"launch_attempt"`
+	RootFSID             string `json:"rootfs_id"`
+	WriterEpoch          int64  `json:"writer_epoch"`
+	WriterGrantID        string `json:"writer_grant_id"`
 	// WriterGrantTokenDigest is a non-secret issuance nonce. It survives in
 	// node-local durable state and prevents a deleted grant row from being
 	// confused with a later grant that accidentally reuses semantic IDs.
@@ -61,8 +61,8 @@ type Identity struct {
 	WriterGrantToken       string `json:"writer_grant_token,omitempty"`
 }
 
-// StageRequest authorizes a real committed marker parent before containerd
-// calls Prepare. InitialGeneration is immutable once the request succeeds.
+// StageRequest authorizes one committed runtime slot before the node runtime
+// prepares storage. InitialGeneration is immutable once the request succeeds.
 type StageRequest struct {
 	BindingVersion      int                   `json:"binding_version"`
 	Parent              string                `json:"parent"`
@@ -138,16 +138,16 @@ func (d GenerationDescriptor) Validate() error {
 
 // NetworkPolicyToken identifies the exact network incarnation for which ctld
 // has installed policy. A policy digest alone is vulnerable to ABA after a
-// claim, PodSandbox, Pod IP, or ctld generation changes.
+// claim, network incarnation, source IP, or ctld generation changes.
 type NetworkPolicyToken struct {
-	PodUID         string `json:"pod_uid"`
-	PodSandboxID   string `json:"pod_sandbox_id"`
-	ClaimID        string `json:"claim_id"`
-	NetworkEpoch   int64  `json:"network_epoch"`
-	PolicyDigest   string `json:"policy_digest"`
-	PodIP          string `json:"pod_ip"`
-	CtldGeneration string `json:"ctld_generation"`
-	NetNSIdentity  string `json:"netns_identity"`
+	AllocationID         string `json:"allocation_id"`
+	NetworkIncarnationID string `json:"network_incarnation_id"`
+	ClaimID              string `json:"claim_id"`
+	NetworkEpoch         int64  `json:"network_epoch"`
+	PolicyDigest         string `json:"policy_digest"`
+	SourceIP             string `json:"source_ip"`
+	CtldGeneration       string `json:"ctld_generation"`
+	NetNSIdentity        string `json:"netns_identity"`
 }
 
 // ReadyRequest resolves the staged logical generation to a protected host
@@ -161,9 +161,9 @@ type ReadyRequest struct {
 	AppliedPolicyToken NetworkPolicyToken `json:"applied_policy_token"`
 }
 
-// ConsumerRequest asks the Snapshotter to bind a prepared backend key to the
-// exact stock-containerd container record after CRI has committed it. Some
-// containerd paths consume Prepare mounts without a later backend Mounts call,
+// ConsumerRequest asks the rootfs runtime to bind a prepared backend key to the
+// exact runtime consumer record after the runtime has committed it. Some
+// runtime paths consume Prepare mounts without a later backend Mounts call,
 // so lifecycle code must not depend on that callback to record the handoff.
 type ConsumerRequest struct {
 	Parent string `json:"parent"`
@@ -189,7 +189,7 @@ type ParentStatus struct {
 }
 
 // RetireRequest identifies one planned writer retirement. OperationID is
-// stable across Manager, ctld, Snapshotter, and PostgreSQL retries.
+// stable across Manager, ctld, the rootfs runtime, and PostgreSQL retries.
 type RetireRequest struct {
 	Parent      string `json:"parent"`
 	OperationID string `json:"operation_id"`
@@ -314,9 +314,9 @@ type CrashFenceProof struct {
 	BootID                 string                       `json:"boot_id"`
 	RuntimeGeneration      string                       `json:"runtime_generation"`
 	HostMountNamespaceID   string                       `json:"host_mount_namespace_id"`
-	PodUID                 string                       `json:"pod_uid"`
-	PodSandboxID           string                       `json:"pod_sandbox_id"`
-	ContainerName          string                       `json:"container_name"`
+	AllocationID           string                       `json:"allocation_id"`
+	NetworkIncarnationID   string                       `json:"network_incarnation_id"`
+	TaskName               string                       `json:"task_name"`
 	SlotNonce              string                       `json:"slot_nonce"`
 	ActiveKey              string                       `json:"active_key"`
 	ConsumerBound          bool                         `json:"consumer_bound"`
@@ -325,7 +325,7 @@ type CrashFenceProof struct {
 	TaskAbsent             bool                         `json:"task_absent"`
 	FrontendSnapshotAbsent bool                         `json:"frontend_snapshot_absent"`
 	StableMountAbsent      bool                         `json:"stable_mount_absent"`
-	SnapshotterState       string                       `json:"snapshotter_state"`
+	RootFSState            string                       `json:"rootfs_state"`
 	Session                CrashFenceSessionObservation `json:"session"`
 	ObservedAt             string                       `json:"observed_at"`
 }
@@ -340,9 +340,9 @@ func (p CrashFenceProof) Validate() error {
 		"rootfs_id": p.RootFSID, "initial_generation": p.InitialGeneration,
 		"initial_block_head": p.InitialBlockHead, "node_uid": p.NodeUID, "boot_id": p.BootID,
 		"runtime_generation": p.RuntimeGeneration, "host_mount_namespace_id": p.HostMountNamespaceID,
-		"pod_uid": p.PodUID, "pod_sandbox_id": p.PodSandboxID, "container_name": p.ContainerName,
+		"allocation_id": p.AllocationID, "network_incarnation_id": p.NetworkIncarnationID, "task_name": p.TaskName,
 		"slot_nonce": p.SlotNonce, "active_key": p.ActiveKey,
-		"snapshotter_state": p.SnapshotterState, "observed_at": p.ObservedAt,
+		"rootfs_state": p.RootFSState, "observed_at": p.ObservedAt,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
@@ -364,7 +364,7 @@ func (p CrashFenceProof) Validate() error {
 	if err := validateSHA256Digest(p.InitialBlockHead); err != nil {
 		return fmt.Errorf("initial_block_head: %w", err)
 	}
-	if p.HeadAction != CrashFenceHeadKeepInitial || p.SnapshotterState != StateTombstoned ||
+	if p.HeadAction != CrashFenceHeadKeepInitial || p.RootFSState != StateTombstoned ||
 		!p.ContainerAbsent || !p.TaskAbsent || !p.FrontendSnapshotAbsent || !p.StableMountAbsent {
 		return fmt.Errorf("crash fence proof does not establish terminal writer absence")
 	}
@@ -560,17 +560,17 @@ type GateRequest struct {
 }
 
 type GateImage struct {
-	SlotNonce string `json:"slot_nonce"`
-	Image     string `json:"image"`
-	Manifest  string `json:"manifest_digest"`
-	Config    string `json:"config_digest"`
-	Layer     string `json:"layer_digest"`
-	DiffID    string `json:"diff_id"`
-	Parent    string `json:"parent_chain_id"`
-	LeaseID   string `json:"lease_id"`
+	SlotNonce       string `json:"slot_nonce"`
+	SourceOCIDigest string `json:"source_oci_digest"`
+	Manifest        string `json:"manifest_digest"`
+	Config          string `json:"config_digest"`
+	Layer           string `json:"layer_digest"`
+	DiffID          string `json:"diff_id"`
+	Parent          string `json:"parent_chain_id"`
+	LeaseID         string `json:"lease_id"`
 }
 
-// RuntimeIncarnation is the host Snapshotter's admitted node/runtime identity.
+// RuntimeIncarnation is the host rootfs runtime's admitted node/runtime identity.
 // Ctld obtains this fact over the root-only local socket rather than trusting
 // a Manager request or duplicating node bootstrap configuration.
 type RuntimeIncarnation struct {
@@ -628,12 +628,12 @@ func (r StageRequest) validate(requireWriterToken bool) error {
 		"node_uid":                  r.Identity.NodeUID,
 		"boot_id":                   r.Identity.BootID,
 		"runtime_generation":        r.Identity.RuntimeGeneration,
-		"pod_uid":                   r.Identity.PodUID,
-		"pod_sandbox_id":            r.Identity.PodSandboxID,
-		"container_name":            r.Identity.ContainerName,
-		"image":                     r.Identity.Image,
-		"snapshotter":               r.Identity.Snapshotter,
-		"runtime_name":              r.Identity.RuntimeName,
+		"allocation_id":             r.Identity.AllocationID,
+		"network_incarnation_id":    r.Identity.NetworkIncarnationID,
+		"task_name":                 r.Identity.TaskName,
+		"source_oci_digest":         r.Identity.SourceOCIDigest,
+		"rootfs_driver":             r.Identity.RootFSDriver,
+		"runtime_class":             r.Identity.RuntimeClass,
 		"slot_nonce":                r.Identity.SlotNonce,
 		"claim_id":                  r.Identity.ClaimID,
 		"launch_attempt":            r.Identity.LaunchAttempt,
@@ -675,9 +675,9 @@ func (r StageRequest) validate(requireWriterToken bool) error {
 	if err := r.ExpectedPolicyToken.Validate(); err != nil {
 		return fmt.Errorf("expected_policy_token: %w", err)
 	}
-	if r.ExpectedPolicyToken.PodUID != r.Identity.PodUID ||
+	if r.ExpectedPolicyToken.AllocationID != r.Identity.AllocationID ||
 		r.ExpectedPolicyToken.ClaimID != r.Identity.ClaimID ||
-		r.ExpectedPolicyToken.PodSandboxID != "" && r.ExpectedPolicyToken.PodSandboxID != r.Identity.PodSandboxID {
+		r.ExpectedPolicyToken.NetworkIncarnationID != "" && r.ExpectedPolicyToken.NetworkIncarnationID != r.Identity.NetworkIncarnationID {
 		return fmt.Errorf("expected_policy_token does not match RootFS identity")
 	}
 	if err := validateSHA256Digest(r.Parent); err != nil {
@@ -763,8 +763,8 @@ func (r ReadyRequest) Normalize() (ReadyRequest, error) {
 
 func (t NetworkPolicyToken) Validate() error {
 	required := map[string]string{
-		"pod_uid": t.PodUID, "claim_id": t.ClaimID, "policy_digest": t.PolicyDigest,
-		"pod_sandbox_id": t.PodSandboxID, "pod_ip": t.PodIP,
+		"allocation_id": t.AllocationID, "claim_id": t.ClaimID, "policy_digest": t.PolicyDigest,
+		"network_incarnation_id": t.NetworkIncarnationID, "source_ip": t.SourceIP,
 		"ctld_generation": t.CtldGeneration, "netns_identity": t.NetNSIdentity,
 	}
 	for name, value := range required {

@@ -197,7 +197,6 @@ func (s *PGSandboxStore) RejectNomadPausedRebaseWorker(
 		return err
 	}
 	if record.TeamID != normalized.ExpectedTeamID || record.ClusterID != normalized.WorkerClusterID ||
-		record.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		record.DesiredState != SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() ||
 		claim.Phase != SandboxRuntimeClaimPhaseCleanupPending || claim.CleanupStartedAt.IsZero() ||
 		!claim.CleanedAt.IsZero() {
@@ -231,9 +230,9 @@ func (s *PGSandboxStore) RejectNomadPausedRebaseWorker(
 	targetGenerationID := NomadPausedRebaseGenerationID(
 		normalized.OperationID, record.ID, source.ID, targetArtifact.ArtifactDigest,
 	)
-	if lifecycle.ExpectedHeadLayerID != source.ID ||
+	if lifecycle.ExpectedGenerationID != source.ID ||
 		lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
-		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedHeadLayerID != "" {
+		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedGenerationID != "" {
 		return fmt.Errorf("%w: worker rejection source lineage changed", ErrNomadSandboxRebaseConflict)
 	}
 	if err := ensureNomadPausedRebaseTargetGenerationAbsent(ctx, tx, targetGenerationID); err != nil {
@@ -290,7 +289,7 @@ func nomadPausedRebaseRejectionIdentityMatches(
 		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromRuntimeNamespace == "" &&
 		lifecycle.FromRuntimeID == "" && lifecycle.ToRuntimeNamespace == "" && lifecycle.ToRuntimeID == "" &&
 		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
-		lifecycle.TargetGenerationID != "" && lifecycle.ExpectedHeadLayerID != "" &&
+		lifecycle.TargetGenerationID != "" && lifecycle.ExpectedGenerationID != "" &&
 		lifecycle.SourceBaseArtifactDigest != "" &&
 		lifecycle.TargetBaseArtifactDigest == request.TargetBaseArtifactDigest &&
 		lifecycle.WorkerClusterID == request.WorkerClusterID &&
@@ -383,8 +382,8 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 	)
 	if lifecycle != nil && lifecycle.Phase == SandboxLifecyclePhaseAborted {
 		if !nomadPausedRebaseRejectionIdentityMatches(lifecycle, record, normalized) ||
-			lifecycle.ExpectedHeadLayerID != source.ID || lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
-			lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedHeadLayerID != "" ||
+			lifecycle.ExpectedGenerationID != source.ID || lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
+			lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedGenerationID != "" ||
 			len(lifecycle.WorkerProofDigest) != sha256.Size ||
 			lifecycle.Error != "sandbox termination requested" {
 			return nil, fmt.Errorf("%w: rejected lifecycle does not match the exact rebase request",
@@ -455,7 +454,7 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 		ID: normalized.OperationID, SandboxID: record.ID, Kind: SandboxLifecycleKindRebase,
 		Phase: SandboxLifecyclePhasePreparing, Source: SandboxLifecycleSourceManual, Cancelable: false,
 		FromGeneration: record.RuntimeGeneration, ToGeneration: record.RuntimeGeneration,
-		TargetGenerationID: targetGenerationID, ExpectedHeadLayerID: source.ID,
+		TargetGenerationID: targetGenerationID, ExpectedGenerationID: source.ID,
 		SourceBaseArtifactDigest: sourceArtifact.ArtifactDigest,
 		TargetBaseArtifactDigest: targetArtifact.ArtifactDigest,
 		RollbackExpiresAt:        normalized.RollbackExpiresAt,
@@ -512,7 +511,7 @@ func validateNomadPausedRebaseClaimState(
 	claim *SandboxRuntimeClaim,
 	lifecycle *SandboxLifecycleTxn,
 ) error {
-	if record == nil || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if record == nil ||
 		!record.DeletedAt.IsZero() ||
 		record.RuntimeGeneration < 0 || record.RuntimeNamespace != "" || record.RuntimeID != "" {
 		return fmt.Errorf("%w: sandbox is not a canonical paused Nomad runtime", ErrNomadSandboxRebaseNotReady)
@@ -539,7 +538,7 @@ func validateNomadPausedRebaseSource(
 	source *RootFSGeneration,
 	teamID string,
 ) error {
-	if filesystem == nil || source == nil || filesystem.StorageFormat != RootFSStorageFormatBlockCOWV1 ||
+	if filesystem == nil || source == nil ||
 		filesystem.TeamID != teamID || filesystem.HeadGenerationID != source.ID ||
 		filesystem.BaseArtifactDigest == "" || filesystem.BaseArtifactDigest != source.BaseArtifactDigest ||
 		filesystem.FormatGeneration != source.FormatGeneration || filesystem.WriterEpoch != source.WriterEpoch ||
@@ -681,7 +680,7 @@ func nomadPausedRebaseLifecycleMatches(
 		lifecycle.FromGeneration != record.RuntimeGeneration || lifecycle.FromRuntimeNamespace != "" ||
 		lifecycle.FromRuntimeID != "" || lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != "" || len(lifecycle.TargetRecordDigest) != 0 ||
-		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.ExpectedHeadLayerID != source.ID ||
+		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.ExpectedGenerationID != source.ID ||
 		lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
 		lifecycle.TargetBaseArtifactDigest != targetArtifact.ArtifactDigest ||
 		lifecycle.WorkerClusterID != record.ClusterID || lifecycle.WorkerClusterID != workerClusterID ||
@@ -692,10 +691,10 @@ func nomadPausedRebaseLifecycleMatches(
 	}
 	if committed {
 		return lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
-			lifecycle.PreparedHeadLayerID == lifecycle.TargetGenerationID &&
+			lifecycle.PreparedGenerationID == lifecycle.TargetGenerationID &&
 			len(lifecycle.WorkerProofDigest) == sha256.Size
 	}
-	return lifecycle.PreparedHeadLayerID == "" &&
+	return lifecycle.PreparedGenerationID == "" &&
 		(lifecycle.Phase == SandboxLifecyclePhasePreparing ||
 			lifecycle.Phase == SandboxLifecyclePhaseBarriered ||
 			lifecycle.Phase == SandboxLifecyclePhasePublishing ||
@@ -723,7 +722,7 @@ func loadCompletedNomadPausedRebase(
 	}
 	source, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
 		WHERE generation_id = $1 FOR SHARE
-	`, lifecycle.ExpectedHeadLayerID))
+	`, lifecycle.ExpectedGenerationID))
 	if err != nil {
 		return nil, fmt.Errorf("load completed Nomad paused-rebase source generation: %w", err)
 	}

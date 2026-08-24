@@ -8,13 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
 	distref "github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
@@ -22,20 +22,19 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pending")
@@ -67,8 +66,8 @@ type Store interface {
 	AcknowledgeNomadPausedRebaseWorker(context.Context, string, string, string, string, string, []byte) error
 	BeginRuntimeSlotQuiesce(context.Context, *sandboxstore.BeginRuntimeSlotQuiesceRequest) (*sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlotBySandboxID(context.Context, string) (*sandboxstore.RuntimeSlot, error)
-	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
-	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, sandboxstore.ReadyRootFSArtifactRequirements) (*sandboxstore.RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform, sandboxstore.ReadyRootFSArtifactRequirements) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
 	GetRootFSSnapshot(context.Context, string, string) (*sandboxstore.RootFSSnapshot, error)
@@ -113,40 +112,45 @@ type pausedRebaseController interface {
 
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
-	Store           Store
-	Templates       templatestore.TemplateStore
-	RuntimeClasses  *RuntimeClassCatalog
-	Planner         planner
-	Allocation      allocationStopper
-	RunningFork     runningForkController
-	PausedRebase    pausedRebaseController
-	QuotaLimits     QuotaLimitStore
-	NetworkPolicies *networkpolicy.NetworkPolicyService
-	ResourcePolicy  templatepkg.ResourcePolicy
-	ClaimTTL        time.Duration
-	DefaultTTL      time.Duration
-	Now             func() time.Time
-	Logger          *zap.Logger
+	Store                  Store
+	Templates              templatestore.TemplateStore
+	RuntimeClasses         *RuntimeClassCatalog
+	Planner                planner
+	Allocation             allocationStopper
+	RunningFork            runningForkController
+	PausedRebase           pausedRebaseController
+	QuotaLimits            QuotaLimitStore
+	NetworkPolicies        *networkpolicy.NetworkPolicyService
+	ResourcePolicy         templatepkg.ResourcePolicy
+	ClaimTTL               time.Duration
+	DefaultTTL             time.Duration
+	Now                    func() time.Time
+	Logger                 *zap.Logger
+	RootFSFormatGeneration int
+	RootFSProcdProtocol    string
+	RootFSProcdDigest      string
 }
 
-// Service claims Nomad slots without creating or mutating Kubernetes runtime
-// objects.
+// Service claims resource-neutral Nomad slots and binds exact resource leases.
 type Service struct {
-	store           Store
-	templates       templatestore.TemplateStore
-	runtimeClasses  *RuntimeClassCatalog
-	planner         planner
-	allocation      allocationStopper
-	runningFork     runningForkController
-	pausedRebase    pausedRebaseController
-	quotaLimits     QuotaLimitStore
-	networkPolicies *networkpolicy.NetworkPolicyService
-	resourcePolicy  templatepkg.ResourcePolicy
-	claimTTL        time.Duration
-	defaultTTL      time.Duration
-	now             func() time.Time
-	logger          *zap.Logger
-	pauseEnqueuer   service.SandboxPauseEnqueuer
+	store                  Store
+	templates              templatestore.TemplateStore
+	runtimeClasses         *RuntimeClassCatalog
+	planner                planner
+	allocation             allocationStopper
+	runningFork            runningForkController
+	pausedRebase           pausedRebaseController
+	quotaLimits            QuotaLimitStore
+	networkPolicies        *networkpolicy.NetworkPolicyService
+	resourcePolicy         templatepkg.ResourcePolicy
+	claimTTL               time.Duration
+	defaultTTL             time.Duration
+	now                    func() time.Time
+	logger                 *zap.Logger
+	rootFSFormatGeneration int
+	rootFSProcdProtocol    string
+	rootFSProcdDigest      string
+	pauseEnqueuer          service.SandboxPauseEnqueuer
 }
 
 // New validates all claim authorities. There is no partially configured mode.
@@ -163,6 +167,18 @@ func New(config Config) (*Service, error) {
 	if config.ClaimTTL < time.Second || config.ClaimTTL > time.Minute {
 		return nil, fmt.Errorf("Nomad claim TTL must be between 1s and 1m")
 	}
+	defaultLogicalSize, err := templatepkg.ResolveRootFSLogicalSize(v1alpha1.SandboxTemplateSpec{})
+	if err != nil {
+		return nil, err
+	}
+	if err := (sandboxstore.ReadyRootFSArtifactRequirements{
+		FormatGeneration: config.RootFSFormatGeneration,
+		LogicalSizeBytes: defaultLogicalSize,
+		ProcdProtocol:    config.RootFSProcdProtocol,
+		ProcdDigest:      config.RootFSProcdDigest,
+	}).Validate(); err != nil {
+		return nil, fmt.Errorf("Nomad claim RootFS artifact policy: %w", err)
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -175,6 +191,8 @@ func New(config Config) (*Service, error) {
 		pausedRebase: config.PausedRebase,
 		quotaLimits:  config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
+		rootFSFormatGeneration: config.RootFSFormatGeneration,
+		rootFSProcdProtocol:    config.RootFSProcdProtocol, rootFSProcdDigest: config.RootFSProcdDigest,
 		now: config.Now, logger: config.Logger,
 	}, nil
 }
@@ -369,11 +387,11 @@ func (s *Service) resumeNomadSandbox(
 		return nil, nil, fmt.Errorf("load Nomad sandbox for resume: %w", err)
 	}
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return nil, nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return nil, nil, apierror.NewNotFound("sandbox", sandboxID)
 	}
-	if record.ID != sandboxID || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
-			fmt.Errorf("sandbox is not owned by the Nomad runtime backend"))
+	if record.ID != sandboxID {
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+			fmt.Errorf("sandbox identity changed during resume"))
 	}
 	plan, err := s.prepareNomadResumePlan(ctx, record)
 	if err != nil {
@@ -398,7 +416,7 @@ func (s *Service) resumeNomadSandbox(
 		}
 	}
 	if err := validateNomadResumeCandidate(candidate, record, plan); err != nil {
-		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID, err)
 	}
 	if candidate.AlreadyActive {
 		return candidate.Record, nil, nil
@@ -407,7 +425,7 @@ func (s *Service) resumeNomadSandbox(
 	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
 	plan.assignment = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
 	if err := plan.assignment.Validate(); err != nil {
-		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
 	}
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
@@ -442,7 +460,7 @@ func (s *Service) resumeNomadSandbox(
 		completed.RuntimeGeneration != candidate.RuntimeGeneration ||
 		completed.RuntimeID != result.Slot.AllocationID ||
 		completed.RuntimeNamespace != result.Slot.AllocationNamespace {
-		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("committed Nomad resume binding does not match the command-ready slot"))
 	}
 	s.logger.Info("Resumed Nomad sandbox",
@@ -463,9 +481,9 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 			service.ErrSandboxLifecycleUnavailable)
 	}
 	config := service.CloneSandboxConfig(&record.Config)
-	if config != nil && len(config.Services) > 0 {
-		return nomadResumePlan{}, fmt.Errorf("%w: Nomad app-service projection is not configured",
-			service.ErrSandboxLifecycleUnavailable)
+	if err := service.NormalizeSandboxConfigForPersistence(config); err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad config is invalid: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
 	}
 	resources, err := s.effectiveResources(record.TemplateSpec, config)
 	if err != nil {
@@ -481,11 +499,6 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 	if err != nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad resources are invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
-	}
-	if configuredCluster := record.TemplateSpec.ClusterId; configuredCluster != nil &&
-		strings.TrimSpace(*configuredCluster) != "" && strings.TrimSpace(*configuredCluster) != runtimeClass.ClusterID {
-		return nomadResumePlan{}, fmt.Errorf("%w: stored template cluster has no compatible Nomad warm-slot class",
-			service.ErrSandboxLifecycleUnavailable)
 	}
 	req := service.ClaimRequest{
 		SandboxID: record.ID, TeamID: record.TeamID, UserID: record.UserID,
@@ -537,8 +550,7 @@ func validateNomadResumeCandidate(
 	record := candidate.Record
 	if candidate.SandboxID != expected.ID || record.ID != expected.ID || record.TeamID != expected.TeamID ||
 		record.UserID != expected.UserID || record.ClusterID != plan.runtimeClass.ClusterID ||
-		record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
-		!apiequality.Semantic.DeepEqual(record.TemplateSpec, expected.TemplateSpec) ||
+		!reflect.DeepEqual(record.TemplateSpec, expected.TemplateSpec) ||
 		!nomadRuntimeConfigEqual(record.Config, expected.Config) {
 		return fmt.Errorf("Nomad resume sandbox identity changed before lifecycle reservation")
 	}
@@ -576,7 +588,7 @@ func nomadRuntimeConfigEqual(actual, expected sandboxstore.SandboxConfig) bool {
 	actual.TTL, expected.TTL = nil, nil
 	actual.HardTTL, expected.HardTTL = nil, nil
 	actual.AutoResume, expected.AutoResume = nil, nil
-	return apiequality.Semantic.DeepEqual(actual, expected)
+	return reflect.DeepEqual(actual, expected)
 }
 
 func (s *Service) activeSandboxLimit(ctx context.Context, teamID string) (*int64, error) {
@@ -597,7 +609,7 @@ func (s *Service) activeSandboxLimit(ctx context.Context, teamID string) (*int64
 func mapNomadResumeError(operation, sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
-		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return apierror.NewNotFound("sandbox", sandboxID)
 	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
 		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxResumeConflict),
@@ -605,7 +617,7 @@ func mapNomadResumeError(operation, sandboxID string, err error) error {
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	default:
 		return fmt.Errorf("%s: %w", operation, err)
 	}
@@ -623,7 +635,7 @@ func (s *Service) projectResumedNomadSandbox(
 	if result != nil && result.Slot != nil {
 		if result.Slot.AllocationID != record.RuntimeID ||
 			result.Slot.AllocationNamespace != record.RuntimeNamespace {
-			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, record.ID,
+			return nil, apierror.NewConflict("sandbox", record.ID,
 				fmt.Errorf("resumed runtime projection changed after commit"))
 		}
 		procdAddress = result.ProcdAddress
@@ -720,13 +732,13 @@ func (s *Service) requestNomadSandboxTTLPause(
 func mapNomadSandboxPauseError(sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
-		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return apierror.NewNotFound("sandbox", sandboxID)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
 		errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	default:
 		return fmt.Errorf("request Nomad sandbox pause: %w", err)
 	}
@@ -760,10 +772,6 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err := service.NormalizeSandboxConfigForPersistence(req.Config); err != nil {
 		return nil, err
 	}
-	if req.Config != nil && len(req.Config.Services) > 0 {
-		return nil, fmt.Errorf("%w: Nomad app-service projection is not configured", service.ErrDataPlaneNotReady)
-	}
-
 	tpl, err := s.templates.GetTemplateForTeam(ctx, req.TeamID, req.Template)
 	if err != nil {
 		return nil, fmt.Errorf("load template: %w", err)
@@ -778,11 +786,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, err
 	}
-	clusterID := ""
-	if tpl.Spec.ClusterId != nil {
-		clusterID = strings.TrimSpace(*tpl.Spec.ClusterId)
-	}
-	runtimeClass, err := s.runtimeClasses.Resolve(clusterID)
+	runtimeClass, err := s.runtimeClasses.Resolve("")
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve Nomad runtime class: %v", service.ErrDataPlaneNotReady, err)
 	}
@@ -824,7 +828,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	}
 
 	now := s.now().UTC()
-	record := s.claimRecord(tpl, &req, runtimeClass, quota, now)
+	record := s.claimRecord(tpl, &req, runtimeClass, resourceRequest, now)
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
 		return nil, err
 	}
@@ -865,7 +869,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Duration("endToEndDuration", result.Duration),
 	)
-	clusterID = runtimeClass.ClusterID
+	clusterID := runtimeClass.ClusterID
 	return &service.ClaimResponse{
 		SandboxID: sandboxID, Status: "running", ProcdAddress: result.ProcdAddress,
 		RuntimeID: result.Slot.AllocationID, Template: req.Template, ClusterId: &clusterID,
@@ -882,28 +886,32 @@ func effectiveResources(
 	spec v1alpha1.SandboxTemplateSpec,
 	config *sandboxstore.SandboxConfig,
 ) (v1alpha1.ResourceQuota, error) {
-	quota := *spec.MainContainer.Resources.DeepCopy()
+	var memoryOverride *string
 	if config != nil && config.Resources != nil {
-		memory, err := resourcePolicy.ParseMemory(config.Resources.Memory, "config.resources.memory")
-		if err != nil {
-			return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
-		}
-		quota.Memory = memory
-		quota.CPU = templatepkg.CPUForMemory(memory, resourcePolicy.MemoryPerCPU())
+		memoryOverride = &config.Resources.Memory
 	}
-	if err := resourcePolicy.ValidateMaxMemory(quota.Memory, "sandbox memory limit"); err != nil {
+	resolved, err := resourcePolicy.ResolveClaimResources(spec, memoryOverride)
+	if err != nil {
 		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", service.ErrInvalidClaimRequest, err)
 	}
-	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
+	return resolved.Quota, nil
 }
 
 func runtimeResourceRequest(quota v1alpha1.ResourceQuota) (protocol.RuntimeResourceRequest, error) {
-	millicpu := quota.CPU.MilliValue()
-	if millicpu <= 0 || resource.NewMilliQuantity(millicpu, resource.DecimalSI).Cmp(quota.CPU) != 0 {
+	cpu, err := quantity.Parse(quota.CPU)
+	if err != nil {
+		return protocol.RuntimeResourceRequest{}, fmt.Errorf("CPU is invalid: %w", err)
+	}
+	millicpu := cpu.MilliValue()
+	if millicpu <= 0 || quantity.NewMilli(millicpu).Cmp(cpu) != 0 {
 		return protocol.RuntimeResourceRequest{}, fmt.Errorf("CPU must be a positive exact millicore quantity")
 	}
-	memoryBytes := quota.Memory.Value()
-	if memoryBytes <= 0 || resource.NewQuantity(memoryBytes, resource.BinarySI).Cmp(quota.Memory) != 0 {
+	memory, err := quantity.Parse(quota.Memory)
+	if err != nil {
+		return protocol.RuntimeResourceRequest{}, fmt.Errorf("memory is invalid: %w", err)
+	}
+	memoryBytes := memory.Value()
+	if memoryBytes <= 0 || quantity.New(memoryBytes).Cmp(memory) != 0 {
 		return protocol.RuntimeResourceRequest{}, fmt.Errorf("memory must be a positive exact byte quantity")
 	}
 	request := protocol.RuntimeResourceRequest{
@@ -957,6 +965,10 @@ func (s *Service) prepareRootFS(
 	req *service.ClaimRequest,
 	platform sandboxstore.RootFSArtifactPlatform,
 ) (rootFSPlan, error) {
+	requirements, err := s.rootFSArtifactRequirements(tpl.Spec)
+	if err != nil {
+		return rootFSPlan{}, fmt.Errorf("%w: template RootFS requirements: %v", service.ErrInvalidClaimRequest, err)
+	}
 	if req.SnapshotID != "" {
 		snapshotID := strings.TrimSpace(req.SnapshotID)
 		if snapshotID != req.SnapshotID || templatepkg.IsBuildSnapshotID(snapshotID) {
@@ -966,13 +978,15 @@ func (s *Service) prepareRootFS(
 		if err != nil {
 			return rootFSPlan{}, err
 		}
-		if snapshot == nil || snapshot.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 {
+		if snapshot == nil {
 			return rootFSPlan{}, sandboxstore.ErrRootFSSnapshotNotFound
 		}
 		if _, err := s.validateSnapshotGeneration(ctx, snapshot); err != nil {
 			return rootFSPlan{}, err
 		}
-		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(ctx, snapshot.BaseArtifactDigest, platform)
+		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
+			ctx, snapshot.BaseArtifactDigest, platform, requirements,
+		)
 		if err != nil {
 			return rootFSPlan{}, err
 		}
@@ -1000,7 +1014,7 @@ func (s *Service) prepareRootFS(
 		if err != nil {
 			return rootFSPlan{}, err
 		}
-		if snapshot == nil || snapshot.StorageFormat != source.StorageFormat ||
+		if snapshot == nil || source.StorageFormat != templatepkg.RootFSTemplateStorageFormatBlockCOWV1 ||
 			snapshot.HeadGenerationID != source.GenerationID ||
 			snapshot.SourceOCIDigest != source.SourceOCIDigest ||
 			snapshot.BaseArtifactDigest != source.BaseArtifactDigest ||
@@ -1018,7 +1032,9 @@ func (s *Service) prepareRootFS(
 			return rootFSPlan{}, fmt.Errorf("%w: template RootFS generation attestation changed",
 				sandboxstore.ErrRootFSGenerationConflict)
 		}
-		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(ctx, source.BaseArtifactDigest, platform)
+		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
+			ctx, source.BaseArtifactDigest, platform, requirements,
+		)
 		if err != nil {
 			return rootFSPlan{}, err
 		}
@@ -1034,7 +1050,12 @@ func (s *Service) prepareRootFS(
 	if err != nil {
 		return rootFSPlan{}, fmt.Errorf("%w: template image: %v", service.ErrInvalidClaimRequest, err)
 	}
-	artifact, err := s.store.GetReadyRootFSBaseArtifact(ctx, sourceDigest, platform, 0)
+	artifact, err := s.store.GetReadyRootFSBaseArtifact(
+		ctx,
+		sourceDigest,
+		platform,
+		requirements,
+	)
 	if err != nil {
 		return rootFSPlan{}, err
 	}
@@ -1047,11 +1068,30 @@ func (s *Service) prepareRootFS(
 	}, nil
 }
 
+func (s *Service) rootFSArtifactRequirements(
+	spec v1alpha1.SandboxTemplateSpec,
+) (sandboxstore.ReadyRootFSArtifactRequirements, error) {
+	logicalSize, err := templatepkg.ResolveRootFSLogicalSize(spec)
+	if err != nil {
+		return sandboxstore.ReadyRootFSArtifactRequirements{}, err
+	}
+	requirements := sandboxstore.ReadyRootFSArtifactRequirements{
+		FormatGeneration: s.rootFSFormatGeneration,
+		LogicalSizeBytes: logicalSize,
+		ProcdProtocol:    s.rootFSProcdProtocol,
+		ProcdDigest:      s.rootFSProcdDigest,
+	}
+	if err := requirements.Validate(); err != nil {
+		return sandboxstore.ReadyRootFSArtifactRequirements{}, err
+	}
+	return requirements, nil
+}
+
 func (s *Service) validateSnapshotGeneration(
 	ctx context.Context,
 	snapshot *sandboxstore.RootFSSnapshot,
 ) (*sandboxstore.RootFSGeneration, error) {
-	if snapshot == nil || snapshot.HeadGenerationID == "" || snapshot.HeadLayerID != "" {
+	if snapshot == nil || snapshot.HeadGenerationID == "" {
 		return nil, fmt.Errorf("%w: snapshot has no block generation", sandboxstore.ErrRootFSGenerationConflict)
 	}
 	generation, err := s.store.GetRootFSGeneration(ctx, snapshot.HeadGenerationID)
@@ -1091,7 +1131,7 @@ func (s *Service) claimRecord(
 	tpl *templatepkg.Template,
 	req *service.ClaimRequest,
 	runtimeClass RuntimeClass,
-	quota v1alpha1.ResourceQuota,
+	resources protocol.RuntimeResourceRequest,
 	now time.Time,
 ) *sandboxstore.SandboxRecord {
 	config := service.CloneSandboxConfig(req.Config)
@@ -1105,11 +1145,11 @@ func (s *Service) claimRecord(
 	record := &sandboxstore.SandboxRecord{
 		ID: req.SandboxID, TeamID: req.TeamID, UserID: req.UserID,
 		TemplateID: tpl.TemplateID, TemplateName: tpl.TemplateID, TemplateNamespace: tpl.Scope,
-		ClusterID: runtimeClass.ClusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		ClusterID:    runtimeClass.ClusterID,
 		DesiredState: sandboxstore.SandboxDesiredStateActive,
 		Config:       *config, TemplateSpec: tpl.Spec, RuntimeGeneration: req.RuntimeGeneration,
-		ResourceMillicpu:  quota.CPU.MilliValue(),
-		ResourceMemoryMiB: bytesToMiBRoundUp(quota.Memory.Value()),
+		ResourceMillicpu:  resources.CPUMillicores,
+		ResourceMemoryMiB: bytesToMiBRoundUp(resources.MemoryBytes),
 		ClaimedAt:         now, CreatedAt: now,
 	}
 	if req.Metadata != nil {
@@ -1186,14 +1226,13 @@ func sameClaimRecord(actual, expected *sandboxstore.SandboxRecord) bool {
 	return actual != nil && expected != nil && actual.DeletedAt.IsZero() &&
 		actual.ID == expected.ID && actual.TeamID == expected.TeamID && actual.UserID == expected.UserID &&
 		actual.TemplateID == expected.TemplateID && actual.ClusterID == expected.ClusterID &&
-		actual.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad &&
 		actual.DesiredState == sandboxstore.SandboxDesiredStateActive &&
 		actual.RuntimeGeneration == expected.RuntimeGeneration &&
 		actual.OwnerKind == expected.OwnerKind &&
 		actual.ResourceMillicpu == expected.ResourceMillicpu &&
 		actual.ResourceMemoryMiB == expected.ResourceMemoryMiB &&
-		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
-		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
+		reflect.DeepEqual(actual.Config, expected.Config) &&
+		reflect.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
 }
 
 func bytesToMiBRoundUp(value int64) int64 {
@@ -1269,5 +1308,5 @@ func sanitizeNomadCredentialBindings(config *sandboxstore.SandboxConfig) {
 	config.Network.CredentialBindings = nil
 }
 
-var _ service.SandboxRuntimeBackend = (*Service)(nil)
+var _ service.SandboxRuntime = (*Service)(nil)
 var _ service.SandboxHardExpiryTerminator = (*Service)(nil)

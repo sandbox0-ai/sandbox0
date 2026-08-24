@@ -4,18 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 )
 
-func TestConfigureRootFSImportWorkerIsNomadOnlyAndFailClosed(t *testing.T) {
-	worker, err := configureRootFSImportWorker(&config.ManagerConfig{
-		SandboxRuntimeBackend: config.SandboxRuntimeBackendKubernetes,
-	}, nil, nil)
-	if err != nil || worker != nil {
-		t.Fatalf("Kubernetes importer = %v, %v", worker, err)
-	}
-
+func TestConfigureRootFSImportWorkerFailsClosed(t *testing.T) {
 	for name, test := range map[string]struct {
 		cfg     *config.ManagerConfig
 		objects objectstore.Store
@@ -23,13 +16,12 @@ func TestConfigureRootFSImportWorkerIsNomadOnlyAndFailClosed(t *testing.T) {
 	}{
 		"disabled": {
 			cfg: &config.ManagerConfig{
-				SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad,
-				RootFSImporter:        config.RootFSImporterConfig{Disabled: true},
+				RootFSImporter: config.RootFSImporterConfig{Disabled: true},
 			},
 			want: "requires the durable RootFS importer",
 		},
 		"database": {
-			cfg:  &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad},
+			cfg:  &config.ManagerConfig{},
 			want: "requires PostgreSQL",
 		},
 	} {

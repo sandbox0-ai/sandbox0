@@ -30,10 +30,37 @@ func TestValidateMaterializerRequiresExactProductionContract(t *testing.T) {
 
 	final = validMaterializerFinal()
 	final.Objects.Objects = final.Bounds.MaxObjects + 1
-	final.Database.CatalogObjects = final.Objects.Objects - 2
+	final.Database.CatalogObjects = final.Objects.Objects - 1
 	verified.LastData = mustJSON(t, final)
 	_, err = validateMaterializer(verified, 24*time.Hour)
 	require.ErrorContains(t, err, "final data")
+}
+
+func TestValidateMaterializerAcceptsExplicitAcceleratedProfile(t *testing.T) {
+	config := validMaterializerConfig()
+	config.Duration = time.Minute.String()
+	config.WorkerInterval = (10 * time.Millisecond).String()
+	config.SampleInterval = time.Second.String()
+	config.MaxDelay = (2 * time.Second).String()
+	final := validMaterializerFinal()
+	final.Counters.RetainedBatches = 12
+	final.Database.CatalogObjects = 25
+	final.Objects.Objects = 26
+	final.Bounds.MaxBatches = 33
+	final.Bounds.MaxObjects = 68
+	verified := soakstate.Verification{
+		ActiveElapsed:  111 * time.Second,
+		Config:         mustJSON(t, config),
+		LastData:       mustJSON(t, final),
+		LastCheckpoint: mustJSON(t, validMaterializerCheckpoint(111*time.Second)),
+	}
+
+	_, err := validateMaterializer(verified, time.Minute)
+	require.NoError(t, err)
+	config.WorkerInterval = time.Millisecond.String()
+	verified.Config = mustJSON(t, config)
+	_, err = validateMaterializer(verified, time.Minute)
+	require.ErrorContains(t, err, "accelerated profile")
 }
 
 func TestVerifyAuditsCompletedHashChainedEvidence(t *testing.T) {
@@ -167,7 +194,7 @@ func validMaterializerFinal() materializerFinal {
 	final.Counters.RetainedBatches = 254
 	final.Counters.ExpectedWorkerErrors = 2
 	final.Database.MaterializedGenerations = 10_001
-	final.Database.CatalogObjects = 514
+	final.Database.CatalogObjects = 515
 	final.Objects.Objects = 516
 	final.Bounds.MaxBatches = 291
 	final.Bounds.MaxObjects = 584

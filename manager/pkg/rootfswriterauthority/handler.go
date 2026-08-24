@@ -400,7 +400,7 @@ func serveConsume(config HandlerConfig, writer http.ResponseWriter, request *htt
 		GrantID: grantID, WriterEpoch: body.WriterEpoch,
 		BindingVersion: body.BindingVersion,
 		RawToken:       body.WriterToken, BindingDigest: digest,
-		ConsumerNodeUID: caller.NodeUID, ConsumerAgentUID: caller.PodUID,
+		ConsumerNodeUID: caller.NodeUID, ConsumerAgentUID: caller.AgentUID,
 		LeaseTTL: config.LeaseTTL,
 	})
 	if err != nil {

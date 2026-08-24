@@ -8,11 +8,11 @@ import (
 	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -22,7 +22,7 @@ type nomadTemplateCaptureStore interface {
 	DeleteRootFSSnapshot(context.Context, string, string) error
 	DeleteTemplateBuildRootFSCapture(context.Context, string, string) error
 	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
-	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform, sandboxstore.ReadyRootFSArtifactRequirements) (*sandboxstore.RootFSBaseArtifact, error)
 	RequestNomadRunningTemplateCapture(context.Context, *sandboxstore.NomadTemplateCaptureRequest) (*sandboxstore.NomadTemplateCaptureCandidate, error)
 }
 
@@ -56,7 +56,6 @@ func (s *Service) EnsureTemplateBuildCapture(
 			return nil, loadErr
 		}
 		if record == nil || record.TeamID != teamID ||
-			record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 			!record.DeletedAt.IsZero() {
 			return nil, templatepkg.ErrTemplateSourceNotFound
 		}
@@ -195,8 +194,7 @@ func (s *Service) nomadTemplateCaptureMetadata(
 	desiredSpec v1alpha1.SandboxTemplateSpec,
 ) (*templatebuild.CaptureMetadata, error) {
 	if snapshot == nil || snapshot.SourceSandboxID != sandboxID || snapshot.TeamID != teamID ||
-		snapshot.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 ||
-		snapshot.HeadGenerationID == "" || snapshot.HeadLayerID != "" {
+		snapshot.HeadGenerationID == "" {
 		return nil, fmt.Errorf("%w: template snapshot has no exact block-COW generation",
 			templatebuild.ErrCaptureInvalid)
 	}
@@ -222,16 +220,18 @@ func (s *Service) nomadTemplateCaptureMetadata(
 	if _, err := s.effectiveResources(desiredSpec, nil); err != nil {
 		return nil, err
 	}
-	clusterID := ""
-	if desiredSpec.ClusterId != nil {
-		clusterID = strings.TrimSpace(*desiredSpec.ClusterId)
-	}
-	runtimeClass, err := s.runtimeClasses.Resolve(clusterID)
+	runtimeClass, err := s.runtimeClasses.Resolve("")
 	if err != nil {
 		return nil, fmt.Errorf("%w: no unambiguous Nomad runtime class for captured template",
 			templatepkg.ErrTemplateSourceUnavailable)
 	}
-	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(ctx, generation.BaseArtifactDigest, runtimeClass.ArtifactPlatform)
+	requirements, err := s.rootFSArtifactRequirements(desiredSpec)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(
+		ctx, generation.BaseArtifactDigest, runtimeClass.ArtifactPlatform, requirements,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -241,8 +241,8 @@ func (s *Service) nomadTemplateCaptureMetadata(
 			templatebuild.ErrCaptureInvalid)
 	}
 	return &templatebuild.CaptureMetadata{
-		Version:    templatebuild.BlockCaptureMetadataVersion,
-		SnapshotID: snapshot.ID, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		Version:    templatebuild.CaptureMetadataVersion,
+		SnapshotID: snapshot.ID, StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
 		HeadGenerationID: generation.ID, SourceOCIDigest: generation.SourceOCIDigest,
 		BaseArtifactDigest: generation.BaseArtifactDigest, FormatGeneration: generation.FormatGeneration,
 		Platform: ocispec.Platform{OS: runtimeClass.ArtifactPlatform.OS,

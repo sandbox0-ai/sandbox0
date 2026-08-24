@@ -1,27 +1,23 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 )
 
 type sandboxRuntimeBackendDependencies struct {
-	ctx             context.Context
-	kubernetes      service.SandboxRuntimeBackend
 	nodeAuthority   *nodeauthority.Component
 	store           nomadclaim.Store
 	quotaLimits     nomadclaim.QuotaLimitStore
@@ -34,34 +30,13 @@ type sandboxRuntimeBackendDependencies struct {
 	defaultTTL      time.Duration
 	now             func() time.Time
 	logger          *zap.Logger
+	runtimeClasses  *nomadclaim.RuntimeClassCatalog
 }
 
-type nomadMeteringResourceBackfiller interface {
-	BackfillNomadMeteringResources(context.Context, sandboxstore.NomadMeteringResourceResolver) (int64, error)
-}
-
-func buildSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntimeBackend, error) {
+func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
 	}
-	backend := cfg.SandboxRuntimeBackend
-	if backend == "" {
-		backend = config.SandboxRuntimeBackendKubernetes
-	}
-	switch backend {
-	case config.SandboxRuntimeBackendKubernetes:
-		if deps.kubernetes == nil {
-			return nil, fmt.Errorf("Kubernetes sandbox claimer is required")
-		}
-		return deps.kubernetes, nil
-	case config.SandboxRuntimeBackendNomad:
-		return buildNomadSandboxRuntimeBackend(cfg, deps)
-	default:
-		return nil, fmt.Errorf("unsupported sandbox runtime backend %q", backend)
-	}
-}
-
-func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntimeBackend, error) {
 	if !cfg.NodeAuthority.Enabled {
 		return nil, fmt.Errorf("Nomad sandbox claims require manager node authority")
 	}
@@ -69,34 +44,12 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 		return nil, fmt.Errorf("Nomad sandbox claims require terminal reconciliation")
 	}
 	claim := cfg.NodeAuthority.Claim
-	if claim.SecretName == "" || claim.SecretName != strings.TrimSpace(claim.SecretName) {
-		return nil, fmt.Errorf("Nomad claim Secret name must be non-empty and canonical")
-	}
 	if claim.ClassCatalogFile != config.NodeAuthorityRuntimeClassesPath ||
 		claim.WriterTokenKeyFile != config.NodeAuthorityWriterTokenKeyPath {
-		return nil, fmt.Errorf("Nomad claim assets must use operator-pinned mount paths")
+		return nil, fmt.Errorf("Nomad claim assets must use deployment-pinned mount paths")
 	}
-	runtimeClasses, err := nomadclaim.LoadRuntimeClassCatalog(claim.ClassCatalogFile)
-	if err != nil {
-		return nil, err
-	}
-	if backfiller, ok := deps.store.(nomadMeteringResourceBackfiller); ok {
-		backfillContext := deps.ctx
-		if backfillContext == nil {
-			backfillContext = context.Background()
-		}
-		updated, err := backfiller.BackfillNomadMeteringResources(
-			backfillContext,
-			func(record *sandboxstore.SandboxRecord) (int64, int64, error) {
-				return runtimeClasses.ResolveLegacyMeteringResources(record, deps.resourcePolicy)
-			},
-		)
-		if err != nil {
-			return nil, fmt.Errorf("backfill Nomad lifecycle metering resources: %w", err)
-		}
-		if updated > 0 && deps.logger != nil {
-			deps.logger.Info("Backfilled Nomad lifecycle metering resources", zap.Int64("sandboxes", updated))
-		}
+	if deps.runtimeClasses == nil {
+		return nil, fmt.Errorf("Nomad sandbox claims require a runtime class catalog")
 	}
 	writerTokenKey, err := loadWriterTokenKey(claim.WriterTokenKeyFile)
 	if err != nil {
@@ -111,13 +64,16 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 		return nil, fmt.Errorf("create Nomad runtime slot claim planner: %w", err)
 	}
 	claimer, err := nomadclaim.New(nomadclaim.Config{
-		Store: deps.store, Templates: deps.templates, RuntimeClasses: runtimeClasses, Planner: planner,
+		Store: deps.store, Templates: deps.templates, RuntimeClasses: deps.runtimeClasses, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
 		RunningFork:     deps.nodeAuthority,
 		PausedRebase:    deps.nodeAuthority,
 		QuotaLimits:     deps.quotaLimits,
 		NetworkPolicies: deps.networkPolicies, ResourcePolicy: deps.resourcePolicy,
-		ClaimTTL: claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,
+		RootFSFormatGeneration: rootfsblock.DescriptorVersion,
+		RootFSProcdProtocol:    cfg.RootFSImporter.ProcdProtocol,
+		RootFSProcdDigest:      cfg.RootFSImporter.ProcdDigest,
+		ClaimTTL:               claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,
 		Now: deps.now, Logger: deps.logger,
 	})
 	if err != nil {

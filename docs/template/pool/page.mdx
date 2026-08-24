@@ -1,128 +1,118 @@
-# Warm Pool
+# Unified Warm Pool
 
-Sandbox0 achieves sub-200ms sandbox creation by maintaining a pool of pre-warmed idle pods for each template. When you claim a sandbox, an idle pod is immediately assigned instead of waiting for a cold container start.
+Sandbox0 uses one resource-neutral pool of pre-created Nomad carrier
+allocations per immutable runtime compatibility class. A template does not own
+or size a separate pool.
 
-## How the Pool Works
+<Callout variant="warning">
+Platform administrators size the shared carrier pool with the Nomad warm-slot
+job. Templates do not own carrier counts or separate resource pools.
+</Callout>
+
+## Claim Path
 
 ```mermaid
 flowchart TB
-    req["Claim request"]
-    check{"Any ready idle pod?"}
-
-    subgraph hot["Hot path (idle pod exists)"]
-        pick["Pick an idle pod"]
-        flip["Update pod label: idle -> active"]
-        sb1["Return sandbox immediately"]
-        rs1["ReplicaSet notices idle < minIdle"]
-        idle1["New idle pod created asynchronously"]
-    end
-
-    subgraph cold["Cold path (no idle pod)"]
-        create["createNewPod(): create active pod directly"]
-        sb2["Return sandbox after pod starts"]
-    end
-
-    req --> check
-    check -->|Yes| pick --> flip --> sb1
-    flip --> rs1 --> idle1
-
-    check -->|No| create --> sb2
+    request["claim(template, memory)"] --> manager["manager"]
+    manager --> tx["PostgreSQL transaction"]
+    tx --> capacity["lease node CPU + memory"]
+    tx --> slot["claim one ready carrier"]
+    capacity --> ctld["ctld prepares cgroup, RootFS, and network"]
+    slot --> driver["Nomad task driver receives committed claim"]
+    ctld --> driver
+    driver --> runsc["runsc create + procd"]
+    runsc --> ready["committed runtime generation"]
 ```
 
-When a sandbox is claimed:
-1. The manager first tries to claim a ready idle pod (`claimIdlePod`)
-2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
-3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`); the warm pool remains reconciled to `minIdle` and does not expand for the burst
+A claim performs these steps:
 
-As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
+1. Manager resolves the template's digest-pinned image or block-COW RootFS
+   source and derives CPU from the requested memory.
+2. PostgreSQL atomically reserves exact node capacity, one ready carrier, and a
+   resource lease. Competing claims cannot spend the same capacity or slot.
+3. `ctld` creates the lease cgroup, attaches RootFS, and applies the sandbox
+   network policy.
+4. The task driver writes the committed CPU, cpuset, memory, and PIDs limits
+   into the OCI spec and starts stock `runsc`.
+5. The runtime is exposed only after manager commits the new runtime generation.
 
-In practice, “available” means the pod is ready for claiming, not merely `Pod Running`. The writable rootfs is initialized before runtime activation and is captured by later rootfs checkpoints.
+Nomad carrier `resources` reserve only driver and allocation overhead. They are
+never copied into the sandbox OCI limits and are not metering truth.
 
----
+## Compatibility Classes
 
-## Pool Fields
+A warm carrier can serve any template whose immutable runtime requirements
+match the carrier class. Class inputs include:
 
-Configure the pool strategy in your template spec under the `pool` key:
+- CPU architecture and RootFS artifact platform;
+- task-driver and stock `runsc` versions;
+- gVisor platform;
+- overlay, file-access, and DirectFS modes;
+- RootFS format generation; and
+- security class or required special devices.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
-| `maxIdle` | integer | Compatibility ceiling for the pool contract. The current manager does not autoscale above `minIdle`; template status still reports `PoolHealthy=False` if idle pods exceed `maxIdle`. |
+CPU quota, CPU weight, cpuset, memory, and PIDs are dynamic lease properties.
+They must not appear in the compatibility digest. This is what allows a 512 MiB
+claim and an 8 GiB claim to draw from the same warm pool when their immutable
+runtime class is otherwise identical.
 
-```yaml
-spec:
-    pool:
-        minIdle: 3
-        maxIdle: 10
-```
+Until the public API exposes an explicit class selector, configure exactly one
+compatible class for each requested cluster. Zero or multiple matches fail
+closed instead of selecting an ambiguous runtime.
 
----
+## Capacity And Replenishment
 
-## minIdle — Guaranteed Fast Starts
+The platform administrator controls the number of carriers with the `count` in
+`nomad-driver-sandbox0/example/warm-slot.nomad`. A carrier is single-use:
+a terminal sandbox consumes its allocation, and Nomad creates a fresh
+allocation with a fresh network namespace. Task restart in the old allocation
+is disabled.
 
-`minIdle` is the number of idle pods the system keeps running at all times. The manager's ReplicaSet controller continuously reconciles towards this count:
+A ready carrier alone is insufficient. A claim also requires all of the
+following:
 
-- If idle pods drop below `minIdle` (due to claims), new pods start immediately
-- If the node has capacity, `minIdle` pods are pre-warmed and ready before any request arrives
+- live, non-expired ctld-reported node capacity;
+- enough free CPU and memory in the dedicated node cpuset;
+- a connected and attested node channel;
+- an available RootFS/NBD attachment; and
+- a matching immutable runtime class.
 
-## Readiness Gates Pool Capacity
+If any requirement is missing, the claim fails closed as unavailable. Increase
+carrier count, dedicated node capacity, and the configured NBD pool together;
+adding carriers cannot create CPU, memory, or devices.
 
-Warm-pool capacity is counted from idle pods that are ready for claiming.
+Production Sandbox0 Nomad clients must belong to the dedicated `sandbox0` node
+pool and advertise `sandbox0_dedicated=true`. Do not place general Nomad jobs on
+those nodes, because Sandbox0's PostgreSQL resource leases—not Nomad allocation
+resources—are the node's sandbox capacity authority.
 
-- An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
-- A hot claim only selects idle pods that are already `Ready`
-- Readiness is based on the sandbox container and procd state
+## Release Safety
 
-**Choosing `minIdle`:**
+Capacity is not returned when an API request merely asks a sandbox to stop.
+The plugin-independent regional terminal reconciler releases the lease only
+after it proves that the old writer, `runsc` instance, RootFS mount, network
+state, and lease cgroup are gone. The same rule applies after driver crashes,
+ctld A/B failover, manager restarts, and authenticated node reboots.
 
-| Workload Pattern | Recommended `minIdle` |
-|------------------|-----------------------|
-| Low traffic / dev environments | 1–2 |
-| Steady interactive traffic | 3–5 |
-| Burst-heavy production | 5–20+ |
-| Single-user tool | 1 |
+This delayed release prevents a stale runtime from overlapping a new claim on
+the same CPU, memory, writer, mount, or network identity.
 
-<Callout variant="warning">
-Idle pods wait with a `128Mi` memory limit to reduce warm-pool cost. `mainContainer.resources.memory` remains the default sandbox memory contract; if `config.resources` is omitted during claim, Sandbox0 resizes the hot-claimed pod to the template default. Claim-time `config.resources.memory` overrides that default. Setting `minIdle` too high still consumes cluster capacity, image cache, ephemeral-storage headroom, and runtime overhead. Monitor your claim rate and set `minIdle` to match your typical concurrency.
-</Callout>
+## Sizing And Validation
 
----
+Monitor ready carriers, free resource leases, NBD availability, claim latency,
+and replacement lag. Size for synchronized bursts rather than average request
+rate.
 
-## maxIdle — Compatibility Ceiling
-
-`maxIdle` remains part of the template contract and must be greater than or equal to `minIdle`, but the current manager keeps warm-pool ReplicaSets at `minIdle`.
-
-- It preserves compatibility for clients and future autoscaler behavior
-- It works with template status conditions (`PoolHealthy=False`) to signal idle over-provisioning
-
-For guaranteed burst capacity today, increase `minIdle` to the number of sandboxes you want pre-warmed.
-
-```yaml
-pool:
-    minIdle: 3
-    maxIdle: 3
-```
-
----
-
-## Pool and Template Updates
-
-When you update a template spec, the warm pool is recycled:
-
-1. Existing idle pods (running the old spec) are drained with per-node teardown and cluster replacement limits
-2. New idle pods are created with the updated spec
-3. Running sandboxes are **not** affected
-
-Ready pods are additionally protected by an idle-pool PodDisruptionBudget and an availability floor. Unready pods do not consume that availability allowance, but they still consume their node's teardown budget. This allows independent nodes to clean up in parallel without sending an unbounded delete wave to one kubelet, container runtime, or CNI instance.
-
-During the transition, the pool may temporarily drop below `minIdle`. Plan updates during low-traffic windows if uninterrupted pool availability is critical.
-
----
+The production acceptance gate requires at least eight ready carriers, eight
+truthful dedicated CPU cores, enough non-oversubscribed memory, serial and
+synchronized-concurrency runs, multi-node failure injection, and security
+checks. A smaller local machine can validate only its real width and must not be
+reported as an eight-way result.
 
 ## Next Steps
 
 <CardGroup>
-  <Card title="Configuration" href="/docs/sandbox/template/configuration" cta="Continue">
-    Tune template resources, runtime behavior, mounts, and networking.
+  <Card title="Self-hosted configuration" href="/docs/self-hosted/configuration" cta="Continue">
+    Configure runtime classes, node capacity, and carrier jobs.
   </Card>
 </CardGroup>

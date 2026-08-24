@@ -26,7 +26,14 @@ Webhook requests may be delivered more than once, so consumers must deduplicate 
 
 When a sandbox is created with a webhook, procd writes signed delivery records to a reserved outbox under `/var/lib/sandbox0/procd/webhook-outbox` before acknowledging the internal publish request, then dispatches them with backoff. The outbox is part of the persistent sandbox rootfs and remains scoped to the sandbox identity.
 
-Sandbox deletion has an additional manager-level path. When manager commits a sandbox deletion, it writes the exact signed `sandbox.deleted` request to a PostgreSQL outbox in the same transaction. Sandbox and Pod cleanup never wait for the external endpoint. Manager retries transport errors and HTTP `408`, `425`, `429`, and `5xx` responses with exponential backoff for up to 24 hours. Other non-`2xx` responses are terminal. After the 24-hour delivery window expires, manager stops retrying and later removes the bounded outbox record.
+Sandbox deletion has an additional manager-level path. When manager commits a
+sandbox deletion, it writes the exact signed `sandbox.deleted` request to a
+PostgreSQL outbox in the same transaction. Runtime and RootFS cleanup never
+wait for the external endpoint. Manager retries transport errors and HTTP
+`408`, `425`, `429`, and `5xx` responses with exponential backoff for up to 24
+hours. Other non-`2xx` responses are terminal. After the 24-hour delivery
+window expires, manager stops retrying and later removes the bounded outbox
+record.
 
 <Callout variant="info">
 Webhook delivery is eventually consistent. Temporary endpoint outages, procd container restarts, and manager restarts can cause retries. A response can be delivered more than once when the receiver accepts it but manager cannot durably record the success.

@@ -39,7 +39,6 @@ job "sandbox0-warm-slots" {
       config {
         command        = "/procd"
         args           = []
-        wait_for_claim = true
       }
 
       resources {

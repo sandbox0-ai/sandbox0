@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/internal/soakstate"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
@@ -33,7 +35,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	templatemigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 )
 
@@ -76,6 +80,26 @@ type runtimeState struct {
 	objects     objectstore.Store
 	conditional objectstore.ContextConditionalStore
 	worker      *rootfsmaterializer.Worker
+}
+
+type zeroReaderAt struct {
+	size int64
+}
+
+func (r zeroReaderAt) ReadAt(payload []byte, offset int64) (int, error) {
+	if offset < 0 || offset >= r.size {
+		return 0, io.EOF
+	}
+	remaining := r.size - offset
+	count := len(payload)
+	if int64(count) > remaining {
+		count = int(remaining)
+	}
+	clear(payload[:count])
+	if count != len(payload) {
+		return count, io.EOF
+	}
+	return count, nil
 }
 
 type fixture struct {
@@ -596,16 +620,24 @@ func openRuntime(ctx context.Context, opts options, endpoint string) (*runtimeSt
 	if err != nil {
 		return nil, fmt.Errorf("open primary PostgreSQL pool: %w", err)
 	}
-	objects, err := objectstore.Create(objectstore.Config{
+	directObjects, err := objectstore.Create(objectstore.Config{
+		Type: objectstore.TypeS3, Bucket: opts.rustFSBucket, Region: "us-east-1",
+		Endpoint: opts.rustFSEndpoint, AccessKey: opts.accessKey, SecretKey: opts.secretKey,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create direct RustFS observation client: %w", err)
+	}
+	workerObjects, err := objectstore.Create(objectstore.Config{
 		Type: objectstore.TypeS3, Bucket: opts.rustFSBucket, Region: "us-east-1",
 		Endpoint: endpoint, AccessKey: opts.accessKey, SecretKey: opts.secretKey,
 	})
 	if err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("create RustFS client: %w", err)
+		return nil, fmt.Errorf("create proxied RustFS worker client: %w", err)
 	}
-	conditional, ok := objects.(objectstore.ContextConditionalStore)
-	if !ok || !objectstore.SupportsContextConditionalCreate(objects) {
+	conditional, ok := workerObjects.(objectstore.ContextConditionalStore)
+	if !ok || !objectstore.SupportsContextConditionalCreate(workerObjects) {
 		pool.Close()
 		return nil, fmt.Errorf("RustFS client lacks contextual conditional access")
 	}
@@ -624,7 +656,10 @@ func openRuntime(ctx context.Context, opts options, endpoint string) (*runtimeSt
 		pool.Close()
 		return nil, err
 	}
-	return &runtimeState{pool: pool, store: store, objects: objects, conditional: conditional, worker: worker}, nil
+	return &runtimeState{
+		pool: pool, store: store, objects: directObjects,
+		conditional: conditional, worker: worker,
+	}, nil
 }
 
 func requireEmptyDatabase(ctx context.Context, pool *pgxpool.Pool) error {
@@ -650,41 +685,119 @@ func seedFixture(
 	startedAt time.Time,
 ) (*fixture, error) {
 	result := &fixture{runID: runID, teamID: runID + "-team"}
-	publisher := rootfsblock.ObjectStorePublisher{Store: runtime.conditional}
-	base, err := rootfsblock.BuildMaterializedGeneration(
-		ctx, bytes.NewReader(make([]byte, rootfsblock.LogicalBlockSize)),
-		rootfsblock.LogicalBlockSize, publisher,
-		rootfsblock.BuildOptions{ObjectPrefix: "rootfs/soak/" + result.runID + "/base"},
-	)
+	sourceDigest := digest.FromString(result.runID + "-source")
+	sourceRef := "registry.invalid/sandbox0-soak@" + sourceDigest.String()
+	procdDigest := digest.FromString("sandbox0-procd-soak")
+	blockOptions := rootfsblock.BuildOptions{ObjectPrefix: "rootfs/soak/" + result.runID + "/base"}
+	operationID := result.runID + ":base-import"
+	platform := rootfsimporter.ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"}
+	operation, err := runtime.store.BeginRootFSImport(ctx, &sandboxstore.BeginRootFSImportRequest{
+		OperationID: operationID,
+		Spec: rootfsimporter.OperationSpec{
+			SourceOCIRef:     sourceRef,
+			Platform:         platform,
+			FormatGeneration: 1,
+			ProcdProtocol:    "sandbox0.procd.soak.v1",
+			ProcdDigest:      procdDigest.String(),
+			LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
+			BlockOptions:     blockOptions,
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("publish soak Base: %w", err)
+		return nil, fmt.Errorf("begin soak Base import: %w", err)
 	}
-	result.base = base.Descriptor
+	artifactPlatform := sandboxstore.RootFSArtifactPlatform{
+		OS: platform.OS, Architecture: platform.Architecture, Variant: platform.Variant,
+	}
+	requirements := sandboxstore.ReadyRootFSArtifactRequirements{
+		FormatGeneration: 1,
+		LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
+		ProcdProtocol:    "sandbox0.procd.soak.v1",
+		ProcdDigest:      procdDigest.String(),
+	}
+	var artifact *sandboxstore.RootFSBaseArtifact
+	if operation.State == sandboxstore.RootFSImportStateReady {
+		artifact, err = runtime.store.GetReadyRootFSBaseArtifactByDigest(
+			ctx, operation.ArtifactDigest, artifactPlatform, requirements,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("read ready soak Base import %q: %w", operationID, err)
+		}
+		result.base, err = rootfsblock.DecodeDescriptor(artifact.Descriptor)
+		if err != nil {
+			return nil, fmt.Errorf("decode ready soak Base import %q: %w", operationID, err)
+		}
+	} else {
+		operation, err = runtime.store.LeaseNextRootFSImport(
+			ctx, "materializer-soak-seed", 2*time.Minute,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("lease soak Base import %q: %w", operationID, err)
+		}
+		if operation == nil || operation.ID != operationID {
+			return nil, fmt.Errorf("lease soak Base import %q returned operation %#v", operationID, operation)
+		}
+		lease, leaseErr := operation.Lease()
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
+		journal, journalErr := sandboxstore.NewRootFSImportPublicationJournal(runtime.store, lease)
+		if journalErr != nil {
+			return nil, journalErr
+		}
+		publisher := rootfsimporter.JournaledPublisher{
+			OperationID: operationID,
+			Journal:     journal,
+			Publisher:   rootfsblock.ObjectStorePublisher{Store: runtime.conditional},
+		}
+		base, buildErr := rootfsblock.BuildMaterializedGeneration(
+			ctx, zeroReaderAt{size: rootfsartifact.MinimumLogicalSizeBytes},
+			rootfsartifact.MinimumLogicalSizeBytes, publisher,
+			blockOptions,
+		)
+		if buildErr != nil {
+			return nil, fmt.Errorf("publish soak Base: %w", buildErr)
+		}
+		result.base = base.Descriptor
+		baseBlockRoot, parseErr := digest.Parse(base.Descriptor.MappingRoot.RootDigest)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse soak Base block root: %w", parseErr)
+		}
+		artifact, err = runtime.store.PublishReadyRootFSImport(ctx, &sandboxstore.PublishReadyRootFSImportRequest{
+			Lease: lease,
+			Result: rootfsimporter.BuildResult{
+				SourceOCIRef: sourceRef, SourceOCIDigest: sourceDigest,
+				ManifestDigest:   digest.FromString(result.runID + "-manifest"),
+				ConfigDigest:     digest.FromString(result.runID + "-config"),
+				Platform:         ocispec.Platform{OS: "linux", Architecture: "amd64"},
+				LayerDigests:     []digest.Digest{digest.FromString(result.runID + "-layer")},
+				DiffIDs:          []digest.Digest{digest.FromString(result.runID + "-diff")},
+				ProcdDigest:      procdDigest,
+				LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
+				DescriptorDigest: digest.FromBytes(base.Payload),
+				BaseBlockRoot:    baseBlockRoot,
+				Descriptor:       base.Descriptor,
+				DescriptorBytes:  base.Payload,
+				Objects:          base.Objects, Bytes: base.Bytes, References: base.References,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("publish ready soak Base import: %w", err)
+		}
+	}
 	sandboxID := result.runID + "-sandbox"
 	if err := runtime.store.UpsertSandbox(ctx, &sandboxstore.SandboxRecord{
 		ID: sandboxID, TeamID: result.teamID, UserID: "soak-user",
 		TemplateID: "soak-template", TemplateName: "soak-template",
-		TemplateNamespace: "soak", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: startedAt,
+		TemplateNamespace: "soak", DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		ResourceMillicpu: 1000, ResourceMemoryMiB: 1024, CreatedAt: startedAt,
 	}); err != nil {
-		return nil, err
-	}
-	artifactDigest := digest.FromBytes(base.Payload).String()
-	sourceDigest := digest.FromString(result.runID + "-source").String()
-	sourceRef := "registry.invalid/sandbox0-soak@" + sourceDigest
-	artifact, err := runtime.store.PutReadyRootFSBaseArtifact(ctx, &sandboxstore.PutReadyRootFSBaseArtifactRequest{
-		ArtifactDigest: artifactDigest, SourceOCIRef: sourceRef, SourceOCIDigest: sourceDigest,
-		BaseBlockRoot: base.Descriptor.MappingRoot.RootDigest, FormatGeneration: 1,
-		Platform:   sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
-		Descriptor: base.Payload,
-	})
-	if err != nil {
 		return nil, err
 	}
 	filesystem, initial, err := runtime.store.EnsureInitialRootFSGeneration(ctx,
 		&sandboxstore.EnsureInitialRootFSGenerationRequest{
 			SandboxID: sandboxID, TeamID: result.teamID, SourceOCIRef: sourceRef,
-			SourceOCIDigest: sourceDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+			SourceOCIDigest: sourceDigest.String(), BaseArtifactDigest: artifact.ArtifactDigest,
 		})
 	if err != nil {
 		return nil, err
@@ -1309,8 +1422,10 @@ func evaluateFinalBounds(
 	if finalDB.DeletionQueue != 0 {
 		result = append(result, fmt.Sprintf("unexpected object deletion queue rows=%d", finalDB.DeletionQueue))
 	}
-	if finalDB.CatalogObjects != finalObjects.Objects-2 {
-		result = append(result, fmt.Sprintf("catalog/RustFS objects=%d/%d do not differ by the Base and run identity objects",
+	// The importer journals the Base object in the shared catalog. Only the
+	// soak-run identity object intentionally remains outside catalog ownership.
+	if finalDB.CatalogObjects != finalObjects.Objects-1 {
+		result = append(result, fmt.Sprintf("catalog/RustFS objects=%d/%d do not differ by the run identity object",
 			finalDB.CatalogObjects, finalObjects.Objects))
 	}
 	bounds := materializerAcceptanceBounds(opts)

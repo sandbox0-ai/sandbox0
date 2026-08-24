@@ -12,12 +12,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 )
 
-// Store implements template and allocation storage in PostgreSQL.
+// Store implements the region-authoritative template store in PostgreSQL.
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -32,11 +32,61 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
+// ListImageSourcesForRootFSImport scans ready image templates with a bounded
+// keyset cursor. Every manager may run the scan because import creation is
+// idempotent in the shared PostgreSQL authority.
+func (s *Store) ListImageSourcesForRootFSImport(
+	ctx context.Context,
+	cursor store.ImageSourceCursor,
+	limit int,
+) ([]store.ImageSource, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("template image source store is not configured")
+	}
+	if limit <= 0 || limit > 1000 {
+		return nil, fmt.Errorf("template image source limit must be within 1..1000")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT scope, team_id, template_id,
+			COALESCE(spec #>> '{mainContainer,image}', ''),
+			COALESCE(spec #>> '{mainContainer,resources,ephemeralStorage}', '')
+		FROM scheduler_templates
+		WHERE creation_state = 'ready'
+			AND rootfs_snapshot_id IS NULL
+			AND ROW(scope, team_id, template_id) > ROW($1, $2, $3)
+		ORDER BY scope, team_id, template_id
+		LIMIT $4
+	`, cursor.Scope, cursor.TeamID, cursor.TemplateID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list template image sources for RootFS import: %w", err)
+	}
+	defer rows.Close()
+
+	sources := make([]store.ImageSource, 0, limit)
+	for rows.Next() {
+		var source store.ImageSource
+		if err := rows.Scan(
+			&source.Cursor.Scope,
+			&source.Cursor.TeamID,
+			&source.Cursor.TemplateID,
+			&source.Image,
+			&source.EphemeralStorage,
+		); err != nil {
+			return nil, fmt.Errorf("scan template image source for RootFS import: %w", err)
+		}
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate template image sources for RootFS import: %w", err)
+	}
+	return sources, nil
+}
+
 const templateSelectColumns = `
 	template_id, scope, team_id, user_id, spec, created_at, updated_at,
 	creation_build_id::text, creation_idempotency_key, creation_request_hash,
 	creation_state, creation_stage, creation_started_at, creation_captured_at,
-	creation_completed_at, creation_output_image, creation_reason, creation_message,
+	creation_completed_at, creation_reason, creation_message,
 	rootfs_storage_format, rootfs_snapshot_id, rootfs_generation_id,
 	rootfs_source_oci_digest, rootfs_base_artifact_digest, rootfs_format_generation,
 	rootfs_platform_os, rootfs_platform_architecture, rootfs_platform_variant
@@ -51,7 +101,7 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 	var specJSON []byte
 	var buildID, idempotencyKey, requestHash *string
 	var creationState string
-	var creationStage, outputImage, reason, message *string
+	var creationStage, reason, message *string
 	var rootFSStorageFormat, rootFSSnapshotID, rootFSGenerationID *string
 	var rootFSSourceOCIDigest, rootFSBaseArtifactDigest *string
 	var rootFSFormatGeneration *int
@@ -73,7 +123,6 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 		&startedAt,
 		&capturedAt,
 		&completedAt,
-		&outputImage,
 		&reason,
 		&message,
 		&rootFSStorageFormat,
@@ -100,10 +149,9 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 			Creation: &v1alpha1.TemplateCreationStatus{
 				State:       v1alpha1.TemplateCreationState(creationState),
 				Stage:       v1alpha1.TemplateCreationStage(stringValue(creationStage)),
-				StartedAt:   metaTime(startedAt),
-				CapturedAt:  metaTime(capturedAt),
-				CompletedAt: metaTime(completedAt),
-				OutputImage: stringValue(outputImage),
+				StartedAt:   utcTime(startedAt),
+				CapturedAt:  utcTime(capturedAt),
+				CompletedAt: utcTime(completedAt),
 				Reason:      stringValue(reason),
 				Message:     stringValue(message),
 			},
@@ -132,11 +180,11 @@ func stringValue(value *string) string {
 	return *value
 }
 
-func metaTime(value *time.Time) *metav1.Time {
+func utcTime(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
 	}
-	out := metav1.NewTime(value.UTC())
+	out := value.UTC()
 	return &out
 }
 
@@ -455,14 +503,14 @@ func (s *Store) DeleteTemplate(ctx context.Context, scope, teamID, templateID st
 const templateBuildSelectColumns = `
 	build_id::text, template_id, scope, team_id, user_id,
 	source_sandbox_id, target_cluster_id, request_hash, idempotency_key,
-	status, stage, snapshot_id, capture_metadata, output_image,
+	status, stage, snapshot_id, capture_metadata,
 	attempt_count, next_attempt_at, lease_owner, lease_expires_at,
 	cancel_requested_at, last_error, created_at, updated_at
 `
 
 func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 	var build template.TemplateBuild
-	var idempotencyKey, snapshotID, outputImage, leaseOwner, lastError *string
+	var idempotencyKey, snapshotID, leaseOwner, lastError *string
 	var captureMetadata []byte
 	var leaseExpiresAt, cancelRequestedAt *time.Time
 	var stage string
@@ -480,7 +528,6 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 		&stage,
 		&snapshotID,
 		&captureMetadata,
-		&outputImage,
 		&build.AttemptCount,
 		&build.NextAttemptAt,
 		&leaseOwner,
@@ -496,7 +543,6 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 	build.Stage = v1alpha1.TemplateCreationStage(stage)
 	build.SnapshotID = stringValue(snapshotID)
 	build.CaptureMetadata = append([]byte(nil), captureMetadata...)
-	build.OutputImage = stringValue(outputImage)
 	build.LeaseOwner = stringValue(leaseOwner)
 	if leaseExpiresAt != nil {
 		build.LeaseExpiresAt = leaseExpiresAt.UTC()
@@ -510,22 +556,16 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 
 // ClaimTemplateBuild leases one build to a manager in the local region.
 // Capturing remains bound to the source cluster. Once capture is durable,
-// publishing, reconciliation cleanup, and cancellation cleanup may be taken
-// over by any compatible manager that shares the region's PostgreSQL and
-// object storage. Capture-version fencing prevents an OCI worker from
-// interpreting a block-COW handoff, or vice versa.
+// publishing and cancellation cleanup may be taken over by any manager that
+// shares the region's PostgreSQL and object storage. The source cluster still
+// owns capture because it owns the source sandbox runtime.
 func (s *Store) ClaimTemplateBuild(
 	ctx context.Context,
 	targetClusterID, workerID string,
-	captureVersion int,
 	leaseDuration time.Duration,
 ) (*template.TemplateBuild, error) {
 	if strings.TrimSpace(targetClusterID) == "" || strings.TrimSpace(workerID) == "" {
 		return nil, fmt.Errorf("target_cluster_id and worker_id are required")
-	}
-	if captureVersion != template.TemplateBuildCaptureVersionOCI &&
-		captureVersion != template.TemplateBuildCaptureVersionBlockCOW {
-		return nil, fmt.Errorf("unsupported template capture version %d", captureVersion)
 	}
 	if leaseDuration <= 0 {
 		leaseDuration = 2 * time.Minute
@@ -557,7 +597,7 @@ func (s *Store) ClaimTemplateBuild(
 					b.cancel_requested_at IS NOT NULL
 					AND (
 						b.capture_metadata IS NULL
-						OR b.capture_metadata->>'version' = $4
+						OR b.capture_metadata->>'version' = '2'
 					)
 				)
 				OR (
@@ -572,7 +612,7 @@ func (s *Store) ClaimTemplateBuild(
 						)
 						OR (
 							b.stage = 'publishing'
-							AND b.capture_metadata->>'version' = $4
+							AND b.capture_metadata->>'version' = '2'
 							AND t.creation_state = 'creating'
 							AND t.creation_stage = 'publishing'
 							AND (
@@ -582,14 +622,6 @@ func (s *Store) ClaimTemplateBuild(
 									AND b.capture_metadata IS NOT NULL
 									AND t.creation_captured_at IS NOT NULL
 								)
-							)
-						)
-						OR (
-							b.stage = 'reconciling'
-							AND b.capture_metadata->>'version' = $4
-							AND (
-								(t.creation_state = 'creating' AND t.creation_stage = 'reconciling')
-								OR t.creation_state = 'ready'
 							)
 						)
 					)
@@ -607,7 +639,7 @@ func (s *Store) ClaimTemplateBuild(
 		FROM candidate
 		WHERE b.build_id = candidate.build_id
 		RETURNING `+templateBuildSelectColumnsWithAlias("b")+`
-	`, targetClusterID, workerID, leaseMillis, fmt.Sprintf("%d", captureVersion)))
+	`, targetClusterID, workerID, leaseMillis))
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -749,9 +781,8 @@ func (s *Store) MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID
 		Version int `json:"version"`
 	}
 	if len(captureMetadata) == 0 || json.Unmarshal(captureMetadata, &metadataVersion) != nil ||
-		(metadataVersion.Version != template.TemplateBuildCaptureVersionOCI &&
-			metadataVersion.Version != template.TemplateBuildCaptureVersionBlockCOW) {
-		return fmt.Errorf("captured template metadata has no supported version")
+		metadataVersion.Version != template.TemplateBuildCaptureVersion {
+		return fmt.Errorf("captured template metadata has no runtime-native version")
 	}
 	if capturedAt.IsZero() {
 		capturedAt = time.Now().UTC()
@@ -802,58 +833,6 @@ func (s *Store) MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit captured template build: %w", err)
-	}
-	return nil
-}
-
-// PublishTemplateBuild atomically installs the digest-pinned image spec and
-// advances the public creation stage to reconciliation.
-func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID string, finalSpec v1alpha1.SandboxTemplateSpec, outputImage string) error {
-	specJSON, err := json.Marshal(finalSpec)
-	if err != nil {
-		return fmt.Errorf("marshal published template spec: %w", err)
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin publish template build: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	result, err := tx.Exec(ctx, `
-		UPDATE scheduler_template_builds
-		SET stage = 'reconciling', output_image = $3, last_error = NULL
-		WHERE build_id = $1::uuid AND lease_owner = $2
-		  AND status = 'running' AND cancel_requested_at IS NULL
-		  AND capture_metadata->>'version' = '1'
-		  AND (
-			stage = 'publishing'
-			OR (stage = 'reconciling' AND output_image = $3)
-		  )
-	`, buildID, workerID, outputImage)
-	if err != nil {
-		return fmt.Errorf("mark template build published: %w", err)
-	}
-	if err := requireBuildRow(result.RowsAffected()); err != nil {
-		return err
-	}
-	result, err = tx.Exec(ctx, `
-		UPDATE scheduler_templates
-		SET spec = $2,
-			creation_stage = 'reconciling',
-			creation_output_image = $3,
-			creation_message = NULL
-		WHERE creation_build_id = $1::uuid
-		  AND creation_state = 'creating'
-		  AND creation_stage IN ('publishing', 'reconciling')
-	`, buildID, specJSON, outputImage)
-	if err != nil {
-		return fmt.Errorf("install published template spec: %w", err)
-	}
-	if err := requireBuildRow(result.RowsAffected()); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit published template build: %w", err)
 	}
 	return nil
 }
@@ -909,10 +888,9 @@ func (s *Store) PublishRootFSTemplateBuild(
 	result, err := tx.Exec(ctx, `
 		UPDATE scheduler_templates
 		SET creation_state = 'ready',
-			creation_stage = 'reconciling',
+			creation_stage = 'publishing',
 			creation_captured_at = COALESCE(creation_captured_at, $5),
 			creation_completed_at = COALESCE(creation_completed_at, NOW()),
-			creation_output_image = NULL,
 			creation_reason = NULL,
 			creation_message = NULL,
 			rootfs_storage_format = $6,
@@ -1221,34 +1199,6 @@ func (s *Store) ReleaseTemplateRootFSDeletion(
 	return requireBuildRow(result.RowsAffected())
 }
 
-// MarkTemplateCreationReady finalizes creation after a reconciler verifies
-// that at least one data-plane cluster can claim the template.
-func (s *Store) MarkTemplateCreationReady(ctx context.Context, scope, teamID, templateID, buildID string, completedAt time.Time) (bool, error) {
-	if completedAt.IsZero() {
-		completedAt = time.Now().UTC()
-	}
-	result, err := s.pool.Exec(ctx, `
-		UPDATE scheduler_templates
-		SET creation_state = 'ready',
-			creation_completed_at = COALESCE(creation_completed_at, $5),
-			creation_reason = NULL,
-			creation_message = NULL
-		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-		  AND creation_build_id = $4::uuid
-		  AND creation_state = 'creating'
-		  AND creation_stage = 'reconciling'
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM scheduler_template_builds b
-			WHERE b.build_id = $4::uuid
-		  )
-	`, scope, teamID, templateID, buildID, completedAt)
-	if err != nil {
-		return false, fmt.Errorf("mark template creation ready: %w", err)
-	}
-	return result.RowsAffected() > 0, nil
-}
-
 func nullableJSON(value json.RawMessage) any {
 	if len(value) == 0 {
 		return nil
@@ -1268,78 +1218,4 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-// UpsertAllocation creates or updates a template allocation.
-func (s *Store) UpsertAllocation(ctx context.Context, alloc *template.TemplateAllocation) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO scheduler_template_allocations (template_id, scope, team_id, cluster_id, min_idle, max_idle, sync_status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (scope, team_id, template_id, cluster_id)
-		DO UPDATE SET min_idle = $5, max_idle = $6, sync_status = $7
-	`, alloc.TemplateID, alloc.Scope, alloc.TeamID, alloc.ClusterID, alloc.MinIdle, alloc.MaxIdle, alloc.SyncStatus)
-	if err != nil {
-		return fmt.Errorf("upsert allocation: %w", err)
-	}
-	return nil
-}
-
-// ListAllocationsByTemplate lists all allocations for a template.
-func (s *Store) ListAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) ([]*template.TemplateAllocation, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT template_id, scope, team_id, cluster_id, min_idle, max_idle, last_synced_at, sync_status, sync_error, created_at, updated_at
-		FROM scheduler_template_allocations
-		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-		ORDER BY cluster_id
-	`, scope, teamID, templateID)
-	if err != nil {
-		return nil, fmt.Errorf("list allocations by template: %w", err)
-	}
-	defer rows.Close()
-
-	var allocations []*template.TemplateAllocation
-	for rows.Next() {
-		var alloc template.TemplateAllocation
-		if err := rows.Scan(
-			&alloc.TemplateID,
-			&alloc.Scope,
-			&alloc.TeamID,
-			&alloc.ClusterID,
-			&alloc.MinIdle,
-			&alloc.MaxIdle,
-			&alloc.LastSyncedAt,
-			&alloc.SyncStatus,
-			&alloc.SyncError,
-			&alloc.CreatedAt,
-			&alloc.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan allocation: %w", err)
-		}
-		allocations = append(allocations, &alloc)
-	}
-	return allocations, nil
-}
-
-// UpdateAllocationSyncStatus updates the sync status of an allocation.
-func (s *Store) UpdateAllocationSyncStatus(ctx context.Context, scope, teamID, templateID, clusterID, status string, syncError *string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE scheduler_template_allocations
-		SET sync_status = $5::text, sync_error = $6, last_synced_at = CASE WHEN $5::text = 'synced' THEN NOW() ELSE last_synced_at END
-		WHERE scope = $1 AND team_id = $2 AND template_id = $3 AND cluster_id = $4
-	`, scope, teamID, templateID, clusterID, status, syncError)
-	if err != nil {
-		return fmt.Errorf("update allocation sync status: %w", err)
-	}
-	return nil
-}
-
-// DeleteAllocationsByTemplate deletes all allocations for a template.
-func (s *Store) DeleteAllocationsByTemplate(ctx context.Context, scope, teamID, templateID string) error {
-	_, err := s.pool.Exec(ctx, `
-		DELETE FROM scheduler_template_allocations WHERE scope = $1 AND team_id = $2 AND template_id = $3
-	`, scope, teamID, templateID)
-	if err != nil {
-		return fmt.Errorf("delete allocations by template: %w", err)
-	}
-	return nil
 }

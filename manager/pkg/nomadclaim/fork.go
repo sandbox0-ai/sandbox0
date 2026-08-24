@@ -13,13 +13,12 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const defaultNomadRunningForkRecoveryTimeout = 10 * time.Minute
@@ -48,8 +47,8 @@ func (s *Service) ForkSandbox(
 	if err != nil {
 		return nil, mapNomadForkError("load Nomad fork source", sourceSandboxID, err)
 	}
-	if source == nil || source.TeamID != teamID || source.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID)
+	if source == nil || source.TeamID != teamID {
+		return nil, apierror.NewNotFound("sandbox", sourceSandboxID)
 	}
 	activeSource := source.DesiredState == sandboxstore.SandboxDesiredStateActive &&
 		source.RuntimeGeneration > 0 && source.RuntimeID != "" && source.RuntimeNamespace != ""
@@ -95,9 +94,8 @@ func (s *Service) ForkSandbox(
 		ID: targetID, TeamID: teamID, UserID: userID,
 		TemplateID: source.TemplateID, TemplateName: source.TemplateName,
 		TemplateNamespace: source.TemplateNamespace, ClusterID: source.ClusterID,
-		RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState:   sandboxstore.SandboxDesiredStatePaused,
-		Config:         *targetConfig, TemplateSpec: source.TemplateSpec, RuntimeGeneration: 0,
+		DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		Config:       *targetConfig, TemplateSpec: source.TemplateSpec, RuntimeGeneration: 0,
 		OwnerKind: source.OwnerKind, ResourceMillicpu: source.ResourceMillicpu,
 		ResourceMemoryMiB: source.ResourceMemoryMiB,
 		ClaimedAt:         startedAt, ExpiresAt: expiresAt, HardExpiresAt: hardExpiresAt,
@@ -110,12 +108,11 @@ func (s *Service) ForkSandbox(
 	if existingTarget != nil {
 		if existingTarget.TeamID != teamID || existingTarget.UserID != userID ||
 			existingTarget.TemplateID != source.TemplateID || existingTarget.ClusterID != source.ClusterID ||
-			existingTarget.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 			existingTarget.DesiredState != sandboxstore.SandboxDesiredStatePaused ||
 			existingTarget.RuntimeGeneration != 0 || existingTarget.RuntimeID != "" ||
 			existingTarget.RuntimeNamespace != "" || !existingTarget.DeletedAt.IsZero() ||
 			!nomadForkExplicitTTLMatches(request.Config, &existingTarget.Config) {
-			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID,
+			return nil, apierror.NewConflict("sandbox", sourceSandboxID,
 				fmt.Errorf("existing fork target does not match the signed operation"))
 		}
 		target = existingTarget
@@ -141,7 +138,7 @@ func (s *Service) ForkSandbox(
 		}
 	}
 	if (!activeSource && !pausedSource) || !source.DeletedAt.IsZero() {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID,
+		return nil, apierror.NewConflict("sandbox", sourceSandboxID,
 			fmt.Errorf("source is not a canonical active or paused Nomad sandbox"))
 	}
 	if pausedSource {
@@ -175,7 +172,7 @@ func (s *Service) completeNomadRunningFork(
 		return candidate.Target, nil
 	}
 	if err := validateNomadRunningForkCandidate(candidate, source, target, operationID); err != nil {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, source.ID, err)
+		return nil, apierror.NewConflict("sandbox", source.ID, err)
 	}
 	bindingDigest := hex.EncodeToString(candidate.BindingDigest)
 	fork := rootfshandoff.RunningForkCheckpointRequest{
@@ -232,7 +229,7 @@ func (s *Service) CompleteSandboxFork(ctx context.Context, sourceSandboxID strin
 	if err != nil {
 		return fmt.Errorf("load Nomad running-fork source for recovery: %w", err)
 	}
-	if source == nil || source.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
+	if source == nil {
 		return nil
 	}
 	if lifecycle.ID == "" || lifecycle.SandboxID != sourceSandboxID ||
@@ -304,13 +301,11 @@ func nomadRunningForkRecoveryStillExact(
 		lifecycle.ToGeneration != lifecycle.FromGeneration || lifecycle.FromGeneration != source.RuntimeGeneration ||
 		lifecycle.FromRuntimeNamespace == "" || lifecycle.FromRuntimeID == "" ||
 		lifecycle.FromRuntimeNamespace != source.RuntimeNamespace || lifecycle.FromRuntimeID != source.RuntimeID ||
-		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" || lifecycle.PreparedHeadLayerID != "" ||
-		lifecycle.ExpectedHeadLayerID == "" || lifecycle.TargetSandboxID != target.ID ||
+		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" || lifecycle.PreparedGenerationID != "" ||
+		lifecycle.ExpectedGenerationID == "" || lifecycle.TargetSandboxID != target.ID ||
 		lifecycle.TargetGenerationID != sandboxstore.NomadSandboxRunningForkGenerationID(lifecycle.ID, target.ID) ||
 		len(lifecycle.TargetRecordDigest) != sha256.Size ||
-		source.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 		source.DesiredState != sandboxstore.SandboxDesiredStateActive || !source.DeletedAt.IsZero() ||
-		target.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
 		target.DesiredState != sandboxstore.SandboxDesiredStatePaused || target.RuntimeGeneration != 0 ||
 		target.RuntimeNamespace != "" || target.RuntimeID != "" || !target.DeletedAt.IsZero() ||
 		target.TeamID != source.TeamID || target.ClusterID != source.ClusterID ||
@@ -318,7 +313,7 @@ func nomadRunningForkRecoveryStillExact(
 		slot.State != sandboxstore.RuntimeSlotStateActive || slot.SandboxID != source.ID ||
 		slot.ClusterID != source.ClusterID || slot.AllocationNamespace != lifecycle.FromRuntimeNamespace ||
 		slot.AllocationID != lifecycle.FromRuntimeID || slot.NodeID == "" || slot.NodeUID == "" || slot.NodeBootID == "" ||
-		slot.FilesystemID == "" || slot.SourceGenerationID != lifecycle.ExpectedHeadLayerID ||
+		slot.FilesystemID == "" || slot.SourceGenerationID != lifecycle.ExpectedGenerationID ||
 		slot.WriterGrantID == "" || slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
 		slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
 		return false, nil
@@ -422,13 +417,13 @@ func nomadForkExplicitTTLMatches(request *service.ForkSandboxConfig, stored *san
 func mapNomadForkError(operation, sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
-		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return apierror.NewNotFound("sandbox", sandboxID)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxForkConflict),
 		errors.Is(err, sandboxstore.ErrNomadSandboxForkNotReady),
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRootFSFilesystemConflict),
 		errors.Is(err, sandboxstore.ErrRootFSWriterGrantConflict):
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	default:
 		return fmt.Errorf("%s: %w", operation, err)
 	}
@@ -436,7 +431,7 @@ func mapNomadForkError(operation, sandboxID string, err error) error {
 
 func mapNomadRunningForkDispatchError(sandboxID string, err error) error {
 	if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) || errdefs.IsFailedPrecondition(err) {
-		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return apierror.NewConflict("sandbox", sandboxID, err)
 	}
 	return fmt.Errorf("%w: dispatch running fork: %v", service.ErrSandboxLifecycleUnavailable, err)
 }

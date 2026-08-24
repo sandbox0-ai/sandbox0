@@ -9,7 +9,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 // RootFSTemplateStorageFormatBlockCOWV1 is the only runtime-native template
@@ -17,34 +17,20 @@ import (
 // than an OCI diff layer.
 const RootFSTemplateStorageFormatBlockCOWV1 = "block-cow-v1"
 
-const (
-	// TemplateBuildCaptureVersionOCI identifies the legacy OCI-layer handoff.
-	TemplateBuildCaptureVersionOCI = 1
-	// TemplateBuildCaptureVersionBlockCOW identifies the runtime-native block
-	// generation handoff. Workers must not claim another version's publication.
-	TemplateBuildCaptureVersionBlockCOW = 2
-)
-
-// AnnotationCopiedRootFS marks cluster templates whose image includes a
-// writable rootfs captured from another sandbox.
-const AnnotationCopiedRootFS = "sandbox0.ai/template-copied-rootfs"
-
-// HasCopiedRootFS reports whether projected template metadata requires a new
-// sandbox runtime to discard session identity copied into its base image.
-func HasCopiedRootFS(annotations map[string]string) bool {
-	return strings.EqualFold(strings.TrimSpace(annotations[AnnotationCopiedRootFS]), "true")
-}
+// TemplateBuildCaptureVersion identifies the runtime-native block generation
+// handoff retained by a template build.
+const TemplateBuildCaptureVersion = 2
 
 // Template represents a SandboxTemplate stored in PostgreSQL.
 type Template struct {
-	TemplateID string                          `json:"template_id"`
-	Scope      string                          `json:"scope"`             // public, team
-	TeamID     string                          `json:"team_id,omitempty"` // only for scope=team
-	UserID     string                          `json:"user_id,omitempty"` // creator/updater user id (best-effort)
-	Spec       v1alpha1.SandboxTemplateSpec    `json:"spec"`
-	Status     *v1alpha1.SandboxTemplateStatus `json:"status,omitempty"`
-	CreatedAt  time.Time                       `json:"created_at"`
-	UpdatedAt  time.Time                       `json:"updated_at"`
+	TemplateID string                      `json:"template_id"`
+	Scope      string                      `json:"scope"`             // public, team
+	TeamID     string                      `json:"team_id,omitempty"` // only for scope=team
+	UserID     string                      `json:"user_id,omitempty"` // creator/updater user id (best-effort)
+	Spec       sandboxspec.TemplateSpec    `json:"spec"`
+	Status     *sandboxspec.TemplateStatus `json:"status,omitempty"`
+	CreatedAt  time.Time                   `json:"created_at"`
+	UpdatedAt  time.Time                   `json:"updated_at"`
 
 	// CreationBuildID and idempotency fields are control-plane state and are
 	// intentionally excluded from the public template representation.
@@ -102,19 +88,7 @@ func (t *Template) ReadyForClaim() bool {
 	if t == nil || t.Status == nil || t.Status.Creation == nil {
 		return true
 	}
-	return t.Status.Creation.State == v1alpha1.TemplateCreationStateReady
-}
-
-// ReadyForReconcile reports whether the template has a complete image spec
-// that may be projected into data-plane clusters.
-func (t *Template) ReadyForReconcile() bool {
-	if t == nil || t.Status == nil || t.Status.Creation == nil {
-		return true
-	}
-	creation := t.Status.Creation
-	return creation.State == v1alpha1.TemplateCreationStateReady ||
-		(creation.State == v1alpha1.TemplateCreationStateCreating &&
-			creation.Stage == v1alpha1.TemplateCreationStageReconciling)
+	return t.Status.Creation.State == sandboxspec.TemplateCreationStateReady
 }
 
 // TemplateBuild is one durable, cluster-targeted template RootFS build.
@@ -126,14 +100,13 @@ type TemplateBuild struct {
 	TemplateID        string
 	SourceSandboxID   string
 	TargetClusterID   string
-	DesiredSpec       v1alpha1.SandboxTemplateSpec
+	DesiredSpec       sandboxspec.TemplateSpec
 	RequestHash       string
 	IdempotencyKey    string
 	Status            string
-	Stage             v1alpha1.TemplateCreationStage
+	Stage             sandboxspec.TemplateCreationStage
 	SnapshotID        string
 	CaptureMetadata   json.RawMessage
-	OutputImage       string
 	AttemptCount      int
 	NextAttemptAt     time.Time
 	LeaseOwner        string
@@ -157,12 +130,12 @@ type TemplateRootFSDeletion struct {
 // SandboxTemplateSource is the durable template context captured when a
 // sandbox was claimed. It is used only between trusted control-plane services.
 type SandboxTemplateSource struct {
-	SandboxID  string                       `json:"sandbox_id"`
-	TeamID     string                       `json:"team_id"`
-	UserID     string                       `json:"user_id,omitempty"`
-	ClusterID  string                       `json:"cluster_id"`
-	TemplateID string                       `json:"template_id"`
-	Spec       v1alpha1.SandboxTemplateSpec `json:"spec"`
+	SandboxID  string                   `json:"sandbox_id"`
+	TeamID     string                   `json:"team_id"`
+	UserID     string                   `json:"user_id,omitempty"`
+	ClusterID  string                   `json:"cluster_id"`
+	TemplateID string                   `json:"template_id"`
+	Spec       sandboxspec.TemplateSpec `json:"spec"`
 }
 
 const (
@@ -195,21 +168,6 @@ var (
 	// ErrTemplateSourceUnavailable indicates the owning data plane is unavailable.
 	ErrTemplateSourceUnavailable = errors.New("template source sandbox is unavailable")
 )
-
-// TemplateAllocation represents how a template is allocated to a cluster.
-type TemplateAllocation struct {
-	TemplateID   string     `json:"template_id"`
-	Scope        string     `json:"scope"`             // public, team
-	TeamID       string     `json:"team_id,omitempty"` // only for scope=team
-	ClusterID    string     `json:"cluster_id"`
-	MinIdle      int32      `json:"min_idle"`
-	MaxIdle      int32      `json:"max_idle"`
-	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
-	SyncStatus   string     `json:"sync_status"`
-	SyncError    *string    `json:"sync_error,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
 
 // Cluster represents a registered data-plane cluster.
 type Cluster struct {

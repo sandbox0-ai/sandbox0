@@ -32,14 +32,17 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/hashicorp/nomad/plugins/shared/structs"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const (
-	PluginName        = "sandbox0-gvisor"
-	PluginVersion     = "0.1.0"
-	taskHandleVersion = 1
-	fingerprintPeriod = 30 * time.Second
+	PluginName                   = "sandbox0-gvisor"
+	PluginVersion                = "0.1.0"
+	taskHandleVersion            = 1
+	fingerprintPeriod            = 30 * time.Second
+	defaultRunscOperationTimeout = 30 * time.Second
+	maxRunscOperationTimeout     = 2 * time.Minute
 )
 
 var (
@@ -59,13 +62,13 @@ var (
 			hclspec.NewAttr("runsc_root", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/runsc"`),
 		),
+		"runsc_operation_timeout_seconds": hclspec.NewDefault(
+			hclspec.NewAttr("runsc_operation_timeout_seconds", "number", false),
+			hclspec.NewLiteral(`30`),
+		),
 		"control_dir": hclspec.NewDefault(
 			hclspec.NewAttr("control_dir", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/nomad-slots"`),
-		),
-		"allowed_rootfs_dir": hclspec.NewDefault(
-			hclspec.NewAttr("allowed_rootfs_dir", "string", false),
-			hclspec.NewLiteral(`"/var/lib/sandbox0/rootfs"`),
 		),
 		"platform": hclspec.NewDefault(
 			hclspec.NewAttr("platform", "string", false),
@@ -91,29 +94,17 @@ var (
 			hclspec.NewAttr("resource_cgroup_root", "string", false),
 			hclspec.NewLiteral(`"/sys/fs/cgroup/sandbox0"`),
 		),
-		"dev_smoke_enabled": hclspec.NewAttr("dev_smoke_enabled", "bool", false),
-		"network_policy_enabled": hclspec.NewDefault(
-			hclspec.NewAttr("network_policy_enabled", "bool", false),
-			hclspec.NewLiteral(`true`),
-		),
-		"rootfs_enabled": hclspec.NewDefault(
-			hclspec.NewAttr("rootfs_enabled", "bool", false),
-			hclspec.NewLiteral(`false`),
-		),
 		"rootfs_node_socket": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_node_socket", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/ctld-nomad-runtime.sock"`),
 		),
-		"rootfs_authority_url":              hclspec.NewAttr("rootfs_authority_url", "string", false),
-		"rootfs_authority_ca_file":          hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
-		"rootfs_authority_client_cert_file": hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
-		"rootfs_authority_client_key_file":  hclspec.NewAttr("rootfs_authority_client_key_file", "string", false),
-		"rootfs_authority_token_file":       hclspec.NewAttr("rootfs_authority_token_file", "string", false),
-		"runtime_slot_enabled": hclspec.NewDefault(
-			hclspec.NewAttr("runtime_slot_enabled", "bool", false),
-			hclspec.NewLiteral(`false`),
-		),
-		"runtime_slot_cluster_id": hclspec.NewAttr("runtime_slot_cluster_id", "string", false),
+		"rootfs_authority_url":               hclspec.NewAttr("rootfs_authority_url", "string", false),
+		"rootfs_authority_ca_file":           hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
+		"rootfs_authority_client_cert_file":  hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
+		"rootfs_authority_client_key_file":   hclspec.NewAttr("rootfs_authority_client_key_file", "string", false),
+		"rootfs_authority_token_file":        hclspec.NewAttr("rootfs_authority_token_file", "string", false),
+		"procd_internal_jwt_public_key_file": hclspec.NewAttr("procd_internal_jwt_public_key_file", "string", false),
+		"runtime_slot_cluster_id":            hclspec.NewAttr("runtime_slot_cluster_id", "string", false),
 		"runtime_slot_node_boot_id_file": hclspec.NewDefault(
 			hclspec.NewAttr("runtime_slot_node_boot_id_file", "string", false),
 			hclspec.NewLiteral(`"/proc/sys/kernel/random/boot_id"`),
@@ -126,11 +117,6 @@ var (
 			hclspec.NewLiteral(`"/procd"`),
 		),
 		"args": hclspec.NewAttr("args", "list(string)", false),
-		"wait_for_claim": hclspec.NewDefault(
-			hclspec.NewAttr("wait_for_claim", "bool", false),
-			hclspec.NewLiteral(`true`),
-		),
-		"rootfs_path": hclspec.NewAttr("rootfs_path", "string", false),
 	})
 
 	capabilities = &drivers.Capabilities{
@@ -144,38 +130,32 @@ var (
 
 // PluginConfig is the node-wide driver configuration.
 type PluginConfig struct {
-	RunscPath            string `codec:"runsc_path"`
-	RunscRoot            string `codec:"runsc_root"`
-	ControlDir           string `codec:"control_dir"`
-	AllowedRootfsDir     string `codec:"allowed_rootfs_dir"`
-	Platform             string `codec:"platform"`
-	Overlay2             string `codec:"overlay2"`
-	FileAccess           string `codec:"file_access"`
-	DirectFS             bool   `codec:"directfs"`
-	SecurityClass        string `codec:"security_class"`
-	ResourceCgroupRoot   string `codec:"resource_cgroup_root"`
-	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
-	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
-
-	RootFSEnabled                 bool   `codec:"rootfs_enabled"`
+	RunscPath                     string `codec:"runsc_path"`
+	RunscRoot                     string `codec:"runsc_root"`
+	RunscOperationTimeoutSeconds  int64  `codec:"runsc_operation_timeout_seconds"`
+	ControlDir                    string `codec:"control_dir"`
+	Platform                      string `codec:"platform"`
+	Overlay2                      string `codec:"overlay2"`
+	FileAccess                    string `codec:"file_access"`
+	DirectFS                      bool   `codec:"directfs"`
+	SecurityClass                 string `codec:"security_class"`
+	ResourceCgroupRoot            string `codec:"resource_cgroup_root"`
 	RootFSNodeSocket              string `codec:"rootfs_node_socket"`
 	RootFSAuthorityURL            string `codec:"rootfs_authority_url"`
 	RootFSAuthorityCAFile         string `codec:"rootfs_authority_ca_file"`
 	RootFSAuthorityClientCertFile string `codec:"rootfs_authority_client_cert_file"`
 	RootFSAuthorityClientKeyFile  string `codec:"rootfs_authority_client_key_file"`
 	RootFSAuthorityTokenFile      string `codec:"rootfs_authority_token_file"`
+	ProcdInternalJWTPublicKeyFile string `codec:"procd_internal_jwt_public_key_file"`
 
-	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
 	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
 	RuntimeSlotNodeBootIDFile string `codec:"runtime_slot_node_boot_id_file"`
 }
 
 // TaskConfig is the per-allocation driver configuration.
 type TaskConfig struct {
-	Command      string   `codec:"command"`
-	Args         []string `codec:"args"`
-	WaitForClaim bool     `codec:"wait_for_claim"`
-	RootfsPath   string   `codec:"rootfs_path"`
+	Command string   `codec:"command"`
+	Args    []string `codec:"args"`
 }
 
 // Plugin implements a Nomad task driver for generic gVisor warm slots.
@@ -185,7 +165,6 @@ type Plugin struct {
 	tasks   *taskStore
 
 	newRunner         func(config PluginConfig) Runsc
-	newNetwork        func(config *PluginConfig) NetworkRuntime
 	rootfs            RootFSRuntime
 	rootfsOnce        sync.Once
 	rootfsErr         error
@@ -214,7 +193,6 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 		config:           defaultPluginConfig(),
 		tasks:            newTaskStore(),
 		newRunner:        newRunner,
-		newNetwork:       networkRuntime,
 		newSlotAuthority: newRuntimeSlotAuthority,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -224,19 +202,18 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
-		RunscPath:                 "/usr/local/bin/runsc",
-		RunscRoot:                 "/run/sandbox0/runsc",
-		ControlDir:                "/run/sandbox0/nomad-slots",
-		AllowedRootfsDir:          "/var/lib/sandbox0/rootfs",
-		Platform:                  "systrap",
-		Overlay2:                  "none",
-		FileAccess:                "shared",
-		DirectFS:                  true,
-		SecurityClass:             "standard",
-		ResourceCgroupRoot:        protocol.RuntimeResourceCgroupRoot,
-		DevSmokeEnabled:           false,
-		RootFSNodeSocket:          "/run/sandbox0/ctld-nomad-runtime.sock",
-		RuntimeSlotNodeBootIDFile: "/proc/sys/kernel/random/boot_id",
+		RunscPath:                    "/usr/local/bin/runsc",
+		RunscRoot:                    "/run/sandbox0/runsc",
+		RunscOperationTimeoutSeconds: int64(defaultRunscOperationTimeout / time.Second),
+		ControlDir:                   "/run/sandbox0/nomad-slots",
+		Platform:                     "systrap",
+		Overlay2:                     "none",
+		FileAccess:                   "shared",
+		DirectFS:                     true,
+		SecurityClass:                "standard",
+		ResourceCgroupRoot:           protocol.RuntimeResourceCgroupRoot,
+		RootFSNodeSocket:             "/run/sandbox0/ctld-nomad-runtime.sock",
+		RuntimeSlotNodeBootIDFile:    "/proc/sys/kernel/random/boot_id",
 	}
 }
 
@@ -264,14 +241,16 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RunscPath = strings.TrimSpace(decoded.RunscPath)
 	decoded.RunscRoot = strings.TrimSpace(decoded.RunscRoot)
 	decoded.ControlDir = strings.TrimSpace(decoded.ControlDir)
-	decoded.AllowedRootfsDir = strings.TrimSpace(decoded.AllowedRootfsDir)
 	decoded.Platform = strings.TrimSpace(decoded.Platform)
 	decoded.Overlay2 = strings.TrimSpace(decoded.Overlay2)
 	decoded.FileAccess = strings.TrimSpace(decoded.FileAccess)
 	decoded.SecurityClass = strings.TrimSpace(decoded.SecurityClass)
 	decoded.ResourceCgroupRoot = strings.TrimSpace(decoded.ResourceCgroupRoot)
-	if decoded.RunscPath == "" || decoded.RunscRoot == "" || decoded.ControlDir == "" || decoded.AllowedRootfsDir == "" {
+	if decoded.RunscPath == "" || decoded.RunscRoot == "" || decoded.ControlDir == "" {
 		return errors.New("runsc, control, and rootfs paths must be non-empty")
+	}
+	if err := validateRunscOperationTimeout(decoded.RunscOperationTimeoutSeconds); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(decoded.ResourceCgroupRoot) || filepath.Clean(decoded.ResourceCgroupRoot) != decoded.ResourceCgroupRoot ||
 		decoded.ResourceCgroupRoot == string(filepath.Separator) {
@@ -283,8 +262,8 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if _, err := runtimeLeaseCgroupsPath(decoded.ResourceCgroupRoot, "s0-config-validation"); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(decoded.RunscPath) || !filepath.IsAbs(decoded.RunscRoot) || !filepath.IsAbs(decoded.ControlDir) || !filepath.IsAbs(decoded.AllowedRootfsDir) {
-		return errors.New("runsc, control, and rootfs paths must be absolute")
+	if !filepath.IsAbs(decoded.RunscPath) || !filepath.IsAbs(decoded.RunscRoot) || !filepath.IsAbs(decoded.ControlDir) {
+		return errors.New("runsc and control paths must be absolute")
 	}
 	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" || decoded.SecurityClass == "" {
 		return errors.New("platform, overlay2, file_access, and security_class cannot be empty")
@@ -298,6 +277,7 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RootFSAuthorityClientCertFile = strings.TrimSpace(decoded.RootFSAuthorityClientCertFile)
 	decoded.RootFSAuthorityClientKeyFile = strings.TrimSpace(decoded.RootFSAuthorityClientKeyFile)
 	decoded.RootFSAuthorityTokenFile = strings.TrimSpace(decoded.RootFSAuthorityTokenFile)
+	decoded.ProcdInternalJWTPublicKeyFile = strings.TrimSpace(decoded.ProcdInternalJWTPublicKeyFile)
 	decoded.RuntimeSlotClusterID = strings.TrimSpace(decoded.RuntimeSlotClusterID)
 	decoded.RuntimeSlotNodeBootIDFile = strings.TrimSpace(decoded.RuntimeSlotNodeBootIDFile)
 	if err := validateRootFSConfig(decoded); err != nil {
@@ -306,7 +286,17 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if err := validateRuntimeSlotConfig(decoded); err != nil {
 		return err
 	}
+	if _, err := internalauth.LoadEd25519PublicKeyFromFile(decoded.ProcdInternalJWTPublicKeyFile); err != nil {
+		return fmt.Errorf("load procd internal JWT public key: %w", err)
+	}
 	p.config = decoded
+	return nil
+}
+
+func validateRunscOperationTimeout(seconds int64) error {
+	if seconds < 1 || seconds > int64(maxRunscOperationTimeout/time.Second) {
+		return fmt.Errorf("runsc_operation_timeout_seconds must be between 1 and %d", int64(maxRunscOperationTimeout/time.Second))
+	}
 	return nil
 }
 
@@ -315,9 +305,7 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 // local configuration and never opens the privileged runtime socket.
 func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
 	p.rootfsOnce.Do(func() {
-		if p.config.RootFSEnabled {
-			p.rootfs, p.rootfsErr = newRootFSRuntime(p.config, p.logger.Named("rootfs"))
-		}
+		p.rootfs, p.rootfsErr = newRootFSRuntime(p.config, p.logger.Named("rootfs"))
 	})
 	if p.rootfsErr != nil {
 		return nil, p.rootfsErr
@@ -327,9 +315,7 @@ func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
 
 func (p *Plugin) runtimeSlotAuthority() (runtimeSlotAuthority, error) {
 	p.slotAuthorityOnce.Do(func() {
-		if p.config.RuntimeSlotEnabled {
-			p.slotAuthority, p.slotAuthorityErr = p.newSlotAuthority(p.config)
-		}
+		p.slotAuthority, p.slotAuthorityErr = p.newSlotAuthority(p.config)
 	})
 	if p.slotAuthorityErr != nil {
 		return nil, p.slotAuthorityErr
@@ -380,19 +366,17 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 			HealthDescription: fmt.Sprintf("runsc not available at %s: %v", p.config.RunscPath, err),
 		}
 	}
-	if p.config.RootFSEnabled {
-		client, err := newNodeRuntimeClient(p.config.RootFSNodeSocket)
-		if err != nil {
-			return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
-		}
-		healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, err = client.RuntimeInfo(healthCtx)
-		cancel()
-		if err != nil {
-			return &drivers.Fingerprint{
-				Health:            drivers.HealthStateUndetected,
-				HealthDescription: fmt.Sprintf("ctld Nomad runtime unavailable at %s: %v", p.config.RootFSNodeSocket, err),
-			}
+	client, err := newNodeRuntimeClient(p.config.RootFSNodeSocket)
+	if err != nil {
+		return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
+	}
+	healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, err = client.RuntimeInfo(healthCtx)
+	cancel()
+	if err != nil {
+		return &drivers.Fingerprint{
+			Health:            drivers.HealthStateUndetected,
+			HealthDescription: fmt.Sprintf("ctld Nomad runtime unavailable at %s: %v", p.config.RootFSNodeSocket, err),
 		}
 	}
 	return &drivers.Fingerprint{
@@ -431,17 +415,6 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	if !filepath.IsAbs(taskConfig.Command) {
 		return nil, nil, errors.New("task command must be absolute")
 	}
-	if !taskConfig.WaitForClaim {
-		if !p.config.DevSmokeEnabled {
-			return nil, nil, errors.New("wait_for_claim=false requires dev_smoke_enabled on the client")
-		}
-		if taskConfig.RootfsPath == "" {
-			return nil, nil, errors.New("rootfs_path is required when wait_for_claim is false")
-		}
-		if _, err := validateRootfsPath(taskConfig.RootfsPath, p.config.AllowedRootfsDir); err != nil {
-			return nil, nil, err
-		}
-	}
 	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
 		return nil, nil, err
 	}
@@ -465,21 +438,20 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	}
 
 	handle := newTaskHandle(taskHandleOptions{
-		taskConfig:         config,
-		bundleDir:          bundleDir,
-		containerID:        containerID,
-		rootMount:          rootMount,
-		socketPath:         socketPath,
-		runner:             p.newRunner(*p.config),
-		mounter:            systemMounter{},
-		allowedRoot:        p.config.AllowedRootfsDir,
-		rootfsAllowedRoot:  rootfsAllowedRoot,
-		resourceCgroupRoot: p.config.ResourceCgroupRoot,
-		rootfs:             rootfs,
-		network:            p.newNetwork(p.config),
-		runtimeSlotNeeded:  p.config.RuntimeSlotEnabled,
-		procdPort:          protocol.NomadProcdPort,
-		logger:             p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
+		taskConfig:                    config,
+		bundleDir:                     bundleDir,
+		containerID:                   containerID,
+		rootMount:                     rootMount,
+		socketPath:                    socketPath,
+		runner:                        p.newRunner(*p.config),
+		runscOperationTimeout:         time.Duration(p.config.RunscOperationTimeoutSeconds) * time.Second,
+		mounter:                       systemMounter{},
+		rootfsAllowedRoot:             rootfsAllowedRoot,
+		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
+		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		rootfs:                        rootfs,
+		procdPort:                     protocol.NomadProcdPort,
+		logger:                        p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
 	if err := handle.Prepare(taskConfig); err != nil {
@@ -506,18 +478,6 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	p.emit(config.ID, "warm-slot-created")
 	if lifecycle != nil {
 		go lifecycle.runHeartbeat(p.ctx, handle.done, observation, handle.runtimeSlotHeartbeatLost)
-	}
-
-	if !taskConfig.WaitForClaim {
-		if err := handle.Claim(ClaimRequest{
-			RootfsPath:  taskConfig.RootfsPath,
-			PolicyToken: "task-config",
-			WriterEpoch: "task-config",
-		}); err != nil {
-			p.tasks.Delete(config.ID)
-			_ = handle.Close(false)
-			return nil, nil, err
-		}
 	}
 
 	return nomadHandle, nil, nil
@@ -571,22 +531,21 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		rootfsAllowedRoot = info.MountRoot
 	}
 	recovered := newTaskHandle(taskHandleOptions{
-		taskConfig:         state.TaskConfig,
-		driverConfig:       taskConfig,
-		bundleDir:          state.BundleDir,
-		containerID:        state.ContainerID,
-		rootMount:          state.RootMount,
-		socketPath:         controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
-		runner:             runner,
-		mounter:            systemMounter{},
-		allowedRoot:        p.config.AllowedRootfsDir,
-		rootfsAllowedRoot:  rootfsAllowedRoot,
-		resourceCgroupRoot: p.config.ResourceCgroupRoot,
-		rootfs:             rootfs,
-		network:            p.newNetwork(p.config),
-		runtimeSlotNeeded:  p.config.RuntimeSlotEnabled,
-		procdPort:          protocol.NomadProcdPort,
-		logger:             p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
+		taskConfig:                    state.TaskConfig,
+		driverConfig:                  taskConfig,
+		bundleDir:                     state.BundleDir,
+		containerID:                   state.ContainerID,
+		rootMount:                     state.RootMount,
+		socketPath:                    controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
+		runner:                        runner,
+		runscOperationTimeout:         time.Duration(p.config.RunscOperationTimeoutSeconds) * time.Second,
+		mounter:                       systemMounter{},
+		rootfsAllowedRoot:             rootfsAllowedRoot,
+		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
+		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		rootfs:                        rootfs,
+		procdPort:                     protocol.NomadProcdPort,
+		logger:                        p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {
 		return err

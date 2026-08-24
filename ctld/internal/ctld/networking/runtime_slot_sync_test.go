@@ -11,7 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/conntrack"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/slotnetwork"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 )
@@ -48,7 +48,7 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	}
 	registry, err := slotnetwork.NewRegistry(slotnetwork.Config{
 		StatePath: filepath.Join(directory, "runtime-slot-network.db"),
-		NetNSRoot: netnsRoot, NodeName: "node-1",
+		NetNSRoot: netnsRoot, NodeID: "node-1",
 	}, syncTestNamespaceInspector{})
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +79,8 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	redirect := &syncTestRedirect{}
 	daemon := &Daemon{cfg: &apiconfig.NetworkRuntimeConfig{NodeName: "node-1"}, logger: zap.NewNop()}
 	if err := daemon.syncRedirect(
-		t.Context(), nil, registry, store, nil, redirect,
-		nil, conntrack.NewTracker(), nil, nil, false,
+		t.Context(), registry, store, nil, redirect,
+		conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +99,8 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	}()
 	waitForRuntimeSlotClaimed(t, registry)
 	if err := daemon.syncRedirect(
-		t.Context(), nil, registry, store, nil, redirect,
-		nil, conntrack.NewTracker(), nil, nil, false,
+		t.Context(), registry, store, nil, redirect,
+		conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +121,8 @@ func TestSyncRedirectAcknowledgesDurableRuntimeSlotPolicyAndAbsence(t *testing.T
 	go func() { cleanupResult <- registry.Cleanup(t.Context(), cleanup) }()
 	waitForRuntimeSlotSnapshot(t, registry, 0)
 	if err := daemon.syncRedirect(
-		t.Context(), nil, registry, store, nil, redirect,
-		nil, conntrack.NewTracker(), nil, nil, false,
+		t.Context(), registry, store, nil, redirect,
+		conntrack.NewTracker(), nil, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}

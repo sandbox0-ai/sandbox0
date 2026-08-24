@@ -31,9 +31,9 @@ This is a better fit for agents that process untrusted inputs, run tools, browse
 
 The agent framework still owns its own sessions, memory format, plugins, and application-level APIs. Sandbox0 owns the runtime boundary around it.
 
-## Builtin Use-Case Templates
+## Use-Case Templates
 
-Self-hosted deployments seed these public builtin templates when `spec.builtinTemplates` is omitted:
+Sandbox0 Cloud may expose these platform templates:
 
 ```bash
 s0 template get openclaw
@@ -42,7 +42,9 @@ s0 template get browser
 s0 template get coding-agent
 ```
 
-Operators can pin images, tune pools, or remove a template by setting `Sandbox0Infra.spec.builtinTemplates` explicitly. The default builtin images are:
+Self-hosted installations do not implicitly create use-case templates. A
+platform system identity can create reviewed public templates, or each team can
+create a private template with the same image. Suggested upstream images are:
 
 | Template | Image |
 |----------|-------|
@@ -52,7 +54,10 @@ Operators can pin images, tune pools, or remove a template by setting `Sandbox0I
 | `browser` | `ghcr.io/steel-dev/steel-browser:latest` |
 
 <Callout variant="warning">
-These are self-hosted convenience defaults, not immutable production pins. Sandbox0 uses `IfNotPresent`, so cached nodes reuse their local image; new or cache-miss nodes pull whichever digest `latest` currently names, which can add cold-start latency and create version drift between nodes. Pin reviewed digests in production. Sandbox0 Cloud manages digest pins and their rollout at the platform layer. See [Pin Builtin Images for Predictable Startup](/docs/self-hosted/configuration#pin-builtin-images-for-predictable-startup).
+Tags such as `latest` are discovery hints, not production pins. Resolve and
+review an immutable digest before creating a production template. Manager's
+durable OCI importer records the digest and publishes an attested block
+artifact; runtime nodes do not pull a mutable tag on the claim path.
 </Callout>
 
 ## Lifecycle Choice
@@ -61,7 +66,12 @@ The examples in this section deliberately do not set `ttl` or `hard_ttl`.
 
 Agent gateways often maintain channel connections, scheduled jobs, local caches, or operator sessions. A short `ttl` can pause the runtime at the wrong time, while a short `hard_ttl` can delete the sandbox identity and rootfs checkpoints. Choose those values after you decide how the agent should be woken up and how long its identity should live.
 
-You can still pause a sandbox manually. If the sandbox has `auto_resume: true` and the service route has `resume: true`, a later public request can create a new runtime pod and restart the `cmd` service. Running processes, sockets, memory, and in-flight connections are not preserved across pause/resume; durable state should live in the sandbox rootfs or an external system.
+You can still pause a sandbox manually. If the sandbox has `auto_resume: true`
+and the service route has `resume: true`, a later public request can claim a
+fresh runtime allocation and restart the `cmd` service. Running processes,
+sockets, memory, and in-flight connections are not preserved across
+pause/resume; durable state should live in the sandbox RootFS or an external
+system.
 
 ## Secret Boundary
 

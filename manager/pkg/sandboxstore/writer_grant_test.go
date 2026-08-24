@@ -29,6 +29,7 @@ func TestValidateIssueRootFSWriterGrantHashesRawToken(t *testing.T) {
 		NodeName:             "node-1",
 		GateParent:           "gate-parent-1",
 		RuntimeGeneration:    "runtime-1",
+		InitialGenerationID:  "generation-1",
 		ConsumeExpiresAt:     time.Now().Add(time.Minute),
 		ExpectedWriterEpoch:  0,
 	}
@@ -45,15 +46,17 @@ func TestPGSandboxStoreHasNoBareWriterRetireCompletionEntryPoint(t *testing.T) {
 	storeType := reflect.TypeOf((*PGSandboxStore)(nil))
 	_, hasLegacyComplete := storeType.MethodByName("CompleteRootFSWriterRetire")
 	_, hasBarePublish := storeType.MethodByName("CompleteRootFSWriterRetireAndPublish")
+	_, hasBareGenerationPublish := storeType.MethodByName("CompleteRootFSWriterRetireAndPublishGeneration")
 	_, hasBareCrashAbandon := storeType.MethodByName("CompleteRootFSWriterCrashAbandon")
 	_, hasCrashAbandonBegin := storeType.MethodByName("BeginRootFSWriterCrashAbandon")
 	assert.False(t, hasLegacyComplete)
 	assert.False(t, hasBarePublish)
+	assert.False(t, hasBareGenerationPublish)
 	assert.False(t, hasBareCrashAbandon)
 	assert.True(t, hasCrashAbandonBegin)
 
 	txType := reflect.TypeOf(sandboxStoreTx{})
-	_, hasTransactionalPublish := txType.MethodByName("CompleteRootFSWriterRetireAndPublish")
+	_, hasTransactionalPublish := txType.MethodByName("CompleteRootFSWriterRetireAndPublishGeneration")
 	_, hasTransactionalCrashAbandon := txType.MethodByName("CompleteRootFSWriterCrashAbandon")
 	_, hasTransactionalCrashAbandonBegin := txType.MethodByName("BeginRootFSWriterCrashAbandon")
 	assert.True(t, hasTransactionalPublish)
@@ -79,6 +82,7 @@ func TestValidateIssueRootFSWriterGrantRejectsShortSecretsAndDigests(t *testing.
 		NodeName:             "node-1",
 		GateParent:           "gate-parent-1",
 		RuntimeGeneration:    "runtime-1",
+		InitialGenerationID:  "generation-1",
 		ConsumeExpiresAt:     time.Now().Add(time.Minute),
 	}
 
@@ -101,7 +105,6 @@ func TestRootFSWriterGrantExactIssueMatchIncludesTokenAndBinding(t *testing.T) {
 			SlotID:               "slot-1",
 			IssueOperationID:     "operation-1",
 			WriterEpoch:          1,
-			InitialHeadLayerID:   "",
 			BindingVersion:       RootFSWriterBindingVersion,
 			BindingDigest:        binding[:],
 			NodeUID:              "node-1",
@@ -112,6 +115,7 @@ func TestRootFSWriterGrantExactIssueMatchIncludesTokenAndBinding(t *testing.T) {
 			NodeName:             "node-1",
 			GateParent:           "gate-parent-1",
 			RuntimeGeneration:    "runtime-1",
+			InitialGenerationID:  "generation-1",
 		},
 		tokenDigest: tokenDigest[:],
 	}
@@ -132,6 +136,7 @@ func TestRootFSWriterGrantExactIssueMatchIncludesTokenAndBinding(t *testing.T) {
 		NodeName:             "node-1",
 		GateParent:           "gate-parent-1",
 		RuntimeGeneration:    "runtime-1",
+		InitialGenerationID:  "generation-1",
 		ExpectedWriterEpoch:  0,
 	}
 
@@ -160,7 +165,8 @@ func TestRootFSWriterBindingVersionIsRequiredAcrossGrantTransitions(t *testing.T
 					BindingDigest: binding[:], NodeUID: "node-1", NodeBootID: "boot-1",
 					RuntimeNamespace: "ns-1", RuntimeID: "pod-1", RuntimeIncarnationID: "pod-uid-1",
 					NodeName: "node-1", GateParent: "gate-parent-1", RuntimeGeneration: "runtime-1",
-					ConsumeExpiresAt: time.Now().Add(time.Minute),
+					InitialGenerationID: "generation-1",
+					ConsumeExpiresAt:    time.Now().Add(time.Minute),
 				})
 				return err
 			},
@@ -199,9 +205,10 @@ func TestRootFSWriterBindingVersionIsRequiredAcrossGrantTransitions(t *testing.T
 		{
 			name: "complete retire and publish",
 			validate: func() error {
-				_, err := validateCompleteRootFSWriterRetireAndPublishRequest(&CompleteRootFSWriterRetireAndPublishRequest{
+				_, err := validateCompleteRootFSWriterRetireAndPublishGenerationRequest(&CompleteRootFSWriterRetireAndPublishGenerationRequest{
 					LifecycleTxnID: "txn-1", GrantID: "grant-1", WriterEpoch: 1,
 					OperationID: "retire-1", BindingDigest: binding[:],
+					ExpectedOldGenerationID: "generation-1",
 				})
 				return err
 			},

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 const (
@@ -647,7 +647,7 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 				lifecycle.Source == SandboxLifecycleSourceLost) &&
 			!lifecycle.Cancelable && lifecycle.CancelRequestedAt.IsZero() &&
 			(lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting) &&
-			lifecycle.PreparedHeadLayerID == "" &&
+			lifecycle.PreparedGenerationID == "" &&
 			lifecycle.FromGeneration == record.RuntimeGeneration &&
 			lifecycle.FromRuntimeNamespace == record.RuntimeNamespace &&
 			lifecycle.FromRuntimeID == record.RuntimeID
@@ -945,9 +945,6 @@ func normalizeSandboxClaimInput(record *SandboxRecord, operationID string, lease
 	if record.TeamID == "" || record.TeamID != strings.TrimSpace(record.TeamID) {
 		return nil, "", 0, fmt.Errorf("team_id must be non-empty and canonical")
 	}
-	if record.RuntimeBackend != SandboxRuntimeBackendNomad {
-		return nil, "", 0, fmt.Errorf("sandbox claim reservation requires the Nomad runtime backend")
-	}
 	if record.DesiredState != SandboxDesiredStateActive || !record.DeletedAt.IsZero() {
 		return nil, "", 0, fmt.Errorf("sandbox claim reservation requires a live active record")
 	}
@@ -965,10 +962,9 @@ func sandboxClaimRecordMatches(actual, expected *SandboxRecord) bool {
 	return actual != nil && expected != nil && actual.DeletedAt.IsZero() &&
 		actual.ID == expected.ID && actual.TeamID == expected.TeamID && actual.UserID == expected.UserID &&
 		actual.TemplateID == expected.TemplateID && actual.ClusterID == expected.ClusterID &&
-		actual.RuntimeBackend == SandboxRuntimeBackendNomad &&
 		actual.DesiredState == SandboxDesiredStateActive && actual.RuntimeGeneration == expected.RuntimeGeneration &&
-		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
-		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
+		reflect.DeepEqual(actual.Config, expected.Config) &&
+		reflect.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
 }
 
 func validateCompleteSandboxClaimRequest(request *CompleteSandboxClaimRequest) error {
@@ -1002,9 +998,6 @@ func lockNomadSandboxClaimRecord(ctx context.Context, tx pgx.Tx, sandboxID strin
 	}
 	if record == nil {
 		return nil, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)
-	}
-	if record.RuntimeBackend != SandboxRuntimeBackendNomad {
-		return nil, fmt.Errorf("%w: sandbox is not Nomad-backed", ErrSandboxClaimReservationConflict)
 	}
 	return record, nil
 }

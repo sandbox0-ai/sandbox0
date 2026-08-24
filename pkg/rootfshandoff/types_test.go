@@ -87,17 +87,17 @@ func validStageRequest() StageRequest {
 		InitialGeneration: "generation-1",
 		Identity: Identity{
 			NodeUID: "node-1", BootID: "boot-1", RuntimeGeneration: "runtime-1",
-			PodUID: "pod-1", PodSandboxID: "sandbox-1", ContainerName: "app",
-			Image: "gate-b@sha256:1", Snapshotter: "sandbox0-rootfs", RuntimeName: "io.containerd.runsc.v1",
+			AllocationID: "pod-1", NetworkIncarnationID: "sandbox-1", TaskName: "app",
+			SourceOCIDigest: "gate-b@sha256:1", RootFSDriver: "sandbox0-rootfs", RuntimeClass: "io.containerd.runsc.v1",
 			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
 			RootFSID: "rootfs-1", WriterEpoch: 1, WriterGrantID: "grant-1", WriterGrantToken: "test-token",
 		},
 	}
 	request.Identity.WriterGrantTokenDigest = WriterGrantTokenDigest(request.Identity.WriterGrantToken)
 	request.ExpectedPolicyToken = NetworkPolicyToken{
-		PodUID: request.Identity.PodUID, PodSandboxID: request.Identity.PodSandboxID,
+		AllocationID: request.Identity.AllocationID, NetworkIncarnationID: request.Identity.NetworkIncarnationID,
 		ClaimID: request.Identity.ClaimID, NetworkEpoch: 1, PolicyDigest: "policy-1",
-		PodIP: "10.0.0.2", CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
+		SourceIP: "10.0.0.2", CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
 	}
 	return request
 }

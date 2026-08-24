@@ -254,7 +254,7 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		ID: operationID, SandboxID: record.ID, Kind: SandboxLifecycleKindResume,
 		Phase: SandboxLifecyclePhasePreparing, Source: SandboxLifecycleSourceManual, Cancelable: false,
 		FromGeneration: record.RuntimeGeneration, ToGeneration: record.RuntimeGeneration + 1,
-		ExpectedHeadLayerID: sourceGenerationID,
+		ExpectedGenerationID: sourceGenerationID,
 	}
 	if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad resume lifecycle: %w", err)
@@ -291,14 +291,14 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 		WHERE txn_id = $1 AND sandbox_id = $2
 		FOR UPDATE
 	`, normalized.OperationID, normalized.SandboxID))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if lifecycle == nil || errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: resume lifecycle is missing", ErrNomadSandboxResumeConflict)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock Nomad resume lifecycle: %w", err)
 	}
 	if lifecycle.Phase == SandboxLifecyclePhaseCommitted {
-		if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedHeadLayerID, true) ||
+		if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedGenerationID, true) ||
 			record.DesiredState != SandboxDesiredStateActive || record.RuntimeID != normalized.AllocationID ||
 			record.RuntimeNamespace != normalized.AllocationNamespace {
 			return nil, fmt.Errorf("%w: committed resume binding changed", ErrNomadSandboxResumeConflict)
@@ -322,14 +322,14 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 		}
 		return record, nil
 	}
-	if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedHeadLayerID, false) {
+	if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedGenerationID, false) {
 		return nil, fmt.Errorf("%w: active resume lifecycle changed", ErrNomadSandboxResumeConflict)
 	}
 	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
 		return nil, err
 	}
-	if sourceGenerationID != lifecycle.ExpectedHeadLayerID {
+	if sourceGenerationID != lifecycle.ExpectedGenerationID {
 		return nil, fmt.Errorf("%w: paused RootFS head changed during resume", ErrNomadSandboxResumeConflict)
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -381,7 +381,7 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 	}
 	locked := sandboxStoreTx{tx: tx}
 	if err := locked.SaveRuntime(ctx, record.ID, slot.AllocationNamespace, slot.AllocationID,
-		lifecycle.ToGeneration, expiresAt, record.HardExpiresAt, SandboxRuntimeMetadata{}); err != nil {
+		lifecycle.ToGeneration, expiresAt, record.HardExpiresAt, ""); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -587,8 +587,8 @@ func nomadResumeLifecycleMatches(
 ) bool {
 	if lifecycle == nil || record == nil || lifecycle.ID != operationID || lifecycle.SandboxID != record.ID ||
 		lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
-		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedHeadLayerID != sourceGenerationID ||
-		lifecycle.PreparedHeadLayerID != "" || lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
+		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedGenerationID != sourceGenerationID ||
+		lifecycle.PreparedGenerationID != "" || lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
 		return false
 	}
 	if committed {

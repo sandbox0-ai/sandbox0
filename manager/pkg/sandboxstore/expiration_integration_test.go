@@ -18,8 +18,9 @@ func TestListSandboxExpirationCandidatesFiltersStateAndLifecycleIntegration(t *t
 			ID: id, TeamID: "team-expiry", UserID: "user-expiry",
 			TemplateID: "template-expiry", TemplateName: "template-expiry",
 			TemplateNamespace: "template-default", ClusterID: "cluster-a",
-			DesiredState: state,
-			ExpiresAt:    soft, HardExpiresAt: hard, CreatedAt: now.Add(-time.Hour),
+			DesiredState:     state,
+			ResourceMillicpu: 1000, ResourceMemoryMiB: 1024,
+			ExpiresAt: soft, HardExpiresAt: hard, CreatedAt: now.Add(-time.Hour),
 		}
 	}
 	records := []*SandboxRecord{

@@ -128,41 +128,37 @@ func newRuntimeSlotAuthority(config *PluginConfig) (runtimeSlotAuthority, error)
 }
 
 func validateRuntimeSlotConfig(config *PluginConfig) error {
-	if config == nil || !config.RuntimeSlotEnabled {
-		return nil
+	if config == nil {
+		return fmt.Errorf("plugin config is required")
 	}
 	if strings.TrimSpace(config.RuntimeSlotClusterID) == "" || len(config.RuntimeSlotClusterID) > 512 {
 		return fmt.Errorf("runtime_slot_cluster_id is required and must not exceed 512 bytes")
 	}
-	if !config.RootFSEnabled || strings.TrimSpace(config.RootFSNodeSocket) == "" {
+	if strings.TrimSpace(config.RootFSNodeSocket) == "" {
 		return fmt.Errorf("runtime slots require the ctld-owned Nomad runtime")
-	}
-	if !config.NetworkPolicyEnabled {
-		return fmt.Errorf("runtime slots require network_policy_enabled")
 	}
 	if strings.TrimSpace(config.RootFSAuthorityURL) == "" {
 		return fmt.Errorf("runtime slots require rootfs_authority_url")
 	}
 	for name, value := range map[string]string{
-		"rootfs_authority_ca_file":          config.RootFSAuthorityCAFile,
-		"rootfs_authority_client_cert_file": config.RootFSAuthorityClientCertFile,
-		"rootfs_authority_client_key_file":  config.RootFSAuthorityClientKeyFile,
-		"rootfs_authority_token_file":       config.RootFSAuthorityTokenFile,
-		"runtime_slot_node_boot_id_file":    config.RuntimeSlotNodeBootIDFile,
+		"rootfs_authority_ca_file":           config.RootFSAuthorityCAFile,
+		"rootfs_authority_client_cert_file":  config.RootFSAuthorityClientCertFile,
+		"rootfs_authority_client_key_file":   config.RootFSAuthorityClientKeyFile,
+		"rootfs_authority_token_file":        config.RootFSAuthorityTokenFile,
+		"procd_internal_jwt_public_key_file": config.ProcdInternalJWTPublicKeyFile,
+		"runtime_slot_node_boot_id_file":     config.RuntimeSlotNodeBootIDFile,
 	} {
-		if !filepath.IsAbs(strings.TrimSpace(value)) || filepath.Clean(value) == "/" {
-			return fmt.Errorf("%s must be a non-root absolute path", name)
+		value = strings.TrimSpace(value)
+		if !filepath.IsAbs(value) || filepath.Clean(value) != value || value == string(filepath.Separator) {
+			return fmt.Errorf("%s must be a canonical non-root absolute path", name)
 		}
 	}
 	return nil
 }
 
 func validateRuntimeSlotTaskConfig(config *PluginConfig, task TaskConfig) error {
-	if config == nil || !config.RuntimeSlotEnabled {
-		return nil
-	}
-	if !task.WaitForClaim {
-		return fmt.Errorf("regional runtime slots require wait_for_claim=true")
+	if config == nil {
+		return fmt.Errorf("plugin config is required")
 	}
 	if task.Command != "/procd" || len(task.Args) != 0 {
 		return fmt.Errorf("regional runtime slots require command=/procd without arguments")
@@ -196,8 +192,8 @@ func (p *Plugin) activateRuntimeSlot(
 	rootfs RootFSRuntime,
 	newAllocation bool,
 ) (*runtimeSlotLifecycle, protocol.Observation, error) {
-	if p.config == nil || !p.config.RuntimeSlotEnabled {
-		return nil, protocol.Observation{}, nil
+	if p.config == nil {
+		return nil, protocol.Observation{}, fmt.Errorf("plugin config is required")
 	}
 	authority, err := p.runtimeSlotAuthority()
 	if err != nil {
@@ -359,15 +355,11 @@ func (h *taskHandle) runtimeSlotStartingRequest(
 	policyDigest string,
 ) (*runtimeSlotLifecycle, *protocol.StartingRequest, error) {
 	h.mu.Lock()
-	required := h.runtimeSlotNeeded
 	lifecycle := h.runtimeSlot
 	task := h.taskConfig
 	containerID := h.containerID
 	networkChain := h.networkChain
 	h.mu.Unlock()
-	if !required {
-		return nil, nil, nil
-	}
 	if lifecycle == nil || task == nil {
 		return nil, nil, fmt.Errorf("regional runtime slot is not registered: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -385,7 +377,7 @@ func (h *taskHandle) runtimeSlotStartingRequest(
 	if stage.ExpectedPolicyToken.PolicyDigest != policyDigest {
 		return nil, nil, fmt.Errorf("runtime slot policy digest does not match RootFS stage: %w", errdefs.ErrFailedPrecondition)
 	}
-	expectedProcdAddress, err := protocol.NomadProcdAddress(stage.ExpectedPolicyToken.PodIP)
+	expectedProcdAddress, err := protocol.NomadProcdAddress(stage.ExpectedPolicyToken.SourceIP)
 	if err != nil || lifecycle.procdAddress != expectedProcdAddress {
 		return nil, nil, fmt.Errorf("runtime slot allocation address does not match RootFS network token: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -472,7 +464,7 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 		return fmt.Errorf("validate procd command-ready proof: %w", err)
 	}
 	h.mu.Lock()
-	if !h.runtimeSlotNeeded || h.runtimeSlot == nil {
+	if h.runtimeSlot == nil {
 		h.mu.Unlock()
 		return fmt.Errorf("regional runtime slot is not enabled: %w", errdefs.ErrFailedPrecondition)
 	}

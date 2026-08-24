@@ -1,19 +1,22 @@
 # Template Configuration
 
-Reference for the most commonly used template spec fields. Pass the spec as the `spec` field when creating or updating a template.
+A template describes reusable sandbox inputs. The public spec is
+runtime-neutral: it contains an image, default memory and ephemeral storage,
+environment variables, metadata, and a default network policy. Scheduling and
+warm-pool topology are platform concerns and are not embedded in a template.
 
-## Spec Example
+## Example
 
 ```yaml
 spec:
     displayName: "Python 3.12 Data Science"
-    description: "Python with numpy, pandas, and jupyter pre-installed"
+    description: "Python with project dependencies preinstalled"
     tags:
         - python
         - data-science
 
     mainContainer:
-        image: registry.example.com/t-<team-key>/my-ds-env:v2.0
+        image: registry.example.com/t-<team-key>/my-ds-env@sha256:<64-hex-digest>
         resources:
             memory: 8Gi
             ephemeralStorage: 8Gi
@@ -25,10 +28,6 @@ spec:
         LOG_LEVEL: info
         TZ: UTC
 
-    pool:
-        minIdle: 3
-        maxIdle: 10
-
     network:
         mode: block-all
         egress:
@@ -37,43 +36,32 @@ spec:
                   action: allow
                   domains:
                       - "*.pypi.org"
-                      - "*.anaconda.org"
                   ports:
                       - port: 443
                         protocol: tcp
-        credentialBindings:
-            - ref: gh-token
-              sourceRef: github-source
-              projection:
-                  type: http_headers
-                  httpHeaders:
-                      headers:
-                          - name: Authorization
-                            valueTemplate: "Bearer {{ .token }}"
 ```
-
----
 
 ## `mainContainer`
 
-The main sandbox container configuration.
+| Field | Required | Description |
+| --- | --- | --- |
+| `image` | Yes | Normalized public or team-scoped private OCI reference pinned as `@sha256:<64 lowercase hex>`. Mutable tags and shorthand names are rejected. |
+| `resources.memory` | Yes | Default sandbox memory, such as `2Gi` or `512Mi`. It must be within the platform limits. |
+| `resources.ephemeralStorage` | No | Immutable RootFS block-device size. The default is `8Gi`; values must be exact bytes, between `300Mi` and `1Ti`, and 4096-byte aligned. |
+| `env` | No | Base environment entries with `name` and `value`. |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or the `Template image reference` returned by `s0 template image push` for private images. |
-| `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). This is the default when a claim does not provide `config.resources.memory`; it cannot exceed the platform maximum, which defaults to `16Gi`. Sandbox0 manages CPU from platform configuration. |
-| `resources.ephemeralStorage` | string | `8Gi` | Writable-layer and container-log storage for the sandbox runtime. Checkpointed pause/resume saves and restores the writable root filesystem, but this quota still bounds writes to `/tmp` or image-local paths. Use rootfs snapshots and claim-time `snapshot_id` to version initialized sandbox files. |
-| `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
+CPU is platform-derived from memory and is intentionally absent from the
+public API. Claim-time `config.resources.memory` can override the template
+default, and the runtime update API can change memory for the active resource
+lease. Every value remains subject to the platform maximum.
 
-<Callout variant="info">
-Set only `mainContainer.resources.memory`; CPU is platform-managed and is not part of the template API. The memory value becomes the default for claimed sandboxes, while `config.resources.memory` can override it at claim time or runtime. The platform maximum applies to both values. Warm-pool pods wait with a `128Mi` memory limit to reduce idle cost, then resize to the template default when claimed.
-</Callout>
-
----
+Carrier allocation resources do not define these limits. Manager leases exact
+CPU and memory from ctld-reported dedicated-node capacity and the task driver
+writes the committed lease into the OCI spec.
 
 ## `envVars`
 
-Global environment variables injected into the procd-managed sandbox environment.
+`envVars` defines defaults for procd-managed child processes:
 
 ```yaml
 envVars:
@@ -82,89 +70,59 @@ envVars:
     APP_ENV: production
 ```
 
-`envVars` are set at the template level and become part of the sandbox container's base environment, alongside `mainContainer.env`. Users can override or extend them at sandbox creation time via the `env_vars` field in the sandbox config.
+Environment precedence is:
 
-Environment variable precedence for procd-managed child processes is:
+1. image environment, template `envVars`, and `mainContainer.env`;
+2. claim-time `config.env_vars`; and
+3. context, command, service, or function `env_vars`.
 
-1. Container image, template `envVars`, and `mainContainer.env`
-2. Sandbox creation `config.env_vars`
-3. Context, command, service runtime, or function `env_vars`
-
-Claim-time sandbox `env_vars` are applied to new procd-managed processes after the sandbox is claimed.
-
----
-
-## `pool`
-
-Warm pool configuration. See [Warm Pool](/docs/sandbox/template/pool) for a detailed guide.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `minIdle` | integer | — | Minimum idle pods to pre-warm. Required (`>= 0`). |
-| `maxIdle` | integer | — | Compatibility ceiling for idle pods and status health. Required (`>= minIdle`). |
-
-Only ready idle pods count toward pool capacity.
-
----
+Claim-time and runtime updates affect newly created procd-managed processes;
+they do not rewrite the environment of an already running process.
 
 ## `network`
 
-Template-level default network policy. Templates now use the same public `SandboxNetworkPolicy` shape as claim-time and runtime sandbox network configuration.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. This is the fallback for unmatched traffic. |
-| `egress.trafficRules` | array | — | Ordered allow/deny rules. First matching rule wins. Recommended for new policies. |
-| `egress.protocolRules` | array | — | Protocol-aware controls for allowed traffic, such as HTTP request policy and MCP tool allowlists. |
-| `network.credentialBindings` | array | — | Credential bindings scoped under the same `network` object. Use this for outbound auth setup. |
-| `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `network.credentialBindings[*].ref`. |
-| `egress.allowed*` / `egress.denied*` | array | — | Legacy compatibility fields. Prefer `trafficRules` instead. |
-
-See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for traffic behavior, and [Credential](/docs/sandbox/credential) for bindings and egress auth.
-
----
-
-## `displayName` `description` `tags`
-
-Metadata fields for human-readable identification. Not used by the runtime.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `displayName` | string | Short human-readable name shown in UI and `s0 template list`. |
-| `description` | string | Longer description of the template's purpose. |
-| `tags` | string[] | Labels for filtering and organization. |
-
----
-
-## Privileged Fields
-
-The following fields require a system-level token. They are not available to regular team API keys and are intended for platform operators configuring multi-tenant or advanced deployments.
+Templates and sandbox claim/update requests share the same public
+`SandboxNetworkPolicy` shape.
 
 | Field | Description |
-|-------|-------------|
-| `pod.nodeSelector` | Pin sandbox pods to nodes matching specific labels. |
-| `pod.affinity` | Node and pod affinity/anti-affinity rules. |
-| `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
-| `pod.serviceAccountName` | Kubernetes service account for sandbox pods. |
-| `pod.emptyDirMounts` | Ephemeral Kubernetes `emptyDir` mounts for system templates, such as `/var/lib/docker` for Docker in Sandbox runtime state. |
-| `mainContainer.securityContext` | Linux container security context for system templates. Supports `privileged`, `allowPrivilegeEscalation`, `runAsUser`, `runAsGroup`, `runAsNonRoot`, `readOnlyRootFilesystem`, `capabilities.add`, `capabilities.drop`, `seccompProfile`, and `appArmorProfile`. |
-| `mainContainer.imagePullPolicy` | Pull policy override for the main container image. Only system administrators/system tokens can set this field. |
-| `clusterId` | Pin the template to a specific cluster in a multi-cluster deployment. |
+| --- | --- |
+| `mode` | Required when `network` is present. Use `allow-all` or `block-all` as the unmatched-traffic default. |
+| `egress.trafficRules` | Ordered allow/deny destination and protocol matchers. First match wins. |
+| `egress.protocolRules` | HTTP and MCP operation controls applied after traffic is allowed. |
+| `credentialBindings` | Named credentials available to destination-scoped injection rules. |
+| `egress.credentialRules` | Egress authentication rules that reference a credential binding. |
+| `egress.proxy` | Optional customer-managed SOCKS5 proxy for allowed TCP traffic. |
 
-<Callout variant="warning">
-Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
-</Callout>
+The legacy `allowed*` and `denied*` egress fields remain compatibility inputs;
+prefer ordered `trafficRules` for new policies. See [Network](/docs/sandbox/network),
+[Protocol Controls](/docs/sandbox/protocol-controls), and
+[Credential](/docs/sandbox/credential).
 
-`pod.emptyDirMounts` is backed by Kubernetes `emptyDir` on the node's default storage medium. Its contents are tied to the sandbox pod lifecycle and are not captured by rootfs snapshots or restore operations. Use it for temporary runtime state and caches, not durable workspace data.
+## Metadata
 
-`mainContainer.securityContext` is intended for platform-owned templates that need runtime-specific privileges, such as container-engine templates on gVisor or Kata. It does not expose host devices or hostPath mounts.
+| Field | Description |
+| --- | --- |
+| `displayName` | Short human-readable name. |
+| `description` | Longer purpose or provenance text. |
+| `tags` | String labels used for organization and filtering. |
 
----
+Metadata does not change runtime compatibility.
+
+## Scheduling And Resources
+
+Template specs define the image, environment, memory, ephemeral storage,
+network policy, and metadata. CPU is derived from memory by platform policy.
+The API uses strict decoding and rejects unknown fields.
+
+Platform administrators configure immutable runtime classes, dedicated node
+capacity, and the unified resource-neutral carrier pool outside template
+specs. See
+[Unified Warm Pool](/docs/sandbox/template/pool).
 
 ## Next Steps
 
 <CardGroup>
   <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
-    Publish, restore, and fork durable sandbox rootfs state.
+    Publish, restore, fork, and rebase durable RootFS state.
   </Card>
 </CardGroup>

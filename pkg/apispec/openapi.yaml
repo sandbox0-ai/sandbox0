@@ -4644,7 +4644,7 @@ components:
             $ref: "#/components/schemas/SandboxAppService"
     SandboxResourceConfig:
       type: object
-      description: Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
+      description: Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
       properties:
         memory:
           type: string
@@ -5053,19 +5053,10 @@ components:
     SandboxUpdateConfig:
       type: object
       description: |
-        Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-        Note: env_vars only affect new processes. webhook is not included as it requires restart.
+        Durable lifecycle and service fields that can be updated without replacing
+        the current runtime allocation. Network policy uses the dedicated network
+        endpoint. Environment, resource, and webhook changes require a new runtime.
       properties:
-        env_vars:
-          type: object
-          additionalProperties:
-            type: string
-          description: |
-            Sandbox-level environment variables used as defaults for new procd-managed
-            processes. Omitting this field preserves the existing environment map; passing
-            an empty object clears it.
-        resources:
-          $ref: "#/components/schemas/SandboxResourceConfig"
         ttl:
           type: integer
           format: int32
@@ -5074,8 +5065,6 @@ components:
           type: integer
           format: int32
           description: Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
-        network:
-          $ref: "#/components/schemas/SandboxNetworkPolicy"
         auto_resume:
           type: boolean
           default: true
@@ -6873,10 +6862,7 @@ components:
     TemplateFromSandboxSpecOverrides:
       type: object
       additionalProperties: false
-      description: |
-        Safe template fields that may override values inherited from the source
-        sandbox's originating template. Pool defaults to zero idle sandboxes
-        when omitted.
+      description: Safe template fields that may override values inherited from the source sandbox's originating template.
       properties:
         description:
           type: string
@@ -6886,8 +6872,6 @@ components:
           type: array
           items:
             type: string
-        pool:
-          $ref: "#/components/schemas/PoolStrategy"
     TemplateUpdateRequest:
       type: object
       properties:
@@ -6937,34 +6921,6 @@ components:
                     $ref: "#/components/schemas/Template"
                 count:
                   type: integer
-    SandboxTemplate:
-      type: object
-      properties:
-        apiVersion:
-          type: string
-        kind:
-          type: string
-        metadata:
-          $ref: "#/components/schemas/ObjectMeta"
-        spec:
-          $ref: "#/components/schemas/SandboxTemplateSpec"
-        status:
-          $ref: "#/components/schemas/SandboxTemplateStatus"
-    ObjectMeta:
-      type: object
-      properties:
-        name:
-          type: string
-        namespace:
-          type: string
-        labels:
-          type: object
-          additionalProperties:
-            type: string
-        annotations:
-          type: object
-          additionalProperties:
-            type: string
     SandboxTemplateSpec:
       type: object
       properties:
@@ -6978,33 +6934,26 @@ components:
             type: string
         mainContainer:
           $ref: "#/components/schemas/ContainerSpec"
-        pod:
-          $ref: "#/components/schemas/PodSpecOverride"
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
-        pool:
-          $ref: "#/components/schemas/PoolStrategy"
         envVars:
           type: object
           additionalProperties:
             type: string
-        clusterId:
-          type: string
+      required: [mainContainer]
     ContainerSpec:
       type: object
       properties:
         image:
           type: string
-        imagePullPolicy:
-          type: string
+          pattern: '^[^\s@]+@sha256:[0-9a-f]{64}$'
+          description: Canonical normalized OCI reference pinned by a lowercase SHA-256 digest. Mutable tags are rejected.
         env:
           type: array
           items:
             $ref: "#/components/schemas/EnvVar"
         resources:
           $ref: "#/components/schemas/ResourceQuota"
-        securityContext:
-          $ref: "#/components/schemas/SecurityContext"
       required: [image, resources]
 
     EnvVar:
@@ -7023,299 +6972,8 @@ components:
           description: Memory limit used by default when a sandbox claim does not provide a memory override. It cannot exceed the platform sandbox maximum, which defaults to 16Gi. Sandbox0 derives the internal CPU limit from platform configuration.
         ephemeralStorage:
           type: string
-          description: Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
+          description: Immutable RootFS block-device size. Defaults to 8Gi when omitted; it must be an exact byte quantity between 300Mi and 1Ti and aligned to 4096 bytes.
       required: [memory]
-    SecurityContext:
-      type: object
-      properties:
-        capabilities:
-          $ref: "#/components/schemas/Capabilities"
-        privileged:
-          type: boolean
-        runAsUser:
-          type: integer
-          format: int64
-        runAsGroup:
-          type: integer
-          format: int64
-        runAsNonRoot:
-          type: boolean
-        readOnlyRootFilesystem:
-          type: boolean
-        allowPrivilegeEscalation:
-          type: boolean
-        seccompProfile:
-          $ref: "#/components/schemas/SeccompProfile"
-        appArmorProfile:
-          $ref: "#/components/schemas/AppArmorProfile"
-    Capabilities:
-      type: object
-      properties:
-        add:
-          type: array
-          items:
-            type: string
-        drop:
-          type: array
-          items:
-            type: string
-    SeccompProfile:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [Unconfined, RuntimeDefault, Localhost]
-        localhostProfile:
-          type: string
-      required: [type]
-    AppArmorProfile:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [Unconfined, RuntimeDefault, Localhost]
-        localhostProfile:
-          type: string
-      required: [type]
-    Probe:
-      type: object
-      properties:
-        exec:
-          $ref: "#/components/schemas/ExecAction"
-        httpGet:
-          $ref: "#/components/schemas/HTTPGetAction"
-        tcpSocket:
-          $ref: "#/components/schemas/TCPSocketAction"
-        grpc:
-          $ref: "#/components/schemas/GRPCAction"
-        initialDelaySeconds:
-          type: integer
-          format: int32
-        timeoutSeconds:
-          type: integer
-          format: int32
-        periodSeconds:
-          type: integer
-          format: int32
-        successThreshold:
-          type: integer
-          format: int32
-        failureThreshold:
-          type: integer
-          format: int32
-        terminationGracePeriodSeconds:
-          type: integer
-          format: int64
-    ExecAction:
-      type: object
-      properties:
-        command:
-          type: array
-          items:
-            type: string
-    HTTPGetAction:
-      type: object
-      properties:
-        path:
-          type: string
-        port:
-          $ref: "#/components/schemas/ProbePort"
-        host:
-          type: string
-        scheme:
-          type: string
-        httpHeaders:
-          type: array
-          items:
-            $ref: "#/components/schemas/HTTPHeader"
-      required: [port]
-    TCPSocketAction:
-      type: object
-      properties:
-        port:
-          $ref: "#/components/schemas/ProbePort"
-        host:
-          type: string
-      required: [port]
-    GRPCAction:
-      type: object
-      properties:
-        port:
-          type: integer
-          format: int32
-        service:
-          type: string
-      required: [port]
-    HTTPHeader:
-      type: object
-      properties:
-        name:
-          type: string
-        value:
-          type: string
-      required: [name, value]
-    ProbePort:
-      type: integer
-      format: int32
-    PodSpecOverride:
-      type: object
-      properties:
-        nodeSelector:
-          type: object
-          additionalProperties:
-            type: string
-        affinity:
-          $ref: "#/components/schemas/Affinity"
-        tolerations:
-          type: array
-          items:
-            $ref: "#/components/schemas/Toleration"
-        serviceAccountName:
-          type: string
-        emptyDirMounts:
-          type: array
-          items:
-            $ref: "#/components/schemas/EmptyDirMountSpec"
-    EmptyDirMountSpec:
-      type: object
-      properties:
-        mountPath:
-          type: string
-        sizeLimit:
-          type: string
-          description: Optional size limit for the Kubernetes emptyDir volume.
-      required: [mountPath]
-    Affinity:
-      type: object
-      properties:
-        nodeAffinity:
-          $ref: "#/components/schemas/NodeAffinity"
-        podAffinity:
-          $ref: "#/components/schemas/PodAffinity"
-    NodeAffinity:
-      type: object
-      properties:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          $ref: "#/components/schemas/NodeSelector"
-        preferredDuringSchedulingIgnoredDuringExecution:
-          type: array
-          items:
-            $ref: "#/components/schemas/PreferredSchedulingTerm"
-    NodeSelector:
-      type: object
-      properties:
-        nodeSelectorTerms:
-          type: array
-          items:
-            $ref: "#/components/schemas/NodeSelectorTerm"
-    NodeSelectorTerm:
-      type: object
-      properties:
-        matchExpressions:
-          type: array
-          items:
-            $ref: "#/components/schemas/NodeSelectorRequirement"
-        matchFields:
-          type: array
-          items:
-            $ref: "#/components/schemas/NodeSelectorRequirement"
-    NodeSelectorRequirement:
-      type: object
-      properties:
-        key:
-          type: string
-        operator:
-          type: string
-        values:
-          type: array
-          items:
-            type: string
-      required: [key, operator]
-    PreferredSchedulingTerm:
-      type: object
-      properties:
-        weight:
-          type: integer
-          format: int32
-        preference:
-          $ref: "#/components/schemas/NodeSelectorTerm"
-      required: [weight, preference]
-    PodAffinity:
-      type: object
-      properties:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          type: array
-          items:
-            $ref: "#/components/schemas/PodAffinityTerm"
-        preferredDuringSchedulingIgnoredDuringExecution:
-          type: array
-          items:
-            $ref: "#/components/schemas/WeightedPodAffinityTerm"
-    PodAffinityTerm:
-      type: object
-      properties:
-        labelSelector:
-          $ref: "#/components/schemas/LabelSelector"
-        namespaces:
-          type: array
-          items:
-            type: string
-        topologyKey:
-          type: string
-      required: [topologyKey]
-    LabelSelector:
-      type: object
-      properties:
-        matchLabels:
-          type: object
-          additionalProperties:
-            type: string
-        matchExpressions:
-          type: array
-          items:
-            $ref: "#/components/schemas/LabelSelectorRequirement"
-    LabelSelectorRequirement:
-      type: object
-      properties:
-        key:
-          type: string
-        operator:
-          type: string
-        values:
-          type: array
-          items:
-            type: string
-      required: [key, operator]
-    WeightedPodAffinityTerm:
-      type: object
-      properties:
-        weight:
-          type: integer
-          format: int32
-        podAffinityTerm:
-          $ref: "#/components/schemas/PodAffinityTerm"
-      required: [weight, podAffinityTerm]
-    Toleration:
-      type: object
-      properties:
-        key:
-          type: string
-        operator:
-          type: string
-        value:
-          type: string
-        effect:
-          type: string
-    PoolStrategy:
-      type: object
-      properties:
-        minIdle:
-          type: integer
-          format: int32
-        maxIdle:
-          type: integer
-          format: int32
-      required: [minIdle, maxIdle]
     SandboxNetworkPolicy:
       type: object
       properties:
@@ -7869,20 +7527,6 @@ components:
     SandboxTemplateStatus:
       type: object
       properties:
-        idleCount:
-          type: integer
-          format: int32
-        activeCount:
-          type: integer
-          format: int32
-        conditions:
-          type: array
-          items:
-            $ref: "#/components/schemas/SandboxTemplateCondition"
-        lastUpdateTime:
-          type: string
-          format: date-time
-          nullable: true
         creation:
           $ref: "#/components/schemas/TemplateCreationStatus"
     TemplateCreationStatus:
@@ -7890,10 +7534,8 @@ components:
       description: |
         Asynchronous creation status for templates built from a sandbox.
         Traditional image-based templates omit this object and are ready
-        immediately after creation. Ready means the template is visible in at
-        least one data-plane cluster and the claim API accepts it; when the
-        pool is zero, it does not imply that a sandbox image has already been
-        pulled.
+        immediately after creation. Ready means the regional template source
+        has been committed and the claim API may consume it.
       properties:
         state:
           type: string
@@ -7904,11 +7546,10 @@ components:
             - TemplateCreationStatusStateFailed
         stage:
           type: string
-          enum: [capturing, publishing, reconciling]
+          enum: [capturing, publishing]
           x-enum-varnames:
             - TemplateCreationStatusStageCapturing
             - TemplateCreationStatusStagePublishing
-            - TemplateCreationStatusStageReconciling
         startedAt:
           type: string
           format: date-time
@@ -7918,28 +7559,11 @@ components:
         completedAt:
           type: string
           format: date-time
-        outputImage:
-          type: string
-          description: Optional digest-pinned image produced by image-publisher backends. Runtime-native block-COW captures omit this field.
         reason:
           type: string
         message:
           type: string
       required: [state, stage]
-    SandboxTemplateCondition:
-      type: object
-      properties:
-        type:
-          type: string
-        status:
-          type: string
-        lastTransitionTime:
-          type: string
-          format: date-time
-        reason:
-          type: string
-        message:
-          type: string
     SuccessSandboxNetworkPolicyResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

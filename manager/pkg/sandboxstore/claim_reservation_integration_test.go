@@ -33,7 +33,6 @@ func TestReserveSandboxClaimSerializesConcurrentTeamQuotaAdmission(t *testing.T)
 			defer workers.Done()
 			<-start
 			record := rootFSTestSandboxRecord(fmt.Sprintf("sandbox-%02d", index), "team-1")
-			record.RuntimeBackend = SandboxRuntimeBackendNomad
 			_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
 				Record: record, OperationID: fmt.Sprintf("operation-%02d", index), LeaseTTL: 15 * time.Second,
 				ActiveSandboxLimit: int64Pointer(limit),
@@ -67,7 +66,6 @@ func TestReserveSandboxClaimAllowsRetryWithoutAnotherQuotaSlot(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
 	record := rootFSTestSandboxRecord("sandbox-retry", "team-1")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	one := int64(1)
 
 	created, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
@@ -121,7 +119,6 @@ func TestReserveSandboxClaimBindsRotatesAndCleansCredentialProjectionIntegration
 		},
 	}
 	record := rootFSTestSandboxRecord("sandbox-credential", "team-credential")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
 		Record: record, OperationID: "operation-credential", LeaseTTL: 15 * time.Second,
 		CredentialBindings: []egressauthstore.CredentialBinding{binding},
@@ -268,7 +265,6 @@ func TestFenceExpiredSandboxClaimWithoutSlotCanBeCleaned(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-abandoned", "team-1")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
 		Record: record, OperationID: "operation-abandoned", LeaseTTL: 15 * time.Second,
 	})
@@ -627,7 +623,6 @@ func sandboxRuntimeClaimReadySlotFixture(
 	sandboxID := "sandbox-" + suffix
 	operationID := "operation-" + suffix
 	record := rootFSTestSandboxRecord(sandboxID, "team-slot")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.ClusterID = "cluster-a"
 	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
 		Record: record, OperationID: operationID, LeaseTTL: time.Minute,

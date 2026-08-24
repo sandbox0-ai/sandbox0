@@ -41,7 +41,7 @@ type SandboxTTLControllerConfig struct {
 }
 
 // SandboxTTLController turns durable soft and hard deadlines into exact
-// backend lifecycle requests without consulting Pod state or informer caches.
+// lifecycle requests from the durable runtime-slot projection.
 type SandboxTTLController struct {
 	lister           SandboxExpirationLister
 	pauser           SandboxAutoPauser

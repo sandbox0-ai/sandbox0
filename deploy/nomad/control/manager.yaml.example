@@ -1,0 +1,57 @@
+http_port: 8080
+metrics_port: 9090
+log_level: info
+region_id: replace-with-region-id
+default_cluster_id: replace-with-cluster-id
+template_store_enabled: true
+database_url: ${SANDBOX0_DATABASE_URL}
+database_max_conns: 40
+database_min_conns: 4
+default_sandbox_ttl: 30m
+team_template_memory_per_cpu: 2Gi
+sandbox_max_memory: 32Gi
+procd_client_timeout: 5s
+
+rootfs_object_storage:
+  type: s3
+  bucket: replace-with-rootfs-bucket
+  region: replace-with-region
+  endpoint: ${SANDBOX0_S3_ENDPOINT}
+  access_key: ${SANDBOX0_S3_ACCESS_KEY}
+  secret_key: ${SANDBOX0_S3_SECRET_KEY}
+
+rootfs_importer:
+  work_root: /var/lib/sandbox0/rootfs-importer
+  procd_path: /usr/local/bin/procd
+  procd_protocol: replace-with-procd-protocol
+  procd_digest: sha256:<replace-with-64-lowercase-hex>
+  discovery_interval: 5s
+  discovery_page_size: 100
+
+node_authority:
+  enabled: true
+  listen_host: 0.0.0.0
+  port: 8421
+  cert_file: /etc/sandbox0/node-authority/tls/tls.crt
+  key_file: /etc/sandbox0/node-authority/tls/tls.key
+  client_ca_file: /etc/sandbox0/node-authority/tls/client-ca.crt
+  runtime_slot_heartbeat_ttl: 30s
+  writer_lease_ttl: 30s
+  writer_renewal_grace: 5s
+  identities:
+    - common_name: replace-with-node-certificate-cn
+      cluster_id: replace-with-cluster-id
+      node_id: replace-with-nomad-node-id
+      node_uid: replace-with-durable-node-uid
+      agent_uid: replace-with-node-agent-identity
+  claim:
+    class_catalog_file: /etc/sandbox0/node-authority/claim/runtime-classes.json
+    writer_token_key_file: /etc/sandbox0/node-authority/claim/writer-token.key
+    claim_ttl: 15s
+    slo: 1s
+  terminal:
+    enabled: true
+    nomad_endpoints_file: /etc/sandbox0/node-authority/control/nomad-endpoints.json
+    interval: 1s
+    pass_timeout: 2m
+    scan_limit: 100

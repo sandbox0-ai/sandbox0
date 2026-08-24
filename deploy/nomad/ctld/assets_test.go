@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -131,9 +131,11 @@ func TestNomadPluginExampleUsesCtldRuntimeOnly(t *testing.T) {
 	config := string(payload)
 	for _, required := range []string{
 		`plugin "sandbox0-gvisor"`,
+		`runsc_operation_timeout_seconds = 30`,
 		`rootfs_node_socket            = "/run/sandbox0/ctld-nomad-runtime.sock"`,
 		`resource_cgroup_root          = "/sys/fs/cgroup/sandbox0"`,
-		`runtime_slot_enabled              = true`,
+		`procd_internal_jwt_public_key_file = "/etc/sandbox0/internal-auth/data-public.pem"`,
+		`runtime_slot_cluster_id           = "replace-with-cluster-id"`,
 	} {
 		if !strings.Contains(config, required) {
 			t.Fatalf("Nomad plugin example lacks %q", required)
@@ -143,6 +145,8 @@ func TestNomadPluginExampleUsesCtldRuntimeOnly(t *testing.T) {
 		"rootfs_sessiond", "rootfs_object_bucket", "rootfs_nbd_devices", "rootfs_mount_root",
 		"rootfs_max_dirty_tail_bytes", "rootfs_max_node_dirty_tail_bytes",
 		"rootfs_dirty_tail_retirement_reserve_bytes",
+		"runtime_slot_enabled", "rootfs_enabled", "network_policy_enabled",
+		"dev_smoke_enabled", "allowed_rootfs_dir",
 	} {
 		if strings.Contains(config, forbidden) {
 			t.Fatalf("Nomad plugin example contains ctld-owned setting %q", forbidden)

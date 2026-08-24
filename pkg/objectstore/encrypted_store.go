@@ -305,7 +305,7 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 	buffered := bufio.NewReader(in)
 	magic, err := buffered.Peek(len(encryptedObjectMagic))
 	if err != nil || string(magic) != encryptedObjectMagic {
-		return copyPlainRange(out, buffered, off, limit)
+		return fmt.Errorf("object %q is missing the required encrypted-object header", key)
 	}
 	if _, err := buffered.Discard(len(encryptedObjectMagic)); err != nil {
 		return err
@@ -438,28 +438,6 @@ func encryptedObjectNonce(nonceSize int, prefix []byte, chunkIndex uint64) []byt
 
 func encryptedObjectChunkAAD(key string, chunkIndex uint64, algorithm string) []byte {
 	return []byte(fmt.Sprintf("s0.object.encrypted.v1|%s|%d|%s", key, chunkIndex, algorithm))
-}
-
-func copyPlainRange(out io.Writer, in io.Reader, off, limit int64) error {
-	if limit == 0 {
-		return nil
-	}
-	if off > 0 {
-		if _, err := io.CopyN(io.Discard, in, off); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-	}
-	if limit < 0 {
-		_, err := io.Copy(out, in)
-		return err
-	}
-	if _, err := io.CopyN(out, in, limit); err != nil && err != io.EOF {
-		return err
-	}
-	return nil
 }
 
 func writeRangeChunk(out io.Writer, chunk []byte, chunkStart, rangeStart, rangeEnd int64) error {

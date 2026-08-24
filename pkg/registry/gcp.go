@@ -3,9 +3,8 @@ package registry
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -24,8 +23,7 @@ var (
 )
 
 type gcpProvider struct {
-	cfg     config.RegistryGCPConfig
-	secrets secretReader
+	cfg config.RegistryGCPConfig
 }
 
 func (p *gcpProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
@@ -34,31 +32,30 @@ func (p *gcpProvider) GetPushCredentials(ctx context.Context, req PushCredential
 	if registry == "" {
 		return nil, fmt.Errorf("gcp registry is required")
 	}
-	serviceAccountJSON := strings.TrimSpace(p.cfg.ServiceAccountJSON)
+	serviceAccountJSON, err := credentialValue(
+		p.cfg.ServiceAccountJSON,
+		p.cfg.ServiceAccountJSONFile,
+		"gcp service account json",
+	)
+	if err != nil {
+		return nil, err
+	}
 	if serviceAccountJSON == "" {
-		if strings.TrimSpace(p.cfg.ServiceAccountSecret) == "" {
-			tokenSource, err := gcpDefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
-			if err != nil {
-				return nil, fmt.Errorf("resolve gcp application default credentials: %w", err)
-			}
-			token, err := tokenSource.Token()
-			if err != nil {
-				return nil, fmt.Errorf("fetch gcp access token: %w", err)
-			}
-			return &Credential{
-				Provider:     "gcp",
-				PushRegistry: registry,
-				Username:     "oauth2accesstoken",
-				Password:     token.AccessToken,
-				ExpiresAt:    timePtr(token.Expiry),
-			}, nil
-		}
-		secretKey := strings.TrimSpace(p.cfg.ServiceAccountKey)
-		var err error
-		serviceAccountJSON, err = p.secrets.readRequired(ctx, p.cfg.ServiceAccountSecret, secretKey, "serviceAccount.json", "gcp service account")
+		tokenSource, err := gcpDefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("resolve gcp application default credentials: %w", err)
 		}
+		token, err := tokenSource.Token()
+		if err != nil {
+			return nil, fmt.Errorf("fetch gcp access token: %w", err)
+		}
+		return &Credential{
+			Provider:     "gcp",
+			PushRegistry: registry,
+			Username:     "oauth2accesstoken",
+			Password:     token.AccessToken,
+			ExpiresAt:    timePtr(token.Expiry),
+		}, nil
 	}
 	tokenSource, err := gcpJWTConfigFromJSON([]byte(serviceAccountJSON), "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {

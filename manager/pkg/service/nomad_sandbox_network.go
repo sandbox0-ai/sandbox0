@@ -11,16 +11,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 // NomadSandboxNetworkPolicyService owns the durable paused policy that is
@@ -57,8 +56,8 @@ type NomadSandboxNetworkMutationEnqueuer interface {
 	EnqueueSandboxNetworkMutation(string)
 }
 
-// NewNomadSandboxNetworkPolicyService creates a policy service that never
-// mutates a Kubernetes runtime object.
+// NewNomadSandboxNetworkPolicyService creates a durable slot-network policy
+// service.
 func NewNomadSandboxNetworkPolicyService(
 	store NomadSandboxNetworkStore,
 	policies *networkpolicy.NetworkPolicyService,
@@ -161,7 +160,7 @@ func (s *NomadSandboxNetworkPolicyService) UpdateNetworkPolicy(
 			return err
 		}
 		if record.DesiredState == sandboxstore.SandboxDesiredStateActive {
-			return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox resumed while updating its paused network policy"))
 		}
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
@@ -169,7 +168,7 @@ func (s *NomadSandboxNetworkPolicyService) UpdateNetworkPolicy(
 			return err
 		}
 		if activeTxn != nil {
-			return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			return apierror.NewConflict("sandbox", sandboxID,
 				fmt.Errorf("sandbox lifecycle %s is %s", activeTxn.Kind, activeTxn.Phase))
 		}
 		request := s.buildRequest(record, policy)
@@ -279,7 +278,7 @@ func (s *NomadSandboxNetworkPolicyService) updateActiveNetworkPolicy(
 	}
 	if err := s.CompleteNomadSandboxNetworkMutation(ctx, record.ID); err != nil {
 		s.enqueueMutation(record.ID)
-		if apierrors.IsConflict(err) {
+		if apierror.IsConflict(err) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w: active Nomad network update is durably pending: %v",
@@ -306,7 +305,7 @@ func (s *NomadSandboxNetworkPolicyService) CompleteNomadSandboxNetworkMutation(
 		return nil
 	}
 	if mutation.Phase == sandboxstore.NomadSandboxNetworkMutationPhaseCanceled {
-		return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("network update was canceled: %s", mutation.CancellationReason))
 	}
 	token, err := s.preparer.Prepare(ctx, runtimeslotclaim.NetworkPrepareRequest{
@@ -391,9 +390,9 @@ func validateNomadSandboxNetworkMutationToken(
 	if err := token.Validate(); err != nil {
 		return fmt.Errorf("applied Nomad network token: %w", err)
 	}
-	if token.PodUID != mutation.AllocationID || token.ClaimID != mutation.ClaimID ||
+	if token.AllocationID != mutation.AllocationID || token.ClaimID != mutation.ClaimID ||
 		token.NetNSIdentity != mutation.NetNSIdentity || token.PolicyDigest != mutation.DesiredPolicyDigest ||
-		token.PodSandboxID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		token.NetworkIncarnationID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: mutation.SlotID, ClusterID: mutation.ClusterID,
 			AllocationID: mutation.AllocationID, NodeID: mutation.NodeID,
 			NodeUID: mutation.NodeUID, NodeBootID: mutation.NodeBootID,
@@ -401,7 +400,7 @@ func validateNomadSandboxNetworkMutationToken(
 		}) {
 		return fmt.Errorf("applied Nomad network token belongs to another runtime slot")
 	}
-	if _, err := protocol.NomadProcdAddress(token.PodIP); err != nil {
+	if _, err := protocol.NomadProcdAddress(token.SourceIP); err != nil {
 		return fmt.Errorf("applied Nomad network token: %w", err)
 	}
 	return nil
@@ -410,7 +409,7 @@ func validateNomadSandboxNetworkMutationToken(
 func mapNomadSandboxNetworkMutationError(sandboxID, action string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrNomadSandboxNetworkMutationConflict):
-		return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("%s Nomad network update: %w", action, err))
 	case errors.Is(err, sandboxstore.ErrNomadSandboxNetworkMutationNotReady),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound):
@@ -465,15 +464,11 @@ func (s *NomadSandboxNetworkPolicyService) buildRequest(
 
 func validateNomadNetworkPolicyRecord(record *sandboxstore.SandboxRecord, sandboxID string) error {
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return apierrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
-	}
-	if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
-			fmt.Errorf("sandbox is not owned by the Nomad runtime"))
+		return apierror.NewNotFound("sandbox", sandboxID)
 	}
 	if record.DesiredState != sandboxstore.SandboxDesiredStateActive &&
 		record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
-		return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+		return apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("sandbox state %s does not expose network policy", record.DesiredState))
 	}
 	return nil

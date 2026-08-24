@@ -17,6 +17,7 @@ package nomadruntime
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func validNodeRuntimeConfig() Config {
@@ -103,6 +104,8 @@ func TestValidateNomadAllocationConfigRejectsUntrustedEndpoints(t *testing.T) {
 		{name: "missing peer identity", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotChannelPeerURISAN = "" }, match: "SPIFFE"},
 		{name: "query in peer identity", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotChannelPeerURISAN += "?node=1" }, match: "SPIFFE"},
 		{name: "ambient control root", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotControlRoot = "/" }, match: "canonical"},
+		{name: "short node control timeout", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotNodeControlTimeout = 500 * time.Millisecond }, match: "between one second and one minute"},
+		{name: "long node control timeout", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotNodeControlTimeout = 61 * time.Second }, match: "between one second and one minute"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -112,6 +115,23 @@ func TestValidateNomadAllocationConfigRejectsUntrustedEndpoints(t *testing.T) {
 				t.Fatalf("validateNomadAllocationConfig() error = %v, want match %q", err, test.match)
 			}
 		})
+	}
+}
+
+func TestRuntimeSlotNodeControlTimeoutPreservesProductionDefaultAndChannelMargin(t *testing.T) {
+	config := validNomadAllocationConfig()
+	if got := runtimeSlotNodeControlTimeout(config); got != 10*time.Second {
+		t.Fatalf("default node control timeout = %s", got)
+	}
+	if got := runtimeSlotNodeChannelOperationTimeout(config); got != 30*time.Second {
+		t.Fatalf("default channel operation timeout = %s", got)
+	}
+	config.RuntimeSlotNodeControlTimeout = 45 * time.Second
+	if got := runtimeSlotNodeControlTimeout(config); got != 45*time.Second {
+		t.Fatalf("configured node control timeout = %s", got)
+	}
+	if got := runtimeSlotNodeChannelOperationTimeout(config); got != 50*time.Second {
+		t.Fatalf("configured channel operation timeout = %s", got)
 	}
 }
 

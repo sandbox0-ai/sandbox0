@@ -7,11 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type rootFSCompositeMaterializerTestStore struct{}
@@ -62,7 +61,7 @@ func (s objectStoreWithoutContextualConditionalAccess) PutIfAbsent(key string, r
 
 func TestBuildRootFSCompositeMaterializerUsesContextualConditionalObjectStore(t *testing.T) {
 	cfg := &config.ManagerConfig{RootFSMaintenance: config.RootFSMaintenanceConfig{
-		MaterializerInterval: metav1.Duration{Duration: 20 * time.Millisecond}, MaterializerScanLimit: 8,
+		MaterializerInterval: config.Duration{Duration: 20 * time.Millisecond}, MaterializerScanLimit: 8,
 	}}
 	worker, err := buildRootFSCompositeMaterializer(
 		cfg, rootFSCompositeMaterializerTestStore{}, objectstore.NewMemoryStore(t.Name()),
@@ -81,13 +80,12 @@ func TestBuildRootFSCompositeMaterializerUsesContextualConditionalObjectStore(t 
 	}
 }
 
-func TestConfigureRootFSCompositeMaterializerRequiresWorkerForNomad(t *testing.T) {
+func TestConfigureRootFSCompositeMaterializerRequiresWorker(t *testing.T) {
 	for name, cfg := range map[string]*config.ManagerConfig{
 		"disabled": {
-			SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad,
-			RootFSMaintenance:     config.RootFSMaintenanceConfig{MaterializerDisabled: true},
+			RootFSMaintenance: config.RootFSMaintenanceConfig{MaterializerDisabled: true},
 		},
-		"missing object store": {SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad},
+		"missing object store": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			worker, err := configureRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{}, nil)
@@ -95,15 +93,5 @@ func TestConfigureRootFSCompositeMaterializerRequiresWorkerForNomad(t *testing.T
 				t.Fatalf("configure materializer = %v, %v", worker, err)
 			}
 		})
-	}
-}
-
-func TestConfigureRootFSCompositeMaterializerAllowsDisabledKubernetesPath(t *testing.T) {
-	worker, err := configureRootFSCompositeMaterializer(&config.ManagerConfig{
-		SandboxRuntimeBackend: config.SandboxRuntimeBackendKubernetes,
-		RootFSMaintenance:     config.RootFSMaintenanceConfig{MaterializerDisabled: true},
-	}, rootFSCompositeMaterializerTestStore{}, nil)
-	if err != nil || worker != nil {
-		t.Fatalf("configure materializer = %v, %v", worker, err)
 	}
 }

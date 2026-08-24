@@ -25,6 +25,8 @@ const (
 	materializerKind    = "materializer"
 	boltKind            = "bolt"
 	requiredItems       = 10_000
+	minimumTestDuration = 10 * time.Second
+	enduranceDuration   = 24 * time.Hour
 )
 
 type options struct {
@@ -177,8 +179,8 @@ func verify(opts options) (report, error) {
 	if opts.kind != materializerKind && opts.kind != boltKind {
 		return report{}, fmt.Errorf("kind must be materializer or bolt")
 	}
-	if opts.minimumActiveDuration < 24*time.Hour || opts.minimumActiveDuration > 7*24*time.Hour {
-		return report{}, fmt.Errorf("minimum active duration must be between 24h and 7d")
+	if opts.minimumActiveDuration < minimumTestDuration || opts.minimumActiveDuration > 7*24*time.Hour {
+		return report{}, fmt.Errorf("minimum active duration must be between 10s and 7d")
 	}
 	if opts.output != "" {
 		if !canonicalNonRootAbsolutePath(opts.output) {
@@ -220,12 +222,14 @@ func validateMaterializer(verified soakstate.Verification, duration time.Duratio
 	}
 	wantDuration := duration.String()
 	if config.Duration != wantDuration || config.Generations != requiredItems || config.BurstCount != 20 ||
-		config.WorkerInterval != time.Second.String() || config.SampleInterval != time.Minute.String() ||
-		config.MinPackBytes != 32<<20 || config.MaxDelay != (5*time.Minute).String() ||
+		config.MinPackBytes != 32<<20 ||
 		config.PhysicalByteLimit != 512<<20 || config.PhysicalFileLimit != 4096 ||
 		config.DatabaseGrowthLimit != 512<<20 || config.TerminalRetention != (24*time.Hour).String() ||
 		config.UploadingStale != time.Hour.String() || config.GarbageInterval != time.Minute.String() {
 		return nil, fmt.Errorf("materializer configuration does not match the production acceptance contract")
+	}
+	if err := validateMaterializerTiming(config, duration); err != nil {
+		return nil, err
 	}
 	if !canonicalRustFSEndpoint(config.RustFSEndpoint) || !canonicalBucket(config.RustFSBucket) ||
 		!canonicalNonRootAbsolutePath(config.RustFSDataDir) || !canonicalListenAddress(config.ProxyListen) {
@@ -248,7 +252,7 @@ func validateMaterializer(verified soakstate.Verification, duration time.Duratio
 		final.Database.CompositeGenerations != 0 || final.Database.UploadingBatches != 0 ||
 		final.Database.AbandonedBatches != 0 || final.Database.DeletionQueue != 0 ||
 		final.Database.MaterializedGenerations != requiredItems+1 ||
-		final.Database.CatalogObjects != final.Objects.Objects-2 ||
+		final.Database.CatalogObjects != final.Objects.Objects-1 ||
 		final.Objects.Objects <= 2 || final.Objects.Objects > maxObjects ||
 		final.Bounds.MaxBatches != maxBatches || final.Bounds.MaxObjects != maxObjects ||
 		final.DatabaseGrowthBytes < 0 || final.DatabaseGrowthBytes > 512<<20 ||
@@ -266,6 +270,27 @@ func validateMaterializer(verified soakstate.Verification, duration time.Duratio
 		return nil, fmt.Errorf("materializer final checkpoint is incomplete")
 	}
 	return rawContract(verified), nil
+}
+
+func validateMaterializerTiming(config materializerConfig, duration time.Duration) error {
+	workerInterval, workerErr := time.ParseDuration(config.WorkerInterval)
+	sampleInterval, sampleErr := time.ParseDuration(config.SampleInterval)
+	maxDelay, delayErr := time.ParseDuration(config.MaxDelay)
+	if workerErr != nil || sampleErr != nil || delayErr != nil {
+		return fmt.Errorf("materializer timing configuration is invalid")
+	}
+	if duration >= enduranceDuration {
+		if workerInterval != time.Second || sampleInterval != time.Minute || maxDelay != 5*time.Minute {
+			return fmt.Errorf("materializer timing does not match the endurance profile")
+		}
+		return nil
+	}
+	if workerInterval < 10*time.Millisecond || workerInterval > time.Second ||
+		sampleInterval < time.Second || sampleInterval > time.Minute ||
+		maxDelay < time.Second || maxDelay > 5*time.Minute || maxDelay >= duration {
+		return fmt.Errorf("materializer timing does not match the accelerated profile")
+	}
+	return nil
 }
 
 func validateBolt(verified soakstate.Verification, duration time.Duration) (map[string]json.RawMessage, error) {

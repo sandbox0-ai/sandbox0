@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore/requestmetering"
@@ -26,9 +26,6 @@ func startCtldObjectStoreRequestMetering(
 		return nil
 	}
 	instance := strings.TrimSpace(nodeName)
-	if instance == "" {
-		instance = strings.TrimSpace(podName)
-	}
 	aggregator := requestmetering.NewAggregator(
 		requestmetering.NewRecorder(meteringoutbox.NewRepository(pool)),
 		cfg.RegionID,

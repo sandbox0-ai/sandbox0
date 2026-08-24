@@ -42,9 +42,11 @@ Use sandbox rootfs snapshots when the default writable filesystem is the state y
 
 ### Rootfs Path Semantics
 
-Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent.
-
-Older snapshot layers are filtered when restored, so legacy `/tmp` entries do not reappear. Reading and filtering a large legacy layer can make its first restore slower; later checkpoints omit that data. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
+Snapshots, snapshot claims, restore, and fork use the same block-COW
+persistence boundary as pause and resume. Ordinary writable RootFS paths,
+including `/tmp`, `/var/tmp`, and workspace directories, are captured. Virtual
+runtime mounts such as `/proc`, `/dev`, and `/sys` are recreated for each
+runtime generation and are not snapshot content.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
@@ -52,13 +54,26 @@ The rootfs snapshot API stores snapshot metadata including `name`, `description`
 
 ## Storage Encryption
 
-Application-layer object encryption is enabled by default. Before manager or ctld writes persisted rootfs layer and checkpoint objects to S3-compatible storage, Sandbox0 encrypts them with AES-256-GCM. Each object receives a random data key, its contents are stored in independently authenticated chunks, and the data key is wrapped with the installation's RSA key.
+When application-layer object encryption is enabled, manager and ctld encrypt
+persisted RootFS block data and descriptors before writing them to
+S3-compatible storage. With `aes256gcm-rsa`, each object receives a random data
+key, its contents are independently authenticated, and the data key is wrapped
+with the installation's RSA key.
 
-This is service-side encryption, not end-to-end encryption: manager and the active ctld hold the installation key and can decrypt rootfs objects while serving sandbox operations. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
+This is service-side encryption, not end-to-end encryption: manager and the
+active ctld hold the installation key and can decrypt RootFS objects while
+serving sandbox operations. Enabling encryption does not rewrite historical
+objects automatically. Self-hosted deployments configure
+`rootfs_object_storage.object_encryption_enabled`, key path, and algorithm on
+manager and ctld; see [Configuration](/docs/sandbox/self-hosted/configuration#rootfs-object-storage).
 
 ## Initialize Once, Claim Many
 
-Rootfs snapshots plus claim-time `snapshot_id` can act like a lightweight custom rootfs when your changes are ordinary filesystem state. Instead of building a custom image and maintaining a team-owned warm pool, start from a builtin template, initialize the sandbox, publish a rootfs snapshot, then claim new sandboxes from that snapshot.
+RootFS snapshots plus claim-time `snapshot_id` can act like a lightweight
+custom RootFS when your changes are ordinary filesystem state. Start from a
+compatible template, initialize the sandbox, publish a RootFS snapshot, then
+claim new sandboxes from that snapshot. All compatible templates share the
+same resource-neutral carrier pool.
 
 Use this pattern for:
 
@@ -69,7 +84,7 @@ Use this pattern for:
 
 Typical workflow:
 
-1. claim a sandbox from a builtin template backed by the platform warm pool
+1. claim a sandbox from a compatible builtin or team-owned template
 2. install dependencies or prepare the workspace inside the sandbox rootfs
 3. create a named rootfs snapshot for the initialized state
 4. optionally pause or delete the seed sandbox after the snapshot is created

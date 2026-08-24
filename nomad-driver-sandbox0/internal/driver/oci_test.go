@@ -35,7 +35,7 @@ func TestRuntimeLeaseCgroupsPathIsRelativeToUnifiedMount(t *testing.T) {
 
 func TestBuildSpecAppliesExactRuntimeResourceLease(t *testing.T) {
 	spec := buildSpec(specOptions{
-		Command: "/procd",
+		Command: "/procd", ProcdInternalJWTPublicKeyFile: "/etc/sandbox0/internal-auth/data-public.pem",
 		Resources: &driversResources{
 			CPUPeriod: 100000, CPUQuota: 150000, CPUShares: 1536,
 			CPUSetCpus: "0-1", MemoryLimitBytes: 768 * 1024 * 1024,
@@ -58,5 +58,10 @@ func TestBuildSpecAppliesExactRuntimeResourceLease(t *testing.T) {
 		*spec.Linux.Resources.Pids.Limit != 4096 ||
 		spec.Linux.CgroupsPath != "/sandbox0/s0-lease" {
 		t.Fatalf("OCI PIDs/cgroup resources = %+v", spec.Linux)
+	}
+	if len(spec.Mounts) != 4 || spec.Mounts[3].Source != "/etc/sandbox0/internal-auth/data-public.pem" ||
+		spec.Mounts[3].Destination != procdInternalJWTPublicKeyDestination ||
+		!strings.Contains(strings.Join(spec.Mounts[3].Options, ","), "ro") {
+		t.Fatalf("OCI procd internal JWT public-key mount = %+v", spec.Mounts)
 	}
 }

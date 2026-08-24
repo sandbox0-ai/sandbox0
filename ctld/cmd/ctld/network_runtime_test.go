@@ -111,12 +111,11 @@ func TestNetworkRuntimeExitErrorTreatsCanceledParentAsGraceful(t *testing.T) {
 }
 
 func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testing.T) {
-	factory, err := configuredNetworkRuntimeFactory("", ":8095", ":8096", false)
-	if err != nil || factory != nil {
-		t.Fatalf("configuredNetworkRuntimeFactory(empty) = (%v, %v), want (nil, nil)", factory, err)
+	if factory, err := configuredNetworkRuntimeFactory("", ":8095"); err == nil || factory != nil {
+		t.Fatalf("configuredNetworkRuntimeFactory(empty) = (%v, %v), want required-config error", factory, err)
 	}
 
-	if _, err := configuredNetworkRuntimeFactory(t.TempDir()+"/missing.yaml", ":8095", ":8096", false); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(t.TempDir()+"/missing.yaml", ":8095"); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory(missing) succeeded, want validation error")
 	}
 
@@ -124,22 +123,15 @@ func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testin
 	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8095\n"), 0o600); err != nil {
 		t.Fatalf("write network runtime config: %v", err)
 	}
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096", false); err == nil {
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095"); err == nil {
 		t.Fatal("configuredNetworkRuntimeFactory accepted a ctld port collision")
 	}
 
 	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8096\n"), 0o600); err != nil {
 		t.Fatalf("write network runtime config: %v", err)
 	}
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8096", false); err == nil {
-		t.Fatal("configuredNetworkRuntimeFactory accepted a runtime watch port collision")
-	}
-
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8095", false); err == nil {
-		t.Fatal("configuredNetworkRuntimeFactory accepted one port for control and runtime watch")
-	}
-	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095", ":8095", true); err != nil {
-		t.Fatalf("Nomad-only network runtime rejected disabled runtime-watch collision: %v", err)
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095"); err != nil {
+		t.Fatalf("configuredNetworkRuntimeFactory(valid) = %v", err)
 	}
 }
 

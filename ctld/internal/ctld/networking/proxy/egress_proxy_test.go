@@ -10,9 +10,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestDialTCPUpstreamForRequestUsesSOCKS5Proxy(t *testing.T) {
@@ -22,7 +21,7 @@ func TestDialTCPUpstreamForRequestUsesSOCKS5Proxy(t *testing.T) {
 
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 	}
 	req := &adapterRequest{
@@ -80,7 +79,7 @@ func TestDialTCPUpstreamForRequestUsesSOCKS5Credentials(t *testing.T) {
 	}
 	server := &Server{
 		cfg: &config.NetworkRuntimeConfig{
-			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			ProxyUpstreamTimeout: config.Duration{Duration: 2 * time.Second},
 		},
 		authResolver: resolver,
 		authCache:    newMemoryEgressAuthCache(),

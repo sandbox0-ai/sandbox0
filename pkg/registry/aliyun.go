@@ -17,7 +17,7 @@ import (
 	cr "github.com/aliyun/alibaba-cloud-sdk-go/services/cr_ee"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/sts"
 	distref "github.com/distribution/reference"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
@@ -34,8 +34,7 @@ type aliyunSTSAPI interface {
 }
 
 type aliyunProvider struct {
-	cfg     config.RegistryAliyunConfig
-	secrets secretReader
+	cfg config.RegistryAliyunConfig
 
 	newAccessKeyCRClient func(region, accessKey, secretKey string) (aliyunCRAPI, error)
 	newSTSClient         func(region, accessKey, secretKey string) (aliyunSTSAPI, error)
@@ -155,21 +154,16 @@ func (p *aliyunProvider) GetPushCredentials(ctx context.Context, req PushCredent
 }
 
 func (p *aliyunProvider) baseCredentials(ctx context.Context) (string, string, error) {
-	accessKey := strings.TrimSpace(p.cfg.AccessKeyID)
-	secretKey := strings.TrimSpace(p.cfg.AccessKeySecret)
-	if accessKey != "" && secretKey != "" {
-		return accessKey, secretKey, nil
-	}
-	if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
-		return "", "", fmt.Errorf("aliyun credentials secret is required")
-	}
-	accessKey, err := p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.AccessKeyKey, "accessKeyId", "aliyun access key")
+	accessKey, err := credentialValue(p.cfg.AccessKeyID, p.cfg.AccessKeyIDFile, "aliyun access key id")
 	if err != nil {
 		return "", "", err
 	}
-	secretKey, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.SecretKeyKey, "accessKeySecret", "aliyun secret key")
+	secretKey, err := credentialValue(p.cfg.AccessKeySecret, p.cfg.AccessKeySecretFile, "aliyun access key secret")
 	if err != nil {
 		return "", "", err
+	}
+	if accessKey == "" || secretKey == "" {
+		return "", "", fmt.Errorf("aliyun access key id and access key secret are required")
 	}
 	return accessKey, secretKey, nil
 }

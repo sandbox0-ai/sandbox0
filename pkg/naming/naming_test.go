@@ -5,27 +5,15 @@ import (
 	"testing"
 )
 
-func TestReplicasetAndSandboxNames(t *testing.T) {
+func TestOperationSandboxNameIsParseable(t *testing.T) {
 	clusterID := "aws-us-east-1"
-	templateName := "basic-template"
-
-	workloadName, err := NewSandboxWorkloadName(clusterID, templateName)
+	sandboxName, err := SandboxNameForOperation(clusterID, "basic-template", "operation-1")
 	if err != nil {
-		t.Fatalf("NewSandboxWorkloadName: %v", err)
-	}
-	rsName := workloadName.ReplicaSetName()
-	if len(rsName) > replicaSetMaxLen {
-		t.Fatalf("replicaset name too long: %d", len(rsName))
-	}
-
-	sandboxName, err := SandboxName(clusterID, templateName, "abcde")
-	if err != nil {
-		t.Fatalf("sandbox name: %v", err)
+		t.Fatalf("SandboxNameForOperation: %v", err)
 	}
 	if len(sandboxName) > sandboxNameMaxLen {
 		t.Fatalf("sandbox name too long: %d", len(sandboxName))
 	}
-
 	parsed, err := ParseSandboxName(sandboxName)
 	if err != nil {
 		t.Fatalf("parse sandbox name: %v", err)
@@ -36,8 +24,7 @@ func TestReplicasetAndSandboxNames(t *testing.T) {
 }
 
 func TestSandboxNameForLongTeamTemplateFitsExposureHostLabel(t *testing.T) {
-	templateName := TemplateNameForCluster(ScopeTeam, "team-a", "e2e-fullmode-rc-123456789")
-	sandboxName, err := SandboxName(DefaultClusterID, templateName, "abcde")
+	sandboxName, err := SandboxNameForOperation(DefaultClusterID, "e2e-fullmode-rc-123456789", "operation-1")
 	if err != nil {
 		t.Fatalf("SandboxName: %v", err)
 	}
@@ -95,21 +82,6 @@ func TestSandboxNameForOperationSupportsLongestClusterID(t *testing.T) {
 	}
 }
 
-func TestReplicasetNameFitsSandboxExposureBudget(t *testing.T) {
-	workloadName, err := NewSandboxWorkloadName(DefaultClusterID, strings.Repeat("long-template-", 8))
-	if err != nil {
-		t.Fatalf("NewSandboxWorkloadName: %v", err)
-	}
-	rsName := workloadName.ReplicaSetName()
-	maxReplicaSetNameForExposure := sandboxNameMaxLen - 1 - podRandSuffixLen
-	if len(rsName) > maxReplicaSetNameForExposure {
-		t.Fatalf("replicaset name too long for exposure-safe pods: %d > %d", len(rsName), maxReplicaSetNameForExposure)
-	}
-	if _, err := BuildExposureHostLabel(rsName+"-abcde", 65535); err != nil {
-		t.Fatalf("BuildExposureHostLabel: %v", err)
-	}
-}
-
 func TestExposureHostLabel(t *testing.T) {
 	sandboxName := "rs-mfwha2dbfzzsayjaomxwg2dbon2gc-zd0b8631-abcde"
 	label, err := BuildExposureHostLabel(sandboxName, 3000)
@@ -138,19 +110,6 @@ func TestExposureHostLabelRejectsInvalid(t *testing.T) {
 	}
 	if _, _, err := ParseExposureHostLabel("rs-valid-name-p3000"); err == nil {
 		t.Fatalf("expected parse error")
-	}
-}
-
-func TestTemplateNameForCluster(t *testing.T) {
-	name := TemplateNameForCluster(ScopeTeam, "team-123", "my-template-name")
-	if name == "" {
-		t.Fatalf("expected template name to be non-empty")
-	}
-	if len(name) > dnsLabelMaxLen {
-		t.Fatalf("template name too long: %d", len(name))
-	}
-	if err := validateDNSLabel(name); err != nil {
-		t.Fatalf("template name invalid: %v", err)
 	}
 }
 
@@ -193,32 +152,6 @@ func TestValidateClusterID(t *testing.T) {
 		if err := ValidateClusterID(clusterID); err == nil {
 			t.Fatalf("expected clusterID %q to be invalid", clusterID)
 		}
-	}
-}
-
-func TestTemplateNamespaceForBuiltin(t *testing.T) {
-	namespace, err := TemplateNamespaceForBuiltin("My Template ID")
-	if err != nil {
-		t.Fatalf("TemplateNamespaceForBuiltin: %v", err)
-	}
-	if len(namespace) > dnsLabelMaxLen {
-		t.Fatalf("namespace too long: %d", len(namespace))
-	}
-	if err := validateDNSLabel(namespace); err != nil {
-		t.Fatalf("namespace invalid: %v", err)
-	}
-}
-
-func TestTemplateNamespaceForTeam(t *testing.T) {
-	namespace, err := TemplateNamespaceForTeam("team-123")
-	if err != nil {
-		t.Fatalf("TemplateNamespaceForTeam: %v", err)
-	}
-	if len(namespace) > dnsLabelMaxLen {
-		t.Fatalf("namespace too long: %d", len(namespace))
-	}
-	if err := validateDNSLabel(namespace); err != nil {
-		t.Fatalf("namespace invalid: %v", err)
 	}
 }
 

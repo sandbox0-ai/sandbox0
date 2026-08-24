@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
@@ -52,7 +52,7 @@ func configureRootFSCompositeMaterializer(
 	if err != nil {
 		return nil, err
 	}
-	if cfg != nil && cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad && worker == nil {
+	if cfg != nil && worker == nil {
 		return nil, fmt.Errorf("Nomad sandbox runtime requires the RootFS composite materializer and conditional object storage")
 	}
 	return worker, nil

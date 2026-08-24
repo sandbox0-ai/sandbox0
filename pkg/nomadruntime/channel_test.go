@@ -202,7 +202,7 @@ func TestNomadRuntimeNodeChannelPreparesExactCgroupBeforeDriverClaim(t *testing.
 	request := testNomadNodeClaimControlRequest(t)
 	target := protocol.NodeChannelTarget{
 		SlotID: request.Resources.SlotID, ClusterID: request.Resources.ClusterID,
-		AllocationID: request.Stage.Identity.PodUID, NodeID: request.Resources.NodeID,
+		AllocationID: request.Stage.Identity.AllocationID, NodeID: request.Resources.NodeID,
 		NodeUID: request.Resources.NodeUID, NodeBootID: request.Resources.NodeBootID,
 		ControlEndpoint: "unix://" + socket,
 	}
@@ -297,8 +297,8 @@ func TestNomadRuntimeNodeChannelExecutorDelegatesNetworkToCtld(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(writer).Encode(rootfshandoff.NetworkPolicyToken{
-			PodUID: request.AllocationID, PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(request), ClaimID: request.ClaimID,
-			NetworkEpoch: 1, PolicyDigest: request.PolicyDigest, PodIP: "192.0.2.8",
+			AllocationID: request.AllocationID, NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(request), ClaimID: request.ClaimID,
+			NetworkEpoch: 1, PolicyDigest: request.PolicyDigest, SourceIP: "192.0.2.8",
 			CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 		})
 	})}
@@ -318,7 +318,7 @@ func TestNomadRuntimeNodeChannelExecutorDelegatesNetworkToCtld(t *testing.T) {
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 	}
 	token, err := executor.PrepareNetwork(t.Context(), target, request)
-	if err != nil || token.PodIP != "192.0.2.8" {
+	if err != nil || token.SourceIP != "192.0.2.8" {
 		t.Fatalf("PrepareNetwork() = %+v, %v", token, err)
 	}
 }
@@ -331,14 +331,14 @@ func testNomadNodeClaimControlRequest(t *testing.T) protocol.NodeClaimControlReq
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         "sha256:" + strings.Repeat("a", 64), InitialGeneration: "generation-1",
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ClaimID: "claim-1",
-			NetworkEpoch: 4, PolicyDigest: protocol.NetworkPolicyDigest(networkPolicy), PodIP: "192.0.2.2",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", ClaimID: "claim-1",
+			NetworkEpoch: 4, PolicyDigest: protocol.NetworkPolicyDigest(networkPolicy), SourceIP: "192.0.2.2",
 			CtldGeneration: "ctld-1", NetNSIdentity: "1:2",
 		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: "node-uid-1", BootID: "boot-1", RuntimeGeneration: "runtime-1",
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ContainerName: "slot",
-			Image: "procd-image-1", Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", TaskName: "slot",
+			SourceOCIDigest: "procd-image-1", RootFSDriver: "nomad-driver", RuntimeClass: "sandbox0-gvisor",
 			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
 			RootFSID: "filesystem-1", WriterEpoch: 4, WriterGrantID: "grant-1",
 			WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),

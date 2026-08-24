@@ -14,13 +14,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	digest "github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 )
 
 const (
-	RootFSStorageFormatLegacyLayer = "legacy-layer"
-	RootFSStorageFormatBlockCOWV1  = "block-cow-v1"
-
 	RootFSBaseArtifactStateReady = "ready"
 
 	RootFSGenerationStateLocalSealed      = "local_sealed"
@@ -101,8 +100,7 @@ func (p RootFSArtifactPlatform) Validate() error {
 	return nil
 }
 
-// RootFSGeneration is one immutable durable block-map generation. It is not a
-// legacy OCI diff layer and must never be inserted into rootfs_layers.
+// RootFSGeneration is one immutable durable block-map generation.
 type RootFSGeneration struct {
 	ID                 string
 	FilesystemID       string
@@ -124,14 +122,33 @@ type RootFSGeneration struct {
 	MaterializationTeamID   string
 }
 
-type PutReadyRootFSBaseArtifactRequest struct {
-	ArtifactDigest   string
-	SourceOCIRef     string
-	SourceOCIDigest  string
-	BaseBlockRoot    string
+// ReadyRootFSArtifactRequirements identifies the exact runtime-consumable
+// artifact shape. A source digest alone is insufficient because procd and the
+// immutable logical block-device size participate in runtime compatibility.
+type ReadyRootFSArtifactRequirements struct {
 	FormatGeneration int
-	Platform         RootFSArtifactPlatform
-	Descriptor       []byte
+	LogicalSizeBytes int64
+	ProcdProtocol    string
+	ProcdDigest      string
+}
+
+func (r ReadyRootFSArtifactRequirements) Validate() error {
+	if r.FormatGeneration <= 0 {
+		return fmt.Errorf("format_generation must be positive")
+	}
+	if r.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
+		r.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
+		r.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
+		return fmt.Errorf("logical_size_bytes is outside the supported aligned range")
+	}
+	if err := rootfsimporter.ValidateProcdProtocol(r.ProcdProtocol); err != nil {
+		return err
+	}
+	procdDigest, err := digest.Parse(r.ProcdDigest)
+	if err != nil || rootfsimporter.ValidateArtifactSHA256Digest(procdDigest) != nil {
+		return fmt.Errorf("procd_digest must be canonical SHA-256")
+	}
+	return nil
 }
 
 type EnsureInitialRootFSGenerationRequest struct {
@@ -142,12 +159,11 @@ type EnsureInitialRootFSGenerationRequest struct {
 	BaseArtifactDigest string
 }
 
-// RootFSGenerationStore is kept separate from SandboxStore while the legacy
-// diff-layer product remains available during the format migration.
+// RootFSGenerationStore owns the immutable block-COW artifact and generation
+// lifecycle used by claims, forks, and paused rebases.
 type RootFSGenerationStore interface {
-	PutReadyRootFSBaseArtifact(context.Context, *PutReadyRootFSBaseArtifactRequest) (*RootFSBaseArtifact, error)
-	GetReadyRootFSBaseArtifact(context.Context, string, RootFSArtifactPlatform, int) (*RootFSBaseArtifact, error)
-	GetReadyRootFSBaseArtifactByDigest(context.Context, string, RootFSArtifactPlatform) (*RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifact(context.Context, string, RootFSArtifactPlatform, ReadyRootFSArtifactRequirements) (*RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifactByDigest(context.Context, string, RootFSArtifactPlatform, ReadyRootFSArtifactRequirements) (*RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *EnsureInitialRootFSGenerationRequest) (*RootFSFilesystem, *RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*RootFSGeneration, error)
 	ForkRunningRootFSFilesystem(context.Context, *ForkRunningRootFSFilesystemRequest) (*RootFSFilesystem, error)
@@ -177,11 +193,10 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			return fmt.Errorf("paused rootfs rebase requires a PostgreSQL transaction")
 		}
 		if record != nil && record.TeamID == normalized.TeamID &&
-			record.RuntimeBackend == SandboxRuntimeBackendNomad &&
 			record.DesiredState == SandboxDesiredStateTerminating && record.DeletedAt.IsZero() {
 			return ErrNomadPausedRebaseTerminating
 		}
-		if record == nil || record.TeamID != normalized.TeamID || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
+		if record == nil || record.TeamID != normalized.TeamID ||
 			record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() ||
 			record.RuntimeNamespace != "" || record.RuntimeID != "" {
 			return fmt.Errorf("%w: sandbox %s is not a paused team-owned source", ErrRootFSGenerationConflict, normalized.SandboxID)
@@ -213,7 +228,7 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			}
 			return fmt.Errorf("%w: committed rebase publication is missing", ErrRootFSGenerationConflict)
 		}
-		if filesystem.StorageFormat != RootFSStorageFormatBlockCOWV1 || filesystem.TeamID != normalized.TeamID ||
+		if filesystem.TeamID != normalized.TeamID ||
 			filesystem.HeadGenerationID != normalized.ExpectedSourceGenerationID ||
 			filesystem.BaseArtifactDigest != normalized.ExpectedBaseArtifactDigest ||
 			source.ID != normalized.ExpectedSourceGenerationID ||
@@ -234,7 +249,7 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			normalized.Generation.ID, normalized.RollbackExpiresAt,
 			normalized.WorkerClusterID, normalized.WorkerNodeID, normalized.WorkerNodeUID, false,
 		) || lifecycle.ID != normalized.OperationID ||
-			normalized.ExpectedSourceGenerationID != lifecycle.ExpectedHeadLayerID ||
+			normalized.ExpectedSourceGenerationID != lifecycle.ExpectedGenerationID ||
 			normalized.ExpectedBaseArtifactDigest != lifecycle.SourceBaseArtifactDigest {
 			return fmt.Errorf("%w: active rebase lifecycle identity changed", ErrRootFSGenerationConflict)
 		}
@@ -277,21 +292,19 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			return insertErr
 		}
 		tag, updateErr := txStore.tx.Exec(lockCtx, `
-			UPDATE manager.rootfs_filesystems
-			SET head_generation_id = $1,
-				writer_epoch = $2,
-				base_artifact_digest = $3,
-				format_generation = $4,
-				base_image_ref = $5,
-				base_image_digest = $6,
-				updated_at = NOW()
-			WHERE filesystem_id = $7
-				AND head_generation_id = $8
-				AND base_artifact_digest = $9
-				AND writer_epoch = $10
-		`, normalized.Generation.ID, normalized.Generation.WriterEpoch,
+				UPDATE manager.rootfs_filesystems
+				SET head_generation_id = $1,
+					writer_epoch = $2,
+					base_artifact_digest = $3,
+					format_generation = $4,
+					updated_at = NOW()
+				WHERE filesystem_id = $5
+					AND head_generation_id = $6
+					AND base_artifact_digest = $7
+					AND writer_epoch = $8
+			`, normalized.Generation.ID, normalized.Generation.WriterEpoch,
 			normalized.Generation.BaseArtifactDigest, normalized.Generation.FormatGeneration,
-			artifact.SourceOCIRef, normalized.Generation.SourceOCIDigest, filesystem.ID,
+			filesystem.ID,
 			normalized.ExpectedSourceGenerationID, normalized.ExpectedBaseArtifactDigest,
 			filesystem.WriterEpoch)
 		if updateErr != nil {
@@ -331,13 +344,18 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			return fmt.Errorf("commit paused rootfs rebase lifecycle: %w", lifecycleErr)
 		}
 		published, loadErr = scanRootFSFilesystem(txStore.tx.QueryRow(lockCtx, `
-			SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				writer_epoch, base_image_ref, base_image_digest, storage_format,
-				base_artifact_digest, format_generation, head_generation_id,
-				created_at, updated_at
-			FROM manager.rootfs_filesystems
-			WHERE filesystem_id = $1
-		`, filesystem.ID))
+				SELECT filesystem.filesystem_id, filesystem.team_id,
+					filesystem.source_filesystem_id, filesystem.writer_epoch,
+					filesystem.head_generation_id, filesystem.base_artifact_digest,
+					filesystem.format_generation, artifact.source_oci_ref,
+					generation.source_oci_digest, filesystem.created_at, filesystem.updated_at
+				FROM manager.rootfs_filesystems filesystem
+				JOIN manager.rootfs_generations generation
+					ON generation.generation_id = filesystem.head_generation_id
+				JOIN manager.rootfs_base_artifacts artifact
+					ON artifact.artifact_digest = filesystem.base_artifact_digest
+				WHERE filesystem.filesystem_id = $1
+			`, filesystem.ID))
 		return loadErr
 	})
 	if err != nil {
@@ -346,50 +364,11 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 	return published, nil
 }
 
-func (s *PGSandboxStore) PutReadyRootFSBaseArtifact(
-	ctx context.Context,
-	req *PutReadyRootFSBaseArtifactRequest,
-) (*RootFSBaseArtifact, error) {
-	if s == nil || s.pool == nil {
-		return nil, fmt.Errorf("rootfs generation store is not configured")
-	}
-	normalized, err := validateReadyRootFSBaseArtifact(req)
-	if err != nil {
-		return nil, err
-	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO manager.rootfs_base_artifacts (
-			artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
-			format_generation, oci_os, oci_architecture, oci_variant,
-			state, descriptor, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-		ON CONFLICT (artifact_digest) DO NOTHING
-	`, normalized.ArtifactDigest, normalized.SourceOCIRef, normalized.SourceOCIDigest,
-		normalized.BaseBlockRoot, normalized.FormatGeneration, normalized.Platform.OS,
-		normalized.Platform.Architecture, normalized.Platform.Variant,
-		RootFSBaseArtifactStateReady, normalized.Descriptor)
-	if err != nil {
-		return nil, fmt.Errorf("put ready rootfs base artifact: %w", err)
-	}
-	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
-		WHERE artifact_digest = $1
-	`, normalized.ArtifactDigest))
-	if err != nil {
-		return nil, fmt.Errorf("read ready rootfs base artifact: %w", err)
-	}
-	if !rootFSBaseArtifactMatchesRequest(artifact, normalized) {
-		return nil, fmt.Errorf("%w: artifact %s has different immutable fields",
-			ErrRootFSBaseArtifactConflict, normalized.ArtifactDigest)
-	}
-	return artifact, nil
-}
-
 func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 	ctx context.Context,
 	sourceOCIDigest string,
 	platform RootFSArtifactPlatform,
-	formatGeneration int,
+	requirements ReadyRootFSArtifactRequirements,
 ) (*RootFSBaseArtifact, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("rootfs generation store is not configured")
@@ -401,19 +380,27 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 	if err := platform.Validate(); err != nil {
 		return nil, err
 	}
+	if err := requirements.Validate(); err != nil {
+		return nil, err
+	}
 	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
 		WHERE source_oci_digest = $1
 			AND state = $2
 			AND oci_os = $3
 			AND oci_architecture = $4
 			AND oci_variant = $5
-			AND ($6 = 0 OR format_generation = $6)
+			AND format_generation = $6
+			AND logical_size_bytes = $7
+			AND procd_protocol = $8
+			AND procd_digest = $9
 		ORDER BY format_generation DESC, created_at DESC
 		LIMIT 1
 	`, sourceOCIDigest, RootFSBaseArtifactStateReady, platform.OS,
-		platform.Architecture, platform.Variant, formatGeneration))
+		platform.Architecture, platform.Variant, requirements.FormatGeneration,
+		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("%w: source %s", ErrRootFSBaseArtifactNotFound, sourceOCIDigest)
+		return nil, fmt.Errorf("%w: source %s with logical size %d",
+			ErrRootFSBaseArtifactNotFound, sourceOCIDigest, requirements.LogicalSizeBytes)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get ready rootfs base artifact: %w", err)
@@ -425,6 +412,7 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 	ctx context.Context,
 	artifactDigest string,
 	platform RootFSArtifactPlatform,
+	requirements ReadyRootFSArtifactRequirements,
 ) (*RootFSBaseArtifact, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("rootfs generation store is not configured")
@@ -436,14 +424,22 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 	if err := platform.Validate(); err != nil {
 		return nil, err
 	}
+	if err := requirements.Validate(); err != nil {
+		return nil, err
+	}
 	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
 		WHERE artifact_digest = $1
 			AND state = $2
 			AND oci_os = $3
 			AND oci_architecture = $4
 			AND oci_variant = $5
+			AND format_generation = $6
+			AND logical_size_bytes = $7
+			AND procd_protocol = $8
+			AND procd_digest = $9
 	`, artifactDigest, RootFSBaseArtifactStateReady, platform.OS,
-		platform.Architecture, platform.Variant))
+		platform.Architecture, platform.Variant, requirements.FormatGeneration,
+		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: artifact %s for %s/%s/%s", ErrRootFSBaseArtifactNotFound,
 			artifactDigest, platform.OS, platform.Architecture, platform.Variant)
@@ -544,13 +540,12 @@ func (s *PGSandboxStore) ensureInitialRootFSGenerationOnce(
 	generationID := initialRootFSGenerationID(filesystemID, artifact.ArtifactDigest, artifact.FormatGeneration)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_filesystems (
-			filesystem_id, team_id, storage_format, base_artifact_digest,
-			format_generation, base_image_ref, base_image_digest, created_at, updated_at
+			filesystem_id, team_id, base_artifact_digest,
+			format_generation, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-	`, filesystemID, normalized.TeamID, RootFSStorageFormatBlockCOWV1,
-		artifact.ArtifactDigest, artifact.FormatGeneration, normalized.SourceOCIRef,
-		normalized.SourceOCIDigest); err != nil {
+		VALUES ($1, $2, $3, $4, NOW(), NOW())
+	`, filesystemID, normalized.TeamID, artifact.ArtifactDigest,
+		artifact.FormatGeneration); err != nil {
 		return nil, nil, fmt.Errorf("create block-cow rootfs filesystem: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -618,10 +613,9 @@ func getInitialRootFSGenerationForSandbox(
 	sandboxID string,
 ) (*RootFSFilesystem, *RootFSGeneration, error) {
 	row := query.QueryRow(ctx, `
-		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.head_layer_id,
-			f.writer_epoch, f.base_image_ref, f.base_image_digest, f.storage_format,
-			f.base_artifact_digest, f.format_generation, f.head_generation_id,
-			f.created_at, f.updated_at,
+		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.writer_epoch,
+			f.head_generation_id, f.base_artifact_digest, f.format_generation,
+			artifact.source_oci_ref, g.source_oci_digest, f.created_at, f.updated_at,
 			g.generation_id, g.filesystem_id, g.parent_generation_id,
 			g.source_oci_digest, g.base_artifact_digest, g.base_block_root,
 			g.current_block_head, g.writer_epoch, g.format_generation,
@@ -629,54 +623,13 @@ func getInitialRootFSGenerationForSandbox(
 		FROM manager.sandbox_rootfs_bindings b
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 		JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
+		JOIN manager.rootfs_base_artifacts artifact
+			ON artifact.artifact_digest = f.base_artifact_digest
 		WHERE b.sandbox_id = $1
 		FOR UPDATE OF f
 	`, sandboxID)
 	filesystem, generation, err := scanRootFSFilesystemAndGeneration(row)
 	return filesystem, generation, err
-}
-
-func validateReadyRootFSBaseArtifact(req *PutReadyRootFSBaseArtifactRequest) (*PutReadyRootFSBaseArtifactRequest, error) {
-	if req == nil {
-		return nil, fmt.Errorf("rootfs base artifact request is required")
-	}
-	normalized := *req
-	normalized.ArtifactDigest = strings.TrimSpace(req.ArtifactDigest)
-	normalized.SourceOCIRef = strings.TrimSpace(req.SourceOCIRef)
-	normalized.SourceOCIDigest = strings.TrimSpace(req.SourceOCIDigest)
-	normalized.BaseBlockRoot = strings.TrimSpace(req.BaseBlockRoot)
-	normalized.Descriptor = append([]byte(nil), req.Descriptor...)
-	for field, value := range map[string]string{
-		"source_oci_ref": normalized.SourceOCIRef, "base_block_root": normalized.BaseBlockRoot,
-	} {
-		if value == "" {
-			return nil, fmt.Errorf("%s is required", field)
-		}
-	}
-	for field, value := range map[string]string{
-		"artifact_digest": normalized.ArtifactDigest, "source_oci_digest": normalized.SourceOCIDigest,
-	} {
-		if _, err := digest.Parse(value); err != nil {
-			return nil, fmt.Errorf("%s: %w", field, err)
-		}
-	}
-	if normalized.FormatGeneration <= 0 {
-		return nil, fmt.Errorf("format_generation must be positive")
-	}
-	if err := normalized.Platform.Validate(); err != nil {
-		return nil, err
-	}
-	if len(normalized.Descriptor) == 0 || len(normalized.Descriptor) > RootFSGenerationDescriptorMaxBytes {
-		return nil, fmt.Errorf("descriptor must contain 1..%d bytes", RootFSGenerationDescriptorMaxBytes)
-	}
-	descriptor, err := rootfsblock.DecodeDescriptor(normalized.Descriptor)
-	if err != nil {
-		return nil, fmt.Errorf("descriptor: %w", err)
-	}
-	if descriptor.MappingRoot.RootDigest != normalized.BaseBlockRoot || descriptor.CompositeTail != nil {
-		return nil, fmt.Errorf("base artifact descriptor must point at the exact S3-materialized base block root")
-	}
-	return &normalized, nil
 }
 
 func validateEnsureInitialRootFSGeneration(req *EnsureInitialRootFSGenerationRequest) (*EnsureInitialRootFSGenerationRequest, error) {
@@ -816,10 +769,9 @@ func getRootFSFilesystemAndGenerationForUpdate(
 	sandboxID string,
 ) (*RootFSFilesystem, *RootFSGeneration, error) {
 	filesystem, generation, err := scanRootFSFilesystemAndGeneration(tx.QueryRow(ctx, `
-		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.head_layer_id,
-			f.writer_epoch, f.base_image_ref, f.base_image_digest, f.storage_format,
-			f.base_artifact_digest, f.format_generation, f.head_generation_id,
-			f.created_at, f.updated_at,
+		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.writer_epoch,
+			f.head_generation_id, f.base_artifact_digest, f.format_generation,
+			artifact.source_oci_ref, g.source_oci_digest, f.created_at, f.updated_at,
 			g.generation_id, g.filesystem_id, g.parent_generation_id,
 			g.source_oci_digest, g.base_artifact_digest, g.base_block_root,
 			g.current_block_head, g.writer_epoch, g.format_generation,
@@ -827,6 +779,8 @@ func getRootFSFilesystemAndGenerationForUpdate(
 		FROM manager.sandbox_rootfs_bindings binding
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = binding.filesystem_id
 		JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
+		JOIN manager.rootfs_base_artifacts artifact
+			ON artifact.artifact_digest = f.base_artifact_digest
 		WHERE binding.sandbox_id = $1
 		FOR UPDATE OF f, g
 	`, sandboxID))
@@ -895,8 +849,8 @@ func committedNomadPausedRebaseLifecycleMatchesRequest(
 		lifecycle.FromRuntimeID == "" && lifecycle.ToRuntimeNamespace == "" && lifecycle.ToRuntimeID == "" &&
 		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
 		lifecycle.TargetGenerationID == request.Generation.ID &&
-		lifecycle.PreparedHeadLayerID == request.Generation.ID &&
-		lifecycle.ExpectedHeadLayerID == request.ExpectedSourceGenerationID &&
+		lifecycle.PreparedGenerationID == request.Generation.ID &&
+		lifecycle.ExpectedGenerationID == request.ExpectedSourceGenerationID &&
 		lifecycle.SourceBaseArtifactDigest == request.ExpectedBaseArtifactDigest &&
 		lifecycle.TargetBaseArtifactDigest == request.Generation.BaseArtifactDigest &&
 		lifecycle.WorkerClusterID == request.WorkerClusterID &&
@@ -965,14 +919,6 @@ func initialRootFSGenerationID(filesystemID, artifactDigest string, formatGenera
 	return "rootfs-generation-" + hex.EncodeToString(sum[:])
 }
 
-func rootFSBaseArtifactMatchesRequest(artifact *RootFSBaseArtifact, req *PutReadyRootFSBaseArtifactRequest) bool {
-	return artifact != nil && req != nil && artifact.ArtifactDigest == req.ArtifactDigest &&
-		artifact.SourceOCIRef == req.SourceOCIRef && artifact.SourceOCIDigest == req.SourceOCIDigest &&
-		artifact.BaseBlockRoot == req.BaseBlockRoot && artifact.FormatGeneration == req.FormatGeneration &&
-		artifact.Platform == req.Platform &&
-		artifact.State == RootFSBaseArtifactStateReady && string(artifact.Descriptor) == string(req.Descriptor)
-}
-
 func initialRootFSGenerationMatches(
 	filesystem *RootFSFilesystem,
 	generation *RootFSGeneration,
@@ -980,7 +926,6 @@ func initialRootFSGenerationMatches(
 	req *EnsureInitialRootFSGenerationRequest,
 ) bool {
 	return filesystem != nil && generation != nil && artifact != nil && req != nil &&
-		filesystem.StorageFormat == RootFSStorageFormatBlockCOWV1 &&
 		filesystem.TeamID == req.TeamID && filesystem.BaseImageRef == req.SourceOCIRef &&
 		filesystem.BaseImageDigest == req.SourceOCIDigest &&
 		filesystem.BaseArtifactDigest == artifact.ArtifactDigest &&
@@ -1050,12 +995,12 @@ func scanRootFSGeneration(row sandboxRecordScanner) (*RootFSGeneration, error) {
 func scanRootFSFilesystemAndGeneration(row sandboxRecordScanner) (*RootFSFilesystem, *RootFSGeneration, error) {
 	var filesystem RootFSFilesystem
 	var generation RootFSGeneration
-	var sourceFilesystemID, headLayerID, baseArtifactDigest, headGenerationID, parentGenerationID *string
-	var formatGeneration *int
+	var sourceFilesystemID, headGenerationID, parentGenerationID *string
 	if err := row.Scan(
-		&filesystem.ID, &filesystem.TeamID, &sourceFilesystemID, &headLayerID,
-		&filesystem.WriterEpoch, &filesystem.BaseImageRef, &filesystem.BaseImageDigest,
-		&filesystem.StorageFormat, &baseArtifactDigest, &formatGeneration, &headGenerationID,
+		&filesystem.ID, &filesystem.TeamID, &sourceFilesystemID,
+		&filesystem.WriterEpoch, &headGenerationID,
+		&filesystem.BaseArtifactDigest, &filesystem.FormatGeneration,
+		&filesystem.BaseImageRef, &filesystem.BaseImageDigest,
 		&filesystem.CreatedAt, &filesystem.UpdatedAt,
 		&generation.ID, &generation.FilesystemID, &parentGenerationID,
 		&generation.SourceOCIDigest, &generation.BaseArtifactDigest, &generation.BaseBlockRoot,
@@ -1067,15 +1012,6 @@ func scanRootFSFilesystemAndGeneration(row sandboxRecordScanner) (*RootFSFilesys
 	}
 	if sourceFilesystemID != nil {
 		filesystem.SourceFilesystemID = *sourceFilesystemID
-	}
-	if headLayerID != nil {
-		filesystem.HeadLayerID = *headLayerID
-	}
-	if baseArtifactDigest != nil {
-		filesystem.BaseArtifactDigest = *baseArtifactDigest
-	}
-	if formatGeneration != nil {
-		filesystem.FormatGeneration = *formatGeneration
 	}
 	if headGenerationID != nil {
 		filesystem.HeadGenerationID = *headGenerationID

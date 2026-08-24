@@ -11,13 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestPreviewBootstrapAndPrivateProxy(t *testing.T) {
@@ -79,7 +78,7 @@ func TestPreviewBootstrapAndPrivateProxy(t *testing.T) {
 	server := &Server{
 		cfg: &config.ClusterGatewayConfig{
 			GatewayConfig: config.GatewayConfig{PublicExposureEnabled: true, PublicRootDomain: "sandbox0.app", PublicRegionID: "aws-us-east-1"},
-			ProxyTimeout:  metav1.Duration{Duration: time.Second},
+			ProxyTimeout:  config.Duration{Duration: time.Second},
 		},
 		logger:          zap.NewNop(),
 		managerClient:   client.NewManagerClient(manager.URL, generator, zap.NewNop(), time.Second),

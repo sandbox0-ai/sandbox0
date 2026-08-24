@@ -519,7 +519,7 @@ func (c *Client) Incarnation(ctx context.Context) (RuntimeIncarnation, error) {
 		return RuntimeIncarnation{}, err
 	}
 	if err := result.Validate(); err != nil {
-		return RuntimeIncarnation{}, fmt.Errorf("invalid rootfs Snapshotter incarnation: %w: %w", err, errdefs.ErrUnavailable)
+		return RuntimeIncarnation{}, fmt.Errorf("invalid rootfs runtime incarnation: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	return result, nil
 }

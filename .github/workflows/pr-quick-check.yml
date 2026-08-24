@@ -31,9 +31,6 @@ jobs:
         with:
           cache-key-suffix: pr-amd64
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
       - name: Install golangci-lint
         shell: bash
         run: |
@@ -59,7 +56,7 @@ jobs:
       - name: Verify generated artifacts are up to date
         shell: bash
         run: |
-          make manifests apispec
+          make apispec
           git diff --exit-code
 
       - name: Verify go.mod/go.sum are tidy
@@ -67,9 +64,6 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
-
-      - name: Helm lint
-        run: helm lint infra-operator/chart
 
       - name: Run golangci-lint
         run: GOFLAGS=-buildvcs=false golangci-lint run ./...

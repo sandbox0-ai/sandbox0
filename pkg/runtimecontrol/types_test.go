@@ -1,11 +1,6 @@
 package runtimecontrol
 
-import (
-	"testing"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
+import "testing"
 
 func TestAssignmentRevisionIsStable(t *testing.T) {
 	first := Assignment{
@@ -41,35 +36,5 @@ func TestAssignmentRevisionIsStable(t *testing.T) {
 func TestAssignmentRevisionRejectsInvalidGeneration(t *testing.T) {
 	if _, err := (Assignment{SandboxID: "sandbox-a"}).Revision(); err == nil {
 		t.Fatal("Revision() error = nil, want invalid generation")
-	}
-}
-
-func TestAssignmentFromPodUsesExistingManifest(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				AnnotationSandboxID:         "sandbox-1",
-				AnnotationTeamID:            "team-1",
-				AnnotationRuntimeGeneration: "3",
-				AnnotationAppDomain:         "region.example.test.",
-				AnnotationConfig:            `{"env_vars":{"USER_VALUE":"yes"},"webhook":{"url":"https://example.test/events","watch_dir":"/workspace"}}`,
-			},
-		},
-	}
-
-	assignment, revision, err := AssignmentFromPod(pod)
-	if err != nil {
-		t.Fatalf("AssignmentFromPod() error = %v", err)
-	}
-	if revision == "" {
-		t.Fatal("AssignmentFromPod() returned an empty revision")
-	}
-	if assignment.SandboxID != "sandbox-1" || assignment.TeamID != "team-1" || assignment.RuntimeGeneration != 3 {
-		t.Fatalf("AssignmentFromPod() = %#v", assignment)
-	}
-	if assignment.EnvVars[EnvSandboxID] != "sandbox-1" ||
-		assignment.EnvVars[EnvAppDomain] != "region.example.test" ||
-		assignment.EnvVars["USER_VALUE"] != "yes" {
-		t.Fatalf("AssignmentFromPod() env = %#v", assignment.EnvVars)
 	}
 }

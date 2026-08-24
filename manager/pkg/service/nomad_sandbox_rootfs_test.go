@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 func TestNomadSandboxRootFSServiceManagesPausedBlockSnapshots(t *testing.T) {
@@ -80,37 +80,21 @@ func TestNomadSandboxRootFSServiceFailsClosed(t *testing.T) {
 		ID: "resume-a", SandboxID: "sandbox-a", Kind: sandboxstore.SandboxLifecycleKindResume,
 		Phase: sandboxstore.SandboxLifecyclePhasePreparing,
 	}
-	if _, err := service.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-a", "team-a", nil); !apierrors.IsConflict(err) {
+	if _, err := service.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-a", "team-a", nil); !apierror.IsConflict(err) {
 		t.Fatalf("lifecycle snapshot error = %v", err)
 	}
 	delete(store.lifecycleTxns, "resume-a")
-	store.records["sandbox-a"].RuntimeBackend = "kubernetes"
-	if _, err := service.ListSandboxRootFSSnapshots(context.Background(), "sandbox-a", "team-a"); !apierrors.IsConflict(err) {
-		t.Fatalf("foreign runtime list error = %v", err)
-	}
-	store.records["sandbox-a"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendNomad
-	if _, err := service.ListSandboxRootFSSnapshots(context.Background(), "sandbox-a", "team-b"); !apierrors.IsForbidden(err) {
+	if _, err := service.ListSandboxRootFSSnapshots(context.Background(), "sandbox-a", "team-b"); !apierror.IsForbidden(err) {
 		t.Fatalf("cross-team list error = %v", err)
 	}
 
-	store.rootFSSnapshots["legacy-a"] = &sandboxstore.RootFSSnapshot{
-		ID: "legacy-a", TeamID: "team-a", SourceSandboxID: "sandbox-a",
-		StorageFormat: sandboxstore.RootFSStorageFormatLegacyLayer, HeadLayerID: "layer-a",
-	}
-	if _, err := service.GetSandboxRootFSSnapshot(context.Background(), "legacy-a", "team-a"); !errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
-		t.Fatalf("legacy snapshot get error = %v", err)
-	}
-	if err := service.DeleteSandboxRootFSSnapshot(context.Background(), "legacy-a", "team-a"); !errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
-		t.Fatalf("legacy snapshot delete error = %v", err)
-	}
 	if _, err := service.GetSandboxRootFSSnapshot(context.Background(), template.BuildSnapshotID("build-a"), "team-a"); !errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 		t.Fatalf("internal snapshot get error = %v", err)
 	}
 
 	store.records["sandbox-b"].DesiredState = sandboxstore.SandboxDesiredStateActive
 	store.rootFSSnapshots["snapshot-a"] = &sandboxstore.RootFSSnapshot{
-		ID: "snapshot-a", FilesystemID: "filesystem-a", TeamID: "team-a", SourceSandboxID: "sandbox-a",
-		StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1, HeadGenerationID: "generation-a",
+		ID: "snapshot-a", FilesystemID: "filesystem-a", TeamID: "team-a", SourceSandboxID: "sandbox-a", HeadGenerationID: "generation-a",
 	}
 	if _, err := service.RestoreSandboxRootFS(context.Background(), "sandbox-b", "team-a", &RestoreSandboxRootFSRequest{SnapshotID: "snapshot-a"}); !errors.Is(err, ErrSandboxRootFSRequiresPausedSandbox) {
 		t.Fatalf("active restore error = %v", err)
@@ -125,23 +109,21 @@ func newNomadRootFSTestStore(now time.Time) *nomadRootFSTestStore {
 	return &nomadRootFSTestStore{memorySandboxStore: &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
-				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: now, UpdatedAt: now,
+				ID: "sandbox-a", TeamID: "team-a", DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: now, UpdatedAt: now,
 			},
 			"sandbox-b": {
-				ID: "sandbox-b", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-				DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: now, UpdatedAt: now,
+				ID: "sandbox-b", TeamID: "team-a", DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: now, UpdatedAt: now,
 			},
 		},
 		lifecycleTxns:   map[string]*sandboxstore.SandboxLifecycleTxn{},
 		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{},
 		rootFSFilesystems: map[string]*sandboxstore.RootFSFilesystem{
 			"sandbox-a": {
-				ID: "filesystem-a", TeamID: "team-a", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+				ID: "filesystem-a", TeamID: "team-a",
 				HeadGenerationID: "generation-a",
 			},
 			"sandbox-b": {
-				ID: "filesystem-b", TeamID: "team-a", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+				ID: "filesystem-b", TeamID: "team-a",
 				HeadGenerationID: "generation-b",
 			},
 		},
@@ -163,14 +145,14 @@ func (s *nomadRootFSTestStore) CreateRootFSSnapshot(_ context.Context, request *
 	defer s.mu.Unlock()
 	record := s.records[request.SandboxID]
 	filesystem := s.rootFSFilesystems[request.SandboxID]
-	if record == nil || filesystem == nil || filesystem.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 || filesystem.HeadGenerationID == "" {
+	if record == nil || filesystem == nil || filesystem.HeadGenerationID == "" {
 		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	snapshot := &sandboxstore.RootFSSnapshot{
 		ID: request.SnapshotID, FilesystemID: filesystem.ID, TeamID: record.TeamID,
 		SourceSandboxID: request.SandboxID, HeadGenerationID: filesystem.HeadGenerationID,
-		StorageFormat: filesystem.StorageFormat, BaseArtifactDigest: filesystem.BaseArtifactDigest,
-		FormatGeneration: filesystem.FormatGeneration, Name: request.Name,
+		BaseArtifactDigest: filesystem.BaseArtifactDigest,
+		FormatGeneration:   filesystem.FormatGeneration, Name: request.Name,
 		Description: request.Description, CreatedAt: time.Now().UTC(), ExpiresAt: request.ExpiresAt,
 	}
 	s.rootFSSnapshots[snapshot.ID] = cloneRootFSSnapshotForTest(snapshot)
@@ -190,7 +172,7 @@ func (s *nomadRootFSTestStore) RestoreRootFSFromSnapshot(_ context.Context, requ
 	}
 	filesystem := &sandboxstore.RootFSFilesystem{
 		ID: request.SandboxID, TeamID: record.TeamID, SourceFilesystemID: snapshot.FilesystemID,
-		HeadGenerationID: snapshot.HeadGenerationID, StorageFormat: snapshot.StorageFormat,
+		HeadGenerationID:   snapshot.HeadGenerationID,
 		BaseArtifactDigest: snapshot.BaseArtifactDigest, FormatGeneration: snapshot.FormatGeneration,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

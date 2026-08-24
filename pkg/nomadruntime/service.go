@@ -271,22 +271,23 @@ type nomadAllocationSource interface {
 // NomadAllocationConfig identifies the server-side allocation catalog used as
 // a reconciliation trigger when the local task-driver process misses Destroy.
 type NomadAllocationConfig struct {
-	ClusterID                    string
-	Address                      string
-	NodeID                       string
-	TokenFile                    string
-	CAFile                       string
-	CertFile                     string
-	KeyFile                      string
-	RuntimeSlotChannelEnabled    bool
-	RuntimeSlotNodeUID           string
-	RuntimeSlotChannelPeerURISAN string
-	RuntimeSlotControlRoot       string
-	RuntimeSlotCtldNetworkSocket string
-	RuntimeResourceCPUMillicores int64
-	RuntimeResourceMemoryBytes   int64
-	RuntimeResourceCPUSetCPUs    string
-	RuntimeResourceCPUSetMems    string
+	ClusterID                     string
+	Address                       string
+	NodeID                        string
+	TokenFile                     string
+	CAFile                        string
+	CertFile                      string
+	KeyFile                       string
+	RuntimeSlotChannelEnabled     bool
+	RuntimeSlotNodeUID            string
+	RuntimeSlotChannelPeerURISAN  string
+	RuntimeSlotControlRoot        string
+	RuntimeSlotNodeControlTimeout time.Duration
+	RuntimeSlotCtldNetworkSocket  string
+	RuntimeResourceCPUMillicores  int64
+	RuntimeResourceMemoryBytes    int64
+	RuntimeResourceCPUSetCPUs     string
+	RuntimeResourceCPUSetMems     string
 }
 
 // RunNodeRuntime runs the node-scoped owner for writer leases,
@@ -378,7 +379,10 @@ func run(
 	}
 	var runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
 	if controlSocket := strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket); controlSocket != "" {
-		runtimeSlotNetwork, err = protocol.NewRuntimeSlotNetworkClient(controlSocket, protocol.DefaultNodeControlTimeout)
+		runtimeSlotNetwork, err = protocol.NewRuntimeSlotNetworkClient(
+			controlSocket,
+			runtimeSlotNodeControlTimeout(nomadConfig),
+		)
 		if err != nil {
 			return fmt.Errorf("create ctld runtime slot network client: %w", err)
 		}
@@ -464,6 +468,10 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 	}
 	if err := validateCanonicalAbsolutePath("runtime_slot_ctld_network_socket", config.RuntimeSlotCtldNetworkSocket); err != nil {
 		return err
+	}
+	if timeout := config.RuntimeSlotNodeControlTimeout; timeout != 0 &&
+		(timeout < time.Second || timeout > time.Minute) {
+		return fmt.Errorf("runtime_slot_node_control_timeout must be between one second and one minute")
 	}
 	peerURI, err := url.Parse(config.RuntimeSlotChannelPeerURISAN)
 	if err != nil || peerURI.Scheme != "spiffe" || peerURI.Host == "" || peerURI.User != nil ||
@@ -652,7 +660,7 @@ func (d *nodeRuntime) CaptureRunningRootFSFork(
 	var matched *rootfssession.RecoverySession
 	for index := range sessions {
 		stage := sessions[index].Stage
-		if stage.Identity.SlotNonce != target.SlotID || stage.Identity.PodUID != target.AllocationID ||
+		if stage.Identity.SlotNonce != target.SlotID || stage.Identity.AllocationID != target.AllocationID ||
 			stage.Identity.NodeUID != target.NodeUID || stage.Identity.BootID != target.NodeBootID ||
 			stage.Identity.RootFSID != request.SourceFilesystemID ||
 			stage.Identity.WriterGrantID != request.SourceWriterGrantID ||
@@ -893,8 +901,8 @@ func validateCrashCleanupProof(
 		proof.RootFSID != stage.Identity.RootFSID || proof.InitialGeneration != stage.InitialGeneration ||
 		proof.InitialBlockHead != stage.Generation.CurrentBlockHead ||
 		proof.NodeUID != request.NodeUID || proof.BootID != request.NodeBootID ||
-		proof.RuntimeGeneration != stage.Identity.RuntimeGeneration || proof.PodUID != request.AllocationID ||
-		proof.PodSandboxID != stage.Identity.PodSandboxID || proof.ContainerName != protocol.NomadTaskName ||
+		proof.RuntimeGeneration != stage.Identity.RuntimeGeneration || proof.AllocationID != request.AllocationID ||
+		proof.NetworkIncarnationID != stage.Identity.NetworkIncarnationID || proof.TaskName != protocol.NomadTaskName ||
 		proof.SlotNonce != request.SlotID || proof.ActiveKey != observation.ActiveKey ||
 		proof.ConsumerBound != (observation.ContainerID != "") || proof.ContainerID != observation.ContainerID ||
 		proof.HostMountNamespaceID != observation.HostMountNamespaceID ||
@@ -925,7 +933,7 @@ func matchRuntimeSlotCleanupSession(
 		stage := session.Stage
 		consumer := session.Consumer
 		sameIncarnation := stage.Identity.SlotNonce == request.SlotID ||
-			stage.Identity.PodUID == request.AllocationID ||
+			stage.Identity.AllocationID == request.AllocationID ||
 			consumer != nil && (consumer.ActiveKey == request.SlotID || consumer.ContainerID == request.RunscContainerID)
 		if stage.Identity.WriterGrantID != request.WriterGrantID {
 			if sameIncarnation {
@@ -1141,9 +1149,9 @@ func validateRuntimeSlotCleanupSession(
 	stage := session.Stage
 	consumer := session.Consumer
 	if session.Kind == rootfssession.RecoveryUnavailable ||
-		stage.Identity.SlotNonce != request.SlotID || stage.Identity.PodUID != request.AllocationID ||
+		stage.Identity.SlotNonce != request.SlotID || stage.Identity.AllocationID != request.AllocationID ||
 		stage.Identity.NodeUID != request.NodeUID || stage.Identity.BootID != request.NodeBootID ||
-		stage.Identity.WriterGrantID != request.WriterGrantID || stage.Identity.ContainerName != protocol.NomadTaskName ||
+		stage.Identity.WriterGrantID != request.WriterGrantID || stage.Identity.TaskName != protocol.NomadTaskName ||
 		stage.ExpectedPolicyToken.NetNSIdentity != request.NetNSIdentity {
 		return fmt.Errorf("RootFS session does not match the runtime slot incarnation: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -1361,7 +1369,7 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		if d.reconciliationInFlight("pressure:" + session.Stage.Parent) {
 			continue
 		}
-		allocationPurged := activeAllocations != nil && !activeAllocations[session.Stage.Identity.PodUID] &&
+		allocationPurged := activeAllocations != nil && !activeAllocations[session.Stage.Identity.AllocationID] &&
 			now.Sub(session.CreatedAt) >= rootFSSessionReconcileInterval
 		if !rootFSSessionNeedsReconciliation(session, now, onlyParent != "" || allocationPurged) {
 			continue

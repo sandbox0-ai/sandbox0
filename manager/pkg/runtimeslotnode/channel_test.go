@@ -65,7 +65,7 @@ func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Id
 		return nodeauth.Identity{}, errdefs.ErrPermissionDenied
 	}
 	return nodeauth.Identity{
-		ClusterID: "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1", PodUID: "agent-1",
+		ClusterID: "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1", AgentUID: "agent-1",
 	}, nil
 }
 
@@ -95,9 +95,9 @@ func (e *channelTestExecutor) PrepareNetwork(
 	e.networks = append(e.networks, request)
 	e.mu.Unlock()
 	return rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID, PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(request),
+		AllocationID: request.AllocationID, NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(request),
 		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
-		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
+		SourceIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}, nil
 }
 
@@ -493,7 +493,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	}
 	networkRequest.PolicyDigest = protocol.NetworkPolicyDigest(networkRequest.NetworkPolicy)
 	policyToken, err := hub.Prepare(t.Context(), networkRequest)
-	if err != nil || policyToken.PolicyDigest != networkRequest.PolicyDigest || policyToken.PodIP != "192.0.2.2" {
+	if err != nil || policyToken.PolicyDigest != networkRequest.PolicyDigest || policyToken.SourceIP != "192.0.2.2" {
 		t.Fatalf("network prepare token = %+v, %v", policyToken, err)
 	}
 	claimRequest := testChannelClaimRequest()
@@ -741,8 +741,8 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         "sha256:" + strings.Repeat("a", 64), InitialGeneration: "generation-1",
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ClaimID: "claim-1",
-			NetworkEpoch: 4, PolicyDigest: protocol.NetworkPolicyDigest(networkPolicy), PodIP: "192.0.2.2",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", ClaimID: "claim-1",
+			NetworkEpoch: 4, PolicyDigest: protocol.NetworkPolicyDigest(networkPolicy), SourceIP: "192.0.2.2",
 			CtldGeneration: "ctld-1", NetNSIdentity: "1:2",
 		},
 		Labels: map[string]string{
@@ -751,8 +751,8 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		},
 		Identity: rootfshandoff.Identity{
 			NodeUID: "node-uid-1", BootID: "boot-1", RuntimeGeneration: "1",
-			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
-			Image: "procd-image-1", Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			AllocationID: "allocation-1", NetworkIncarnationID: "allocation-network-1", TaskName: protocol.NomadTaskName,
+			SourceOCIDigest: "procd-image-1", RootFSDriver: "nomad-driver", RuntimeClass: "sandbox0-gvisor",
 			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
 			RootFSID: "filesystem-1", WriterEpoch: 4, WriterGrantID: "grant-1",
 			WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),

@@ -266,7 +266,6 @@ type runtimeSlotPluginFixture struct {
 	task      *drivers.TaskConfig
 	runner    *fakeRunsc
 	rootfs    *fakeRootFSRuntime
-	network   *fakeNetworkRuntime
 	authority *fakeRuntimeSlotAuthority
 }
 
@@ -284,9 +283,6 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	}
 	config := defaultPluginConfig()
 	config.ControlDir = controlDir
-	config.AllowedRootfsDir = filepath.Join(tempDir, "development-rootfs")
-	config.NetworkPolicyEnabled = true
-	config.RootFSEnabled = true
 	config.RootFSNodeSocket = filepath.Join(tempDir, "ctld-runtime.sock")
 	rootFSMountRoot := filepath.Join(tempDir, "rootfs-mounts")
 	config.RootFSAuthorityURL = "https://regional.example.test"
@@ -294,7 +290,7 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	config.RootFSAuthorityClientCertFile = filepath.Join(tempDir, "client.pem")
 	config.RootFSAuthorityClientKeyFile = filepath.Join(tempDir, "client-key.pem")
 	config.RootFSAuthorityTokenFile = filepath.Join(tempDir, "token")
-	config.RuntimeSlotEnabled = true
+	config.ProcdInternalJWTPublicKeyFile = filepath.Join(tempDir, "internal-jwt-public.pem")
 	config.RuntimeSlotClusterID = "cluster-1"
 	config.RuntimeSlotNodeBootIDFile = bootIDPath
 
@@ -323,7 +319,7 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 			Path: netnsPath,
 		},
 	}
-	if err := task.EncodeConcreteDriverConfig(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
+	if err := task.EncodeConcreteDriverConfig(TaskConfig{Command: "/procd"}); err != nil {
 		t.Fatalf("encode task config: %v", err)
 	}
 	runner := newFakeRunsc()
@@ -333,17 +329,15 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 		MaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
 		DirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
 	}}
-	network := &fakeNetworkRuntime{}
 	authority := newFakeRuntimeSlotAuthority()
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return runner }).(*Plugin)
 	plugin.config = config
 	plugin.rootfs = rootfs
 	plugin.rootfsOnce.Do(func() {})
-	plugin.newNetwork = func(*PluginConfig) NetworkRuntime { return network }
 	plugin.newSlotAuthority = func(*PluginConfig) (runtimeSlotAuthority, error) { return authority, nil }
 	return &runtimeSlotPluginFixture{
 		plugin: plugin, config: config, task: task, runner: runner,
-		rootfs: rootfs, network: network, authority: authority,
+		rootfs: rootfs, authority: authority,
 	}
 }
 
@@ -485,10 +479,6 @@ func TestStartTaskRegistrationFailureCleansLocalSlot(t *testing.T) {
 	if _, statErr := os.Stat(bundleDir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("bundle still exists after failed registration: %v", statErr)
 	}
-	_, cleanups := fixture.network.snapshot()
-	if cleanups != 0 {
-		t.Fatalf("legacy network cleanups = %d, want 0 for a ctld-owned runtime slot", cleanups)
-	}
 }
 
 func TestStartTaskDoesNotRegisterBeforeControlEndpointIsReady(t *testing.T) {
@@ -575,13 +565,13 @@ func prepareRuntimeSlotClaim(
 	if err != nil {
 		t.Fatalf("derive claim netns identity: %v", err)
 	}
-	stage.ExpectedPolicyToken.PodUID = fixture.task.AllocID
+	stage.ExpectedPolicyToken.AllocationID = fixture.task.AllocID
 	stage.ExpectedPolicyToken.ClaimID = "claim-1"
 	stage.ExpectedPolicyToken.NetNSIdentity = netnsIdentity
 	stage.Identity.NodeUID = fixture.task.NodeID
 	stage.Identity.BootID = "boot-1"
-	stage.Identity.PodUID = fixture.task.AllocID
-	stage.Identity.ContainerName = fixture.task.Name
+	stage.Identity.AllocationID = fixture.task.AllocID
+	stage.Identity.TaskName = fixture.task.Name
 	stage.Identity.SlotNonce = fixture.task.ID
 	stage.Identity.ClaimID = "claim-1"
 	runtimeRevision, err := runtimeSlotAssignment().Revision()
@@ -853,6 +843,63 @@ func TestRuntimeSlotClaimAcceptsExactRetryAfterResponseLoss(t *testing.T) {
 	}
 }
 
+func TestRuntimeSlotClaimJoinsExactConcurrentRetry(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	request := ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
+	}
+	starting := make(chan struct{})
+	release := make(chan struct{})
+	var startingOnce sync.Once
+	fixture.authority.mu.Lock()
+	fixture.authority.startingHook = func(protocol.StartingRequest) {
+		startingOnce.Do(func() {
+			close(starting)
+			<-release
+		})
+	}
+	fixture.authority.mu.Unlock()
+
+	first := make(chan error, 1)
+	go func() { first <- handle.Claim(request) }()
+	select {
+	case <-starting:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first claim did not reach the blocked starting transition")
+	}
+	retry := make(chan error, 1)
+	go func() { retry <- handle.Claim(request) }()
+	select {
+	case err := <-retry:
+		t.Fatalf("concurrent retry returned before the original claim: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for name, result := range map[string]<-chan error{"first": first, "retry": retry} {
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("%s Claim() error = %v", name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s Claim() did not complete", name)
+		}
+	}
+	ensureCalls, _, _, _ := fixture.rootfs.snapshot()
+	if ensureCalls != 1 {
+		t.Fatalf("RootFS Ensure calls = %d, concurrent retry consumed the writer twice", ensureCalls)
+	}
+	if startingCalls := fixture.authority.startingSnapshot(); len(startingCalls) != 1 {
+		t.Fatalf("regional starting calls = %d, concurrent retry launched twice", len(startingCalls))
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
 func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
@@ -880,7 +927,7 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 func TestRuntimeSlotClaimRejectsNetworkTokenForAnotherAllocationAddress(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
-	stage.ExpectedPolicyToken.PodIP = "172.26.64.3"
+	stage.ExpectedPolicyToken.SourceIP = "172.26.64.3"
 
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
@@ -1027,12 +1074,10 @@ func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
 	fixture.authority.heartbeatTTL = 300 * time.Millisecond
 	fixture.authority.mu.Unlock()
 	recoveredRunner := newFakeRunsc()
-	recoveredNetwork := &fakeNetworkRuntime{}
 	recovered := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return recoveredRunner }).(*Plugin)
 	recovered.config = fixture.config
 	recovered.rootfs = fixture.rootfs
 	recovered.rootfsOnce.Do(func() {})
-	recovered.newNetwork = func(*PluginConfig) NetworkRuntime { return recoveredNetwork }
 	recovered.newSlotAuthority = func(*PluginConfig) (runtimeSlotAuthority, error) { return fixture.authority, nil }
 
 	if err := recovered.RecoverTask(handle); err != nil {
@@ -1052,7 +1097,7 @@ func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
 	if !ok {
 		t.Fatal("recovered runtime slot was not stored")
 	}
-	if recoveredHandle.driverConfig.Command != "/procd" || !recoveredHandle.driverConfig.WaitForClaim {
+	if recoveredHandle.driverConfig.Command != "/procd" {
 		t.Fatalf("recovered driver config = %+v", recoveredHandle.driverConfig)
 	}
 	select {
@@ -1087,8 +1132,7 @@ func TestRecoverRuntimeSlotLeavesTerminalWriteForRegionalOwner(t *testing.T) {
 		taskConfig: state.TaskConfig, bundleDir: state.BundleDir, containerID: state.ContainerID,
 		rootMount: state.RootMount, socketPath: filepath.Join(t.TempDir(), "recovered.sock"),
 		runner: recoveredRunner, mounter: recoveredMounter, rootfs: fixture.rootfs,
-		allowedRoot: fixture.config.AllowedRootfsDir, rootfsAllowedRoot: fixture.rootfs.runtimeInfo.MountRoot,
-		runtimeSlotNeeded: true, logger: hclog.NewNullLogger(),
+		rootfsAllowedRoot: fixture.rootfs.runtimeInfo.MountRoot, logger: hclog.NewNullLogger(),
 	})
 	if err := recovered.Recover(state); err != nil {
 		t.Fatalf("Recover() error = %v", err)
@@ -1273,7 +1317,7 @@ func TestRuntimeSlotNetNSReplacementChangesReadinessIdentity(t *testing.T) {
 		taskConfig: fixture.task, bundleDir: filepath.Join(t.TempDir(), "bundle"),
 		containerID: safeContainerID(fixture.task.ID), rootMount: filepath.Join(t.TempDir(), "root"),
 		socketPath: controlSocketPath(fixture.config.ControlDir, fixture.task.ID), runner: fixture.runner,
-		mounter: &fakeMounter{}, rootfs: fixture.rootfs, network: fixture.network, logger: hclog.NewNullLogger(),
+		mounter: &fakeMounter{}, rootfs: fixture.rootfs, logger: hclog.NewNullLogger(),
 	})
 	if err := os.MkdirAll(handle.rootMount, 0o755); err != nil {
 		t.Fatalf("create root mount: %v", err)
@@ -1302,14 +1346,13 @@ func TestRuntimeSlotNetNSReplacementChangesReadinessIdentity(t *testing.T) {
 }
 
 func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
-	config := &PluginConfig{RuntimeSlotEnabled: true}
+	config := defaultPluginConfig()
 	tests := []struct {
 		name string
 		task TaskConfig
 	}{
-		{name: "eager", task: TaskConfig{Command: "/procd"}},
-		{name: "different command", task: TaskConfig{Command: "/bin/sh", WaitForClaim: true}},
-		{name: "arguments", task: TaskConfig{Command: "/procd", Args: []string{"--unsafe"}, WaitForClaim: true}},
+		{name: "different command", task: TaskConfig{Command: "/bin/sh"}},
+		{name: "arguments", task: TaskConfig{Command: "/procd", Args: []string{"--unsafe"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1318,7 +1361,7 @@ func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
 			}
 		})
 	}
-	if err := validateRuntimeSlotTaskConfig(config, TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
+	if err := validateRuntimeSlotTaskConfig(config, TaskConfig{Command: "/procd"}); err != nil {
 		t.Fatalf("valid regional runtime slot task was rejected: %v", err)
 	}
 }
@@ -1379,9 +1422,9 @@ func TestValidateRuntimeSlotConfigRequiresProductionDependencies(t *testing.T) {
 		match  string
 	}{
 		{name: "cluster", mutate: func(config *PluginConfig) { config.RuntimeSlotClusterID = "" }, match: "cluster_id"},
-		{name: "ctld runtime", mutate: func(config *PluginConfig) { config.RootFSEnabled = false }, match: "ctld-owned Nomad runtime"},
-		{name: "network", mutate: func(config *PluginConfig) { config.NetworkPolicyEnabled = false }, match: "network_policy_enabled"},
+		{name: "ctld runtime", mutate: func(config *PluginConfig) { config.RootFSNodeSocket = "" }, match: "ctld-owned Nomad runtime"},
 		{name: "authority", mutate: func(config *PluginConfig) { config.RootFSAuthorityURL = "" }, match: "authority_url"},
+		{name: "procd public key", mutate: func(config *PluginConfig) { config.ProcdInternalJWTPublicKeyFile = "" }, match: "procd_internal_jwt_public_key_file"},
 		{name: "boot identity", mutate: func(config *PluginConfig) { config.RuntimeSlotNodeBootIDFile = "relative" }, match: "node_boot_id_file"},
 	}
 	for _, test := range tests {

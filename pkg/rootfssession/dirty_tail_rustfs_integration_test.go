@@ -266,8 +266,8 @@ func nextNodeStageRequest(
 	next.Identity.NodeUID = "node-b"
 	next.Identity.BootID = "boot-b"
 	next.Identity.RuntimeGeneration = "runtime-b"
-	next.Identity.PodUID = "pod-rustfs-node-b"
-	next.Identity.PodSandboxID = "sandbox-rustfs-node-b"
+	next.Identity.AllocationID = "pod-rustfs-node-b"
+	next.Identity.NetworkIncarnationID = "sandbox-rustfs-node-b"
 	next.Identity.SlotNonce = "slot-rustfs-node-b"
 	next.Identity.ClaimID = "claim-rustfs-node-b"
 	next.Identity.LaunchAttempt = "attempt-rustfs-node-b"
@@ -275,8 +275,8 @@ func nextNodeStageRequest(
 	next.Identity.WriterGrantID = "grant-rustfs-node-b"
 	next.Identity.WriterGrantToken = "token-rustfs-node-b"
 	next.Identity.WriterGrantTokenDigest = rootfshandoff.WriterGrantTokenDigest(next.Identity.WriterGrantToken)
-	next.ExpectedPolicyToken.PodUID = next.Identity.PodUID
-	next.ExpectedPolicyToken.PodSandboxID = next.Identity.PodSandboxID
+	next.ExpectedPolicyToken.AllocationID = next.Identity.AllocationID
+	next.ExpectedPolicyToken.NetworkIncarnationID = next.Identity.NetworkIncarnationID
 	next.ExpectedPolicyToken.ClaimID = next.Identity.ClaimID
 	next.ExpectedPolicyToken.NetworkEpoch = next.Identity.WriterEpoch
 	next.ExpectedPolicyToken.PolicyDigest = "policy-rustfs-node-b"

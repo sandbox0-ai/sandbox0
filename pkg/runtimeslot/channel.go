@@ -464,7 +464,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("claim request: %w", err)
 		}
 		identity := c.Claim.Stage.Identity
-		if identity.SlotNonce != c.Target.SlotID || identity.PodUID != c.Target.AllocationID ||
+		if identity.SlotNonce != c.Target.SlotID || identity.AllocationID != c.Target.AllocationID ||
 			identity.NodeUID != c.Target.NodeUID || identity.BootID != c.Target.NodeBootID {
 			return fmt.Errorf("claim request does not match the node channel target")
 		}
@@ -587,11 +587,11 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 			return err
 		}
 		request := command.NetworkPrepare
-		if r.NetworkPolicyToken.PodUID != request.AllocationID ||
+		if r.NetworkPolicyToken.AllocationID != request.AllocationID ||
 			r.NetworkPolicyToken.ClaimID != request.ClaimID ||
 			r.NetworkPolicyToken.PolicyDigest != request.PolicyDigest ||
 			r.NetworkPolicyToken.NetNSIdentity != request.NetNSIdentity ||
-			r.NetworkPolicyToken.PodSandboxID != RuntimeSlotNetworkIncarnationID(*request) {
+			r.NetworkPolicyToken.NetworkIncarnationID != RuntimeSlotNetworkIncarnationID(*request) {
 			return fmt.Errorf("node channel network policy token belongs to another request")
 		}
 		return nil

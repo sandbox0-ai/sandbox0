@@ -1,4 +1,0 @@
-/*
-Copyright sandbox0.ai
-All rights reserved.
-*/

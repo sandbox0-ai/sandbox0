@@ -12,7 +12,7 @@ import (
 	"time"
 
 	ctldnetworking "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking"
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	apiconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 )
@@ -97,26 +97,15 @@ func (h *primaryServiceHandle) Wait(ctx context.Context) error {
 }
 
 func configuredNetworkRuntimeFactory(
-	path, ctldHTTPAddr, runtimeWatchHTTPAddr string,
-	runtimeSlotsOnly bool,
+	path, ctldHTTPAddr string,
 ) (primaryServiceFactory, error) {
 	ctldPort, err := listenerPort(ctldHTTPAddr, "ctld HTTP")
 	if err != nil {
 		return nil, err
 	}
-	runtimeWatchPort := 0
-	if !runtimeSlotsOnly {
-		runtimeWatchPort, err = listenerPort(runtimeWatchHTTPAddr, "ctld runtime watch")
-		if err != nil {
-			return nil, err
-		}
-		if ctldPort == runtimeWatchPort {
-			return nil, fmt.Errorf("ctld HTTP port and runtime watch port must differ")
-		}
-	}
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil, nil
+		return nil, fmt.Errorf("ctld network runtime config path is required")
 	}
 	if err := validateRuntimeSlotNetworkPaths(stateRoot, runtimeSlotNetworkSocket, runtimeSlotNetNSRoot); err != nil {
 		return nil, err
@@ -126,14 +115,11 @@ func configuredNetworkRuntimeFactory(
 		return nil, err
 	}
 	reservedPorts := map[int]string{ctldPort: "ctld HTTP port"}
-	if runtimeWatchPort != 0 {
-		reservedPorts[runtimeWatchPort] = "ctld runtime watch port"
-	}
 	if err := cfg.ValidateListenerPorts(reservedPorts); err != nil {
 		return nil, err
 	}
 	return func() (primaryService, error) {
-		return newNetworkRuntimeService(cfg.DeepCopy(), runtimeWatchPort, runtimeSlotsOnly)
+		return newNetworkRuntimeService(cfg.DeepCopy())
 	}, nil
 }
 
@@ -183,11 +169,7 @@ func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetworkRuntimeConfi
 	return cfg, nil
 }
 
-func newNetworkRuntimeService(
-	cfg *apiconfig.NetworkRuntimeConfig,
-	runtimeWatchPort int,
-	runtimeSlotsOnly bool,
-) (*networkRuntimeService, error) {
+func newNetworkRuntimeService(cfg *apiconfig.NetworkRuntimeConfig) (*networkRuntimeService, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("network runtime config is nil")
 	}
@@ -210,17 +192,11 @@ func newNetworkRuntimeService(
 		zap.Int("proxy_http_port", cfg.ProxyHTTPPort),
 		zap.Int("proxy_https_port", cfg.ProxyHTTPSPort),
 	)
-	runtimeWatchPorts := []int(nil)
-	if runtimeWatchPort != 0 {
-		runtimeWatchPorts = []int{runtimeWatchPort}
-	}
 	return &networkRuntimeService{
 		daemon: ctldnetworking.New(cfg, logger, provider, ctldnetworking.Options{
-			RuntimeWatchTCPPorts:     runtimeWatchPorts,
 			RuntimeSlotStatePath:     filepath.Join(stateRoot, "runtime-slot-network.db"),
 			RuntimeSlotControlSocket: runtimeSlotNetworkSocket,
 			RuntimeSlotNetNSRoot:     runtimeSlotNetNSRoot,
-			RuntimeSlotsOnly:         runtimeSlotsOnly,
 		}),
 		logger:        logger,
 		observability: provider,

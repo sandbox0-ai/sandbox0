@@ -8,13 +8,10 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type recordingSandboxPauser struct {
@@ -39,7 +36,7 @@ func (r *recordingSandboxResumer) ResumeSandboxAndWait(_ context.Context, sandbo
 	return &managerapi.ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true}, nil
 }
 
-func TestPauseAndResumeUseSelectedRuntimeBackend(t *testing.T) {
+func TestPauseAndResumeUseRuntime(t *testing.T) {
 	pauser := &recordingSandboxPauser{}
 	resumer := &recordingSandboxResumer{}
 	server, pauseContext, pauseRecorder := newSandboxLifecycleHandlerFixture(t, pauser, resumer, http.MethodPost)
@@ -56,7 +53,7 @@ func TestPauseAndResumeUseSelectedRuntimeBackend(t *testing.T) {
 	}
 }
 
-func TestPauseMapsUnavailableRuntimeBackend(t *testing.T) {
+func TestPauseMapsUnavailableRuntime(t *testing.T) {
 	pauser := &recordingSandboxPauser{err: fmt.Errorf("%w: test backend", service.ErrSandboxLifecycleUnavailable)}
 	server, ctx, recorder := newSandboxLifecycleHandlerFixture(t, pauser, nil, http.MethodPost)
 
@@ -74,21 +71,9 @@ func newSandboxLifecycleHandlerFixture(
 ) (*Server, *gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "sandbox-1", Namespace: "default",
-			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-1", controller.LabelTemplateID: "default",
-				controller.LabelPoolType: controller.PoolTypeActive,
-			},
-			Annotations: map[string]string{controller.AnnotationTeamID: "team-1"},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
-		PodLister: newHTTPTestPodLister(t, pod), Config: service.SandboxServiceConfig{}, Logger: zap.NewNop(),
-	})
-	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server := &Server{sandboxReader: staticSandboxReader{sandbox: &managerapi.Sandbox{
+		ID: "sandbox-1", TeamID: "team-1", Status: managerapi.SandboxStatusRunning,
+	}}}
 	server.sandboxPauser = pauser
 	server.sandboxResumer = resumer
 	server.logger = zap.NewNop()

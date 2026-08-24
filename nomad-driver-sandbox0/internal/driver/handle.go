@@ -84,22 +84,21 @@ type PersistedState struct {
 }
 
 type taskHandleOptions struct {
-	taskConfig         *drivers.TaskConfig
-	driverConfig       TaskConfig
-	bundleDir          string
-	containerID        string
-	rootMount          string
-	socketPath         string
-	runner             Runsc
-	mounter            Mounter
-	allowedRoot        string
-	rootfsAllowedRoot  string
-	resourceCgroupRoot string
-	rootfs             RootFSRuntime
-	network            NetworkRuntime
-	runtimeSlotNeeded  bool
-	procdPort          int
-	logger             hclog.Logger
+	taskConfig                    *drivers.TaskConfig
+	driverConfig                  TaskConfig
+	bundleDir                     string
+	containerID                   string
+	rootMount                     string
+	socketPath                    string
+	runner                        Runsc
+	runscOperationTimeout         time.Duration
+	mounter                       Mounter
+	rootfsAllowedRoot             string
+	resourceCgroupRoot            string
+	procdInternalJWTPublicKeyFile string
+	rootfs                        RootFSRuntime
+	procdPort                     int
+	logger                        hclog.Logger
 }
 
 type taskHandle struct {
@@ -108,32 +107,32 @@ type taskHandle struct {
 	// retryable cleanup as complete.
 	closeMu sync.Mutex
 
-	taskConfig         *drivers.TaskConfig
-	driverConfig       TaskConfig
-	bundleDir          string
-	containerID        string
-	rootMount          string
-	socketPath         string
-	allowedRoot        string
-	runner             Runsc
-	mounter            Mounter
-	rootfsAllowedRoot  string
-	resourceCgroupRoot string
-	rootfs             RootFSRuntime
-	network            NetworkRuntime
-	runtimeSlotNeeded  bool
-	procdPort          int
-	networkChain       string
-	logger             hclog.Logger
+	taskConfig                    *drivers.TaskConfig
+	driverConfig                  TaskConfig
+	bundleDir                     string
+	containerID                   string
+	rootMount                     string
+	socketPath                    string
+	runner                        Runsc
+	runscOperationTimeout         time.Duration
+	mounter                       Mounter
+	rootfsAllowedRoot             string
+	resourceCgroupRoot            string
+	procdInternalJWTPublicKeyFile string
+	rootfs                        RootFSRuntime
+	procdPort                     int
+	networkChain                  string
+	logger                        hclog.Logger
 
-	phase       slotPhase
-	startedAt   time.Time
-	completedAt time.Time
-	exitResult  *drivers.ExitResult
-	rootMounted bool
-	claim       *claimMetadata
-	stage       *rootfshandoff.StageRequest
-	closed      bool
+	phase        slotPhase
+	startedAt    time.Time
+	completedAt  time.Time
+	exitResult   *drivers.ExitResult
+	rootMounted  bool
+	claim        *claimMetadata
+	claimAttempt *claimAttempt
+	stage        *rootfshandoff.StageRequest
+	closed       bool
 
 	done chan struct{}
 
@@ -146,6 +145,12 @@ type taskHandle struct {
 	consumerCancel   context.CancelFunc
 	waitCancel       context.CancelFunc
 	runtimeSlot      *runtimeSlotLifecycle
+}
+
+type claimAttempt struct {
+	digest [sha256.Size]byte
+	done   chan struct{}
+	err    error
 }
 
 func (h *taskHandle) statePath() string {
@@ -217,27 +222,33 @@ func readPersistedState(path string) (PersistedState, error) {
 
 func newTaskHandle(options taskHandleOptions) *taskHandle {
 	return &taskHandle{
-		taskConfig:         options.taskConfig,
-		driverConfig:       options.driverConfig,
-		bundleDir:          options.bundleDir,
-		containerID:        options.containerID,
-		rootMount:          options.rootMount,
-		socketPath:         options.socketPath,
-		allowedRoot:        options.allowedRoot,
-		runner:             options.runner,
-		mounter:            options.mounter,
-		rootfsAllowedRoot:  options.rootfsAllowedRoot,
-		resourceCgroupRoot: options.resourceCgroupRoot,
-		rootfs:             options.rootfs,
-		network:            options.network,
-		runtimeSlotNeeded:  options.runtimeSlotNeeded,
-		procdPort:          options.procdPort,
-		logger:             options.logger,
-		networkChain:       networkChainName(options.containerID),
-		phase:              phaseWarm,
-		done:               make(chan struct{}),
-		controlReady:       make(chan struct{}),
+		taskConfig:                    options.taskConfig,
+		driverConfig:                  options.driverConfig,
+		bundleDir:                     options.bundleDir,
+		containerID:                   options.containerID,
+		rootMount:                     options.rootMount,
+		socketPath:                    options.socketPath,
+		runner:                        options.runner,
+		runscOperationTimeout:         effectiveRunscOperationTimeout(options.runscOperationTimeout),
+		mounter:                       options.mounter,
+		rootfsAllowedRoot:             options.rootfsAllowedRoot,
+		resourceCgroupRoot:            options.resourceCgroupRoot,
+		procdInternalJWTPublicKeyFile: options.procdInternalJWTPublicKeyFile,
+		rootfs:                        options.rootfs,
+		procdPort:                     options.procdPort,
+		logger:                        options.logger,
+		networkChain:                  networkChainName(options.containerID),
+		phase:                         phaseWarm,
+		done:                          make(chan struct{}),
+		controlReady:                  make(chan struct{}),
 	}
+}
+
+func effectiveRunscOperationTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultRunscOperationTimeout
+	}
+	return timeout
 }
 
 func (h *taskHandle) signalControlReady(err error) {
@@ -265,30 +276,17 @@ func (h *taskHandle) netnsPath() string {
 	return h.taskConfig.NetworkIsolation.Path
 }
 
-func decodeNetworkPolicy(raw string) (NetworkPolicy, string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return NetworkPolicy{Mode: networkPolicyBlockAll}, digestString(raw), nil
-	}
-	var policy NetworkPolicy
-	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-		return NetworkPolicy{}, "", fmt.Errorf("decode network policy: %w", err)
-	}
-	if err := policy.Validate(); err != nil {
-		return NetworkPolicy{}, "", err
-	}
-	return policy, digestString(raw), nil
-}
-
 func digestString(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func (h *taskHandle) resetNetworkPolicy() {
-	if h.runtimeSlotNeeded || h.network == nil || h.networkChain == "" || h.netnsPath() == "" {
-		return
+func networkChainName(containerID string) string {
+	value := strings.TrimPrefix(containerID, "s0-")
+	if len(value) > 12 {
+		value = value[:12]
 	}
-	_ = h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll})
+	return "S0-NET-" + value
 }
 
 // Prepare creates a generic warm allocation without creating a gVisor container.
@@ -311,12 +309,6 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	if err := os.MkdirAll(h.rootMount, 0o755); err != nil {
 		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
 	}
-	if !h.runtimeSlotNeeded && h.network != nil && h.netnsPath() != "" {
-		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll}); err != nil {
-			_ = h.Close(false)
-			return fmt.Errorf("apply warm default-deny policy: %w", err)
-		}
-	}
 	if err := h.persist(); err != nil {
 		_ = h.Close(false)
 		return err
@@ -336,34 +328,21 @@ func (h *taskHandle) writeClaimBundle(
 			return errors.New("Nomad network namespace path must be absolute")
 		}
 	}
-	var resources *driversResources
-	if h.taskConfig.Resources != nil && h.taskConfig.Resources.LinuxResources != nil {
-		linux := h.taskConfig.Resources.LinuxResources
-		resources = &driversResources{
-			CPUPeriod:        linux.CPUPeriod,
-			CPUQuota:         linux.CPUQuota,
-			CPUShares:        linux.CPUShares,
-			CPUSetCpus:       linux.CpusetCpus,
-			MemoryLimitBytes: linux.MemoryLimitBytes,
-		}
+	if err := resourceLease.Validate(); err != nil {
+		return fmt.Errorf("validate runtime resource lease: %w", err)
 	}
-	if h.runtimeSlotNeeded {
-		if err := resourceLease.Validate(); err != nil {
-			return fmt.Errorf("validate runtime resource lease: %w", err)
-		}
-		if resourceLease.SlotID != h.taskConfig.ID || resourceLease.NodeID != h.taskConfig.NodeID {
-			return fmt.Errorf("runtime resource lease does not match the Nomad carrier")
-		}
-		cgroupPath, err := runtimeLeaseCgroupsPath(h.resourceCgroupRoot, resourceLease.CgroupName)
-		if err != nil {
-			return err
-		}
-		resources = &driversResources{
-			CPUPeriod: int64(resourceLease.CPUPeriodMicros), CPUQuota: resourceLease.CPUQuotaMicros,
-			CPUShares: int64(resourceLease.CPUShares), CPUSetCpus: resourceLease.CPUSetCPUs,
-			MemoryLimitBytes: resourceLease.MemoryBytes, PIDsLimit: resourceLease.PIDsLimit,
-			CgroupPath: cgroupPath,
-		}
+	if resourceLease.SlotID != h.taskConfig.ID || resourceLease.NodeID != h.taskConfig.NodeID {
+		return fmt.Errorf("runtime resource lease does not match the Nomad carrier")
+	}
+	cgroupPath, err := runtimeLeaseCgroupsPath(h.resourceCgroupRoot, resourceLease.CgroupName)
+	if err != nil {
+		return err
+	}
+	resources := &driversResources{
+		CPUPeriod: int64(resourceLease.CPUPeriodMicros), CPUQuota: resourceLease.CPUQuotaMicros,
+		CPUShares: int64(resourceLease.CPUShares), CPUSetCpus: resourceLease.CPUSetCPUs,
+		MemoryLimitBytes: resourceLease.MemoryBytes, PIDsLimit: resourceLease.PIDsLimit,
+		CgroupPath: cgroupPath,
 	}
 	h.mu.Lock()
 	command := h.driverConfig.Command
@@ -381,18 +360,20 @@ func (h *taskHandle) writeClaimBundle(
 		}
 		runtimeEnv = []string{
 			"http_port=" + strconv.Itoa(procdPort),
+			"INTERNAL_JWT_PUBLIC_KEY_PATH=" + procdInternalJWTPublicKeyDestination,
 			runtimecontrol.EnvControlMode + "=" + runtimecontrol.ControlModeStatic,
 			runtimecontrol.EnvStaticAssignment + "=" + string(payload),
 		}
 	}
 	spec := buildSpec(specOptions{
-		Command:   command,
-		Args:      args,
-		Env:       runtimeEnv,
-		AllocID:   h.taskConfig.AllocID,
-		TaskID:    h.taskConfig.ID,
-		NetNSPath: netnsPath,
-		Resources: resources,
+		Command:                       command,
+		Args:                          args,
+		Env:                           runtimeEnv,
+		AllocID:                       h.taskConfig.AllocID,
+		TaskID:                        h.taskConfig.ID,
+		NetNSPath:                     netnsPath,
+		ProcdInternalJWTPublicKeyFile: h.procdInternalJWTPublicKeyFile,
+		Resources:                     resources,
 	})
 	if err := writeBundle(h.bundleDir, spec); err != nil {
 		return err
@@ -415,7 +396,13 @@ func runtimeLeaseCgroupsPath(root, cgroupName string) (string, error) {
 }
 
 // Claim writes the OCI bundle, attaches D as its initial root, then creates and starts runsc.
-func (h *taskHandle) Claim(request ClaimRequest) error {
+func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
+	requestPayload, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("encode claim retry identity: %w", err)
+	}
+	requestDigest := sha256.Sum256(requestPayload)
+
 	h.mu.Lock()
 	if h.phase != phaseWarm {
 		if h.phase == phaseActive {
@@ -429,64 +416,54 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 				return nil
 			}
 		}
+		if h.phase == phaseClaiming && h.claimAttempt != nil && h.claimAttempt.digest == requestDigest {
+			attempt := h.claimAttempt
+			h.mu.Unlock()
+			<-attempt.done
+			return attempt.err
+		}
 		err := fmt.Errorf("claim is only valid in warm phase, current phase %s", h.phase)
 		h.mu.Unlock()
 		return err
 	}
+	attempt := &claimAttempt{digest: requestDigest, done: make(chan struct{})}
+	h.claimAttempt = attempt
 	h.phase = phaseClaiming
 	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		attempt.err = resultErr
+		if h.claimAttempt == attempt {
+			h.claimAttempt = nil
+		}
+		close(attempt.done)
+		h.mu.Unlock()
+	}()
 
 	if request.PolicyToken == "" || request.WriterEpoch == "" {
 		h.setPhase(phaseWarm)
 		return errors.New("policy token and writer epoch are required")
 	}
-	h.mu.Lock()
-	runtimeSlotNeeded := h.runtimeSlotNeeded
-	h.mu.Unlock()
-	var err error
-	networkPolicy := NetworkPolicy{}
 	networkDigest := digestString(request.NetworkPolicy)
-	if !runtimeSlotNeeded {
-		networkPolicy, networkDigest, err = decodeNetworkPolicy(request.NetworkPolicy)
-		if err != nil {
-			h.setPhase(phaseWarm)
-			return err
-		}
-	}
 	runtimeRevision := ""
-	if runtimeSlotNeeded && request.Stage == nil {
+	if request.Stage == nil {
 		h.setPhase(phaseWarm)
 		return errors.New("regional runtime slot claims require a RootFS stage")
 	}
-	if runtimeSlotNeeded {
-		if err := request.ValidateRegional(); err != nil {
-			h.setPhase(phaseWarm)
-			return fmt.Errorf("validate regional runtime slot claim: %w: %w", err, errdefs.ErrInvalidArgument)
-		}
-		var err error
-		runtimeRevision, err = request.Runtime.Revision()
-		if err != nil {
-			h.setPhase(phaseWarm)
-			return fmt.Errorf("derive static runtime assignment revision: %w: %w", err, errdefs.ErrInvalidArgument)
-		}
+	if err := request.ValidateRegional(); err != nil {
+		h.setPhase(phaseWarm)
+		return fmt.Errorf("validate regional runtime slot claim: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
-	rootfsSource := request.RootfsPath
-	allowedRoot := h.allowedRoot
+	runtimeRevision, err = request.Runtime.Revision()
+	if err != nil {
+		h.setPhase(phaseWarm)
+		return fmt.Errorf("derive static runtime assignment revision: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	rootfsSource := ""
+	allowedRoot := h.rootfsAllowedRoot
 	var durableStage *rootfshandoff.StageRequest
 	var runtimeSlot *runtimeSlotLifecycle
 	var startingRequest *protocol.StartingRequest
-	sessionAttached := false
-	claimSucceeded := false
-	defer func() {
-		if runtimeSlotNeeded || durableStage == nil || !sessionAttached || claimSucceeded || h.rootfs == nil {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if _, err := h.rootfs.Retire(ctx, *durableStage, retireOperationID(*durableStage)); err != nil {
-			h.logger.Error("failed RootFS abort after claim failure", "error", err)
-		}
-	}()
 	if request.Stage != nil {
 		if h.rootfs == nil {
 			h.setPhase(phaseWarm)
@@ -501,10 +478,10 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			h.setPhase(phaseWarm)
 			return errors.New("claim credentials do not match RootFS stage")
 		}
-		if request.Stage.Identity.PodUID != h.taskConfig.AllocID ||
-			request.Stage.Identity.ContainerName != h.taskConfig.Name ||
-			request.Stage.Identity.RuntimeName != PluginName ||
-			request.Stage.Identity.Snapshotter != "nomad-driver" {
+		if request.Stage.Identity.AllocationID != h.taskConfig.AllocID ||
+			request.Stage.Identity.TaskName != h.taskConfig.Name ||
+			request.Stage.Identity.RuntimeClass != PluginName ||
+			request.Stage.Identity.RootFSDriver != "nomad-driver" {
 			h.setPhase(phaseWarm)
 			return errors.New("RootFS stage is not bound to this Nomad allocation")
 		}
@@ -518,7 +495,6 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		}
 		durable := request.Stage.WithoutWriterGrantToken()
 		durableStage = &durable
-		allowedRoot = h.rootfsAllowedRoot
 		runtimeSlot, startingRequest, err = h.runtimeSlotStartingRequest(request, durable, networkDigest)
 		if err != nil {
 			h.setPhase(phaseWarm)
@@ -528,12 +504,6 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	if err := h.writeClaimBundle(request.Runtime, request.Resources); err != nil {
 		h.setPhase(phaseWarm)
 		return err
-	}
-	if !runtimeSlotNeeded && h.network != nil && h.netnsPath() != "" {
-		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, networkPolicy); err != nil {
-			h.setPhase(phaseWarm)
-			return fmt.Errorf("apply claim network policy: %w", err)
-		}
 	}
 	h.mu.Lock()
 	h.rootMounted = true
@@ -569,22 +539,12 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 				_ = h.rollbackClaim()
 				return attachErr
 			}
-			if runtimeSlotNeeded {
-				return h.poisonClaimLaunch(errors.Join(
-					attachErr,
-					errors.New("regional runtime-slot cleanup is required for the consumed writer"),
-				), false)
-			}
-			fenceErr := h.crashAbandonPersistedRootFS(errors.New("RootFS attach failed; writer was crash-abandoned"))
-			if fenceErr != nil {
-				h.markPoisoned(errors.Join(attachErr, fenceErr))
-				_ = h.persist()
-				return errors.Join(attachErr, fmt.Errorf("crash-abandon failed RootFS attach: %w", fenceErr))
-			}
-			return errors.Join(attachErr, errors.New("writer was crash-abandoned"))
+			return h.poisonClaimLaunch(errors.Join(
+				attachErr,
+				errors.New("regional runtime-slot cleanup is required for the consumed writer"),
+			), false)
 		}
 		rootfsSource = mount.Source
-		sessionAttached = true
 	}
 	resolvedRootfs, err := validateRootfsPath(rootfsSource, allowedRoot)
 	if err != nil {
@@ -625,13 +585,13 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
 	defer cancel()
 	if err := h.runner.Create(ctx, h.bundleDir, h.containerID); err != nil {
 		return h.poisonClaimLaunch(fmt.Errorf("runsc create: %w", err), true)
 	}
 	cancel()
-	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	startCtx, startCancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
 	defer startCancel()
 	if err := h.runner.Start(startCtx, h.containerID); err != nil {
 		return h.poisonClaimLaunch(fmt.Errorf("runsc start: %w", err), true)
@@ -661,7 +621,6 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		_ = h.persist()
 		return fmt.Errorf("persist active state: %w", err)
 	}
-	claimSucceeded = true
 	h.startExitWatch()
 	return nil
 }
@@ -670,7 +629,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 // claim after runsc has started. This closes the response-loss window without
 // making a one-shot slot reusable for another grant or policy.
 func (h *taskHandle) activeRegionalClaimRetryMatchesLocked(request ClaimRequest) (bool, error) {
-	if !h.runtimeSlotNeeded || h.claim == nil || h.claim.Stage == nil || request.Stage == nil {
+	if h.claim == nil || h.claim.Stage == nil || request.Stage == nil {
 		return false, nil
 	}
 	if err := request.ValidateRegional(); err != nil {
@@ -759,7 +718,6 @@ func (h *taskHandle) rollbackClaim() error {
 	h.claim = nil
 	h.stage = nil
 	h.mu.Unlock()
-	h.resetNetworkPolicy()
 	return h.persist()
 }
 
@@ -784,7 +742,6 @@ func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error 
 		deleteErr = h.runner.Delete(deleteCtx, h.containerID, true)
 		deleteCancel()
 	}
-	h.resetNetworkPolicy()
 	result := errors.Join(cause, unmountErr, deleteErr)
 	h.mu.Lock()
 	h.rootMounted = unmountErr != nil
@@ -951,11 +908,6 @@ func (h *taskHandle) Close(force bool) error {
 	}
 	h.closed = true
 	rootMounted := h.rootMounted
-	phase := h.phase
-	stage := h.stage
-	if stage == nil && h.claim != nil {
-		stage = h.claim.Stage
-	}
 	h.mu.Unlock()
 
 	h.stopControl()
@@ -967,37 +919,14 @@ func (h *taskHandle) Close(force bool) error {
 		_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	}
 	firstErr := h.runner.Delete(cleanupCtx, h.containerID, true)
-	if rootMounted && (h.runtimeSlotNeeded || phase != phasePoisoned || stage == nil) {
+	if rootMounted {
 		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	// The regional runtime-slot reconciler is the sole terminal writer owner.
-	// The plugin removes its task-facing bind, but leaves the durable RootFS
-	// session for authenticated node cleanup so Nomad StopTask cannot race a
-	// crash-abandon transaction with a competing planned retirement.
-	if !h.runtimeSlotNeeded && stage != nil && rootMounted && h.rootfs != nil {
-		retireCtx, retireCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		var err error
-		if phase == phasePoisoned {
-			err = h.crashAbandonPersistedRootFS(errors.New("poisoned RootFS writer was crash-abandoned during task cleanup"))
-		} else {
-			_, err = h.rootfs.Retire(retireCtx, *stage, retireOperationID(*stage))
-		}
-		if err != nil {
-			retireCancel()
-			h.mu.Lock()
-			h.closed = false
-			h.mu.Unlock()
-			return errors.Join(firstErr, fmt.Errorf("terminate RootFS session: %w", err))
-		}
-		retireCancel()
-	}
-	if !h.runtimeSlotNeeded && h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
-		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
+	// The regional reconciler is the sole terminal writer owner. The plugin
+	// removes only its task-facing bind and leaves the durable RootFS session
+	// for authenticated, plugin-independent node cleanup.
 	if err := os.Remove(h.socketPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
 		firstErr = err
 	}
@@ -1185,7 +1114,7 @@ func (h *taskHandle) Recover(state PersistedState) error {
 
 func (h *taskHandle) recoverCrashedRootFS() error {
 	if h.rootfs == nil || h.stage == nil {
-		return errors.New("recovered RootFS task has no storage runtime")
+		return errors.New("recovered runtime-slot task has no storage runtime")
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cleanupCancel()
@@ -1193,75 +1122,19 @@ func (h *taskHandle) recoverCrashedRootFS() error {
 	if err := h.runner.Delete(cleanupCtx, h.containerID, true); err != nil {
 		return fmt.Errorf("delete crashed gVisor task: %w", err)
 	}
-	if h.runtimeSlotNeeded {
-		if err := h.mounter.Unmount(h.rootMount); err != nil {
-			return fmt.Errorf("unmount crashed runtime-slot task root: %w", err)
-		}
-		h.mu.Lock()
-		h.rootMounted = false
-		h.phase = phasePoisoned
-		h.exitResult = &drivers.ExitResult{Err: errors.New("task driver restarted; regional runtime-slot cleanup is required")}
-		if h.completedAt.IsZero() {
-			h.completedAt = time.Now()
-		}
-		closeDoneLocked(h.done)
-		h.mu.Unlock()
-		return h.persist()
-	}
-	return h.crashAbandonPersistedRootFS(errors.New("task driver restarted; RootFS writer was crash-abandoned"))
-}
-
-func (h *taskHandle) crashAbandonPersistedRootFS(exitErr error) error {
-	if h.rootfs == nil || h.stage == nil {
-		return errors.New("crashed RootFS task has no storage runtime")
-	}
-	operationID := crashOperationID(*h.stage)
 	if err := h.mounter.Unmount(h.rootMount); err != nil {
-		return fmt.Errorf("unmount crashed task root: %w", err)
-	}
-	mountNamespace, err := os.Readlink("/proc/self/ns/mnt")
-	if err != nil {
-		return fmt.Errorf("read host mount namespace: %w", err)
-	}
-	fenceCtx, fenceCancel := context.WithTimeout(context.Background(), 45*time.Second)
-	_, err = h.rootfs.CrashFence(fenceCtx, *h.stage, operationID, crashTaskObservation{
-		ActiveKey: h.taskConfig.ID, ContainerID: h.containerID,
-		HostMountNamespaceID: mountNamespace, ContainerAbsent: true, TaskAbsent: true,
-		FrontendSnapshotAbsent: true, StableMountAbsent: true,
-	})
-	fenceCancel()
-	if err != nil {
-		return fmt.Errorf("crash-fence recovered RootFS task: %w", err)
-	}
-	if !h.runtimeSlotNeeded && h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
-		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil {
-			return fmt.Errorf("cleanup crashed task network policy: %w", err)
-		}
+		return fmt.Errorf("unmount crashed runtime-slot task root: %w", err)
 	}
 	h.mu.Lock()
 	h.rootMounted = false
 	h.phase = phasePoisoned
-	h.exitResult = &drivers.ExitResult{Err: exitErr}
+	h.exitResult = &drivers.ExitResult{Err: errors.New("task driver restarted; regional runtime-slot cleanup is required")}
 	if h.completedAt.IsZero() {
 		h.completedAt = time.Now()
 	}
 	closeDoneLocked(h.done)
 	h.mu.Unlock()
 	return h.persist()
-}
-
-func crashOperationID(stage rootfshandoff.StageRequest) string {
-	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
-	sum := sha256.Sum256([]byte(payload))
-	return "nomad-crash-" + hex.EncodeToString(sum[:16])
-}
-
-func retireOperationID(stage rootfshandoff.StageRequest) string {
-	return rootfshandoff.PlannedRetireOperationID(
-		stage.Parent,
-		stage.Identity.WriterGrantID,
-		stage.Identity.WriterEpoch,
-	)
 }
 
 func (h *taskHandle) setPhase(phase slotPhase) {

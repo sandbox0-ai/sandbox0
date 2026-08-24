@@ -49,7 +49,7 @@ type ContainerLogForwarder struct {
 	streams      map[containerLogStreamKey]*containerLogLineState
 }
 
-// NewContainerLogForwarder creates a process output forwarder for pod logs.
+// NewContainerLogForwarder creates a process output forwarder for runtime logs.
 func NewContainerLogForwarder(opts ContainerLogForwarderOptions) *ContainerLogForwarder {
 	stdout := opts.Stdout
 	if stdout == nil {

@@ -13,7 +13,7 @@ func TestCloneSandboxConfigClonesEnvVars(t *testing.T) {
 		},
 	}
 
-	got := cloneSandboxConfig(cfg)
+	got := CloneSandboxConfig(cfg)
 	if got.EnvVars["APP_ENV"] != "test" {
 		t.Fatalf("APP_ENV = %q, want test", got.EnvVars["APP_ENV"])
 	}

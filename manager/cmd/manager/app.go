@@ -6,37 +6,30 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportdiscovery"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportworker"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
 	"go.uber.org/zap"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 )
 
-// managerApp owns process-level startup, leader election, and shutdown. Feature
+// managerApp owns process-level startup and shutdown. Feature
 // construction stays outside this lifecycle object so dependencies are fully
 // assembled before any server or controller starts.
 type managerApp struct {
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	logger                 *zap.Logger
-	k8sClient              kubernetes.Interface
 	httpServer             *httpserver.Server
 	nodeAuthority          *nodeauthority.Component
 	rootFSMaterializer     *rootfsmaterializer.Worker
+	rootFSImportDiscovery  *rootfsimportdiscovery.Worker
 	rootFSImporter         *rootfsimportworker.Worker
 	sandboxClaimReconciler *sandboxclaimreconciler.Worker
-	informerFactory        informers.SharedInformerFactory
-	crdInformerFactory     externalversions.SharedInformerFactory
-	cacheSyncs             []cache.InformerSynced
 	metricsPort            int
-	leaderElectionEnabled  bool
 	startControllers       func(context.Context)
 }
 
@@ -51,6 +44,12 @@ func (a *managerApp) Run() {
 		})
 		a.logger.Info("Active-active Rootfs composite materializer started")
 	}
+	if a.rootFSImportDiscovery != nil {
+		go a.rootFSImportDiscovery.Run(a.ctx, func(result rootfsimportdiscovery.Result, err error) {
+			logRootFSImportDiscoveryPass(a.logger, result, err)
+		})
+		a.logger.Info("Active-active template Rootfs import discovery started")
+	}
 	if a.rootFSImporter != nil {
 		go a.rootFSImporter.Run(a.ctx, func(result rootfsimportworker.Result, err error) {
 			logRootFSImportWorkerPass(a.logger, result, err)
@@ -64,51 +63,17 @@ func (a *managerApp) Run() {
 		a.logger.Info("Active-active abandoned sandbox claim reconciler started")
 	}
 
-	if a.informerFactory != nil || a.crdInformerFactory != nil {
-		a.logger.Info("Starting informers")
-	}
-	if a.informerFactory != nil {
-		a.informerFactory.Start(a.ctx.Done())
-	}
-	if a.crdInformerFactory != nil {
-		a.crdInformerFactory.Start(a.ctx.Done())
-	}
-
-	if len(a.cacheSyncs) > 0 {
-		a.logger.Info("Waiting for informer caches to sync")
-		if !cache.WaitForCacheSync(a.ctx.Done(), a.cacheSyncs...) {
-			a.logger.Fatal("Failed to sync informer caches")
-		}
-	}
-	if a.crdInformerFactory != nil {
-		for typ, synced := range a.crdInformerFactory.WaitForCacheSync(a.ctx.Done()) {
-			if !synced {
-				a.logger.Warn("CRD informer cache not synced", zap.String("type", typ.String()))
-			} else {
-				a.logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
-			}
-		}
-	}
-
 	go func() {
 		if err := a.httpServer.Start(a.ctx); err != nil && err != http.ErrServerClosed {
 			a.logger.Fatal("HTTP server failed", zap.Error(err))
 		}
 	}()
 
-	if a.leaderElectionEnabled {
-		go func() {
-			if err := runManagerLeaderElection(a.ctx, a.k8sClient, a.logger, a.startControllers, a.cancel); err != nil {
-				a.logger.Error("Manager controller leader election stopped", zap.Error(err))
-				a.cancel()
-			}
-		}()
-	} else {
-		a.logger.Warn("Manager controller leader election is disabled")
+	if a.startControllers != nil {
 		a.startControllers(a.ctx)
 	}
 
-	a.logger.Info("Manager is running", zap.Bool("leaderElection", a.leaderElectionEnabled))
+	a.logger.Info("Manager is running")
 	<-a.ctx.Done()
 	a.logger.Info("Shutting down gracefully")
 	// Give components time to finish their context-driven shutdown paths.

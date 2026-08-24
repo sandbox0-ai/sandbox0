@@ -33,7 +33,7 @@ func (r *recordingPauseReconciler) ResumePausedSandboxRuntime(_ context.Context,
 	return &managerapi.Sandbox{ID: sandboxID}, nil
 }
 
-func TestSandboxPauseControllerUsesSelectedRuntimeBackend(t *testing.T) {
+func TestSandboxPauseControllerUsesRuntimeReconciler(t *testing.T) {
 	store := staticPauseLifecycleStore{txns: []*sandboxstore.SandboxLifecycleTxn{
 		{SandboxID: "manual", Kind: sandboxstore.SandboxLifecycleKindPause, Source: sandboxstore.SandboxLifecycleSourceManual},
 		{SandboxID: "crash", Kind: sandboxstore.SandboxLifecycleKindPause, Source: sandboxstore.SandboxLifecycleSourceCrash},

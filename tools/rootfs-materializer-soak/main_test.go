@@ -132,7 +132,7 @@ func TestEvaluateFinalBoundsAcceptsBoundedRun(t *testing.T) {
 	}
 	baselineDB := databaseSnapshot{DatabaseBytes: 100}
 	finalDB := databaseSnapshot{
-		MaterializedGenerations: 11, CatalogObjects: 4, DatabaseBytes: 200,
+		MaterializedGenerations: 11, CatalogObjects: 5, DatabaseBytes: 200,
 	}
 	violations := evaluateFinalBounds(opts, time.Minute,
 		counters{Generated: 10, Materialized: 10, RetainedBatches: 2, ExpectedWorkerErrors: 2}, true,
@@ -148,7 +148,7 @@ func TestEvaluateFinalBoundsUsesForcedFlushBoundAfterTerminalBatchPurge(t *testi
 	}
 	baselineDB := databaseSnapshot{DatabaseBytes: 10_255_719}
 	finalDB := databaseSnapshot{
-		MaterializedGenerations: 10_001, CatalogObjects: 514, DatabaseBytes: 93_461_863,
+		MaterializedGenerations: 10_001, CatalogObjects: 515, DatabaseBytes: 93_461_863,
 	}
 	state := counters{
 		Generated: 10_000, Materialized: 10_000, RetainedBatches: 254, ExpectedWorkerErrors: 2,
@@ -159,7 +159,7 @@ func TestEvaluateFinalBoundsUsesForcedFlushBoundAfterTerminalBatchPurge(t *testi
 	require.Empty(t, violations)
 
 	tooManyObjects := objectSnapshot{Objects: materializerAcceptanceBounds(opts).MaxObjects + 1}
-	finalDB.CatalogObjects = tooManyObjects.Objects - 2
+	finalDB.CatalogObjects = tooManyObjects.Objects - 1
 	violations = evaluateFinalBounds(opts, 24*time.Hour, state, true,
 		baselineDB, directorySnapshot{Files: 14, Bytes: 13_837}, finalDB,
 		tooManyObjects, directorySnapshot{Files: 550, Bytes: 42_503_320})

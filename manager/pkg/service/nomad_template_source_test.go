@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -71,9 +71,6 @@ func TestNomadSandboxTemplateSourceResolverFailsClosed(t *testing.T) {
 	}{
 		{name: "publisher unavailable", available: false, teamID: "team-a", targetError: template.ErrTemplateSourceUnavailable},
 		{name: "active slot missing", available: true, teamID: "team-a", targetError: template.ErrTemplateSourceNotReady},
-		{name: "foreign runtime", available: true, teamID: "team-a", configure: func(record *sandboxstore.SandboxRecord) {
-			record.RuntimeBackend = "kubernetes"
-		}, targetError: template.ErrTemplateSourceUnavailable},
 		{name: "cross team", available: true, teamID: "team-b", targetError: template.ErrTemplateSourceForbidden},
 		{name: "hard expired", available: true, teamID: "team-a", configure: func(record *sandboxstore.SandboxRecord) {
 			record.HardExpiresAt = now
@@ -120,8 +117,7 @@ func TestNomadSandboxTemplateSourceResolverRejectsActiveLifecycle(t *testing.T) 
 func nomadTemplateSourceTestRecord(now time.Time, desiredState string) *sandboxstore.SandboxRecord {
 	return &sandboxstore.SandboxRecord{
 		ID: "sandbox-a", TeamID: "team-a", UserID: "user-a", ClusterID: "cluster-a",
-		TemplateID: "default", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState: desiredState, RuntimeID: "allocation-a",
+		TemplateID: "default", DesiredState: desiredState, RuntimeID: "allocation-a",
 		TemplateSpec: v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu:24.04"},
 		},

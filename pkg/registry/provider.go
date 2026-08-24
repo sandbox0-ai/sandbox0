@@ -8,10 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
-	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 // Credential contains registry login credentials.
@@ -43,18 +42,13 @@ type Provider interface {
 }
 
 // NewProvider creates a registry provider based on config.
-func NewProvider(cfg config.RegistryConfig, secretLister corelisters.SecretLister, logger *zap.Logger) (Provider, error) {
+func NewProvider(cfg config.RegistryConfig, logger *zap.Logger) (Provider, error) {
 	provider := strings.TrimSpace(strings.ToLower(cfg.Provider))
 	if provider == "" {
 		return nil, nil
 	}
 	if logger != nil {
 		logger.Info("Registry provider configured", zap.String("provider", provider))
-	}
-	namespace := resolveNamespace(cfg.Namespace)
-	secretReader := secretReader{
-		secretLister: secretLister,
-		namespace:    namespace,
 	}
 	pullRegistry := normalizeRegistryHost(cfg.PullRegistry)
 
@@ -64,27 +58,27 @@ func NewProvider(cfg config.RegistryConfig, secretLister corelisters.SecretListe
 		if cfg.AWS == nil {
 			return nil, fmt.Errorf("registry aws config is required")
 		}
-		base = &awsProvider{cfg: *cfg.AWS, secrets: secretReader}
+		base = &awsProvider{cfg: *cfg.AWS}
 	case "gcp":
 		if cfg.GCP == nil {
 			return nil, fmt.Errorf("registry gcp config is required")
 		}
-		base = &gcpProvider{cfg: *cfg.GCP, secrets: secretReader}
+		base = &gcpProvider{cfg: *cfg.GCP}
 	case "azure":
 		if cfg.Azure == nil {
 			return nil, fmt.Errorf("registry azure config is required")
 		}
-		base = &azureProvider{cfg: *cfg.Azure, secrets: secretReader}
+		base = &azureProvider{cfg: *cfg.Azure}
 	case "aliyun":
 		if cfg.Aliyun == nil {
 			return nil, fmt.Errorf("registry aliyun config is required")
 		}
-		base = &aliyunProvider{cfg: *cfg.Aliyun, secrets: secretReader}
+		base = &aliyunProvider{cfg: *cfg.Aliyun}
 	case "harbor":
 		if cfg.Harbor == nil {
 			return nil, fmt.Errorf("registry harbor config is required")
 		}
-		base = &harborProvider{cfg: *cfg.Harbor, secrets: secretReader}
+		base = &harborProvider{cfg: *cfg.Harbor}
 	case "builtin":
 		if cfg.Builtin == nil {
 			return nil, fmt.Errorf("registry builtin config is required")
@@ -92,7 +86,6 @@ func NewProvider(cfg config.RegistryConfig, secretLister corelisters.SecretListe
 		base = &builtinProvider{
 			cfg:      *cfg.Builtin,
 			registry: normalizeRegistryHost(cfg.PushRegistry),
-			secrets:  secretReader,
 		}
 	default:
 		return nil, fmt.Errorf("unsupported registry provider: %s", provider)
@@ -135,58 +128,23 @@ func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, req P
 	return creds, nil
 }
 
-type secretReader struct {
-	secretLister corelisters.SecretLister
-	namespace    string
-}
-
-func (s secretReader) read(ctx context.Context, name, key string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("secret name is required")
+func credentialValue(value, path, description string) (string, error) {
+	value = strings.TrimSpace(value)
+	path = strings.TrimSpace(path)
+	if value != "" && path != "" {
+		return "", fmt.Errorf("%s must be configured by value or file, not both", description)
 	}
-	var secretData map[string][]byte
-	if s.secretLister != nil {
-		secret, err := s.secretLister.Secrets(s.namespace).Get(name)
-		if err != nil {
-			return "", err
-		}
-		secretData = secret.Data
-	} else {
-		return "", fmt.Errorf("secret lister is required for registry credentials")
+	if value != "" {
+		return value, nil
 	}
-	if secretData == nil {
-		return "", fmt.Errorf("secret %q has no data", name)
+	if path == "" {
+		return "", nil
 	}
-	value, ok := secretData[key]
-	if !ok {
-		return "", fmt.Errorf("secret %q missing key %q", name, key)
-	}
-	return string(value), nil
-}
-
-func (s secretReader) readRequired(ctx context.Context, secretName, configuredKey, defaultKey, description string) (string, error) {
-	key := strings.TrimSpace(configuredKey)
-	if key == "" {
-		key = defaultKey
-	}
-	value, err := s.read(ctx, secretName, key)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", description, err)
+		return "", fmt.Errorf("read %s file: %w", description, err)
 	}
-	return value, nil
-}
-
-func resolveNamespace(explicit string) string {
-	if strings.TrimSpace(explicit) != "" {
-		return explicit
-	}
-	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err == nil {
-		if ns := strings.TrimSpace(string(data)); ns != "" {
-			return ns
-		}
-	}
-	return "default"
+	return strings.TrimSpace(string(data)), nil
 }
 
 func normalizeRegistryHost(raw string) string {
@@ -207,7 +165,6 @@ func timePtr(t time.Time) *time.Time {
 type builtinProvider struct {
 	cfg      config.RegistryBuiltinConfig
 	registry string
-	secrets  secretReader
 }
 
 func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
@@ -217,18 +174,16 @@ func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCreden
 	if err := validateBuiltinTargetImage(req.TeamID, req.TargetImage, p.registry); err != nil {
 		return nil, err
 	}
-	username := strings.TrimSpace(p.cfg.Username)
-	password := strings.TrimSpace(p.cfg.Password)
+	username, err := credentialValue(p.cfg.Username, p.cfg.UsernameFile, "builtin registry username")
+	if err != nil {
+		return nil, err
+	}
+	password, err := credentialValue(p.cfg.Password, p.cfg.PasswordFile, "builtin registry password")
+	if err != nil {
+		return nil, err
+	}
 	if username == "" || password == "" {
-		var err error
-		username, err = p.secrets.readRequired(ctx, p.cfg.AuthSecretName, p.cfg.UsernameKey, "username", "username")
-		if err != nil {
-			return nil, err
-		}
-		password, err = p.secrets.readRequired(ctx, p.cfg.AuthSecretName, p.cfg.PasswordKey, "password", "password")
-		if err != nil {
-			return nil, err
-		}
+		return nil, errors.New("builtin registry username and password are required")
 	}
 	return &Credential{
 		Provider:     "builtin",

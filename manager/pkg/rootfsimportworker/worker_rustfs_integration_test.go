@@ -223,7 +223,13 @@ func TestDurableWorkerReplaysPublishedRustFSObjectsBeforeReadyCAS(t *testing.T) 
 		t.Fatalf("operation did not reach Ready on attempt two: %#v", ready)
 	}
 	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(ctx, ready.ArtifactDigest,
-		sandboxstore.RootFSArtifactPlatform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture})
+		sandboxstore.RootFSArtifactPlatform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
+		sandboxstore.ReadyRootFSArtifactRequirements{
+			FormatGeneration: spec.FormatGeneration,
+			LogicalSizeBytes: spec.LogicalSizeBytes,
+			ProcdProtocol:    spec.ProcdProtocol,
+			ProcdDigest:      spec.ProcdDigest,
+		})
 	if err != nil {
 		t.Fatal(err)
 	}

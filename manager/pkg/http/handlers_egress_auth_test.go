@@ -97,33 +97,6 @@ func TestResolveEgressAuthAllowsCtldCaller(t *testing.T) {
 	}
 }
 
-func TestResolveEgressAuthAllowsLegacyNetworkCallerDuringRollout(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	srv := &Server{
-		logger: zap.NewNop(),
-		egressAuthService: egressauthservice.NewEgressAuthService(egressauthservice.EgressAuthServiceConfig{
-			StaticAuth: []egressauthservice.StaticAuthConfig{{
-				AuthRef: "example-api",
-				Headers: map[string]string{"Authorization": "Bearer static"},
-			}},
-		}, &egressAuthBindingStore{}, zap.NewNop()),
-	}
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/egress-auth/resolve", bytes.NewReader([]byte(`{"authRef":"example-api"}`)))
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
-		Caller: internalauth.ServiceLegacyNetworkRuntime,
-		Target: internalauth.ServiceManager,
-	}))
-	req.Header.Set("Content-Type", "application/json")
-	ctx.Request = req
-
-	srv.resolveEgressAuth(ctx)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-}
-
 func TestResolveEgressAuthRejectsNonCtldCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	srv := &Server{

@@ -12,7 +12,6 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
@@ -21,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -29,12 +29,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type fakeTemplateStore struct {
@@ -246,7 +245,7 @@ func (f *fakeClaimStore) RequestNomadPausedRebase(
 			Kind: sandboxstore.SandboxLifecycleKindRebase, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
 			Source:                   sandboxstore.SandboxLifecycleSourceManual,
 			TargetGenerationID:       f.rebaseCandidate.TargetGenerationID,
-			ExpectedHeadLayerID:      f.rebaseCandidate.SourceGeneration.ID,
+			ExpectedGenerationID:     f.rebaseCandidate.SourceGeneration.ID,
 			SourceBaseArtifactDigest: f.rebaseCandidate.SourceBaseArtifact.ArtifactDigest,
 			TargetBaseArtifactDigest: request.TargetBaseArtifactDigest,
 			RollbackExpiresAt:        request.RollbackExpiresAt,
@@ -289,7 +288,7 @@ func (f *fakeClaimStore) PublishPausedRootFSRebase(
 	}
 	if txn := f.lifecyclesByID[request.OperationID]; txn != nil {
 		txn.Phase = sandboxstore.SandboxLifecyclePhaseCommitted
-		txn.PreparedHeadLayerID = request.Generation.ID
+		txn.PreparedGenerationID = request.Generation.ID
 		txn.WorkerProofDigest = append([]byte(nil), request.WorkerProofDigest...)
 		delete(f.activeLifecycles, request.SandboxID)
 	}
@@ -664,9 +663,13 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(
 	_ context.Context,
 	source string,
 	platform sandboxstore.RootFSArtifactPlatform,
-	format int,
+	requirements sandboxstore.ReadyRootFSArtifactRequirements,
 ) (*sandboxstore.RootFSBaseArtifact, error) {
-	if f.artifact == nil || f.artifact.SourceOCIDigest != source || f.artifact.Platform != platform || format != 0 {
+	if f.artifact == nil || f.artifact.SourceOCIDigest != source || f.artifact.Platform != platform ||
+		f.artifact.FormatGeneration != requirements.FormatGeneration ||
+		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
+		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
+		f.artifact.ProcdDigest != requirements.ProcdDigest {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
 	}
 	copy := *f.artifact
@@ -677,8 +680,13 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifactByDigest(
 	_ context.Context,
 	digest string,
 	platform sandboxstore.RootFSArtifactPlatform,
+	requirements sandboxstore.ReadyRootFSArtifactRequirements,
 ) (*sandboxstore.RootFSBaseArtifact, error) {
-	if f.artifact == nil || f.artifact.ArtifactDigest != digest || f.artifact.Platform != platform {
+	if f.artifact == nil || f.artifact.ArtifactDigest != digest || f.artifact.Platform != platform ||
+		f.artifact.FormatGeneration != requirements.FormatGeneration ||
+		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
+		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
+		f.artifact.ProcdDigest != requirements.ProcdDigest {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
 	}
 	copy := *f.artifact
@@ -712,7 +720,7 @@ func (f *fakeClaimStore) CreateRootFSSnapshot(
 	f.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: request.SnapshotID, FilesystemID: f.generation.FilesystemID,
 		TeamID: record.TeamID, SourceSandboxID: request.SandboxID,
-		HeadGenerationID: f.generation.ID, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		HeadGenerationID:   f.generation.ID,
 		BaseArtifactDigest: f.generation.BaseArtifactDigest,
 		FormatGeneration:   f.generation.FormatGeneration, SourceOCIDigest: f.generation.SourceOCIDigest,
 		Name: request.Name, Description: request.Description, CreatedAt: time.Unix(100, 0).UTC(),
@@ -1250,7 +1258,7 @@ func TestServiceMapsNomadResumeUnavailableConflictAndQuotaErrors(t *testing.T) {
 		sandboxID := preparePausedNomadResume(t, fixture)
 		fixture.store.resumeErr = sandboxstore.ErrNomadSandboxResumeConflict
 		_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
-		if !k8serrors.IsConflict(err) {
+		if !apierror.IsConflict(err) {
 			t.Fatalf("resume error = %v, want conflict", err)
 		}
 		if len(fixture.planner.requests) != 0 {
@@ -1333,7 +1341,6 @@ func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: "snapshot-1", FilesystemID: "snapshot-filesystem", TeamID: "team-1",
-		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
 		HeadGenerationID:   "snapshot-generation",
 		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
 		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
@@ -1375,7 +1382,6 @@ func TestServiceRestoresAttestedTemplateRootFSBeforeClaim(t *testing.T) {
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: tpl.RootFS.SnapshotID, FilesystemID: "captured-filesystem",
 		TeamID: "team-1", SourceSandboxID: "source-sandbox",
-		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
 		HeadGenerationID:   tpl.RootFS.GenerationID,
 		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
 		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
@@ -1415,7 +1421,7 @@ func TestServiceRejectsChangedTemplateRootFSAttestationBeforePersistence(t *test
 		Platform:           ocispec.Platform{OS: "linux", Architecture: "amd64"},
 	}
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
-		ID: tpl.RootFS.SnapshotID, TeamID: "team-1", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		ID: tpl.RootFS.SnapshotID, TeamID: "team-1",
 		HeadGenerationID: "substituted-generation", BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
 		SourceOCIDigest: tpl.RootFS.SourceOCIDigest, FormatGeneration: tpl.RootFS.FormatGeneration,
 	}
@@ -1444,7 +1450,6 @@ func TestServiceRejectsTemplateSnapshotGenerationFilesystemMismatch(t *testing.T
 	}
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: tpl.RootFS.SnapshotID, FilesystemID: "substituted-filesystem", TeamID: "team-1",
-		StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
 		HeadGenerationID:   tpl.RootFS.GenerationID,
 		BaseArtifactDigest: tpl.RootFS.BaseArtifactDigest,
 		SourceOCIDigest:    tpl.RootFS.SourceOCIDigest,
@@ -1475,9 +1480,8 @@ func TestServiceCapturesPausedNomadTemplateAsBlockGeneration(t *testing.T) {
 	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
 	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
 		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
-		RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
-		DesiredState:   sandboxstore.SandboxDesiredStatePaused,
-		TemplateSpec:   sourceSpec,
+		DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		TemplateSpec: sourceSpec,
 	}
 	fixture.store.generation = &sandboxstore.RootFSGeneration{
 		ID: "generation-captured", FilesystemID: "source-sandbox",
@@ -1493,11 +1497,11 @@ func TestServiceCapturesPausedNomadTemplateAsBlockGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if capture.Version != templatebuild.BlockCaptureMetadataVersion ||
+	if capture.Version != templatebuild.CaptureMetadataVersion ||
 		capture.SnapshotID != snapshotID || capture.HeadGenerationID != fixture.store.generation.ID ||
 		capture.SourceOCIDigest != fixture.store.artifact.SourceOCIDigest ||
 		capture.BaseArtifactDigest != fixture.store.artifact.ArtifactDigest ||
-		capture.Platform.Architecture != "amd64" || len(capture.Layers) != 0 {
+		capture.Platform.Architecture != "amd64" {
 		t.Fatalf("capture = %#v", capture)
 	}
 	if len(fixture.store.createdSnapshots) != 1 {
@@ -1516,7 +1520,6 @@ func TestServiceCapturesActiveNomadTemplateThroughExactWriter(t *testing.T) {
 	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
 	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
 		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
-		RuntimeBackend:    sandboxstore.SandboxRuntimeBackendNomad,
 		DesiredState:      sandboxstore.SandboxDesiredStateActive,
 		RuntimeGeneration: 3, RuntimeNamespace: "nomad", RuntimeID: "allocation-1",
 		TemplateSpec: sourceSpec,
@@ -1579,7 +1582,6 @@ func TestServiceCapturesActiveNomadTemplateThroughExactWriter(t *testing.T) {
 		fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 			ID: snapshotID, FilesystemID: targetFilesystemID, TeamID: "team-1",
 			SourceSandboxID: "source-sandbox", HeadGenerationID: targetGenerationID,
-			StorageFormat:      sandboxstore.RootFSStorageFormatBlockCOWV1,
 			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
 			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
 			FormatGeneration:   fixture.store.artifact.FormatGeneration,
@@ -1938,7 +1940,7 @@ func TestServiceForkRecoveryKeepsStaleExactLiveWriterRetryable(t *testing.T) {
 			FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 			TargetSandboxID:    targetID,
 			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
-			TargetRecordDigest: targetDigest, ExpectedHeadLayerID: "generation-source",
+			TargetRecordDigest: targetDigest, ExpectedGenerationID: "generation-source",
 			UpdatedAt: fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
 		},
 	}
@@ -2195,7 +2197,7 @@ func TestServicePausedRootFSRebaseRejectsCachedResultWhenDeleteWinsPublication(t
 			OperationID: operationID, StartedAt: fixture.now,
 			TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
 		})
-	if !k8serrors.IsConflict(err) {
+	if !apierror.IsConflict(err) {
 		t.Fatalf("delete-won publication error = %v", err)
 	}
 	if len(fixture.pausedRebase.executeCalls) != 1 || len(fixture.store.rebasePublishes) != 1 ||
@@ -2222,7 +2224,7 @@ func TestServicePausedRootFSRebaseRejectsChangedRetryAndMissingWorker(t *testing
 	changed := *request
 	changed.RollbackTTL = int32Pointer(7200)
 	_, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", &changed)
-	if !k8serrors.IsConflict(err) {
+	if !apierror.IsConflict(err) {
 		t.Fatalf("changed retry error = %v, want conflict", err)
 	}
 
@@ -2271,8 +2273,8 @@ func preparePausedNomadRebase(
 		Sandbox:        cloneClaimRecord(record),
 		Filesystem: &sandboxstore.RootFSFilesystem{
 			ID: "filesystem-" + operationID, TeamID: record.TeamID,
-			HeadGenerationID: "generation-source-" + operationID,
-			WriterEpoch:      7, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+			HeadGenerationID:   "generation-source-" + operationID,
+			WriterEpoch:        7,
 			BaseArtifactDigest: sourceArtifactDigest, FormatGeneration: 1,
 		},
 		SourceGeneration: &sandboxstore.RootFSGeneration{
@@ -2509,7 +2511,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 				Image: "example.com/sandbox0/procd@" + imageDigest,
 				Env:   []v1alpha1.EnvVar{{Name: "MAIN", Value: "yes"}, {Name: "SHARED", Value: "main"}},
 				Resources: v1alpha1.ResourceQuota{
-					CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"),
+					CPU: "1", Memory: "1Gi",
 				},
 			},
 			EnvVars: map[string]string{"TEMPLATE": "yes", "SHARED": "template"},
@@ -2538,8 +2540,10 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		claimPhases: make(map[string]string),
 		artifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest: artifactDigest, SourceOCIRef: template.Spec.MainContainer.Image,
-			SourceOCIDigest: imageDigest, FormatGeneration: 1,
-			Platform: sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
+			SourceOCIDigest: imageDigest, FormatGeneration: 1, LogicalSizeBytes: 8 << 30,
+			ProcdProtocol: "sandbox0.procd.test.v1",
+			ProcdDigest:   "sha256:" + strings.Repeat("f", 64),
+			Platform:      sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		},
 	}
 	planner := &fakePlanner{}
@@ -2553,13 +2557,16 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{runtimeClass}}, Planner: planner, Allocation: allocation,
-		RunningFork:     runningFork,
-		PausedRebase:    pausedRebase,
-		QuotaLimits:     quotaLimits,
-		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
-		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
-		ClaimTTL:        15 * time.Second,
-		DefaultTTL:      time.Hour, Now: func() time.Time { return now }, Logger: zap.NewNop(),
+		RunningFork:            runningFork,
+		PausedRebase:           pausedRebase,
+		QuotaLimits:            quotaLimits,
+		NetworkPolicies:        networkpolicy.NewNetworkPolicyService(zap.NewNop()),
+		ResourcePolicy:         templatepkg.NewResourcePolicy("1Gi", "8Gi"),
+		RootFSFormatGeneration: 1,
+		RootFSProcdProtocol:    "sandbox0.procd.test.v1",
+		RootFSProcdDigest:      "sha256:" + strings.Repeat("f", 64),
+		ClaimTTL:               15 * time.Second,
+		DefaultTTL:             time.Hour, Now: func() time.Time { return now }, Logger: zap.NewNop(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2612,8 +2619,4 @@ func cloneNomadPausedRebaseCandidate(
 	}
 	copy.WorkerProofDigest = append([]byte(nil), candidate.WorkerProofDigest...)
 	return &copy
-}
-
-func mustQuantity(value string) resource.Quantity {
-	return resource.MustParse(value)
 }

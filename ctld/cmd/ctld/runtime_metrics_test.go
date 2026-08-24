@@ -7,42 +7,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	ctldruntimemetrics "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimemetrics"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
+func TestCtldRuntimeMetricsProducerPostsAuthorizedNomadRuntimeSample(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:         "cluster-gateway",
-		PublicKey:      publicKey,
-		AllowedCallers: []string{"ctld"},
+		Target: "cluster-gateway", PublicKey: publicKey, AllowedCallers: []string{"ctld"},
 	})
 	received := make(chan sandboxobservability.RuntimeSample, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/internal/v1/sandbox-observability/runtime-samples", r.URL.Path)
-		claims, validateErr := validator.Validate(r.Header.Get(internalauth.DefaultTokenHeader))
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, http.MethodPost, request.Method)
+		assert.Equal(t, "/internal/v1/sandbox-observability/runtime-samples", request.URL.Path)
+		claims, validateErr := validator.Validate(request.Header.Get(internalauth.DefaultTokenHeader))
 		if validateErr != nil {
-			t.Errorf("validate ctld internal token: %v", validateErr)
-			w.WriteHeader(http.StatusUnauthorized)
+			http.Error(writer, validateErr.Error(), http.StatusUnauthorized)
 			return
 		}
 		assert.Equal(t, "ctld", claims.Caller)
@@ -50,84 +42,42 @@ func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
 		var body struct {
 			Samples []sandboxobservability.RuntimeSample `json:"samples"`
 		}
-		if decodeErr := json.NewDecoder(r.Body).Decode(&body); decodeErr != nil {
-			t.Errorf("decode runtime sample batch: %v", decodeErr)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if len(body.Samples) != 1 {
-			t.Errorf("runtime sample count = %d, want 1", len(body.Samples))
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
+		require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+		require.Len(t, body.Samples, 1)
 		received <- body.Samples[0]
-		w.WriteHeader(http.StatusNoContent)
+		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
-	originalNodeName := nodeName
-	nodeName = "node-a"
-	defer func() { nodeName = originalNodeName }()
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns-a",
-			Name:      "pod-a",
-			UID:       types.UID("pod-uid-a"),
-			Labels: map[string]string{
-				sandboxpod.LabelPoolType:  sandboxpod.PoolTypeActive,
-				sandboxpod.LabelSandboxID: "sandbox-a",
-			},
-			Annotations: map[string]string{
-				sandboxpod.AnnotationTeamID:            "team-a",
-				sandboxpod.AnnotationRuntimeGeneration: "4",
-			},
+	target := nomadruntime.RuntimeMetricTarget{
+		Version: nomadruntime.RuntimeMetricTargetVersion,
+		TeamID:  "team-a", SandboxID: "sandbox-a", RuntimeGeneration: 4,
+		CPUMillicpu: 500, MemoryMiB: 1024,
+		AllocationID: "allocation-a", NodeBootID: "boot-a", LaunchAttempt: "launch-a",
+		RunscContainerID: "runsc-a", BindingDigest: strings.Repeat("a", 64),
+	}
+	target.SeriesEpoch = nomadruntime.RuntimeMetricSeriesEpoch(
+		target.AllocationID, target.NodeBootID, target.LaunchAttempt, target.RunscContainerID,
+	)
+	client := &staticRuntimeMetricClient{
+		target: target,
+		sample: nomadruntime.RuntimeMetricSample{
+			Version: nomadruntime.RuntimeMetricSampleVersion, ObservedAt: time.Now().UTC(),
+			Stats: gvisorcli.RunscStats{Type: "stats", ID: target.RunscContainerID},
 		},
-		Spec: corev1.PodSpec{
-			NodeName:   "node-a",
-			Containers: []corev1.Container{{Name: "procd"}},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		called: make(chan struct{}, 1),
 	}
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "ctld", PrivateKey: privateKey, TTL: time.Minute})
-	statsCalled := make(chan struct{}, 1)
-	producer, err := newCtldRuntimeMetricsProducer(&config.CtldConfig{
-		RegionID:         "region-a",
-		DefaultClusterId: "cluster-a",
-		SandboxObservabilityRuntimeSamplesIngestURL: server.URL + "/internal/v1/sandbox-observability/runtime-samples",
-		SandboxObservabilityIngestQueueSize:         10,
-		SandboxObservabilityIngestBatchSize:         100,
-		SandboxObservabilityIngestFlushInterval:     metav1.Duration{Duration: time.Hour},
-		SandboxObservabilityIngestRequestTimeout:    metav1.Duration{Duration: time.Second},
-		SandboxObservabilityIngestMaxRetries:        1,
-		SandboxObservabilityIngestRetryBackoff:      metav1.Duration{Duration: time.Millisecond},
-		SandboxObservabilityRuntimeSampleInterval:   metav1.Duration{Duration: time.Minute},
-		SandboxObservabilityRuntimeSampleJitter:     metav1.Duration{Duration: time.Second},
-	}, staticStatsClient{
-		onCall: statsCalled,
-		sandboxes: []*runtimeapi.PodSandbox{{
-			Id:       "cri-sandbox-a",
-			Metadata: &runtimeapi.PodSandboxMetadata{Namespace: "ns-a", Name: "pod-a", Uid: "pod-uid-a"},
-			State:    runtimeapi.PodSandboxState_SANDBOX_READY,
-		}},
-		statsByID: map[string]*runtimeapi.PodSandboxStats{
-			"cri-sandbox-a": {
-				Attributes: &runtimeapi.PodSandboxAttributes{
-					Id:       "cri-sandbox-a",
-					Metadata: &runtimeapi.PodSandboxMetadata{Namespace: "ns-a", Name: "pod-a", Uid: "pod-uid-a"},
-				},
-				Linux: &runtimeapi.LinuxPodSandboxStats{},
-			},
-		},
-	}, testPodLister(t, pod), generator, nil, nil)
+	producer, err := newCtldRuntimeMetricsProducer(testRuntimeMetricConfig(server.URL), client, generator, nil, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handle := startCtldRuntimeMetricLoops(ctx, producer.worker.Run, producer.collector.Run)
 	select {
-	case <-statsCalled:
+	case <-client.called:
 	case <-time.After(time.Second):
-		t.Fatal("collector did not request CRI stats")
+		t.Fatal("collector did not request runsc stats")
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	require.NoError(t, handle.Shutdown(shutdownCtx))
@@ -135,14 +85,46 @@ func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
 
 	select {
 	case sample := <-received:
-		assert.Equal(t, "team-a", sample.TeamID)
-		assert.Equal(t, "sandbox-a", sample.SandboxID)
-		assert.Equal(t, int64(4), sample.RuntimeGeneration)
-		assert.Equal(t, "cri-sandbox-a", sample.SeriesEpoch)
+		assert.Equal(t, target.TeamID, sample.TeamID)
+		assert.Equal(t, target.SandboxID, sample.SandboxID)
+		assert.Equal(t, target.RuntimeGeneration, sample.RuntimeGeneration)
+		assert.Equal(t, target.SeriesEpoch, sample.SeriesEpoch)
 		assert.NotEmpty(t, sample.SampleID)
 	case <-time.After(2 * time.Second):
 		t.Fatal("runtime sample was not posted")
 	}
+}
+
+func testRuntimeMetricConfig(baseURL string) *config.CtldConfig {
+	return &config.CtldConfig{
+		RegionID: "region-a", DefaultClusterId: "cluster-a",
+		SandboxObservabilityRuntimeSamplesIngestURL: baseURL + "/internal/v1/sandbox-observability/runtime-samples",
+		SandboxObservabilityIngestQueueSize:         10, SandboxObservabilityIngestBatchSize: 100,
+		SandboxObservabilityIngestFlushInterval:   config.Duration{Duration: time.Hour},
+		SandboxObservabilityIngestRequestTimeout:  config.Duration{Duration: time.Second},
+		SandboxObservabilityIngestMaxRetries:      1,
+		SandboxObservabilityIngestRetryBackoff:    config.Duration{Duration: time.Millisecond},
+		SandboxObservabilityRuntimeSampleInterval: config.Duration{Duration: time.Minute},
+		SandboxObservabilityRuntimeSampleJitter:   config.Duration{Duration: time.Second},
+	}
+}
+
+type staticRuntimeMetricClient struct {
+	target nomadruntime.RuntimeMetricTarget
+	sample nomadruntime.RuntimeMetricSample
+	called chan struct{}
+}
+
+func (c *staticRuntimeMetricClient) ListRuntimeMetricTargets(context.Context) ([]nomadruntime.RuntimeMetricTarget, error) {
+	return []nomadruntime.RuntimeMetricTarget{c.target}, nil
+}
+
+func (c *staticRuntimeMetricClient) RuntimeMetricStats(context.Context, nomadruntime.RuntimeMetricTarget) (nomadruntime.RuntimeMetricSample, error) {
+	select {
+	case c.called <- struct{}{}:
+	default:
+	}
+	return c.sample, nil
 }
 
 func TestCtldRuntimeMetricsShutdownStopsCollectorBeforeWorkerDrain(t *testing.T) {
@@ -180,7 +162,6 @@ func TestCtldRuntimeMetricsShutdownStopsCollectorBeforeWorkerDrain(t *testing.T)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, handle.Shutdown(shutdownCtx))
-
 	select {
 	case item := <-drained:
 		assert.Equal(t, "final-sample", item)
@@ -190,32 +171,4 @@ func TestCtldRuntimeMetricsShutdownStopsCollectorBeforeWorkerDrain(t *testing.T)
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{"collector", "worker", "stats"}, order)
-}
-
-type staticStatsClient struct {
-	sandboxes []*runtimeapi.PodSandbox
-	statsByID map[string]*runtimeapi.PodSandboxStats
-	onCall    chan<- struct{}
-}
-
-func (c staticStatsClient) ListPodSandboxes(context.Context) ([]*runtimeapi.PodSandbox, error) {
-	return c.sandboxes, nil
-}
-
-func (c staticStatsClient) PodSandboxStats(_ context.Context, id string) (*runtimeapi.PodSandboxStats, error) {
-	if c.onCall != nil {
-		c.onCall <- struct{}{}
-	}
-	return c.statsByID[id], nil
-}
-
-var _ ctldruntimemetrics.StatsClient = staticStatsClient{}
-
-func testPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
-	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	for _, pod := range pods {
-		require.NoError(t, indexer.Add(pod))
-	}
-	return corelisters.NewPodLister(indexer)
 }

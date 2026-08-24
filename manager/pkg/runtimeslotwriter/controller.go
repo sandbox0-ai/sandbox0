@@ -244,10 +244,10 @@ func (c *Controller) ensureCrashLifecycle(
 			!record.DeletedAt.IsZero() || record.RuntimeGeneration != runtimeGeneration {
 			return errors.New("sandbox runtime does not match the runtime slot writer")
 		}
-		fromPodNamespace := record.RuntimeNamespace
-		fromPodName := record.RuntimeID
-		if fromPodNamespace != grant.RuntimeNamespace || fromPodName != grant.RuntimeIncarnationID {
-			if fromPodNamespace != "" || fromPodName != "" {
+		fromRuntimeNamespace := record.RuntimeNamespace
+		fromRuntimeID := record.RuntimeID
+		if fromRuntimeNamespace != grant.RuntimeNamespace || fromRuntimeID != grant.RuntimeIncarnationID {
+			if fromRuntimeNamespace != "" || fromRuntimeID != "" {
 				return errors.New("sandbox runtime does not match the runtime slot writer")
 			}
 			claimReader, ok := tx.(sandboxRuntimeClaimReader)
@@ -261,15 +261,15 @@ func (c *Controller) ensureCrashLifecycle(
 			if claim == nil || claim.Phase != sandboxstore.SandboxRuntimeClaimPhaseCleanupPending {
 				return errors.New("sandbox runtime does not match the runtime slot writer")
 			}
-			fromPodNamespace = grant.RuntimeNamespace
-			fromPodName = grant.RuntimeIncarnationID
+			fromRuntimeNamespace = grant.RuntimeNamespace
+			fromRuntimeID = grant.RuntimeIncarnationID
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: request.OperationID, SandboxID: grant.SandboxID,
 			Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePublishing,
 			Source: sandboxstore.SandboxLifecycleSourceCrash, Cancelable: false,
-			FromGeneration: runtimeGeneration, FromRuntimeNamespace: fromPodNamespace,
-			FromRuntimeID: fromPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+			FromGeneration: runtimeGeneration, FromRuntimeNamespace: fromRuntimeNamespace,
+			FromRuntimeID: fromRuntimeID, ExpectedGenerationID: grant.InitialGenerationID,
 		})
 	})
 	if err != nil {
@@ -290,7 +290,7 @@ func crashLifecycleMatches(
 		active.Source == sandboxstore.SandboxLifecycleSourceCrash && !active.Cancelable &&
 		active.CancelRequestedAt.IsZero() && active.FromGeneration == runtimeGeneration &&
 		active.FromRuntimeNamespace == grant.RuntimeNamespace && active.FromRuntimeID == grant.RuntimeIncarnationID &&
-		active.ExpectedHeadLayerID == grant.InitialGenerationID && active.PreparedHeadLayerID == ""
+		active.ExpectedGenerationID == grant.InitialGenerationID && active.PreparedGenerationID == ""
 }
 
 func validateFenceRequest(request runtimeslotreconciler.WriterFenceRequest) error {

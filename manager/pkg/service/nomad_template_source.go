@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // NomadSandboxTemplateSourceResolver validates source sandboxes from the
@@ -22,8 +22,8 @@ type NomadSandboxTemplateSourceResolver struct {
 	now              func() time.Time
 }
 
-// NewNomadSandboxTemplateSourceResolver creates a source resolver that never
-// consults a Kubernetes runtime object.
+// NewNomadSandboxTemplateSourceResolver creates a resolver backed by durable
+// sandbox projection and runtime-slot state.
 func NewNomadSandboxTemplateSourceResolver(
 	store NomadSandboxProjectionStore,
 	captureAvailable bool,
@@ -60,16 +60,13 @@ func (r *NomadSandboxTemplateSourceResolver) ResolveSandboxTemplateSource(
 	}
 	record, err := r.store.GetSandbox(ctx, sandboxID)
 	if err != nil {
-		if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) || apierrors.IsNotFound(err) {
+		if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) || apierror.IsNotFound(err) {
 			return nil, template.ErrTemplateSourceNotFound
 		}
 		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceUnavailable, err)
 	}
 	if err := validateRootFSSourceSandboxRecord(record, sandboxID, teamID, r.now()); err != nil {
 		return nil, mapSandboxTemplateSourceValidationError(err)
-	}
-	if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, fmt.Errorf("%w: source sandbox is not owned by the Nomad runtime", template.ErrTemplateSourceUnavailable)
 	}
 	activeTxn, err := r.store.GetActiveLifecycleTxn(ctx, sandboxID)
 	if err != nil {
@@ -92,9 +89,9 @@ func (r *NomadSandboxTemplateSourceResolver) ResolveSandboxTemplateSource(
 
 func mapSandboxTemplateSourceValidationError(err error) error {
 	switch {
-	case apierrors.IsNotFound(err):
+	case apierror.IsNotFound(err):
 		return template.ErrTemplateSourceNotFound
-	case apierrors.IsForbidden(err):
+	case apierror.IsForbidden(err):
 		return template.ErrTemplateSourceForbidden
 	default:
 		return fmt.Errorf("%w: %v", template.ErrTemplateSourceNotReady, err)

@@ -161,7 +161,7 @@ func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 		FromGeneration: source.RuntimeGeneration, ToGeneration: source.RuntimeGeneration,
 		FromRuntimeNamespace: source.RuntimeNamespace, FromRuntimeID: source.RuntimeID,
 		TargetSandboxID: targetFilesystemID, TargetGenerationID: targetGenerationID,
-		TargetRecordDigest: requestDigest, ExpectedHeadLayerID: writer.generation.ID,
+		TargetRecordDigest: requestDigest, ExpectedGenerationID: writer.generation.ID,
 	}
 	if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad template capture lifecycle: %w", err)
@@ -331,14 +331,12 @@ func loadCompletedNomadTemplateCapture(
 	}
 	snapshot, err := scanRootFSSnapshot(tx.QueryRow(ctx, `
 		SELECT s.snapshot_id, s.filesystem_id, s.team_id, s.source_sandbox_id,
-			s.head_layer_id, s.head_generation_id,
-			CASE WHEN s.head_generation_id IS NULL THEN 'legacy-layer' ELSE 'block-cow-v1' END,
+			s.head_generation_id,
 			g.base_artifact_digest, g.format_generation, g.source_oci_digest,
 			s.name, s.description, s.created_at, s.expires_at
 		FROM manager.rootfs_snapshots s
 		JOIN manager.rootfs_generations g
 		  ON g.generation_id = s.head_generation_id
-		 AND g.filesystem_id = s.filesystem_id
 		WHERE s.snapshot_id = $1 AND s.team_id = $2
 	`, intent.SnapshotID, intent.TeamID))
 	if err != nil {
@@ -371,15 +369,15 @@ func nomadTemplateCaptureLifecycleMatches(
 		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != intent.TargetFilesystemID ||
 		lifecycle.TargetGenerationID != intent.CheckpointGeneration ||
-		lifecycle.ExpectedHeadLayerID != intent.SourceGenerationID ||
+		lifecycle.ExpectedGenerationID != intent.SourceGenerationID ||
 		!bytes.Equal(lifecycle.TargetRecordDigest, intent.RequestDigest) {
 		return false
 	}
 	if committed {
 		return lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
-			lifecycle.PreparedHeadLayerID == intent.CheckpointGeneration
+			lifecycle.PreparedGenerationID == intent.CheckpointGeneration
 	}
-	return lifecycle.Phase == SandboxLifecyclePhasePublishing && lifecycle.PreparedHeadLayerID == "" &&
+	return lifecycle.Phase == SandboxLifecyclePhasePublishing && lifecycle.PreparedGenerationID == "" &&
 		lifecycle.FromGeneration == source.RuntimeGeneration &&
 		lifecycle.FromRuntimeNamespace == source.RuntimeNamespace &&
 		lifecycle.FromRuntimeID == source.RuntimeID

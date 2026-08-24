@@ -42,8 +42,8 @@ func TestRuntimeSlotNetworkClientUsesSecureExactUnixProtocol(t *testing.T) {
 				return
 			}
 			token := rootfshandoff.NetworkPolicyToken{
-				PodUID: control.AllocationID, PodSandboxID: RuntimeSlotNetworkIncarnationID(control), ClaimID: control.ClaimID,
-				NetworkEpoch: 1, PolicyDigest: control.PolicyDigest, PodIP: "192.0.2.2",
+				AllocationID: control.AllocationID, NetworkIncarnationID: RuntimeSlotNetworkIncarnationID(control), ClaimID: control.ClaimID,
+				NetworkEpoch: 1, PolicyDigest: control.PolicyDigest, SourceIP: "192.0.2.2",
 				CtldGeneration: "ctld-1", NetNSIdentity: control.NetNSIdentity,
 			}
 			_ = json.NewEncoder(writer).Encode(token)

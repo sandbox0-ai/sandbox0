@@ -283,10 +283,10 @@ func (f *fakeController) CrashFence(_ context.Context, request CrashFenceRequest
 		InitialGeneration: stage.InitialGeneration, InitialBlockHead: blockHead,
 		HeadAction: CrashFenceHeadKeepInitial, NodeUID: stage.Identity.NodeUID, BootID: stage.Identity.BootID,
 		RuntimeGeneration: stage.Identity.RuntimeGeneration, HostMountNamespaceID: "mntns",
-		PodUID: stage.Identity.PodUID, PodSandboxID: stage.Identity.PodSandboxID,
-		ContainerName: stage.Identity.ContainerName, SlotNonce: stage.Identity.SlotNonce,
+		AllocationID: stage.Identity.AllocationID, NetworkIncarnationID: stage.Identity.NetworkIncarnationID,
+		TaskName: stage.Identity.TaskName, SlotNonce: stage.Identity.SlotNonce,
 		ActiveKey: "active", ConsumerBound: true, ContainerID: "container", ContainerAbsent: true, TaskAbsent: true,
-		FrontendSnapshotAbsent: true, StableMountAbsent: true, SnapshotterState: StateTombstoned,
+		FrontendSnapshotAbsent: true, StableMountAbsent: true, RootFSState: StateTombstoned,
 		Session: CrashFenceSessionObservation{
 			Parent: request.Parent, RootFSID: stage.Identity.RootFSID, WriterEpoch: stage.Identity.WriterEpoch,
 			OperationID: request.OperationID, BindingDigest: fmt.Sprintf("%x", binding),

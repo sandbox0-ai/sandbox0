@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -311,7 +311,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, errors.New("sandbox has no RootFS filesystem")
 	}
-	if filesystem.TeamID != normalized.TeamID || filesystem.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 ||
+	if filesystem.TeamID != normalized.TeamID ||
 		filesystem.HeadGenerationID == "" {
 		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, errors.New("sandbox RootFS is not a team-owned block-COW generation")
@@ -395,7 +395,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		recordPhase(PhaseNetworkPrepare, phaseStarted, false)
 		return nil, err
 	}
-	procdAddress, err := protocol.NomadProcdAddress(policyToken.PodIP)
+	procdAddress, err := protocol.NomadProcdAddress(policyToken.SourceIP)
 	if err != nil {
 		recordPhase(PhaseNetworkPrepare, phaseStarted, false)
 		return nil, fmt.Errorf("derive procd address from applied network token: %w", err)
@@ -421,9 +421,9 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		Identity: rootfshandoff.Identity{
 			NodeUID: slot.NodeUID, BootID: slot.NodeBootID,
 			RuntimeGeneration: strconv.FormatInt(normalized.Runtime.RuntimeGeneration, 10),
-			PodUID:            slot.AllocationID, PodSandboxID: policyToken.PodSandboxID,
-			ContainerName: protocol.NomadTaskName, Image: generation.SourceOCIDigest,
-			Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			AllocationID:      slot.AllocationID, NetworkIncarnationID: policyToken.NetworkIncarnationID,
+			TaskName: protocol.NomadTaskName, SourceOCIDigest: generation.SourceOCIDigest,
+			RootFSDriver: "nomad-driver", RuntimeClass: "sandbox0-gvisor",
 			SlotNonce: slot.ID, ClaimID: ids.claimID, LaunchAttempt: ids.launchAttempt,
 			RootFSID: filesystem.ID, WriterEpoch: writerEpoch, WriterGrantID: ids.grantID,
 			WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(ids.rawToken),
@@ -530,7 +530,13 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	if slot.ClaimLeaseExpiresAt.Before(probeDeadline) {
 		probeDeadline = slot.ClaimLeaseExpiresAt
 	}
-	probe, err := p.probeCommandReady(ctx, procdAddress, internalToken, probeDeadline)
+	probe, err := p.probeCommandReady(
+		ctx,
+		procdAddress,
+		internalToken,
+		probeDeadline,
+		slot.ClaimLeaseExpiresAt,
+	)
 	if err != nil {
 		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, fmt.Errorf("probe procd command readiness: %w", err)
@@ -576,15 +582,27 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 func (p *Planner) probeCommandReady(
 	ctx context.Context,
 	procdAddress, internalToken string,
-	deadline time.Time,
+	retryDeadline, hardDeadline time.Time,
 ) (*procdapi.CommandReadyProbeResult, error) {
 	retryDelay := commandProbeRetryInitial
 	var lastErr error
+	firstAttempt := true
 	for {
 		attemptCtx := ctx
 		cancel := func() {}
-		if !deadline.IsZero() {
-			attemptCtx, cancel = context.WithDeadline(ctx, deadline)
+		attemptDeadline := retryDeadline
+		if firstAttempt && !retryDeadline.After(time.Now()) {
+			// An SLO miss must remain observable as a successful late claim when
+			// procd is already command-ready. Always make one bounded probe even
+			// after the retry budget has elapsed; the durable claim lease remains
+			// the hard deadline.
+			attemptDeadline = hardDeadline
+		}
+		if !hardDeadline.IsZero() && (attemptDeadline.IsZero() || hardDeadline.Before(attemptDeadline)) {
+			attemptDeadline = hardDeadline
+		}
+		if !attemptDeadline.IsZero() {
+			attemptCtx, cancel = context.WithDeadline(ctx, attemptDeadline)
 		}
 		probe, err := p.prober.ProbeCommandReady(attemptCtx, procdAddress, internalToken)
 		cancel()
@@ -592,11 +610,12 @@ func (p *Planner) probeCommandReady(
 			return probe, nil
 		}
 		lastErr = err
+		firstAttempt = false
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("command-ready probe canceled: %w", ctx.Err())
 		}
-		remaining := time.Until(deadline)
-		if deadline.IsZero() || remaining <= 0 {
+		remaining := time.Until(retryDeadline)
+		if retryDeadline.IsZero() || remaining <= 0 {
 			return nil, fmt.Errorf("command-ready probe deadline exceeded: %w", lastErr)
 		}
 		wait := min(retryDelay, remaining)
@@ -765,16 +784,16 @@ func validatePolicyToken(token rootfshandoff.NetworkPolicyToken, slot *sandboxst
 	if err := token.Validate(); err != nil {
 		return fmt.Errorf("applied network policy token: %w", err)
 	}
-	if token.PodUID != slot.AllocationID || token.ClaimID != claimID ||
+	if token.AllocationID != slot.AllocationID || token.ClaimID != claimID ||
 		token.NetNSIdentity != slot.NetNSIdentity || token.PolicyDigest != policyDigest ||
-		token.PodSandboxID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		token.NetworkIncarnationID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: slot.ID, ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
 			NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
 			NetNSIdentity: slot.NetNSIdentity,
 		}) {
 		return errors.New("applied network policy token does not match runtime slot claim")
 	}
-	if _, err := protocol.NomadProcdAddress(token.PodIP); err != nil {
+	if _, err := protocol.NomadProcdAddress(token.SourceIP); err != nil {
 		return fmt.Errorf("applied network policy token: %w", err)
 	}
 	return nil
@@ -787,7 +806,7 @@ func grantMatchesStage(grant *sandboxstore.RootFSWriterGrant, stage rootfshandof
 		grant.InitialGenerationID == stage.InitialGeneration && grant.BindingVersion == stage.BindingVersion &&
 		hmac.Equal(grant.BindingDigest, binding) && grant.NodeUID == stage.Identity.NodeUID &&
 		grant.NodeBootID == stage.Identity.BootID && grant.RuntimeNamespace == slot.AllocationNamespace &&
-		grant.RuntimeID == protocol.NomadTaskName && grant.RuntimeIncarnationID == stage.Identity.PodUID &&
+		grant.RuntimeID == protocol.NomadTaskName && grant.RuntimeIncarnationID == stage.Identity.AllocationID &&
 		grant.NodeName == slot.NodeID && grant.GateParent == stage.Parent &&
 		grant.RuntimeGeneration == stage.Identity.RuntimeGeneration &&
 		grant.ConsumeExpiresAt.Equal(slot.ClaimLeaseExpiresAt)

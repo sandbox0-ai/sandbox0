@@ -118,7 +118,7 @@ type CrashFencePreAttachmentHostInspector interface {
 
 // Config defines the host-only state roots used for writable RootFS sessions.
 // StatePath and BranchRoot must survive process restarts; MountRoot is boot
-// local and must be in the same mount namespace as containerd.
+// local and must be in the same mount namespace as the stock runsc runtime.
 type Config struct {
 	StatePath                       string
 	BranchRoot                      string
@@ -138,7 +138,7 @@ type RebaseEngine interface {
 	Apply(context.Context, rootfsrebase.WorkerRequest, string, string, string, []uint64) (*rootfsrebase.ApplyResult, error)
 }
 
-// Mount is the storage-owned merged root exported to the Snapshotter's stable
+// Mount is the storage-owned merged root exported to the rootfs runtime's stable
 // open_tree/move_mount capture. It is not directly tenant reachable.
 type Mount struct {
 	Source  string

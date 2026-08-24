@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/metrics"
 	"go.uber.org/zap"

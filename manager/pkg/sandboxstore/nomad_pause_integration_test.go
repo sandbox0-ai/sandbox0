@@ -45,7 +45,7 @@ func TestRequestNomadSandboxPausePersistsDeterministicIntentIntegration(t *testi
 	require.Equal(t, int64(1), active.FromGeneration)
 	require.Equal(t, fixture.allocationNamespace, active.FromRuntimeNamespace)
 	require.Equal(t, fixture.allocationID, active.FromRuntimeID)
-	require.Equal(t, fixture.initialGenerationID, active.ExpectedHeadLayerID)
+	require.Equal(t, fixture.initialGenerationID, active.ExpectedGenerationID)
 
 	var lifecycleCount int
 	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
@@ -216,7 +216,7 @@ func (f *nomadPauseStoreFixture) publishPlannedPause(t *testing.T, operationID s
 		if _, err := writerTx.BeginRootFSWriterRetire(lockCtx, &BeginRootFSWriterRetireRequest{
 			GrantID: f.issue.GrantID, WriterEpoch: f.writerEpoch, OperationID: operationID,
 			BindingVersion: RootFSWriterBindingVersion, BindingDigest: f.issue.BindingDigest,
-			ExpectedOldHeadLayerID: f.initial.ID,
+			ExpectedOldGenerationID: f.initial.ID,
 		}); err != nil {
 			return err
 		}
@@ -245,7 +245,6 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	allocationID := "allocation-nomad-pause-" + suffix
 	allocationNamespace := "nomad"
 	record := rootFSTestSandboxRecord(sandboxID, "team-slot")
-	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	record.ClusterID = "cluster-a"
 	record.RuntimeGeneration = 1
 	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{

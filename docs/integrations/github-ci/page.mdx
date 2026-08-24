@@ -115,17 +115,14 @@ This keeps registry credentials short-lived while leaving the build itself on th
 
 ## Using the pushed image in a template
 
-After a successful push, use the printed `Template image reference` value in your template spec. Treat the printed value as authoritative: providers such as Aliyun ACR may map the logical image name to a tag in a fixed team repository, and the runtime reference may use a VPC-only hostname.
+After a successful push, treat the printed `Template image reference` repository and pull hostname as authoritative. Resolve the pushed manifest digest with Docker or another registry client, then replace the tag with the registry-reported `@sha256:<digest>`. Providers such as Aliyun ACR may use a VPC-only runtime hostname, so do not reconstruct the pull path from the push path.
 
 ```yaml
 spec:
     mainContainer:
-        image: registry.example.com/t-<team-key>/my-app:${GITHUB_SHA}
+        image: registry.example.com/t-<team-key>/my-app@sha256:${PUSHED_MANIFEST_DIGEST}
         resources:
             memory: 8Gi
-    pool:
-        minIdle: 1
-        maxIdle: 4
 ```
 
 If your workflow also updates templates, it will need a role with template write permission in addition to registry push permission.
@@ -147,6 +144,6 @@ If your workflow also updates templates, it will need a role with template write
   </Card>
 
   <Card title="Install" href="/docs/sandbox/self-hosted/install" cta="Continue">
-    Install the operator and create the first self-hosted environment.
+    Install direct control services and dedicated Nomad nodes.
   </Card>
 </CardGroup>

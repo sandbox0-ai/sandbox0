@@ -151,16 +151,15 @@ func (f fakeTx) CompleteRootFSWriterCrashAbandon(
 }
 
 func (fakeTx) SaveSandbox(context.Context, *sandboxstore.SandboxRecord) error { return nil }
-func (fakeTx) SaveRuntime(context.Context, string, string, string, int64, time.Time, time.Time, sandboxstore.SandboxRuntimeMetadata) error {
+func (fakeTx) SaveRuntime(context.Context, string, string, string, int64, time.Time, time.Time, string) error {
 	return nil
 }
 func (fakeTx) MarkHotClaimCompleted(context.Context, string, time.Time) error          { return nil }
 func (fakeTx) MarkRuntimePaused(context.Context, string, int64, time.Time) error       { return nil }
 func (fakeTx) MarkRuntimeTerminating(context.Context, string) error                    { return nil }
-func (fakeTx) SaveRootFSState(context.Context, *sandboxstore.SandboxRootFSState) error { return nil }
 func (fakeTx) SetLifecycleTxnRuntime(context.Context, string, string, string) error    { return nil }
 func (fakeTx) UpdateLifecycleTxnPhase(context.Context, string, string) error           { return nil }
-func (fakeTx) SetLifecycleTxnPreparedHead(context.Context, string, string) error       { return nil }
+func (fakeTx) SetLifecycleTxnPreparedGeneration(context.Context, string, string) error { return nil }
 func (fakeTx) RequestLifecycleTxnCancel(context.Context, string, string) (bool, error) {
 	return false, nil
 }

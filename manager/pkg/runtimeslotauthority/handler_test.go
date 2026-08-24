@@ -75,7 +75,7 @@ func (f *fakeStore) MarkRuntimeSlotCommandReady(_ context.Context, request *sand
 }
 
 func TestRegisterDerivesNodeIdentityAndReturnsAuthorityTime(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid", PodUID: "agent-instance"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid", AgentUID: "agent-instance"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 	body := protocol.RegistrationRequest{

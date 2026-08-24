@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/metrics"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -644,24 +644,11 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 	internal.Use(s.managerUpstreamMiddleware())
 	internal.Use(s.authMiddleware.Authenticate())
 	{
-		// Cluster information (→ Manager)
-		internal.GET("/cluster/summary", s.getClusterSummary)
-
 		// Sandbox metadata and power control (→ Manager)
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
 		internal.GET("/sandboxes/:id/template-source", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxyInternalManagerRequest)
 		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
-		// Template management (→ Manager)
-		internal.GET("/templates", s.proxyInternalTemplateRequest)
-		internal.GET("/templates/:id", s.proxyInternalTemplateRequest)
-		internal.POST("/templates", s.proxyInternalTemplateRequest)
-		internal.PUT("/templates/:id", s.proxyInternalTemplateRequest)
-		internal.DELETE("/templates/:id", s.proxyInternalTemplateRequest)
-
-		// Template statistics (→ Manager)
-		internal.GET("/templates/stats", s.getTemplateStats)
-
 		// Team quota management (→ Manager)
 		internal.PUT("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
 		internal.DELETE("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
@@ -870,7 +857,6 @@ func newInternalAuthValidators(
 		PublicKey: dataPlanePublicKey,
 		AllowedCallers: []string{
 			internalauth.ServiceCtld,
-			internalauth.ServiceLegacyNetworkRuntime,
 			internalauth.ServiceManager,
 			internalauth.ServiceProcd,
 		},
@@ -881,7 +867,7 @@ func newInternalAuthValidators(
 		auditIngestValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
 			Target:             internalauth.ServiceClusterGateway,
 			PublicKey:          networkAuditPublicKey,
-			AllowedCallers:     []string{internalauth.ServiceCtld, internalauth.ServiceLegacyNetworkRuntime},
+			AllowedCallers:     []string{internalauth.ServiceCtld},
 			ClockSkewTolerance: 10 * time.Second,
 		})
 	}

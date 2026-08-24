@@ -699,7 +699,7 @@ func lockRuntimeSlotClaimAdmission(
 		WHERE txn_id = $1 AND sandbox_id = $2
 		FOR SHARE
 	`, request.OperationID, request.SandboxID))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if lifecycle == nil || errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("%w: Nomad sandbox operation identity changed", ErrRuntimeSlotConflict)
 	}
 	if err != nil {
@@ -707,7 +707,7 @@ func lockRuntimeSlotClaimAdmission(
 	}
 	if lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
-		lifecycle.ExpectedHeadLayerID != request.SourceGenerationID ||
+		lifecycle.ExpectedGenerationID != request.SourceGenerationID ||
 		lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
 		return false, fmt.Errorf("%w: Nomad resume lifecycle identity changed", ErrRuntimeSlotConflict)
 	}

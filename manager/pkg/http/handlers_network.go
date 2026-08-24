@@ -6,11 +6,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"go.uber.org/zap"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // getNetworkPolicy gets the network policy for a sandbox.
@@ -37,7 +37,7 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return
 		}
-		if apierrors.IsConflict(err) {
+		if apierror.IsConflict(err) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
@@ -90,7 +90,7 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		case errors.Is(err, service.ErrSandboxRuntimeUpdateUnavailable), errors.Is(err, service.ErrDataPlaneNotReady):
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return
-		case apierrors.IsConflict(err):
+		case apierror.IsConflict(err):
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}

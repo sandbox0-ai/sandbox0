@@ -7,7 +7,6 @@ import (
 
 func TestNomadForkDigestPreservesLegacyEncodingWhileValidationBindsResources(t *testing.T) {
 	left := rootFSTestSandboxRecord("fork-target", "team-1")
-	left.RuntimeBackend = SandboxRuntimeBackendNomad
 	left.DesiredState = SandboxDesiredStatePaused
 	left.OwnerKind = "team"
 	left.ResourceMillicpu = 1000

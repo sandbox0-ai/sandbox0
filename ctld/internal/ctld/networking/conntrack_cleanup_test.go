@@ -6,17 +6,17 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/conntrack"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/model"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/watcher"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 func TestCleanupDeniedTrackedFlowsKeepsDomainAllowedTLSFlow(t *testing.T) {
-	const podIP = "172.28.23.117"
+	const sourceIP = "172.28.23.117"
 	tracker := conntrack.NewTracker()
-	tracker.Record(testFlowKey(t, podIP, "172.67.213.44", "app.storenoviq.com", "tls"))
+	tracker.Record(testFlowKey(t, sourceIP, "172.67.213.44", "app.storenoviq.com", "tls"))
 
-	store := testPolicyStore(t, podIP, &v1alpha1.NetworkPolicySpec{
+	store := testPolicyStore(t, sourceIP, &v1alpha1.NetworkPolicySpec{
 		SandboxID: "sbx-test",
 		TeamID:    "team-test",
 		Mode:      v1alpha1.NetworkModeBlockAll,
@@ -25,17 +25,17 @@ func TestCleanupDeniedTrackedFlowsKeepsDomainAllowedTLSFlow(t *testing.T) {
 		},
 	})
 
-	if killed := cleanupDeniedTrackedFlows(context.Background(), tracker, nil, store, podIP); killed != 0 {
+	if killed := cleanupDeniedTrackedFlows(context.Background(), tracker, nil, store, sourceIP); killed != 0 {
 		t.Fatalf("cleanupDeniedTrackedFlows killed %d flows, want 0", killed)
 	}
 }
 
 func TestCleanupDeniedTrackedFlowsKillsDomainDeniedTLSFlow(t *testing.T) {
-	const podIP = "172.28.23.117"
+	const sourceIP = "172.28.23.117"
 	tracker := conntrack.NewTracker()
-	tracker.Record(testFlowKey(t, podIP, "172.67.213.44", "blocked.example.com", "tls"))
+	tracker.Record(testFlowKey(t, sourceIP, "172.67.213.44", "blocked.example.com", "tls"))
 
-	store := testPolicyStore(t, podIP, &v1alpha1.NetworkPolicySpec{
+	store := testPolicyStore(t, sourceIP, &v1alpha1.NetworkPolicySpec{
 		SandboxID: "sbx-test",
 		TeamID:    "team-test",
 		Mode:      v1alpha1.NetworkModeBlockAll,
@@ -44,7 +44,7 @@ func TestCleanupDeniedTrackedFlowsKillsDomainDeniedTLSFlow(t *testing.T) {
 		},
 	})
 
-	if killed := cleanupDeniedTrackedFlows(context.Background(), tracker, nil, store, podIP); killed != 1 {
+	if killed := cleanupDeniedTrackedFlows(context.Background(), tracker, nil, store, sourceIP); killed != 1 {
 		t.Fatalf("cleanupDeniedTrackedFlows killed %d flows, want 1", killed)
 	}
 }
@@ -70,17 +70,17 @@ func testFlowKey(t *testing.T, srcIP string, dstIP string, host string, app stri
 	}
 }
 
-func testPolicyStore(t *testing.T, podIP string, spec *v1alpha1.NetworkPolicySpec) *policy.Store {
+func testPolicyStore(t *testing.T, sourceIP string, spec *v1alpha1.NetworkPolicySpec) *policy.Store {
 	t.Helper()
 	annotation, err := v1alpha1.NetworkPolicyToAnnotation(spec)
 	if err != nil {
 		t.Fatalf("serialize network policy: %v", err)
 	}
 	store := policy.NewStore(nil)
-	store.ReconcileSandboxes([]*watcher.SandboxInfo{{
-		Namespace:         "default",
+	store.ReconcileSandboxes([]*model.SandboxInfo{{
+		Scope:             "default",
 		Name:              "sandbox-test",
-		PodIP:             podIP,
+		SourceIP:          sourceIP,
 		SandboxID:         spec.SandboxID,
 		TeamID:            spec.TeamID,
 		NetworkPolicy:     annotation,

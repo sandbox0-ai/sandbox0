@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -112,7 +112,7 @@ func NewServer(
 	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
 	identityRepo := identity.NewRepository(pool)
 	apiKeyRepo := apikey.NewRepository(pool, apikey.WithLocalTeamValidation(selfHostedAuthEnabled))
-	registryProvider, err := registryprovider.NewProvider(cfg.Registry, nil, logger)
+	registryProvider, err := registryprovider.NewProvider(cfg.Registry, logger)
 	if err != nil {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}

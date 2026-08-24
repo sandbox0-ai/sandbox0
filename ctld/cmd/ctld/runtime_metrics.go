@@ -10,22 +10,21 @@ import (
 	"sync"
 	"time"
 
-	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldruntimemetrics "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimemetrics"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	sandboxobsingest "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability/ingest"
 	"go.uber.org/zap"
-	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 type ctldRuntimeMetricsProducer struct {
 	worker    *ctldruntimemetrics.RuntimeSampleWorker
-	collector *ctldruntimemetrics.Collector
+	collector *ctldruntimemetrics.NomadCollector
 }
 
 type ctldRuntimeMetricsHandle struct {
@@ -38,45 +37,40 @@ type ctldRuntimeMetricsHandle struct {
 	shutdownErr     error
 }
 
-func startCtldRuntimeMetrics(ctx context.Context, cfg *config.CtldConfig, statsClient ctldruntimemetrics.StatsClient, podCache *ctldpower.PodCache, obsProvider *observability.Provider, logger *zap.Logger) *ctldRuntimeMetricsHandle {
+func startCtldRuntimeMetrics(
+	ctx context.Context,
+	cfg *config.CtldConfig,
+	runtimeSocket string,
+	obsProvider *observability.Provider,
+	logger *zap.Logger,
+) *ctldRuntimeMetricsHandle {
 	if cfg == nil || strings.TrimSpace(cfg.SandboxObservabilityRuntimeSamplesIngestURL) == "" {
 		return nil
 	}
-	if statsClient == nil || podCache == nil || podCache.PodLister() == nil {
-		log.Printf("ctld runtime metric producer disabled: CRI client or pod cache unavailable")
+	client, err := nomadruntime.NewClient(runtimeSocket)
+	if err != nil {
+		log.Printf("ctld runtime metric producer disabled: create Nomad runtime client: %v", err)
 		return nil
 	}
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
+		_ = client.Close()
 		log.Printf("ctld runtime metric producer disabled: load internal jwt private key: %v", err)
 		return nil
 	}
-	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "ctld",
-		PrivateKey: privateKey,
-		TTL:        10 * time.Second,
-	})
-	producer, err := newCtldRuntimeMetricsProducer(cfg, statsClient, podCache.PodLister(), generator, obsProvider, logger)
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "ctld", PrivateKey: privateKey, TTL: 10 * time.Second})
+	producer, err := newCtldRuntimeMetricsProducer(cfg, client, generator, obsProvider, logger)
 	if err != nil {
+		_ = client.Close()
 		log.Printf("ctld runtime metric producer disabled: %v", err)
 		return nil
 	}
-	handle := startCtldRuntimeMetricLoops(ctx, producer.worker.Run, func(collectorCtx context.Context) {
-		syncCtx, cancel := context.WithTimeout(collectorCtx, 10*time.Second)
-		synced := podCache.WaitForSync(syncCtx)
-		cancel()
-		if collectorCtx.Err() != nil {
-			return
-		}
-		if !synced {
-			log.Printf("ctld runtime metric producer starting before pod cache sync completed")
-		}
-		producer.collector.Run(collectorCtx)
-	})
-	if closer, ok := statsClient.(interface{ Close() error }); ok {
-		handle.statsClose = closer.Close
-	}
-	log.Printf("ctld runtime metric producer started: sample_interval=%s sample_jitter=%s", cfg.SandboxObservabilityRuntimeSampleInterval.Duration, cfg.SandboxObservabilityRuntimeSampleJitter.Duration)
+	handle := startCtldRuntimeMetricLoops(ctx, producer.worker.Run, producer.collector.Run)
+	handle.statsClose = client.Close
+	log.Printf("ctld Nomad runtime metric producer started: sample_interval=%s sample_jitter=%s",
+		cfg.SandboxObservabilityRuntimeSampleInterval.Duration,
+		cfg.SandboxObservabilityRuntimeSampleJitter.Duration,
+	)
 	return handle
 }
 
@@ -94,10 +88,8 @@ func startCtldRuntimeMetricLoops(parent context.Context, workerRun, collectorRun
 		collectorRun(collectorCtx)
 	}()
 	return &ctldRuntimeMetricsHandle{
-		collectorCancel: collectorCancel,
-		collectorDone:   collectorDone,
-		workerCancel:    workerCancel,
-		workerDone:      workerDone,
+		collectorCancel: collectorCancel, collectorDone: collectorDone,
+		workerCancel: workerCancel, workerDone: workerDone,
 	}
 }
 
@@ -134,15 +126,21 @@ func waitRuntimeMetricLoop(ctx context.Context, done <-chan struct{}, name strin
 	}
 }
 
-func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldruntimemetrics.StatsClient, podLister corelisters.PodLister, generator *internalauth.Generator, obsProvider *observability.Provider, logger *zap.Logger) (*ctldRuntimeMetricsProducer, error) {
+func newCtldRuntimeMetricsProducer(
+	cfg *config.CtldConfig,
+	client ctldruntimemetrics.RuntimeMetricClient,
+	generator *internalauth.Generator,
+	obsProvider *observability.Provider,
+	logger *zap.Logger,
+) (*ctldRuntimeMetricsProducer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("ctld config is nil")
 	}
 	if strings.TrimSpace(cfg.SandboxObservabilityRuntimeSamplesIngestURL) == "" {
 		return nil, fmt.Errorf("runtime samples ingest URL is empty")
 	}
-	if generator == nil {
-		return nil, fmt.Errorf("internal auth generator is nil")
+	if client == nil || generator == nil {
+		return nil, fmt.Errorf("runtime metric client and internal auth generator are required")
 	}
 	httpClient := &http.Client{}
 	if obsProvider != nil {
@@ -150,8 +148,7 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 	}
 	writer := sandboxobservability.NewHTTPWriter(sandboxobservability.HTTPWriterOptions{
 		RuntimeSamplesURL: cfg.SandboxObservabilityRuntimeSamplesIngestURL,
-		Client:            httpClient,
-		RequestTimeout:    cfg.SandboxObservabilityIngestRequestTimeout.Duration,
+		Client:            httpClient, RequestTimeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration,
 		TokenProvider: func(context.Context) (string, error) {
 			return generator.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
 				Permissions: []string{gatewayauthn.PermSandboxObservabilityWrite},
@@ -159,33 +156,25 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 		},
 	})
 	worker, err := ctldruntimemetrics.NewRuntimeSampleWorker(writer, sandboxobsingest.Config{
-		QueueSize:     cfg.SandboxObservabilityIngestQueueSize,
-		BatchSize:     cfg.SandboxObservabilityIngestBatchSize,
+		QueueSize: cfg.SandboxObservabilityIngestQueueSize, BatchSize: cfg.SandboxObservabilityIngestBatchSize,
 		FlushInterval: cfg.SandboxObservabilityIngestFlushInterval.Duration,
-		MaxRetries:    cfg.SandboxObservabilityIngestMaxRetries,
-		RetryBackoff:  cfg.SandboxObservabilityIngestRetryBackoff.Duration,
+		MaxRetries:    cfg.SandboxObservabilityIngestMaxRetries, RetryBackoff: cfg.SandboxObservabilityIngestRetryBackoff.Duration,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runtime sample worker: %w", err)
 	}
-	var runtimeMetricsObserver *ctldruntimemetrics.Observer
+	var observer *ctldruntimemetrics.Observer
 	if obsProvider != nil {
-		runtimeMetricsObserver = ctldruntimemetrics.NewObserver(obsProvider.MetricsRegistryOrNil())
+		observer = ctldruntimemetrics.NewObserver(obsProvider.MetricsRegistryOrNil())
 	}
-	collector, err := ctldruntimemetrics.NewCollector(ctldruntimemetrics.CollectorConfig{
-		RegionID:    cfg.RegionID,
-		ClusterID:   cfg.DefaultClusterId,
-		NodeName:    nodeName,
-		Interval:    cfg.SandboxObservabilityRuntimeSampleInterval.Duration,
-		Jitter:      cfg.SandboxObservabilityRuntimeSampleJitter.Duration,
-		Logger:      logger,
-		StatsClient: statsClient,
-		PodLister:   podLister,
-		Sink:        worker,
-		Observer:    runtimeMetricsObserver,
+	collector, err := ctldruntimemetrics.NewNomadCollector(ctldruntimemetrics.NomadCollectorConfig{
+		RegionID: cfg.RegionID, ClusterID: cfg.DefaultClusterId,
+		Interval: cfg.SandboxObservabilityRuntimeSampleInterval.Duration,
+		Jitter:   cfg.SandboxObservabilityRuntimeSampleJitter.Duration,
+		Logger:   logger, Client: client, Sink: worker, Observer: observer,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create runtime metric collector: %w", err)
+		return nil, fmt.Errorf("create Nomad runtime metric collector: %w", err)
 	}
 	return &ctldRuntimeMetricsProducer{worker: worker, collector: collector}, nil
 }

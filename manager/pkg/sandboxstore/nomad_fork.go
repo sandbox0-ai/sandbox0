@@ -8,12 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 var (
@@ -159,7 +159,7 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningFork(
 		!normalized.Target.HardExpiresAt.After(preflight.Slot.AuthorityObservedAt) {
 		return nil, fmt.Errorf("%w: target hard TTL has expired", ErrNomadSandboxForkConflict)
 	}
-	placeholderLifecycle.ExpectedHeadLayerID = preflight.SourceGenerationID
+	placeholderLifecycle.ExpectedGenerationID = preflight.SourceGenerationID
 
 	args, err := sandboxRecordInsertArgs(normalized.Target)
 	if err != nil {
@@ -279,7 +279,7 @@ func nomadRunningForkLifecycleOwnsNeverRunTarget(
 	lifecycle *SandboxLifecycleTxn,
 	source *SandboxRecord,
 ) bool {
-	return lifecycle != nil && source != nil && source.RuntimeBackend == SandboxRuntimeBackendNomad &&
+	return lifecycle != nil && source != nil &&
 		lifecycle.SandboxID == source.ID && lifecycle.Kind == SandboxLifecycleKindFork &&
 		lifecycle.Source == SandboxLifecycleSourceManual && !lifecycle.Cancelable &&
 		lifecycle.CancelRequestedAt.IsZero() && lifecycle.Phase == SandboxLifecyclePhasePublishing &&
@@ -289,8 +289,8 @@ func nomadRunningForkLifecycleOwnsNeverRunTarget(
 		lifecycle.ToGeneration == source.RuntimeGeneration && lifecycle.ToRuntimeNamespace == "" &&
 		lifecycle.ToRuntimeID == "" && lifecycle.TargetSandboxID != "" &&
 		lifecycle.TargetGenerationID != "" && len(lifecycle.TargetRecordDigest) == sha256.Size &&
-		lifecycle.ExpectedHeadLayerID != "" &&
-		lifecycle.PreparedHeadLayerID == ""
+		lifecycle.ExpectedGenerationID != "" &&
+		lifecycle.PreparedGenerationID == ""
 }
 
 func queueNeverRunNomadForkTargetCleanup(
@@ -304,7 +304,7 @@ func queueNeverRunNomadForkTargetCleanup(
 	if err != nil {
 		return fmt.Errorf("lock never-run Nomad fork target for cleanup: %w", err)
 	}
-	if target == nil || target.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if target == nil ||
 		target.RuntimeGeneration != 0 || target.RuntimeNamespace != "" || target.RuntimeID != "" ||
 		!target.DeletedAt.IsZero() {
 		return fmt.Errorf("%w: never-run Nomad fork target changed before cleanup", ErrNomadSandboxForkConflict)
@@ -390,7 +390,7 @@ func normalizeNomadSandboxForkRequest(
 		}
 	}
 	if target.ID == normalized.SourceSandboxID || target.TeamID != normalized.ExpectedTeamID ||
-		target.RuntimeBackend != SandboxRuntimeBackendNomad || target.DesiredState != SandboxDesiredStatePaused ||
+		target.DesiredState != SandboxDesiredStatePaused ||
 		target.RuntimeGeneration != 0 || target.RuntimeID != "" || target.RuntimeNamespace != "" ||
 		!target.DeletedAt.IsZero() {
 		return nil, fmt.Errorf("Nomad fork target must be a fresh paused Nomad sandbox")
@@ -431,7 +431,7 @@ func NomadSandboxForkTargetRecordDigest(target *SandboxRecord) ([]byte, error) {
 }
 
 func validateNomadRunningForkSourceRecord(source *SandboxRecord) error {
-	if source == nil || source.RuntimeBackend != SandboxRuntimeBackendNomad ||
+	if source == nil ||
 		source.DesiredState != SandboxDesiredStateActive || !source.DeletedAt.IsZero() ||
 		source.RuntimeGeneration <= 0 || source.RuntimeID == "" || source.RuntimeNamespace == "" {
 		return fmt.Errorf("%w: source is not a canonical active Nomad sandbox", ErrNomadSandboxForkNotReady)
@@ -470,13 +470,13 @@ func nomadForkTargetMatches(actual, expected *SandboxRecord) bool {
 		actual.ID == expected.ID && actual.TeamID == expected.TeamID && actual.UserID == expected.UserID &&
 		actual.TemplateID == expected.TemplateID && actual.TemplateName == expected.TemplateName &&
 		actual.TemplateNamespace == expected.TemplateNamespace && actual.ClusterID == expected.ClusterID &&
-		actual.RuntimeBackend == SandboxRuntimeBackendNomad && actual.DesiredState == SandboxDesiredStatePaused &&
+		actual.DesiredState == SandboxDesiredStatePaused &&
 		actual.RuntimeGeneration == 0 && actual.RuntimeID == "" && actual.RuntimeNamespace == "" &&
 		actual.OwnerKind == expected.OwnerKind &&
 		actual.ResourceMillicpu == expected.ResourceMillicpu &&
 		actual.ResourceMemoryMiB == expected.ResourceMemoryMiB &&
-		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
-		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec) &&
+		reflect.DeepEqual(actual.Config, expected.Config) &&
+		reflect.DeepEqual(actual.TemplateSpec, expected.TemplateSpec) &&
 		actual.ExpiresAt.Equal(expected.ExpiresAt) && actual.HardExpiresAt.Equal(expected.HardExpiresAt)
 }
 
@@ -484,18 +484,17 @@ func nomadForkTargetDerivedFromSource(source, target *SandboxRecord) bool {
 	if source == nil || target == nil || source.TeamID != target.TeamID ||
 		source.TemplateID != target.TemplateID || source.TemplateName != target.TemplateName ||
 		source.TemplateNamespace != target.TemplateNamespace || source.ClusterID != target.ClusterID ||
-		source.RuntimeBackend != SandboxRuntimeBackendNomad || target.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		source.OwnerKind != target.OwnerKind ||
 		source.ResourceMillicpu != target.ResourceMillicpu ||
 		source.ResourceMemoryMiB != target.ResourceMemoryMiB ||
-		!apiequality.Semantic.DeepEqual(source.TemplateSpec, target.TemplateSpec) {
+		!reflect.DeepEqual(source.TemplateSpec, target.TemplateSpec) {
 		return false
 	}
 	sourceConfig := source.Config
 	targetConfig := target.Config
 	sourceConfig.TTL, sourceConfig.HardTTL = nil, nil
 	targetConfig.TTL, targetConfig.HardTTL = nil, nil
-	return apiequality.Semantic.DeepEqual(sourceConfig, targetConfig)
+	return reflect.DeepEqual(sourceConfig, targetConfig)
 }
 
 func lockNomadRunningForkLiveWriter(
@@ -510,7 +509,7 @@ func lockNomadRunningForkLiveWriter(
 	if err != nil {
 		return nil, err
 	}
-	if lifecycle.ExpectedHeadLayerID != "" && lifecycle.ExpectedHeadLayerID != writer.generation.ID {
+	if lifecycle.ExpectedGenerationID != "" && lifecycle.ExpectedGenerationID != writer.generation.ID {
 		return nil, fmt.Errorf("%w: source lifecycle head changed", ErrNomadSandboxForkConflict)
 	}
 	return &NomadSandboxRunningForkCandidate{
@@ -596,7 +595,7 @@ func nomadRunningForkLifecycleMatches(
 	if lifecycle == nil || source == nil || lifecycle.ID != request.OperationID ||
 		lifecycle.SandboxID != source.ID || lifecycle.Kind != SandboxLifecycleKindFork ||
 		lifecycle.Source != SandboxLifecycleSourceManual || lifecycle.Cancelable ||
-		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedHeadLayerID == "" ||
+		!lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedGenerationID == "" ||
 		lifecycle.ToRuntimeNamespace != "" || lifecycle.ToRuntimeID != "" ||
 		lifecycle.TargetSandboxID != request.Target.ID || lifecycle.TargetGenerationID != targetGenerationID ||
 		!bytes.Equal(lifecycle.TargetRecordDigest, request.TargetRecordDigest) {
@@ -604,13 +603,13 @@ func nomadRunningForkLifecycleMatches(
 	}
 	if committed {
 		return lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
-			lifecycle.PreparedHeadLayerID == targetGenerationID
+			lifecycle.PreparedGenerationID == targetGenerationID
 	}
 	return lifecycle.FromGeneration == source.RuntimeGeneration &&
 		lifecycle.ToGeneration == source.RuntimeGeneration &&
 		lifecycle.FromRuntimeNamespace == source.RuntimeNamespace &&
 		lifecycle.FromRuntimeID == source.RuntimeID &&
-		lifecycle.Phase == SandboxLifecyclePhasePublishing && lifecycle.PreparedHeadLayerID == ""
+		lifecycle.Phase == SandboxLifecyclePhasePublishing && lifecycle.PreparedGenerationID == ""
 }
 
 func loadCompletedNomadSandboxRunningFork(
@@ -647,21 +646,14 @@ func loadCompletedNomadSandboxRunningFork(
 	if !nomadRunningForkLifecycleMatches(lifecycle, source, request, targetGenerationID, true) {
 		return nil, fmt.Errorf("%w: completed source lifecycle changed", ErrNomadSandboxForkConflict)
 	}
-	if lifecycle.ExpectedHeadLayerID != sourceGenerationID {
+	if lifecycle.ExpectedGenerationID != sourceGenerationID {
 		return nil, fmt.Errorf("%w: completed source generation changed", ErrNomadSandboxForkConflict)
 	}
 	target, err := lockNomadForkTarget(ctx, tx, request)
 	if err != nil {
 		return nil, err
 	}
-	filesystem, err := scanRootFSFilesystem(tx.QueryRow(ctx, `
-		SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
-			writer_epoch, base_image_ref, base_image_digest, storage_format,
-			base_artifact_digest, format_generation, head_generation_id,
-			created_at, updated_at
-		FROM manager.rootfs_filesystems WHERE filesystem_id = $1
-		FOR SHARE
-	`, target.ID))
+	filesystem, err := getRootFSFilesystemByID(ctx, tx, target.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load completed Nomad running-fork target filesystem: %w", err)
 	}

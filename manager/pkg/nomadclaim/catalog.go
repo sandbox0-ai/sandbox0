@@ -8,14 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
-	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -54,6 +53,33 @@ type RuntimeClass struct {
 // RuntimeClassCatalog is an immutable warm-carrier scheduler input.
 type RuntimeClassCatalog struct {
 	classes []RuntimeClass
+}
+
+// ArtifactPlatforms returns the unique immutable OCI platforms required by
+// every configured warm-carrier class.
+func (c *RuntimeClassCatalog) ArtifactPlatforms() []sandboxstore.RootFSArtifactPlatform {
+	if c == nil {
+		return nil
+	}
+	platforms := make([]sandboxstore.RootFSArtifactPlatform, 0, len(c.classes))
+	seen := make(map[sandboxstore.RootFSArtifactPlatform]struct{}, len(c.classes))
+	for _, class := range c.classes {
+		if _, ok := seen[class.ArtifactPlatform]; ok {
+			continue
+		}
+		seen[class.ArtifactPlatform] = struct{}{}
+		platforms = append(platforms, class.ArtifactPlatform)
+	}
+	sort.Slice(platforms, func(i, j int) bool {
+		if platforms[i].OS != platforms[j].OS {
+			return platforms[i].OS < platforms[j].OS
+		}
+		if platforms[i].Architecture != platforms[j].Architecture {
+			return platforms[i].Architecture < platforms[j].Architecture
+		}
+		return platforms[i].Variant < platforms[j].Variant
+	})
+	return platforms
 }
 
 // LoadRuntimeClassCatalog loads a strict bounded catalog from a mounted
@@ -161,29 +187,4 @@ func (c *RuntimeClassCatalog) Resolve(clusterID string) (RuntimeClass, error) {
 		return RuntimeClass{}, fmt.Errorf("%w for cluster %q", ErrRuntimeClassUnavailable, clusterID)
 	}
 	return selected, nil
-}
-
-// ResolveLegacyMeteringResources is a bounded additive-migration fallback for
-// sandbox rows created before numeric metering fields existed. New usage truth
-// comes from the PostgreSQL resource lease, not this template reconstruction.
-func (c *RuntimeClassCatalog) ResolveLegacyMeteringResources(
-	record *sandboxstore.SandboxRecord,
-	resourcePolicy templatepkg.ResourcePolicy,
-) (int64, int64, error) {
-	if record == nil || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return 0, 0, fmt.Errorf("persisted Nomad sandbox record is required")
-	}
-	if _, err := c.Resolve(record.ClusterID); err != nil {
-		return 0, 0, fmt.Errorf("resolve persisted runtime class: %w", err)
-	}
-	quota, err := effectiveResources(resourcePolicy, record.TemplateSpec, &record.Config)
-	if err != nil {
-		return 0, 0, err
-	}
-	millicpu := quota.CPU.MilliValue()
-	memoryMiB := bytesToMiBRoundUp(quota.Memory.Value())
-	if millicpu <= 0 || memoryMiB <= 0 || resource.NewMilliQuantity(millicpu, resource.DecimalSI).Cmp(quota.CPU) != 0 {
-		return 0, 0, fmt.Errorf("persisted Nomad resources are not exact metering quantities")
-	}
-	return millicpu, memoryMiB, nil
 }

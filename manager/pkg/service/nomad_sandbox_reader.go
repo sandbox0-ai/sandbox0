@@ -23,7 +23,7 @@ type NomadSandboxProjectionStore interface {
 }
 
 // NomadSandboxReader projects public sandbox state only from regional durable
-// records and runtime-slot authority. It never consults a Kubernetes Pod cache.
+// records and runtime-slot authority. It never consults an ephemeral process cache.
 type NomadSandboxReader struct {
 	store NomadSandboxProjectionStore
 }
@@ -45,9 +45,6 @@ func (r *NomadSandboxReader) GetSandbox(ctx context.Context, sandboxID string) (
 	}
 	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return nil, sandboxstore.ErrSandboxRecordNotFound
-	}
-	if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-		return nil, fmt.Errorf("sandbox %s does not use the Nomad runtime", sandboxID)
 	}
 	projected := sandboxRecordToSandbox(record)
 	if record.DesiredState != sandboxstore.SandboxDesiredStateActive {
@@ -84,9 +81,6 @@ func (r *NomadSandboxReader) ListSandboxes(ctx context.Context, request *sandbox
 	for _, record := range records {
 		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 			continue
-		}
-		if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
-			return nil, fmt.Errorf("sandbox %s does not use the Nomad runtime", record.ID)
 		}
 		projected := sandboxRecordToSandbox(record)
 		if record.DesiredState == sandboxstore.SandboxDesiredStateActive {

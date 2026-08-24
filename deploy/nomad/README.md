@@ -1,144 +1,83 @@
 # Nomad production deployment contract
 
-This directory contains the production deployment boundary for Nomad-backed
-sandbox compute. Regional services and manager may still run under the
-Sandbox0 operator, but sandbox workloads are Nomad allocations and ctld runs
-directly on every Nomad client host. Do not deploy ctld in a Kubernetes Pod:
-the elected ctld primary, the Nomad task driver, NBD mounts, network
-namespaces, and runsc must observe the same host namespaces.
+Sandbox0 uses Nomad for sandbox compute and stock gVisor `runsc` for isolation.
+Run regional and data-plane control services as host services or Nomad service
+jobs. Run ctld A/B directly on every dedicated Nomad client host so ctld, the
+task driver, NBD mounts, network namespaces, cgroups, and runsc observe the same
+host namespaces.
+
+- [`control/`](control/) contains the direct systemd boundary for
+  regional-gateway, optional scheduler, cluster-gateway, manager, and
+  ssh-gateway.
+- [`ctld/`](ctld/) installs ctld A/B, runsc, the task driver, cgroup delegation,
+  NBD devices, and Nomad client plugin configuration.
+- [`nomad-driver-sandbox0/example/`](../../nomad-driver-sandbox0/example/)
+  contains the runtime-class catalog, endpoint catalog, and warm-slot job.
 
 ## Immutable deployment inputs
 
-Pin and record one build of `manager`, `regional-gateway`, `scheduler`,
-`cluster-gateway`, `ctld`, `nomad-driver-sandbox0`, `procd`, and stock `runsc`.
-The following identities must agree across every generated file:
+Pin one build of every service, `nomad-driver-sandbox0`, `procd`, and stock
+`runsc`. Record and keep consistent:
 
-- region ID and cluster ID;
-- Nomad server cluster and exact client node IDs;
-- durable node UID and current node boot ID;
-- node certificate common name and its manager authority mapping;
-- runsc version, driver version, immutable runtime settings, and security
+- region ID, cluster ID, Nomad server cluster, and exact client node IDs;
+- durable node UID, current node boot ID, and node certificate identity;
+- driver and runsc versions, platform, DirectFS, filesystem mode, and security
   class; and
-- RootFS artifact OS/architecture.
+- RootFS artifact OS and architecture.
 
-The exact compatibility object belongs in
-`nomad-driver-sandbox0/example/runtime-classes.example.json`. Catalog version
-`3` contains only immutable carrier compatibility: architecture, driver/runsc
-versions, gVisor platform, filesystem settings, DirectFS, runtime mode, and
-security class. CPU, memory, PIDs, CPU quota/weight, and cpuset are forbidden
-from this catalog. Until the public API exposes an explicit class selector,
-configure exactly one class for each requested cluster; zero or multiple
-matches fail closed.
+Runtime-class catalog version `3` contains immutable carrier compatibility only.
+CPU, memory, PIDs, quota/weight, and cpuset do not belong in the catalog. Until
+an explicit class selector is public, configure exactly one class per requested
+cluster; zero or multiple matches fail closed.
 
-Nomad schedules only dedicated Sandbox0 nodes and low-overhead, resource-neutral
-warm carriers. Manager atomically leases exact CPU and memory from the live
-capacity reported by ctld, then ctld creates `/sys/fs/cgroup/sandbox0/<lease>`
-and the driver writes that lease into OCI. Neither component derives sandbox
-limits from the carrier allocation; per-lease swap is disabled so it cannot
-bypass PostgreSQL memory accounting. Register these clients in the Nomad
-`sandbox0` node pool and set node metadata `sandbox0_dedicated=true`; the warm
-job requires both. Do not register general workloads against this node pool.
-After a node reboot, only plugin-independent cleanup may be routed through one
-authenticated successor boot for the same durable node UID. Ctld must replay
-the old slot journal and prove the old runsc, mount, network, writer, and lease
-cgroup absent before manager releases that old lease; ambiguous successors
-fail closed.
+Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers.
+Manager atomically leases exact CPU and memory from ctld-reported node capacity;
+ctld creates `/sys/fs/cgroup/sandbox0/<lease>` and the driver writes that lease
+into the OCI spec. Carrier allocation resources are overhead, not sandbox
+limits. Use the Nomad `sandbox0` node pool with node metadata
+`sandbox0_dedicated=true`, and never schedule general workloads there.
 
-## Manager authority secrets
+## Manager authority files
 
-For an operator-managed manager, create three Secrets before applying a Nomad
-backend configuration:
+Provision these root-owned inputs identically on every manager replica:
 
-| Secret | Required keys |
+| Directory | Required files |
 | --- | --- |
-| node authority TLS | `tls.crt`, `tls.key`, `client-ca.crt` |
-| claim authority | `runtime-classes.json`, `writer-token.key` |
-| terminal Nomad control | `nomad-endpoints.json` and every credential file named by that catalog |
+| `/etc/sandbox0/node-authority/tls` | `tls.crt`, `tls.key`, `client-ca.crt` |
+| `/etc/sandbox0/node-authority/claim` | `runtime-classes.json`, `writer-token.key` |
+| `/etc/sandbox0/node-authority/control` | `nomad-endpoints.json` and all credential files referenced by it |
 
-`writer-token.key` must contain exactly 32 random bytes and remain stable
-across retries, manager replicas, and rollouts. The terminal catalog example
-uses the operator's fixed
-`/etc/sandbox0/node-authority/control` mount. Keep every referenced credential
-under that directory so one projected Secret is the complete, rotatable input.
-The catalog needs one trusted HTTPS server endpoint per Nomad cluster and one
-exact HTTPS client endpoint per node; redirects and ambient proxies are not
-accepted.
+`writer-token.key` is exactly 32 random bytes and remains stable across retries
+and rollouts. The endpoint catalog has one trusted HTTPS server endpoint per
+Nomad cluster and one exact HTTPS client endpoint per node. Redirects and
+ambient proxies are rejected. Manager uses direct file paths; see
+`control/manager.yaml.example`.
 
-A data-plane manager configuration has this shape (replace every placeholder):
+The authority URL on each node must resolve only to current manager replica
+addresses and present the configured DNS and SPIFFE SANs. Keep PostgreSQL,
+RootFS object storage, manager authority, and Nomad TLS endpoints private and
+mutually authenticated.
 
-```yaml
-services:
-  manager:
-    enabled: true
-    replicas: 2
-    config:
-      sandboxRuntimeBackend: nomad
-      nodeAuthority:
-        enabled: true
-        listenHost: 0.0.0.0
-        tlsSecretName: manager-node-authority-tls
-        identities:
-          - commonName: replace-with-node-certificate-cn
-            clusterId: replace-with-cluster-id
-            nodeId: replace-with-nomad-node-id
-            nodeUid: replace-with-durable-node-uid
-            podUid: replace-with-node-agent-token-identity
-        runtimeSlotHeartbeatTtl: 30s
-        claim:
-          secretName: manager-nomad-claim
-          claimTtl: 15s
-          slo: 1s
-        terminal:
-          enabled: true
-          controlSecretName: manager-nomad-control
-          interval: 1s
-          passTimeout: 2m
-          scanLimit: 100
-```
+## Bring-up and acceptance
 
-The authority URL configured on each node must resolve to the exact current
-manager replica addresses and present the configured DNS and SPIFFE SANs. A
-ClusterIP or load-balancer address is not an exact membership source. Keep
-PostgreSQL, RootFS object storage, manager authority, and Nomad TLS endpoints
-private and mutually authenticated.
-
-## Node and warm-pool sequence
-
-1. Configure PostgreSQL through its primary/writer endpoint and provision the
-   RootFS object bucket with least-privilege credentials.
-2. Create the authority Secrets and deploy regional-gateway, optional
-   scheduler, cluster-gateway, and manager with the Nomad backend enabled.
-3. Install ctld A/B, runsc, and the task driver with
-   `ctld/install-node.sh`. Verify both role-aware ctld health states before
-   enabling Nomad on the node. The installer provisions a cgroup-v2 subtree at
-   `/sys/fs/cgroup/sandbox0`, enables `cpu`, `cpuset`, `memory`, and `pids` for
-   child leases, and fails startup if those controllers are unavailable or the
-   resource root itself contains processes.
-4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad`. Its count of eight
-   is the minimum production acceptance width. Configure at least that many
-   ctld NBD devices and enough replacement headroom. The example reserves only
-   50 MHz and 64 MiB of Nomad carrier overhead per slot; these are not sandbox
-   limits. For the production eight-way acceptance gate, ctld must truthfully
-   report at least eight dedicated CPU cores and sufficient sandbox memory
-   after host overhead. Never falsify Nomad node capacity, ctld capacity, or
-   cpusets, and never oversubscribe memory for an SLO report. Keep the supplied
-   `restart { attempts = 0 }` policy: one-shot slot termination must create a
-   fresh allocation and network namespace, never restart the driver inside the
-   consumed allocation.
-5. Confirm PostgreSQL shows healthy resource-neutral class slots and live node
-   capacity, every node channel is
-   connected, warm default-deny is applied, and Nomad replacement allocations
-   reach ready after one batch is deleted.
-6. Verify the acceptance team's active and rate quotas, then run the fixed
-   `tools/runtime-slot-slo` binary through the public regional URL exactly as
+1. Provision regional PostgreSQL through its writer endpoint and an
+   access-controlled RootFS S3 bucket.
+2. Install regional-gateway, optional scheduler, cluster-gateway, manager, and
+   ssh-gateway from `control/`. Run manager active-active.
+3. Install each dedicated node with `ctld/install-node.sh`; verify one primary
+   and one synchronized standby before enabling the Nomad client.
+4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad`. Keep `restart {
+   attempts = 0 }`: a consumed slot gets a fresh allocation and network
+   namespace, never a task restart in the same allocation.
+5. Confirm PostgreSQL has live node capacity, resource-neutral ready slots,
+   connected node channels, default-deny networking, and replacement slots.
+6. Run `tools/runtime-slot-slo` through the public regional endpoint as
    documented in `nomad-driver-sandbox0/README.md`.
 
-Serial 1000, the truthful synchronized concurrency report supported by the
-available dedicated hardware, privileged multi-node validation, and all
-failure-injection gates must pass before cutover. The production asset still
-requires eight resource-neutral carriers and eight dedicated CPU cores; a
-narrower acceptance host must be labeled with its real width and cannot be
-reported as an eight-way run. The cutover is deletion-based: physically
-remove the superseded Kubernetes sandbox runtime code, configuration, tests, documents,
-schema compatibility, and dependencies. Disabling the old route while leaving
-its state machine in the repository is not completion.
+Production acceptance requires at least eight carriers, eight truthful dedicated
+CPU cores, enough non-oversubscribed memory, serial 1000, synchronized
+concurrency, multi-node failure injection, and security gates. A narrower local
+host may validate only its real width and must never be reported as an eight-way
+run. After reboot, a successor boot may perform plugin-independent cleanup only
+for the same authenticated durable node UID and only after proving old runsc,
+mount, network, writer, and lease-cgroup state absent.

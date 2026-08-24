@@ -15,7 +15,7 @@ type CertificateIdentity struct {
 	ClusterID  string
 	NodeID     string
 	NodeUID    string
-	PodUID     string
+	AgentUID   string
 }
 
 type certificateVerifier struct {
@@ -44,7 +44,7 @@ func (v certificateVerifier) Verify(_ context.Context, bearer string) (Identity,
 	}
 	return Identity{
 		ClusterID: identity.ClusterID, NodeID: identity.NodeID,
-		NodeUID: identity.NodeUID, PodUID: identity.PodUID,
+		NodeUID: identity.NodeUID, AgentUID: identity.AgentUID,
 	}, nil
 }
 
@@ -85,9 +85,9 @@ func certificateIdentityMap(identities []CertificateIdentity) (map[string]Certif
 		identity.ClusterID = strings.TrimSpace(identity.ClusterID)
 		identity.NodeID = strings.TrimSpace(identity.NodeID)
 		identity.NodeUID = strings.TrimSpace(identity.NodeUID)
-		identity.PodUID = strings.TrimSpace(identity.PodUID)
-		if identity.CommonName == "" || identity.NodeUID == "" || identity.PodUID == "" {
-			return nil, fmt.Errorf("node authority client identity %d requires common name, node UID, and pod UID", index)
+		identity.AgentUID = strings.TrimSpace(identity.AgentUID)
+		if identity.CommonName == "" || identity.NodeUID == "" || identity.AgentUID == "" {
+			return nil, fmt.Errorf("node authority client identity %d requires common name, node UID, and agent UID", index)
 		}
 		if (identity.ClusterID == "") != (identity.NodeID == "") {
 			return nil, fmt.Errorf("node authority client identity %d must configure cluster and node IDs together", index)

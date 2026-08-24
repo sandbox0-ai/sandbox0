@@ -1,299 +1,212 @@
 # Observability
 
-Self-hosted Sandbox0 has three separate data paths. Configure each one for its own purpose.
+Self-hosted Sandbox0 has three distinct data paths. Do not merge their storage
+or authority boundaries.
 
-| Data path | Purpose | Main configuration | Storage or destination |
-|-----------|---------|--------------------|------------------------|
-| Platform telemetry | Operate Sandbox0 services | `spec.observability` | Your OpenTelemetry or Prometheus stack |
-| Per-sandbox history | Runtime metrics, logs, and audit events | `spec.clickHouse`, `spec.sandboxObservability` | Region ClickHouse |
-| Metering | Usage truth, quota, showback, and export | `spec.clickHouse`, `spec.metering` | PostgreSQL outbox projected to region ClickHouse |
+| Path | Purpose | Authority/destination |
+| --- | --- | --- |
+| Platform telemetry | Operate services and nodes | Logs, Prometheus metrics, OpenTelemetry traces |
+| Per-sandbox history | Query runtime samples, process logs, and signed audit facts | ClickHouse read model |
+| Metering | Usage truth, quota, showback, and export | PostgreSQL producer state/outbox projected to ClickHouse |
 
-<Callout variant="info">
-This page covers operator configuration. See [Sandbox Observability](/docs/sandbox/observability) for API filters, metric names, audit delivery behavior, watch streams, and coverage limits.
-</Callout>
+See [Sandbox Observability](/docs/sandbox/observability) for the public sandbox
+query APIs.
 
-## Platform Telemetry
+## Platform Logs And Traces
 
-Sandbox0 services write logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. `spec.observability` can export Sandbox0-owned logs, metrics, and traces to your platform stack.
+Direct systemd services write to the journal; Nomad service jobs write through
+the configured Nomad log sink. Collect both with your existing node agent.
+Include stable attributes for service, region, cluster, node ID, durable node
+UID, and boot ID.
 
-For cold-start diagnosis, collect `manager_pod_lifecycle_stage_duration_seconds`. Its `stage` label separates:
+Sandbox0 uses standard OpenTelemetry trace environment variables. Set them in
+`/etc/sandbox0/<service>.env` or the equivalent service-job environment:
 
-- scheduling
-- the `PodReadyToStartContainers` sandbox and network boundary
-- procd container start
-- first PodIP observation
-- Sandbox0 startup and readiness probe completion
-
-The sandbox boundary is a Kubernetes lifecycle timestamp, not an individual CRI call duration. Collect `kubelet_runtime_operations_duration_seconds{operation_type=~"run_podsandbox|create_container|start_container"}` when you need node-level CRI timing.
-
-For rootfs checkpoint and resume diagnosis, collect these ctld metrics:
-
-- `ctld_rootfs_operation_duration_seconds` for total save and apply latency
-- `ctld_rootfs_phase_duration_seconds` for cache lookup, cache validation, tar filtering, containerd ingest, diff apply, and baseline capture
-- `ctld_rootfs_checkpoint_bytes` for input, output, and excluded byte distributions
-- `ctld_rootfs_checkpoint_chain_depth` for the number of layers replayed by each operation
-- `ctld_rootfs_object_cache_requests_total` for cache hit, miss, and error counts
-
-Manager also records `apply_rootfs_checkpoint`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
-
-Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
-
-- `ctld_ha_primary` identifies the elected peer; alert when `sum by (node) (ctld_ha_primary) != 1` remains true
-- `ctld_ha_role`, `ctld_ha_epoch`, and `ctld_ha_role_transitions_total` show election and failover history
-- `ctld_ha_synchronized` and `ctld_ha_standbys` show whether failover state has reached the peer
-- `ctld_ha_state_duration_seconds` shows how long the peer has held its current role
-- `ctld_ha_lock_info` exposes the shared lock device and inode; the two peers on one node should report the same identity
-
-Slot A exposes this pre-election endpoint on port `9192`; slot B uses `9193`. These endpoints stay available on both primary and standby peers, unlike the primary-only ctld service endpoint.
-
-### Managed Collector
-
-Use `managedCollector` when Sandbox0 should install OpenTelemetry Collectors and export to your OTLP endpoint.
-
-```yaml
-spec:
-    observability:
-        backend:
-            type: external
-            external:
-                mode: managedCollector
-                otlp:
-                    endpoint: otel-gateway.example.com:4317
-                    insecure: false
-        resourceAttributes:
-            deployment.environment: production
-        collection:
-            logs:
-                enabled: true
-            metrics:
-                enabled: true
-            traces:
-                enabled: true
+```sh
+OTEL_TRACES_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otel.example.com:4317
+OTEL_EXPORTER_OTLP_TRACES_HEADERS=authorization=Bearer%20<token>
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,sandbox0.region.id=region-1,sandbox0.cluster.id=cluster-1
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.25
 ```
 
-### Existing Collector
+Keep secrets out of resource attributes. If no trace exporter is configured,
+services use the no-op path.
 
-Use `existingCollector` when your platform already operates collectors. Sandbox0 does not install collectors in this mode; it injects standard OpenTelemetry trace environment variables into platform services.
+## Prometheus Metrics
 
-```yaml
-spec:
-    observability:
-        backend:
-            type: external
-            external:
-                mode: existingCollector
-                otlp:
-                    endpoint: http://otel-collector.observability.svc.cluster.local:4317
-                    headersSecret:
-                        name: otel-export-headers
-                        key: headers
-                    insecure: true
-```
+Scrape each service's configured metrics port and both ctld HA endpoints. ctld
+slot A uses port `9192` and slot B uses `9193` in the supplied deployment
+assets; both remain available before primary election.
 
-The legacy direct trace exporter remains supported and overrides trace endpoints derived from the export configuration:
+High-value claim metrics include:
 
-```yaml
-spec:
-    observability:
-        traces:
-            enabled: true
-            exporter: otlp
-            endpoint: http://otel-collector.observability.svc.cluster.local:4317
-            insecure: true
-            timeout: 10s
-            sampleRate: "0.25"
-```
+- `manager_runtime_slot_claim_end_to_end_duration_seconds`;
+- `manager_runtime_slot_claim_phase_duration_seconds`;
+- HTTP request duration/error metrics at regional-gateway, scheduler,
+  cluster-gateway, and manager; and
+- the signed regional-gateway-to-procd SLO report produced by the acceptance
+  tool.
 
-The operator adds stable attributes such as `service.name`, `sandbox0.region.id`, `sandbox0.cluster.id`, `k8s.namespace.name`, `k8s.pod.name`, and `k8s.node.name`. Built-in values take precedence over user-provided values for the same keys.
+Monitor the complete capacity conjunction rather than carrier count alone:
 
-When traces are not enabled through `collection.traces` or the legacy `traces` block, services use the noop trace exporter. Direct environment overrides still take precedence over operator defaults, including:
+- ready resource-neutral slots by compatibility digest;
+- ctld-reported free CPU and memory;
+- active/retiring resource leases;
+- connected authenticated node channels and heartbeat age;
+- free NBD devices;
+- terminal reconciliation age and retry count; and
+- Nomad replacement-allocation lag.
 
-- `OTEL_TRACES_EXPORTER`
-- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_TRACES_HEADERS`
-- `OTEL_RESOURCE_ATTRIBUTES`
+### ctld A/B
 
-Official sample manifests:
+Group HA alerts by node:
 
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml">single-cluster/fullmode-gke-gvisor.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/control-plane.yaml">multi-cluster/control-plane.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/data-plane.yaml">multi-cluster/data-plane.yaml</GitHubRawLink>
+- `ctld_ha_primary`: alert when `sum by (node) (ctld_ha_primary) != 1` persists;
+- `ctld_ha_role`, `ctld_ha_epoch`, and
+  `ctld_ha_role_transitions_total`: election/failover history;
+- `ctld_ha_synchronized` and `ctld_ha_standbys`: takeover readiness;
+- `ctld_ha_state_duration_seconds`: time in current role; and
+- `ctld_ha_lock_info`: both peers on one node must report the same lock
+  identity.
+
+Runtime metric collection health is exposed through:
+
+- `ctld_runtime_metric_collection_duration_seconds`;
+- `ctld_runtime_metric_collections_total`;
+- `ctld_runtime_metric_collection_targets`; and
+- `ctld_runtime_metric_samples_total`.
+
+Alert when a node has no synchronized standby, when boot identity changes
+without cleanup progress, when the primary cannot renew writers, or when lease
+cgroups remain occupied after termination was requested.
+
+### RootFS And Metering
+
+Manager exports:
+
+- `manager_rootfs_maintenance_runs_total`;
+- `manager_rootfs_maintenance_duration_seconds`;
+- `manager_rootfs_object_deletes_total`;
+- `manager_rootfs_object_deletion_queue_depth`;
+- `manager_rootfs_storage_bytes` and `manager_rootfs_storage_objects`;
+- `manager_metering_outbox_pending_operations`; and
+- `manager_metering_outbox_oldest_pending_age_seconds`.
+
+Also monitor importer leases, materializer backlog bytes, dirty-tail retirement
+reserve, conditional-publication failures, S3 request rate/status, PostgreSQL
+writer readiness, database pool saturation, and local branch-disk usage.
 
 ## Per-Sandbox Historical Data
 
-Configure ClickHouse once under `spec.clickHouse`. `spec.sandboxObservability` and `spec.metering` consume that region component; do not configure separate ClickHouse backends on individual services.
-
-| Data | Required configuration | Enterprise license |
-|------|------------------------|--------------------|
-| Historical logs | `sandboxObservability.enabled: true` | No |
-| Runtime metrics | `sandboxObservability.enabled: true` | No |
-| Signed audit events | `sandboxObservability.audit.enabled: true` | `sandbox_audit` |
-| Metering ledger | `metering.enabled: true` | No |
-
-Historical queries return `503 unavailable` when their backend is disabled or unavailable. They are separate from platform telemetry and from the metering usage ledger.
-
-### Builtin ClickHouse
-
-Use builtin ClickHouse when the infra-operator should install the region component.
+Configure cluster-gateway directly with a ClickHouse backend:
 
 ```yaml
-spec:
-    enterpriseLicense:
-        secretRef:
-            name: sandbox0-enterprise-license
-            key: license.lic
-    clickHouse:
-        type: builtin
-        builtin:
-            image: clickhouse/clickhouse-server:24.8
-            persistence:
-                size: 50Gi
-        databases:
-            observability: sandbox0_observability
-            metering: sandbox0_metering
-        schemaMigration:
-            enabled: true
-    sandboxObservability:
-        enabled: true
-        backend: clickhouse
-        audit:
-            enabled: true
-            deliveryMode: durable_async
-            deliveryPersistence:
-                size: 1Gi
-        retention:
-            auditDays: 90
-            logDays: 7
-            runtimeSampleDays: 30
-        ingest:
-            queueSize: 1024
-            batchSize: 100
-            flushInterval:
-                duration: 1s
-            requestTimeout:
-                duration: 2s
-            maxRetries: 3
-            retryBackoff:
-                duration: 100ms
-    metering:
-        enabled: true
-        clickHouse:
-            eventsTable: usage_events
-            windowsTable: usage_windows
-            watermarksTable: producer_watermarks
-            sandboxStateTable: sandbox_projection_state
-            storageStateTable: storage_projection_state
+sandbox_observability:
+    backend: clickhouse
+    audit_enabled: false
+    clickhouse:
+        dsn: ${SANDBOX0_OBSERVABILITY_CLICKHOUSE_DSN}
+        database: sandbox0_observability
+        events_table: sandbox_events
+        logs_table: sandbox_logs
+        runtime_samples_table: sandbox_runtime_samples
+        retention_days: 30
+        logs_retention_days: 7
+        runtime_samples_retention_days: 30
+        connect_timeout: 10s
 ```
 
-### External ClickHouse
+Historical APIs return unavailable when the backend is disabled or unhealthy.
+They do not fall back to platform logs or PostgreSQL lifecycle tables.
 
-Use an external backend when you already operate ClickHouse.
+Set `skip_schema_migration: true` only when an external migration process owns
+the exact expected ClickHouse schemas. Startup otherwise validates/creates the
+configured schema.
+
+## Metering Projection
+
+Enable metering on all producer/consumer services that participate in the
+region and configure the same ClickHouse table names:
 
 ```yaml
-spec:
-    enterpriseLicense:
-        secretRef:
-            name: sandbox0-enterprise-license
-            key: license.lic
-    clickHouse:
-        type: external
-        external:
-            dsnSecret:
-                name: sandbox0-clickhouse
-                key: dsn
-            connectTimeout:
-                duration: 10s
-        databases:
-            observability: sandbox0_observability
-            metering: sandbox0_metering
-    sandboxObservability:
-        enabled: true
-        backend: clickhouse
-        audit:
-            enabled: true
-            deliveryMode: durable_async
-            deliveryPersistence:
-                size: 1Gi
-        retention:
-            auditDays: 90
-            logDays: 7
-            runtimeSampleDays: 30
-    metering:
-        enabled: true
+metering:
+    enabled: true
+    clickhouse:
+        dsn: ${SANDBOX0_METERING_CLICKHOUSE_DSN}
+        database: sandbox0_metering
+        events_table: usage_events
+        windows_table: usage_windows
+        watermarks_table: producer_watermarks
+        sandbox_state_table: sandbox_projection_state
+        storage_state_table: storage_projection_state
+        connect_timeout: 10s
 ```
 
-## Audit Operations
+PostgreSQL `metering` projection state and `projection_outbox` are the producer
+persistence boundary. ClickHouse is rebuilt asynchronously from that outbox.
+A ClickHouse outage may increase projection lag, but it must not create a
+second usage truth or cause producers to invent independent counters.
 
-Cluster-gateway authorizes audit ingestion and the public event query and watch API. The enterprise license is mounted only into cluster-gateway.
+Alert on outbox depth, oldest pending age, producer watermark gaps, duplicate
+or rejected operations, and ClickHouse insert latency/errors.
 
-The infra-operator also manages two independent key pairs:
+## Signed Audit
 
-- the active ctld process receives the network-producer private key
-- cluster-gateway receives the corresponding producer public key
-- cluster-gateway receives the independent audit-signing private key
+Signed centralized audit is a separately licensed per-sandbox history feature.
+When enabled, cluster-gateway requires:
 
-ClickHouse table `sandbox_audit_events` is the canonical audit store. PostgreSQL is not a second audit store, and fsync-backed buffers are delivery state rather than query sources.
+- `region_id` and `cluster_id`;
+- a dedicated network-producer public key;
+- a distinct audit-signing private/public key pair;
+- a durable `sandbox_observability.audit_spool_dir`; and
+- a compatible ClickHouse events table.
 
-### Delivery Mode
+ctld receives only the dedicated producer private key. It must not receive the
+audit-signing key. Preserve signing public keys for at least the full event
+retention period.
 
-`spec.sandboxObservability.audit.deliveryMode` controls admission for non-mutating Sandbox API requests, public exposure requests, and new ctld network flows.
+Delivery modes are:
 
-| Mode | Admission point | Operational tradeoff |
-|------|-----------------|----------------------|
-| `durable_async` | Local durable enqueue | Default; lower ClickHouse coupling, eventual query visibility |
-| `canonical_sync` | ClickHouse acknowledgement | Immediate canonical admission, added latency and availability coupling |
+| Mode | Admission point | Tradeoff |
+| --- | --- | --- |
+| `durable_async` | fsync-backed local spool enqueue | Lower ClickHouse coupling; eventual query visibility |
+| `canonical_sync` | ClickHouse acknowledgement | Immediate query authority; added latency and availability coupling |
 
-State-changing Sandbox API requests always require canonical acknowledgement before execution and before returning their signed result. See [Audit Delivery](/docs/sandbox/observability#audit-delivery) for failure behavior and caller-visible results.
+State-changing sandbox API operations require canonical acknowledgement even
+when non-mutating operations use durable asynchronous delivery. Spool records
+are delivery state, not a second query store, and are removed only after exact
+event acknowledgement.
 
-Audit retention starts at cluster-gateway's `ingested_at` timestamp, when it creates or normalizes the canonical event. It does not start at the producer's `occurred_at` time or at ClickHouse acknowledgement. A delayed event can therefore have less than the configured retention period remaining when it becomes query-visible.
+For `durable_async`, place the cluster-gateway spool on encrypted durable local
+storage and choose a failover design that does not discard an unacknowledged
+spool. Do not put two active writers on the same non-concurrent filesystem.
+Node-local ctld network spools survive process restart but not permanent disk
+loss; account for this explicitly in compliance design.
 
-### Persistence And Keys
+Monitor `sandbox0_ctld_network_audit_ingest_events_total` and
+`sandbox0_ctld_network_audit_ingest_batches_total`, especially
+`persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed`
+results.
 
-Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator uses a `ReadWriteOnce` event-delivery PVC and the `Recreate` deployment strategy so a replacement gateway reattaches the same buffer before starting.
+## Operational Dashboards
 
-Production requirements:
+At minimum, build dashboards for:
 
-- set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that can reattach across nodes; omitting it uses the cluster default
-- preserve the generated audit-signing Secret for the entire retention period
-- retain previous public keys outside the cluster before destructive key replacement; inline verification uses only the active public key and reports older retained keys as `signature_status=unavailable`
-- account for ctld network-flow buffers being node-local: they survive a same-node Pod restart, not permanent node loss
-- alert on delivery records that have not reached ClickHouse; records are removed only after exact-event acknowledgement
+1. regional request rate, errors, and end-to-end claim latency;
+2. node capacity, ready carriers, NBD devices, and resource leases;
+3. ctld A/B election, synchronization, writers, and node channels;
+4. RootFS import, attach, checkpoint, materializer backlog, S3 cost, and GC;
+5. PostgreSQL writer health and transaction contention;
+6. terminal cleanup age and unreleased capacity;
+7. metering outbox and ClickHouse projection lag; and
+8. audit spool and acknowledgement lag when audit is enabled.
 
-### Schema Compatibility
+## Next Steps
 
-Audit schema v2 uses `sandbox_audit_events`. Older `sandbox_events` rows lack trusted actor and signature data, so Sandbox0 retains them as legacy history rather than retroactively signing them.
-
-At startup, an audit-enabled cluster-gateway validates the actual ClickHouse engine, partition key, sorting key, and required columns. It refuses audit operations against an old or incompatible custom table. Existing CRs that persisted the old default table value are routed to the canonical v2 table.
-
-### Monitoring
-
-The ctld network runtime exports:
-
-- `sandbox0_ctld_network_audit_ingest_events_total`
-- `sandbox0_ctld_network_audit_ingest_batches_total`
-
-Alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Also monitor the ClickHouse service, cluster-gateway delivery PVC capacity and latency, and audit query errors.
-
-### External Controls
-
-Sandbox0 provides durable delivery, authenticated producer identity, tenant scoping, append-only application behavior, and tamper-evident row signatures. A production compliance design must also provide:
-
-- highly available ClickHouse storage
-- restricted ClickHouse mutation credentials
-- encrypted backups and tested restores
-- retention and legal-hold policy
-- clock synchronization
-- independent preservation of signing public keys or exported checkpoints
-
-A per-row signature does not protect against an administrator who can rewrite the complete table and all of its backups.
-
-## Disable Or Retain Features
-
-| Goal | Configuration |
-|------|---------------|
-| Disable all per-sandbox historical APIs | Omit `spec.sandboxObservability` or set `enabled: false` |
-| Keep logs and runtime metrics but disable audit | Omit `audit.enabled` or set it to `false` |
-| Disable metering | Omit `spec.metering` or set `enabled: false` |
-
-Disabling audit stops new facts but does not delete existing rows. Set `retention.auditDays` to your required retention period before enabling audit in production. Legacy `spec.sandboxObservability.type` fields remain accepted for compatibility, but new installs should configure ClickHouse through `spec.clickHouse`.
+<CardGroup>
+  <Card title="Sandbox Observability" href="/docs/sandbox/observability" cta="Continue">
+    Query runtime metrics, logs, and audit events through the public API.
+  </Card>
+</CardGroup>

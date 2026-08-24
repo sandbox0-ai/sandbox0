@@ -134,7 +134,7 @@ func serveCrashAbandonComplete(
 		return
 	}
 	record, err := store.GetSandbox(request.Context(), grant.SandboxID)
-	if err != nil || record.RuntimeID != proof.PodUID {
+	if err != nil || record.RuntimeID != proof.AllocationID {
 		http.Error(writer, "crash proof does not match Nomad allocation", http.StatusConflict)
 		return
 	}
@@ -283,7 +283,7 @@ func ensureCrashLifecycle(
 		if active != nil {
 			if active.ID == body.OperationID && active.Kind == sandboxstore.SandboxLifecycleKindPause &&
 				active.Source == sandboxstore.SandboxLifecycleSourceCrash &&
-				active.ExpectedHeadLayerID == body.ExpectedOldGenerationID {
+				active.ExpectedGenerationID == body.ExpectedOldGenerationID {
 				return nil
 			}
 			return fmt.Errorf("another lifecycle transaction %s is active", active.ID)
@@ -297,7 +297,7 @@ func ensureCrashLifecycle(
 			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceCrash,
 			Cancelable: false, FromGeneration: runtimeGeneration,
 			FromRuntimeNamespace: record.RuntimeNamespace, FromRuntimeID: record.RuntimeID,
-			ExpectedHeadLayerID: body.ExpectedOldGenerationID,
+			ExpectedGenerationID: body.ExpectedOldGenerationID,
 		})
 	})
 }
@@ -374,7 +374,7 @@ func servePublish(
 		if _, err := writerTx.BeginRootFSWriterRetire(ctx, &sandboxstore.BeginRootFSWriterRetireRequest{
 			GrantID: grantID, WriterEpoch: grant.WriterEpoch, OperationID: body.OperationID,
 			BindingVersion: grant.BindingVersion, BindingDigest: grant.BindingDigest,
-			ExpectedOldHeadLayerID: oldGenerationID,
+			ExpectedOldGenerationID: oldGenerationID,
 		}); err != nil {
 			return err
 		}
@@ -415,7 +415,7 @@ func preparePlannedPublishLifecycle(
 	if active == nil {
 		return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 			ID: operationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
-			Phase: sandboxstore.SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: expectedHead,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, ExpectedGenerationID: expectedHead,
 		})
 	}
 	if record == nil || active.ID != operationID || active.SandboxID != grant.SandboxID ||
@@ -423,7 +423,7 @@ func preparePlannedPublishLifecycle(
 		(active.Source != sandboxstore.SandboxLifecycleSourceManual && active.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
 		active.Cancelable || !active.CancelRequestedAt.IsZero() || active.FromGeneration != runtimeGeneration ||
 		active.FromRuntimeNamespace != record.RuntimeNamespace || active.FromRuntimeID != record.RuntimeID ||
-		active.ExpectedHeadLayerID != expectedHead || active.PreparedHeadLayerID != "" {
+		active.ExpectedGenerationID != expectedHead || active.PreparedGenerationID != "" {
 		return fmt.Errorf("pre-existing planned pause lifecycle does not match writer grant")
 	}
 	switch active.Phase {

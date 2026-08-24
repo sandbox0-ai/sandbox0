@@ -111,9 +111,9 @@ func (f *fakeStore) IssueRootFSWriterGrant(_ context.Context, request *sandboxst
 			ID: request.GrantID, FilesystemID: request.ExpectedFilesystemID,
 			SandboxID: request.SandboxID, ClaimID: request.ClaimID, SlotID: request.SlotID,
 			IssueOperationID: request.OperationID, WriterEpoch: request.ExpectedWriterEpoch + 1,
-			State:              sandboxstore.RootFSWriterGrantStateIssued,
-			InitialHeadLayerID: request.InitialGenerationID, InitialGenerationID: request.InitialGenerationID,
-			BindingVersion: request.BindingVersion, BindingDigest: append([]byte(nil), request.BindingDigest...),
+			State:               sandboxstore.RootFSWriterGrantStateIssued,
+			InitialGenerationID: request.InitialGenerationID,
+			BindingVersion:      request.BindingVersion, BindingDigest: append([]byte(nil), request.BindingDigest...),
 			NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 			RuntimeNamespace: request.RuntimeNamespace, RuntimeID: request.RuntimeID, RuntimeIncarnationID: request.RuntimeIncarnationID,
 			NodeName: request.NodeName, GateParent: request.GateParent,
@@ -159,14 +159,14 @@ func (f *fakeNetwork) Prepare(_ context.Context, request NetworkPrepareRequest) 
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	token := rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID,
-		PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+		AllocationID: request.AllocationID,
+		NetworkIncarnationID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
 			SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 			NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 			NetNSIdentity: request.NetNSIdentity,
 		}),
 		ClaimID:      request.ClaimID,
-		NetworkEpoch: 1, PolicyDigest: request.PolicyDigest, PodIP: "192.0.2.8",
+		NetworkEpoch: 1, PolicyDigest: request.PolicyDigest, SourceIP: "192.0.2.8",
 		CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}
 	if f.mutate != nil {
@@ -226,18 +226,22 @@ func cloneNodeClaim(source protocol.NodeClaimControlRequest) protocol.NodeClaimC
 }
 
 type fakeProber struct {
-	mu        sync.Mutex
-	addresses []string
-	tokens    []string
-	errors    []error
-	error     error
+	mu             sync.Mutex
+	addresses      []string
+	tokens         []string
+	errors         []error
+	error          error
+	respectContext bool
 }
 
-func (f *fakeProber) ProbeCommandReady(_ context.Context, address, token string) (*procdapi.CommandReadyProbeResult, error) {
+func (f *fakeProber) ProbeCommandReady(ctx context.Context, address, token string) (*procdapi.CommandReadyProbeResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.addresses = append(f.addresses, address)
 	f.tokens = append(f.tokens, token)
+	if f.respectContext && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if len(f.errors) > 0 {
 		err := f.errors[0]
 		f.errors = f.errors[1:]
@@ -294,6 +298,23 @@ func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
 	}
 }
 
+func TestPlannerMakesOneLeaseBoundProbeAfterSLOBudgetExpires(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.prober.respectContext = true
+	fixture.request.StartedAt = time.Now().UTC().Add(-2 * time.Second)
+
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.prober.mu.Lock()
+	attempts := len(fixture.prober.addresses)
+	fixture.prober.mu.Unlock()
+	if attempts != 1 || result.WithinSLO {
+		t.Fatalf("late probe attempts = %d, result = %+v", attempts, result)
+	}
+}
+
 type fakeTokenGenerator struct {
 	requests [][3]string
 }
@@ -343,7 +364,7 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 	store := &fakeStore{
 		filesystem: &sandboxstore.RootFSFilesystem{
 			ID: "filesystem-1", TeamID: "team-1", HeadGenerationID: "generation-1",
-			WriterEpoch: 7, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+			WriterEpoch:        7,
 			BaseArtifactDigest: artifact, FormatGeneration: 1,
 		},
 		generation: &sandboxstore.RootFSGeneration{
@@ -402,7 +423,7 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 	}
 	if result.ProcdAddress != "http://192.0.2.8:49983" || result.ProcdInstanceID != "procd-instance-1" ||
 		result.Stage.Identity.WriterEpoch != 8 || result.Stage.Identity.RuntimeGeneration != "19" ||
-		result.Stage.Identity.ContainerName != protocol.NomadTaskName ||
+		result.Stage.Identity.TaskName != protocol.NomadTaskName ||
 		result.CommandProof.RunscContainerID != protocol.NomadRunscContainerID("slot-1") {
 		t.Fatalf("claim result = %+v", result)
 	}
@@ -506,7 +527,7 @@ func TestPlannerRetriesExactNodeClaimAfterAmbiguousSuccess(t *testing.T) {
 func TestPlannerRejectsUntrustedNetworkTokenBeforeWriterIssue(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.network.mutate = func(token *rootfshandoff.NetworkPolicyToken) {
-		token.PodUID = "another-allocation"
+		token.AllocationID = "another-allocation"
 	}
 	if _, err := fixture.planner.Claim(context.Background(), fixture.request); err == nil ||
 		!strings.Contains(err.Error(), "does not match runtime slot claim") {
@@ -525,7 +546,7 @@ func TestPlannerRejectsUntrustedNetworkTokenBeforeWriterIssue(t *testing.T) {
 func TestPlannerRejectsChangedRuntimeRetryBeforeNetworkMutation(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.network.mutate = func(token *rootfshandoff.NetworkPolicyToken) {
-		token.PodUID = "another-allocation"
+		token.AllocationID = "another-allocation"
 	}
 	if _, err := fixture.planner.Claim(context.Background(), fixture.request); err == nil {
 		t.Fatal("first claim unexpectedly succeeded")

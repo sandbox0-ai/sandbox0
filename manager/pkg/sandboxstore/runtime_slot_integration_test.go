@@ -10,49 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
-
-func TestRuntimeResourceLeaseMigrationDownAndUpIntegration(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPoolThrough(t, "00045")
-	assertRuntimeResourceSchema := func(want bool) {
-		t.Helper()
-		var capacityTable, leaseTable, slotColumn bool
-		require.NoError(t, pool.QueryRow(ctx, `
-			SELECT to_regclass('manager.runtime_node_capacities') IS NOT NULL,
-				to_regclass('manager.runtime_resource_leases') IS NOT NULL,
-				EXISTS (
-					SELECT 1 FROM information_schema.columns
-					WHERE table_schema = 'manager' AND table_name = 'runtime_slots'
-						AND column_name = 'resource_lease_id'
-				)
-		`).Scan(&capacityTable, &leaseTable, &slotColumn))
-		require.Equal(t, want, capacityTable)
-		require.Equal(t, want, leaseTable)
-		require.Equal(t, want, slotColumn)
-	}
-	assertRuntimeResourceSchema(true)
-	require.NoError(t, migrate.Down(ctx, pool, ".",
-		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00045")),
-		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
-		migrate.WithSchema(sandboxStoreSchemaName),
-	))
-	assertRuntimeResourceSchema(false)
-	require.NoError(t, migrate.Up(ctx, pool, ".",
-		migrate.WithBaseFS(sandboxStoreMigrationFilesThrough(t, "00045")),
-		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
-		migrate.WithSchema(sandboxStoreSchemaName),
-	))
-	assertRuntimeResourceSchema(true)
-}
 
 func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
-	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-slot")
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-slot", "claim-operation-a")
 	registration := runtimeSlotTestRegistration("slot-a", "allocation-a")
 
 	registered, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
@@ -231,7 +196,7 @@ func TestRuntimeSlotConcurrentAcquireUsesDistinctReadySlotsIntegration(t *testin
 	for index := range fixtures {
 		fixtures[index].sandboxID = fmt.Sprintf("sandbox-concurrent-%d", index)
 		fixtures[index].filesystem, fixtures[index].generation =
-			runtimeSlotTestGeneration(t, store, fixtures[index].sandboxID)
+			runtimeSlotTestGeneration(t, store, fixtures[index].sandboxID, fmt.Sprintf("operation-%d", index))
 	}
 
 	results := make([]*RuntimeSlot, 2)
@@ -280,7 +245,7 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 		})
 		require.NoError(t, err)
 	}
-	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-idempotent")
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-idempotent", "operation-idempotent")
 	request := &AcquireRuntimeSlotRequest{
 		OperationID: "operation-idempotent", ClaimID: "claim-idempotent",
 		SandboxID: "sandbox-idempotent", FilesystemID: filesystem.ID,
@@ -350,7 +315,7 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 			HeartbeatTTL: time.Minute,
 		})
 		require.NoError(t, err)
-		filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-"+suffix)
+		filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-"+suffix, "operation-"+suffix)
 		fixtures[index].request = &AcquireRuntimeSlotRequest{
 			OperationID: "operation-" + suffix, ClaimID: "claim-" + suffix,
 			SandboxID: "sandbox-" + suffix, FilesystemID: filesystem.ID,
@@ -451,7 +416,7 @@ func TestRuntimeSlotReconcileFenceRechecksExpiryIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
-	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-fence")
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-fence", "operation-reconcile-fence")
 	registration := runtimeSlotTestRegistration("slot-reconcile-fence", "allocation-reconcile-fence")
 	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
@@ -507,7 +472,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
-	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-writer")
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-writer", "operation-reconcile-writer")
 	registration := runtimeSlotTestRegistration("slot-reconcile-writer", "allocation-reconcile-writer")
 	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
@@ -577,8 +542,8 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
-	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-abort")
-	_, unrelatedGeneration := runtimeSlotTestGeneration(t, store, "sandbox-unrelated")
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-abort", "operation-abort")
+	_, unrelatedGeneration := runtimeSlotTestGeneration(t, store, "sandbox-unrelated", "operation-unrelated")
 	registration := runtimeSlotTestRegistration("slot-abort", "allocation-abort")
 	_, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
@@ -631,10 +596,15 @@ func runtimeSlotTestGeneration(
 	t *testing.T,
 	store *PGSandboxStore,
 	sandboxID string,
+	operationID string,
 ) (*RootFSFilesystem, *RootFSGeneration) {
 	t.Helper()
 	ctx := context.Background()
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord(sandboxID, "team-slot")))
+	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
+		Record: rootFSTestSandboxRecord(sandboxID, "team-slot"), OperationID: operationID,
+		LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
 	artifactRequest := readyRootFSBaseArtifactTestRequest()
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, artifactRequest)
 	require.NoError(t, err)

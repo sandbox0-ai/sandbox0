@@ -10,7 +10,7 @@ type Identity struct {
 	ClusterID string
 	NodeID    string
 	NodeUID   string
-	PodUID    string
+	AgentUID  string
 }
 
 // Verifier resolves a bearer credential to its durable node incarnation.

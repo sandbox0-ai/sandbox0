@@ -67,9 +67,9 @@ func TestNodeChannelNetworkResultRequiresValidPolicyToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID, PodSandboxID: RuntimeSlotNetworkIncarnationID(request),
+		AllocationID: request.AllocationID, NetworkIncarnationID: RuntimeSlotNetworkIncarnationID(request),
 		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
-		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
+		SourceIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}
 	result := NodeChannelResult{
 		Version: NodeChannelVersion, RequestID: command.RequestID,

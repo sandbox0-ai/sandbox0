@@ -85,7 +85,6 @@ func TestNomadRunningTemplateCapturePublishesExactSnapshotIntegration(t *testing
 
 	derivedID := "sandbox-template-derived"
 	derived := rootFSTestSandboxRecord(derivedID, source.TeamID)
-	derived.RuntimeBackend = SandboxRuntimeBackendNomad
 	derived.DesiredState = SandboxDesiredStatePaused
 	require.NoError(t, fixture.store.UpsertSandbox(fixture.ctx, derived))
 	restored, err := fixture.store.RestoreRootFSFromSnapshot(fixture.ctx, &RestoreRootFSFromSnapshotRequest{

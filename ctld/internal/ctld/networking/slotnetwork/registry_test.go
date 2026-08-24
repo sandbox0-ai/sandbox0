@@ -128,7 +128,7 @@ func TestRegistryPersistsExactPrepareAndCleanupAcrossHAReopen(t *testing.T) {
 		t.Fatalf("HA replay = %+v, %v; want %+v", replayed, err, first)
 	}
 	sandboxes, _, err := reopened.Snapshot()
-	if err != nil || len(sandboxes) != 1 || sandboxes[0].PodIP != first.PodIP ||
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].SourceIP != first.SourceIP ||
 		sandboxes[0].NetworkPolicyHash != request.Request.PolicyDigest {
 		t.Fatalf("snapshot = %+v, %v", sandboxes, err)
 	}
@@ -315,7 +315,7 @@ func TestRegistryRejectsWritableRootsAndUnsafeStateFile(t *testing.T) {
 				if err := os.Chmod(netnsRoot, 0o770); err != nil {
 					return Config{}, err
 				}
-				return Config{StatePath: filepath.Join(directory, "network.db"), NetNSRoot: netnsRoot, NodeName: "node-1"}, nil
+				return Config{StatePath: filepath.Join(directory, "network.db"), NetNSRoot: netnsRoot, NodeID: "node-1"}, nil
 			},
 		},
 		{
@@ -332,7 +332,7 @@ func TestRegistryRejectsWritableRootsAndUnsafeStateFile(t *testing.T) {
 				if err := os.Chmod(stateRoot, 0o770); err != nil {
 					return Config{}, err
 				}
-				return Config{StatePath: filepath.Join(stateRoot, "network.db"), NetNSRoot: netnsRoot, NodeName: "node-1"}, nil
+				return Config{StatePath: filepath.Join(stateRoot, "network.db"), NetNSRoot: netnsRoot, NodeID: "node-1"}, nil
 			},
 		},
 		{
@@ -349,7 +349,7 @@ func TestRegistryRejectsWritableRootsAndUnsafeStateFile(t *testing.T) {
 				if err := os.Chmod(statePath, 0o640); err != nil {
 					return Config{}, err
 				}
-				return Config{StatePath: statePath, NetNSRoot: netnsRoot, NodeName: "node-1"}, nil
+				return Config{StatePath: statePath, NetNSRoot: netnsRoot, NodeID: "node-1"}, nil
 			},
 		},
 	}
@@ -378,7 +378,7 @@ func newTestRegistry(
 ) *Registry {
 	t.Helper()
 	registry, err := NewRegistry(Config{
-		StatePath: state, NetNSRoot: netnsRoot, NodeName: "node-1",
+		StatePath: state, NetNSRoot: netnsRoot, NodeID: "node-1",
 		TerminalRetention: retention, MaxRecords: 100,
 	}, inspector)
 	if err != nil {

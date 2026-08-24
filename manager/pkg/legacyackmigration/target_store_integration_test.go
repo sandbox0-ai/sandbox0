@@ -33,10 +33,20 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	}
 
 	build, contract, result, baseArtifactDigest, baseDescriptor := targetStoreIntegrationFixture(t)
-	if err := store.EnsureSession(ctx, "migration-session", digest.FromString("source-catalog").String(), "ali-ue1-nomad"); err != nil {
+	normalized := targetStoreIntegrationCatalog(build)
+	baseImports := &targetStoreIntegrationBaseImports{}
+	prepared, err := store.PrepareCatalog(
+		ctx, "migration-session", digest.FromString("source-catalog").String(),
+		"ali-ue1-nomad", normalized, contract, baseImports,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	operation, err := store.BeginBuild(ctx, "migration-session", build, contract)
+	if prepared.Builds != 1 || prepared.BaseRequirements != 1 || prepared.PendingBaseImports != 1 ||
+		prepared.ReadyBaseArtifacts != 0 || baseImports.operation == nil {
+		t.Fatalf("preparation = %#v, operation = %#v", prepared, baseImports.operation)
+	}
+	operation, err := store.GetBuild(ctx, build.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +93,6 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	if retried.State != targetBuildStateReady || retried.Result == nil {
 		t.Fatalf("retried operation = %#v", retried)
 	}
-	normalized := targetStoreIntegrationCatalog(build)
 	committed, err := store.CommitCatalog(ctx, "migration-session", normalized)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +150,29 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	}
 }
 
+type targetStoreIntegrationBaseImports struct {
+	operation *sandboxstore.RootFSImportOperation
+}
+
+func (s *targetStoreIntegrationBaseImports) GetReadyRootFSBaseArtifact(
+	context.Context,
+	string,
+	sandboxstore.RootFSArtifactPlatform,
+	sandboxstore.ReadyRootFSArtifactRequirements,
+) (*sandboxstore.RootFSBaseArtifact, error) {
+	return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
+}
+
+func (s *targetStoreIntegrationBaseImports) BeginRootFSImport(
+	_ context.Context,
+	request *sandboxstore.BeginRootFSImportRequest,
+) (*sandboxstore.RootFSImportOperation, error) {
+	s.operation = &sandboxstore.RootFSImportOperation{
+		ID: request.OperationID, Spec: request.Spec, State: sandboxstore.RootFSImportStatePending,
+	}
+	return s.operation, nil
+}
+
 func targetStoreIntegrationCatalog(build MaterializedBuild) *NormalizedCatalog {
 	createdAt := time.Date(2026, 8, 25, 0, 0, 0, 123000000, time.UTC)
 	updatedAt := createdAt.Add(time.Minute)
@@ -181,12 +213,32 @@ func targetStoreIntegrationFixture(
 ) (MaterializedBuild, TargetContract, rootfsimporter.MaterializedGenerationBuildResult, string, []byte) {
 	t.Helper()
 	sourceDigest := digest.FromString("source-image")
-	mutationDigest := digest.FromString("legacy-layer-manifest")
 	procdDigest := digest.FromString("procd")
-	objectPrefix := "rootfs/legacy-ack-v1/team/build"
 	mapDigest := digest.FromString("migrated-map-page")
-	mapKey := objectPrefix + "/maps/sha256/" + mapDigest.Encoded()
 	logicalSize := int64(1 << 30)
+	platform := ocispec.Platform{OS: "linux", Architecture: "amd64"}
+	build := MaterializedBuild{
+		TeamID: "team-1", HeadLayerID: "layer-1",
+		PinnedOCIRef: "registry.example/sandbox@" + sourceDigest.String(), SourceOCIDigest: sourceDigest.String(),
+		LogicalSizeBytes: logicalSize, Platform: platform,
+		Layers: []Layer{{
+			ID: "layer-1", SourceSandboxID: "sandbox-1", TeamID: "team-1",
+			BaseImageRef: "registry.example/sandbox", BaseImageDigest: sourceDigest.String(),
+			DiffDigest: digest.FromString("legacy-layer").String(),
+			DiffID:     digest.FromString("legacy-layer").String(), DiffMediaType: ocispec.MediaTypeImageLayer,
+			DiffSize: 4096, DiffObjectKey: "rootfs/layers/layer-1.tar",
+			PlatformOS: "linux", PlatformArchitecture: "amd64",
+		}},
+	}
+	build, err := normalizeMaterializedBuildIdentity(build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationDigest, err := digest.Parse(build.MutationDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapKey := build.ObjectPrefix + "/maps/sha256/" + mapDigest.Encoded()
 	descriptor := rootfsblock.Descriptor{
 		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: logicalSize,
 		BlockSizeBytes: rootfsblock.LogicalBlockSize,
@@ -200,13 +252,6 @@ func targetStoreIntegrationFixture(
 	descriptorBytes, err := rootfsblock.EncodeDescriptor(descriptor)
 	if err != nil {
 		t.Fatal(err)
-	}
-	platform := ocispec.Platform{OS: "linux", Architecture: "amd64"}
-	build := MaterializedBuild{
-		ID: "legacy-ack-generation-v1-integration", TeamID: "team-1", HeadLayerID: "layer-1",
-		PinnedOCIRef: "registry.example/sandbox@" + sourceDigest.String(), SourceOCIDigest: sourceDigest.String(),
-		LogicalSizeBytes: logicalSize, Platform: platform, MutationDigest: mutationDigest.String(),
-		ObjectPrefix: objectPrefix,
 	}
 	contract := TargetContract{
 		FormatGeneration: 1, ProcdProtocol: "sandbox0.procd.test.v1", ProcdDigest: procdDigest.String(),

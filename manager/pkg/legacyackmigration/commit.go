@@ -195,6 +195,9 @@ func loadTargetCommitInputs(
 ) (map[string]*TargetBuildOperation, map[string]targetReadyBaseArtifact, error) {
 	builds := make(map[string]MaterializedBuild, len(catalog.MaterializedBuilds))
 	for _, build := range catalog.MaterializedBuilds {
+		if err := validateMaterializedBuildIdentity(build); err != nil {
+			return nil, nil, err
+		}
 		if build.ID == "" {
 			return nil, nil, fmt.Errorf("normalized catalog has an empty materialized build ID")
 		}

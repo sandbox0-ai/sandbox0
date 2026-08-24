@@ -221,6 +221,9 @@ func (s *TargetStore) BeginBuild(
 	build MaterializedBuild,
 	contract TargetContract,
 ) (*TargetBuildOperation, error) {
+	if err := validateMaterializedBuildIdentity(build); err != nil {
+		return nil, err
+	}
 	normalizedBuild, normalizedContract, inputDigest, err := normalizeTargetBuildInput(build, contract)
 	if err != nil {
 		return nil, err
@@ -349,6 +352,33 @@ func (s *TargetStore) RenewBuildLease(
 	}
 	lease.ExpiresAt = expiresAt
 	return lease, nil
+}
+
+// ReleaseBuildLease makes a transiently failed build immediately retryable.
+// Prepared or already published objects remain journaled for exact replay.
+func (s *TargetStore) ReleaseBuildLease(ctx context.Context, lease TargetBuildLease) error {
+	lease, err := normalizeTargetBuildLease(lease)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE legacy_ack_migration.builds
+		SET state = 'pending', lease_owner = NULL, lease_token = NULL,
+			lease_expires_at = NULL, updated_at = NOW()
+		WHERE build_id = $1 AND state = 'building'
+			AND lease_owner = $2 AND lease_token = $3
+	`, lease.BuildID, lease.WorkerID, lease.Token)
+	if err != nil {
+		return fmt.Errorf("release target build lease: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	operation, getErr := s.GetBuild(ctx, lease.BuildID)
+	if getErr == nil && operation.State == targetBuildStateReady {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrTargetBuildLeaseLost, lease.BuildID)
 }
 
 // Journal returns the pre-PUT boundary used by rootfsimporter.JournaledPublisher.

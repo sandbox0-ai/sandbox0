@@ -531,33 +531,17 @@ func (c *NormalizedCatalog) planMaterializedBuilds(filesystems []Filesystem, sna
 		platform := ocispec.Platform{
 			OS: chain[0].PlatformOS, Architecture: chain[0].PlatformArchitecture, Variant: chain[0].PlatformVariant,
 		}
-		manifest := layerMutationManifest{
-			Version: 1, TeamID: filesystem.TeamID, HeadLayerID: headLayerID,
-			SourceOCIDigest: baseDigest, LogicalSizeBytes: logicalSize, Platform: platform,
-			Layers: make([]layerMutationManifestEntry, 0, len(chain)),
-		}
-		for _, layer := range chain {
-			manifest.Layers = append(manifest.Layers, layerMutationManifestEntry{
-				ID: layer.ID, ParentID: layer.ParentID, DiffDigest: layer.DiffDigest,
-				DiffID: layer.DiffID, DiffMediaType: layer.DiffMediaType,
-				DiffSize: layer.DiffSize, DiffObjectKey: layer.DiffObjectKey,
-			})
-		}
-		payload, err := json.Marshal(manifest)
-		if err != nil {
-			return "", fmt.Errorf("encode legacy layer mutation manifest: %w", err)
-		}
-		mutationDigest := digest.FromBytes(payload)
-		teamDigest := digest.FromString(filesystem.TeamID)
-		id := "legacy-ack-generation-v1-" + mutationDigest.Encoded()
 		build := MaterializedBuild{
-			ID: id, TeamID: filesystem.TeamID, HeadLayerID: headLayerID,
+			TeamID: filesystem.TeamID, HeadLayerID: headLayerID,
 			PinnedOCIRef: pinnedRef, SourceOCIDigest: baseDigest,
 			LogicalSizeBytes: logicalSize, Platform: platform,
-			MutationDigest: mutationDigest.String(),
-			ObjectPrefix:   "rootfs/legacy-ack-v1/" + teamDigest.Encoded() + "/" + mutationDigest.Encoded(),
-			Layers:         append([]Layer(nil), chain...),
+			Layers: append([]Layer(nil), chain...),
 		}
+		build, err := normalizeMaterializedBuildIdentity(build)
+		if err != nil {
+			return "", err
+		}
+		id := build.ID
 		if existing, ok := builds[id]; ok {
 			existingPayload, _ := json.Marshal(existing)
 			buildPayload, _ := json.Marshal(build)
@@ -603,6 +587,46 @@ func (c *NormalizedCatalog) planMaterializedBuilds(filesystems []Filesystem, sna
 	slices.SortFunc(c.MaterializedBuilds, func(left, right MaterializedBuild) int {
 		return strings.Compare(left.ID, right.ID)
 	})
+	return nil
+}
+
+func normalizeMaterializedBuildIdentity(build MaterializedBuild) (MaterializedBuild, error) {
+	if strings.TrimSpace(build.TeamID) == "" || strings.TrimSpace(build.HeadLayerID) == "" ||
+		strings.TrimSpace(build.SourceOCIDigest) == "" || build.LogicalSizeBytes <= 0 || len(build.Layers) == 0 {
+		return MaterializedBuild{}, fmt.Errorf("legacy materialized build identity is incomplete")
+	}
+	manifest := layerMutationManifest{
+		Version: 1, TeamID: build.TeamID, HeadLayerID: build.HeadLayerID,
+		SourceOCIDigest: build.SourceOCIDigest, LogicalSizeBytes: build.LogicalSizeBytes,
+		Platform: build.Platform, Layers: make([]layerMutationManifestEntry, 0, len(build.Layers)),
+	}
+	for _, layer := range build.Layers {
+		manifest.Layers = append(manifest.Layers, layerMutationManifestEntry{
+			ID: layer.ID, ParentID: layer.ParentID, DiffDigest: layer.DiffDigest,
+			DiffID: layer.DiffID, DiffMediaType: layer.DiffMediaType,
+			DiffSize: layer.DiffSize, DiffObjectKey: layer.DiffObjectKey,
+		})
+	}
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		return MaterializedBuild{}, fmt.Errorf("encode legacy layer mutation manifest: %w", err)
+	}
+	mutationDigest := digest.FromBytes(payload)
+	build.ID = "legacy-ack-generation-v1-" + mutationDigest.Encoded()
+	build.MutationDigest = mutationDigest.String()
+	build.ObjectPrefix = "rootfs/legacy-ack-v1/" + digest.FromString(build.TeamID).Encoded() + "/" + mutationDigest.Encoded()
+	return build, nil
+}
+
+func validateMaterializedBuildIdentity(build MaterializedBuild) error {
+	expected, err := normalizeMaterializedBuildIdentity(build)
+	if err != nil {
+		return err
+	}
+	if build.ID != expected.ID || build.MutationDigest != expected.MutationDigest ||
+		build.ObjectPrefix != expected.ObjectPrefix {
+		return fmt.Errorf("legacy materialized build identity does not match its exact layer manifest")
+	}
 	return nil
 }
 

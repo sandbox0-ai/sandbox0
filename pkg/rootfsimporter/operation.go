@@ -15,6 +15,9 @@
 package rootfsimporter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/opencontainers/go-digest"
@@ -33,6 +36,36 @@ type OperationSpec struct {
 	ProcdDigest      string
 	LogicalSizeBytes int64
 	BlockOptions     rootfsblock.BuildOptions
+}
+
+type operationIdentity struct {
+	SourceOCIRef     string                   `json:"source_oci_ref"`
+	Platform         ReadyArtifactPlatform    `json:"platform"`
+	FormatGeneration int                      `json:"format_generation"`
+	ProcdProtocol    string                   `json:"procd_protocol"`
+	ProcdDigest      string                   `json:"procd_digest"`
+	LogicalSizeBytes int64                    `json:"logical_size_bytes"`
+	BlockOptions     rootfsblock.BuildOptions `json:"block_options"`
+}
+
+// DeterministicOperation returns the canonical durable identity shared by all
+// producers of the same OCI-to-block import requirement.
+func DeterministicOperation(input OperationSpec) (string, OperationSpec, error) {
+	normalized, err := NormalizeOperationSpec(input)
+	if err != nil {
+		return "", OperationSpec{}, err
+	}
+	payload, err := json.Marshal(operationIdentity{
+		SourceOCIRef: normalized.SourceOCIRef, Platform: normalized.Platform,
+		FormatGeneration: normalized.FormatGeneration,
+		ProcdProtocol:    normalized.ProcdProtocol, ProcdDigest: normalized.ProcdDigest,
+		LogicalSizeBytes: normalized.LogicalSizeBytes, BlockOptions: normalized.BlockOptions,
+	})
+	if err != nil {
+		return "", OperationSpec{}, fmt.Errorf("encode immutable import identity: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return "template-import:" + hex.EncodeToString(sum[:]), normalized, nil
 }
 
 // NormalizeOperationSpec validates a durable import contract and applies the

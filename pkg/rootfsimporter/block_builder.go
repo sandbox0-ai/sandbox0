@@ -47,12 +47,34 @@ type BlockBuilder struct {
 	Publisher  rootfsblock.ImmutableObjectPublisher
 }
 
+// RootMutator applies a trusted, operation-bound change to an imported OCI
+// root before it is encoded as a complete materialized generation.
+type RootMutator interface {
+	Mutate(context.Context, string) error
+}
+
+// RootMutatorFunc adapts a function to RootMutator.
+type RootMutatorFunc func(context.Context, string) error
+
+func (f RootMutatorFunc) Mutate(ctx context.Context, root string) error {
+	return f(ctx, root)
+}
+
 // BuildRequest binds filesystem construction and object publication
 // to one already digest-pinned OCI import request.
 type BuildRequest struct {
 	Image            ocirootfs.Request
 	LogicalSizeBytes int64
 	BlockOptions     rootfsblock.BuildOptions
+}
+
+// MaterializedGenerationBuildRequest builds user-state output rather than a
+// reusable Base artifact. MutationDigest binds the exact durable mutation
+// manifest; the ready-generation CAS must compare it with its operation.
+type MaterializedGenerationBuildRequest struct {
+	BuildRequest
+	MutationDigest digest.Digest
+	Mutator        RootMutator
 }
 
 // BuildResult contains the non-secret attestation and complete object
@@ -73,6 +95,25 @@ type BuildResult struct {
 	// artifact identity must additionally bind platform and procd compatibility.
 	DescriptorDigest digest.Digest
 	BaseBlockRoot    digest.Digest
+	Descriptor       rootfsblock.Descriptor
+	DescriptorBytes  []byte
+	Objects          int
+	Bytes            int64
+	References       []rootfsblock.ObjectReference
+}
+
+// MaterializedGenerationBuildResult contains only the evidence needed to
+// publish an s3_materialized user-state generation. It intentionally cannot be
+// passed to the Base-artifact ready API.
+type MaterializedGenerationBuildResult struct {
+	SourceOCIRef     string
+	SourceOCIDigest  digest.Digest
+	Platform         ocispec.Platform
+	ProcdDigest      digest.Digest
+	LogicalSizeBytes int64
+	MutationDigest   digest.Digest
+	DescriptorDigest digest.Digest
+	CurrentBlockHead digest.Digest
 	Descriptor       rootfsblock.Descriptor
 	DescriptorBytes  []byte
 	Objects          int

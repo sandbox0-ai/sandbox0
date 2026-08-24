@@ -25,3 +25,12 @@ import (
 func (BlockBuilder) Build(context.Context, BuildRequest) (BuildResult, error) {
 	return BuildResult{}, fmt.Errorf("OCI block artifact construction requires Linux")
 }
+
+// BuildMaterializedGeneration is unavailable because production generation
+// construction requires XFS.
+func (BlockBuilder) BuildMaterializedGeneration(
+	context.Context,
+	MaterializedGenerationBuildRequest,
+) (MaterializedGenerationBuildResult, error) {
+	return MaterializedGenerationBuildResult{}, fmt.Errorf("OCI block generation construction requires Linux")
+}

@@ -42,12 +42,14 @@ type options struct {
 }
 
 type validationSummary struct {
-	Valid                 bool   `json:"valid"`
-	Error                 string `json:"error,omitempty"`
-	SandboxCount          int    `json:"sandbox_count,omitempty"`
-	LayerChainCount       int    `json:"layer_chain_count,omitempty"`
-	PinnedBaseImageCount  int    `json:"pinned_base_image_count,omitempty"`
-	InferredPlatformCount int    `json:"inferred_platform_count,omitempty"`
+	Valid                        bool   `json:"valid"`
+	Error                        string `json:"error,omitempty"`
+	SandboxCount                 int    `json:"sandbox_count,omitempty"`
+	LayerChainCount              int    `json:"layer_chain_count,omitempty"`
+	PinnedBaseImageCount         int    `json:"pinned_base_image_count,omitempty"`
+	InferredPlatformCount        int    `json:"inferred_platform_count,omitempty"`
+	AdjustedSandboxCount         int    `json:"adjusted_sandbox_count,omitempty"`
+	CompatibilityAdjustmentCount int    `json:"compatibility_adjustment_count,omitempty"`
 }
 
 type report struct {
@@ -103,10 +105,18 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	if validationErr != nil {
 		result.Validation.Error = validationErr.Error()
 	} else {
+		var adjustedSandboxes, adjustments int
+		for _, sandbox := range normalized.Sandboxes {
+			if len(sandbox.CompatibilityAdjustments) != 0 {
+				adjustedSandboxes++
+				adjustments += len(sandbox.CompatibilityAdjustments)
+			}
+		}
 		result.Validation = validationSummary{
 			Valid: true, SandboxCount: len(normalized.Sandboxes),
 			LayerChainCount: len(normalized.LayerChains), PinnedBaseImageCount: len(normalized.PinnedImageRefs),
-			InferredPlatformCount: len(normalized.InferredLayers),
+			InferredPlatformCount: len(normalized.InferredLayers), AdjustedSandboxCount: adjustedSandboxes,
+			CompatibilityAdjustmentCount: adjustments,
 		}
 	}
 	payload, err := json.MarshalIndent(result, "", "  ")

@@ -55,10 +55,44 @@ func ReadCatalog(ctx context.Context, pool *pgxpool.Pool) (*Catalog, error) {
 	if catalog.Snapshots, err = readSnapshots(ctx, tx); err != nil {
 		return nil, err
 	}
+	if catalog.SourceSandboxes, err = readSourceSandboxes(ctx, tx); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit legacy manager read-only snapshot: %w", err)
 	}
 	return catalog, nil
+}
+
+func readSourceSandboxes(ctx context.Context, tx pgx.Tx) ([]SourceSandbox, error) {
+	rows, err := tx.Query(ctx, `
+		WITH referenced AS (
+			SELECT source_sandbox_id AS sandbox_id FROM manager.rootfs_layers
+			UNION
+			SELECT source_sandbox_id FROM manager.rootfs_snapshots
+		)
+		SELECT sandbox.sandbox_id, sandbox.team_id, sandbox.template_spec
+		FROM referenced
+		JOIN manager.sandboxes sandbox USING (sandbox_id)
+		WHERE referenced.sandbox_id <> ''
+		ORDER BY sandbox.sandbox_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query legacy source sandbox templates: %w", err)
+	}
+	defer rows.Close()
+	var result []SourceSandbox
+	for rows.Next() {
+		var item SourceSandbox
+		if err := rows.Scan(&item.ID, &item.TeamID, &item.TemplateSpec); err != nil {
+			return nil, fmt.Errorf("scan legacy source sandbox template: %w", err)
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate legacy source sandbox templates: %w", err)
+	}
+	return result, nil
 }
 
 func readSandboxes(ctx context.Context, tx pgx.Tx) ([]Sandbox, error) {

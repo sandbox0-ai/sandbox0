@@ -4,8 +4,12 @@
 package legacyackmigration
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -97,6 +101,14 @@ type Snapshot struct {
 	ExpiresAt       time.Time
 }
 
+// SourceSandbox retains only the historical template identity needed to
+// recover exact block-device geometry for layer and snapshot owners.
+type SourceSandbox struct {
+	ID           string
+	TeamID       string
+	TemplateSpec json.RawMessage
+}
+
 type Catalog struct {
 	ManagerSchemaVersion int64
 	ActiveLifecycleTxns  int64
@@ -105,6 +117,18 @@ type Catalog struct {
 	Filesystems          []Filesystem
 	Bindings             []Binding
 	Snapshots            []Snapshot
+	SourceSandboxes      []SourceSandbox
+}
+
+// Digest returns the immutable identity of the ordered frozen source catalog.
+// Reader queries use deterministic ordering, so any source-row change produces
+// a different session fence without introducing a second canonical form.
+func (c Catalog) Digest() (string, error) {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("marshal legacy ACK catalog: %w", err)
+	}
+	return digest.FromBytes(payload).String(), nil
 }
 
 type NormalizeOptions struct {
@@ -114,16 +138,50 @@ type NormalizeOptions struct {
 }
 
 type NormalizedSandbox struct {
-	Record       sandboxstore.SandboxRecord
-	FilesystemID string
-	PinnedOCIRef string
+	Record                   sandboxstore.SandboxRecord
+	FilesystemID             string
+	PinnedOCIRef             string
+	CompatibilityAdjustments []string
 }
 
 type NormalizedCatalog struct {
-	Sandboxes       []NormalizedSandbox
-	LayerChains     map[string][]Layer
-	PinnedImageRefs map[string]string
-	InferredLayers  []string
+	Sandboxes                []NormalizedSandbox
+	LayerChains              map[string][]Layer
+	PinnedImageRefs          map[string]string
+	FilesystemLogicalSizes   map[string]int64
+	SourceSandboxLogicalSize map[string]int64
+	MaterializedBuilds       []MaterializedBuild
+	Filesystems              []NormalizedFilesystem
+	Snapshots                []NormalizedSnapshot
+	InferredLayers           []string
+}
+
+// MaterializedBuild is one tenant-scoped, complete generation conversion.
+// Multiple filesystem generation rows may reuse its immutable descriptor and
+// object inventory without sharing state across teams.
+type MaterializedBuild struct {
+	ID               string
+	TeamID           string
+	HeadLayerID      string
+	PinnedOCIRef     string
+	SourceOCIDigest  string
+	LogicalSizeBytes int64
+	Platform         ocispec.Platform
+	MutationDigest   string
+	ObjectPrefix     string
+	Layers           []Layer
+}
+
+type NormalizedFilesystem struct {
+	Record           Filesystem
+	LogicalSizeBytes int64
+	HeadBuildID      string
+	BuildIDByLayer   map[string]string
+}
+
+type NormalizedSnapshot struct {
+	Record  Snapshot
+	BuildID string
 }
 
 // Normalize validates the frozen source graph and produces runtime-neutral
@@ -277,7 +335,14 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 		return chain, nil
 	}
 
-	normalized := &NormalizedCatalog{LayerChains: make(map[string][]Layer), PinnedImageRefs: pinnedRefs}
+	sourceSizes, sourceTeams, err := resolveSourceSandboxLogicalSizes(c.SourceSandboxes, c.Sandboxes)
+	if err != nil {
+		return nil, err
+	}
+	normalized := &NormalizedCatalog{
+		LayerChains: make(map[string][]Layer), PinnedImageRefs: pinnedRefs,
+		FilesystemLogicalSizes: make(map[string]int64), SourceSandboxLogicalSize: sourceSizes,
+	}
 	seenSandboxes := make(map[string]struct{}, len(c.Sandboxes))
 	for _, legacy := range c.Sandboxes {
 		if _, exists := seenSandboxes[legacy.ID]; exists {
@@ -309,7 +374,7 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 		if err := json.Unmarshal(legacy.Config, &config); err != nil {
 			return nil, fmt.Errorf("decode legacy sandbox %s config: %w", legacy.ID, err)
 		}
-		spec, err := decodeLegacyTemplateSpec(legacy.TemplateSpec)
+		spec, adjustments, err := decodeLegacyTemplateSpec(legacy.TemplateSpec)
 		if err != nil {
 			return nil, fmt.Errorf("decode legacy sandbox %s template spec: %w", legacy.ID, err)
 		}
@@ -324,9 +389,17 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 			return nil, fmt.Errorf("resolve legacy sandbox %s resources: %w", legacy.ID, resourceErr)
 		}
 		spec.MainContainer.Resources = resources.Quota
+		logicalSize, sizeErr := templatepkg.ResolveRootFSLogicalSize(spec)
+		if sizeErr != nil {
+			return nil, fmt.Errorf("resolve legacy sandbox %s RootFS logical size: %w", legacy.ID, sizeErr)
+		}
+		if sourceSize, ok := sourceSizes[legacy.ID]; ok && sourceSize != logicalSize {
+			return nil, fmt.Errorf("legacy sandbox %s RootFS logical size changed during normalization", legacy.ID)
+		}
 		normalized.Sandboxes = append(normalized.Sandboxes, NormalizedSandbox{
-			FilesystemID: binding.FilesystemID,
-			PinnedOCIRef: pinnedRef,
+			FilesystemID:             binding.FilesystemID,
+			PinnedOCIRef:             pinnedRef,
+			CompatibilityAdjustments: adjustments,
 			Record: sandboxstore.SandboxRecord{
 				ID: legacy.ID, TeamID: legacy.TeamID, UserID: legacy.UserID,
 				TemplateID: legacy.TemplateID, TemplateName: legacy.TemplateName,
@@ -361,12 +434,227 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 		}
 		normalized.LayerChains[snapshot.HeadLayerID] = chain
 	}
+	for filesystemID, filesystem := range filesystems {
+		candidateSources := make(map[string]struct{})
+		if chain, chainErr := chainFor(filesystem.HeadLayerID); chainErr != nil {
+			return nil, chainErr
+		} else {
+			normalized.LayerChains[filesystem.HeadLayerID] = chain
+			for _, layer := range chain {
+				candidateSources[layer.SourceSandboxID] = struct{}{}
+			}
+		}
+		for sandboxID, binding := range bindings {
+			if binding.FilesystemID == filesystemID {
+				candidateSources[sandboxID] = struct{}{}
+			}
+		}
+		for _, snapshot := range c.Snapshots {
+			if snapshot.FilesystemID != filesystemID {
+				continue
+			}
+			candidateSources[snapshot.SourceSandboxID] = struct{}{}
+			chain := normalized.LayerChains[snapshot.HeadLayerID]
+			for _, layer := range chain {
+				candidateSources[layer.SourceSandboxID] = struct{}{}
+			}
+		}
+		var logicalSize int64
+		for sourceID := range candidateSources {
+			size, ok := sourceSizes[sourceID]
+			if !ok {
+				return nil, fmt.Errorf("legacy filesystem %s source sandbox %s has no template geometry", filesystemID, sourceID)
+			}
+			if sourceTeams[sourceID] != filesystem.TeamID {
+				return nil, fmt.Errorf("legacy filesystem %s source sandbox %s crosses team ownership", filesystemID, sourceID)
+			}
+			if logicalSize != 0 && logicalSize != size {
+				return nil, fmt.Errorf("legacy filesystem %s has conflicting RootFS logical sizes", filesystemID)
+			}
+			logicalSize = size
+		}
+		if logicalSize == 0 {
+			return nil, fmt.Errorf("legacy filesystem %s has no recoverable RootFS logical size", filesystemID)
+		}
+		normalized.FilesystemLogicalSizes[filesystemID] = logicalSize
+	}
+	if err := normalized.planMaterializedBuilds(c.Filesystems, c.Snapshots); err != nil {
+		return nil, err
+	}
 
 	for layerID := range inferred {
 		normalized.InferredLayers = append(normalized.InferredLayers, layerID)
 	}
 	sortStrings(normalized.InferredLayers)
 	return normalized, nil
+}
+
+type layerMutationManifest struct {
+	Version          int                          `json:"version"`
+	TeamID           string                       `json:"team_id"`
+	HeadLayerID      string                       `json:"head_layer_id"`
+	SourceOCIDigest  string                       `json:"source_oci_digest"`
+	LogicalSizeBytes int64                        `json:"logical_size_bytes"`
+	Platform         ocispec.Platform             `json:"platform"`
+	Layers           []layerMutationManifestEntry `json:"layers"`
+}
+
+type layerMutationManifestEntry struct {
+	ID            string `json:"id"`
+	ParentID      string `json:"parent_id,omitempty"`
+	DiffDigest    string `json:"diff_digest"`
+	DiffID        string `json:"diff_id"`
+	DiffMediaType string `json:"diff_media_type"`
+	DiffSize      int64  `json:"diff_size"`
+	DiffObjectKey string `json:"diff_object_key"`
+}
+
+func (c *NormalizedCatalog) planMaterializedBuilds(filesystems []Filesystem, snapshots []Snapshot) error {
+	if c == nil {
+		return fmt.Errorf("normalized legacy catalog is required")
+	}
+	builds := make(map[string]MaterializedBuild)
+	addBuild := func(filesystem Filesystem, headLayerID string) (string, error) {
+		chain := c.LayerChains[headLayerID]
+		if len(chain) == 0 {
+			return "", fmt.Errorf("legacy filesystem %s build head %s has no normalized layer chain", filesystem.ID, headLayerID)
+		}
+		logicalSize := c.FilesystemLogicalSizes[filesystem.ID]
+		if logicalSize <= 0 {
+			return "", fmt.Errorf("legacy filesystem %s has no normalized logical size", filesystem.ID)
+		}
+		baseDigest := strings.TrimSpace(chain[0].BaseImageDigest)
+		pinnedRef := c.PinnedImageRefs[baseDigest]
+		if pinnedRef == "" {
+			return "", fmt.Errorf("legacy filesystem %s has no pinned Base image", filesystem.ID)
+		}
+		platform := ocispec.Platform{
+			OS: chain[0].PlatformOS, Architecture: chain[0].PlatformArchitecture, Variant: chain[0].PlatformVariant,
+		}
+		manifest := layerMutationManifest{
+			Version: 1, TeamID: filesystem.TeamID, HeadLayerID: headLayerID,
+			SourceOCIDigest: baseDigest, LogicalSizeBytes: logicalSize, Platform: platform,
+			Layers: make([]layerMutationManifestEntry, 0, len(chain)),
+		}
+		for _, layer := range chain {
+			manifest.Layers = append(manifest.Layers, layerMutationManifestEntry{
+				ID: layer.ID, ParentID: layer.ParentID, DiffDigest: layer.DiffDigest,
+				DiffID: layer.DiffID, DiffMediaType: layer.DiffMediaType,
+				DiffSize: layer.DiffSize, DiffObjectKey: layer.DiffObjectKey,
+			})
+		}
+		payload, err := json.Marshal(manifest)
+		if err != nil {
+			return "", fmt.Errorf("encode legacy layer mutation manifest: %w", err)
+		}
+		mutationDigest := digest.FromBytes(payload)
+		teamDigest := digest.FromString(filesystem.TeamID)
+		id := "legacy-ack-generation-v1-" + mutationDigest.Encoded()
+		build := MaterializedBuild{
+			ID: id, TeamID: filesystem.TeamID, HeadLayerID: headLayerID,
+			PinnedOCIRef: pinnedRef, SourceOCIDigest: baseDigest,
+			LogicalSizeBytes: logicalSize, Platform: platform,
+			MutationDigest: mutationDigest.String(),
+			ObjectPrefix:   "rootfs/legacy-ack-v1/" + teamDigest.Encoded() + "/" + mutationDigest.Encoded(),
+			Layers:         append([]Layer(nil), chain...),
+		}
+		if existing, ok := builds[id]; ok {
+			existingPayload, _ := json.Marshal(existing)
+			buildPayload, _ := json.Marshal(build)
+			if !bytes.Equal(existingPayload, buildPayload) {
+				return "", fmt.Errorf("legacy materialized build identity collision")
+			}
+		} else {
+			builds[id] = build
+		}
+		return id, nil
+	}
+
+	filesystemPlans := make(map[string]*NormalizedFilesystem, len(filesystems))
+	for _, filesystem := range filesystems {
+		headBuildID, err := addBuild(filesystem, filesystem.HeadLayerID)
+		if err != nil {
+			return err
+		}
+		plan := &NormalizedFilesystem{
+			Record: filesystem, LogicalSizeBytes: c.FilesystemLogicalSizes[filesystem.ID],
+			HeadBuildID: headBuildID, BuildIDByLayer: map[string]string{filesystem.HeadLayerID: headBuildID},
+		}
+		filesystemPlans[filesystem.ID] = plan
+	}
+	for _, snapshot := range snapshots {
+		filesystem := filesystemPlans[snapshot.FilesystemID]
+		if filesystem == nil {
+			return fmt.Errorf("legacy snapshot %s has no normalized filesystem", snapshot.ID)
+		}
+		buildID, err := addBuild(filesystem.Record, snapshot.HeadLayerID)
+		if err != nil {
+			return fmt.Errorf("legacy snapshot %s: %w", snapshot.ID, err)
+		}
+		filesystem.BuildIDByLayer[snapshot.HeadLayerID] = buildID
+		c.Snapshots = append(c.Snapshots, NormalizedSnapshot{Record: snapshot, BuildID: buildID})
+	}
+	for _, filesystem := range filesystems {
+		c.Filesystems = append(c.Filesystems, *filesystemPlans[filesystem.ID])
+	}
+	for _, build := range builds {
+		c.MaterializedBuilds = append(c.MaterializedBuilds, build)
+	}
+	slices.SortFunc(c.MaterializedBuilds, func(left, right MaterializedBuild) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return nil
+}
+
+func resolveSourceSandboxLogicalSizes(
+	sources []SourceSandbox,
+	live []Sandbox,
+) (map[string]int64, map[string]string, error) {
+	type sourceRecord struct {
+		team string
+		spec json.RawMessage
+	}
+	records := make(map[string]sourceRecord, len(sources)+len(live))
+	add := func(id, team string, spec json.RawMessage) error {
+		id, team = strings.TrimSpace(id), strings.TrimSpace(team)
+		if id == "" || team == "" || len(spec) == 0 {
+			return fmt.Errorf("legacy source sandbox has incomplete template geometry")
+		}
+		if existing, ok := records[id]; ok {
+			if existing.team != team || !bytes.Equal(existing.spec, spec) {
+				return fmt.Errorf("legacy source sandbox %s has conflicting template geometry", id)
+			}
+			return nil
+		}
+		records[id] = sourceRecord{team: team, spec: append(json.RawMessage(nil), spec...)}
+		return nil
+	}
+	for _, source := range sources {
+		if err := add(source.ID, source.TeamID, source.TemplateSpec); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, sandbox := range live {
+		if err := add(sandbox.ID, sandbox.TeamID, sandbox.TemplateSpec); err != nil {
+			return nil, nil, err
+		}
+	}
+	sizes := make(map[string]int64, len(records))
+	teams := make(map[string]string, len(records))
+	for id, record := range records {
+		var spec legacyTemplateSpec
+		if err := decodeStrictJSON(record.spec, &spec); err != nil {
+			return nil, nil, fmt.Errorf("decode legacy source sandbox %s template geometry: %w", id, err)
+		}
+		logicalSize, err := templatepkg.ResolveRootFSLogicalSize(sandboxspec.TemplateSpec{
+			MainContainer: sandboxspec.ContainerSpec{Resources: spec.MainContainer.Resources},
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve legacy source sandbox %s RootFS logical size: %w", id, err)
+		}
+		sizes[id], teams[id] = logicalSize, record.team
+	}
+	return sizes, teams, nil
 }
 
 func validateFilesystemGraph(filesystems map[string]Filesystem) error {
@@ -405,9 +693,10 @@ type legacyTemplateSpec struct {
 	DisplayName   string                            `json:"displayName,omitempty"`
 	Tags          []string                          `json:"tags,omitempty"`
 	MainContainer legacyTemplateMainContainer       `json:"mainContainer"`
-	Pod           json.RawMessage                   `json:"pod,omitempty"`
+	VolumeMounts  []legacyVolumeMount               `json:"volumeMounts,omitempty"`
+	Pod           *legacyPodOverride                `json:"pod,omitempty"`
 	Network       *sandboxspec.SandboxNetworkPolicy `json:"network,omitempty"`
-	Pool          json.RawMessage                   `json:"pool,omitempty"`
+	Pool          legacyPoolStrategy                `json:"pool,omitempty"`
 	EnvVars       map[string]string                 `json:"envVars,omitempty"`
 	ClusterID     *string                           `json:"clusterId,omitempty"`
 }
@@ -417,35 +706,175 @@ type legacyTemplateMainContainer struct {
 	ImagePullPolicy string                    `json:"imagePullPolicy,omitempty"`
 	Env             []sandboxspec.EnvVar      `json:"env,omitempty"`
 	Resources       sandboxspec.ResourceQuota `json:"resources"`
-	SecurityContext json.RawMessage           `json:"securityContext,omitempty"`
+	SecurityContext *legacySecurityContext    `json:"securityContext,omitempty"`
 }
 
-func decodeLegacyTemplateSpec(raw json.RawMessage) (sandboxspec.TemplateSpec, error) {
+type legacyVolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+type legacyPoolStrategy struct {
+	MinIdle int32 `json:"minIdle"`
+	MaxIdle int32 `json:"maxIdle"`
+}
+
+type legacyPodOverride struct {
+	NodeSelector       map[string]string     `json:"nodeSelector,omitempty"`
+	Affinity           json.RawMessage       `json:"affinity,omitempty"`
+	Tolerations        []json.RawMessage     `json:"tolerations,omitempty"`
+	ServiceAccountName string                `json:"serviceAccountName,omitempty"`
+	EmptyDirMounts     []legacyEmptyDirMount `json:"emptyDirMounts,omitempty"`
+}
+
+type legacyEmptyDirMount struct {
+	MountPath string `json:"mountPath"`
+	SizeLimit string `json:"sizeLimit,omitempty"`
+}
+
+type legacySecurityContext struct {
+	Capabilities             *legacyCapabilities `json:"capabilities,omitempty"`
+	Privileged               *bool               `json:"privileged,omitempty"`
+	RunAsUser                *int64              `json:"runAsUser,omitempty"`
+	RunAsGroup               *int64              `json:"runAsGroup,omitempty"`
+	RunAsNonRoot             *bool               `json:"runAsNonRoot,omitempty"`
+	ReadOnlyRootFilesystem   *bool               `json:"readOnlyRootFilesystem,omitempty"`
+	AllowPrivilegeEscalation *bool               `json:"allowPrivilegeEscalation,omitempty"`
+	SeccompProfile           json.RawMessage     `json:"seccompProfile,omitempty"`
+	AppArmorProfile          json.RawMessage     `json:"appArmorProfile,omitempty"`
+}
+
+type legacyCapabilities struct {
+	Add  []string `json:"add,omitempty"`
+	Drop []string `json:"drop,omitempty"`
+}
+
+func decodeLegacyTemplateSpec(raw json.RawMessage) (sandboxspec.TemplateSpec, []string, error) {
 	var legacy legacyTemplateSpec
-	if err := json.Unmarshal(raw, &legacy); err != nil {
-		return sandboxspec.TemplateSpec{}, err
-	}
-	if !emptyJSONValue(legacy.Pod) {
-		return sandboxspec.TemplateSpec{}, fmt.Errorf("Kubernetes pod overrides cannot be migrated losslessly")
-	}
-	if !emptyJSONValue(legacy.MainContainer.SecurityContext) {
-		return sandboxspec.TemplateSpec{}, fmt.Errorf("Kubernetes securityContext cannot be migrated losslessly")
+	if err := decodeStrictJSON(raw, &legacy); err != nil {
+		return sandboxspec.TemplateSpec{}, nil, err
 	}
 	if strings.TrimSpace(legacy.MainContainer.Image) == "" {
-		return sandboxspec.TemplateSpec{}, fmt.Errorf("main container image is required")
+		return sandboxspec.TemplateSpec{}, nil, fmt.Errorf("main container image is required")
 	}
-	return sandboxspec.TemplateSpec{
+	securityClass, securityAdjusted, err := mapLegacySecurityContext(legacy.MainContainer.SecurityContext)
+	if err != nil {
+		return sandboxspec.TemplateSpec{}, nil, err
+	}
+	ephemeralMounts, podAdjusted, err := mapLegacyPodOverride(legacy.Pod)
+	if err != nil {
+		return sandboxspec.TemplateSpec{}, nil, err
+	}
+	spec := sandboxspec.TemplateSpec{
 		Description: legacy.Description,
 		DisplayName: legacy.DisplayName,
 		Tags:        append([]string(nil), legacy.Tags...),
 		MainContainer: sandboxspec.ContainerSpec{
-			Image:     legacy.MainContainer.Image,
-			Env:       append([]sandboxspec.EnvVar(nil), legacy.MainContainer.Env...),
-			Resources: legacy.MainContainer.Resources,
+			Image:         legacy.MainContainer.Image,
+			Env:           append([]sandboxspec.EnvVar(nil), legacy.MainContainer.Env...),
+			Resources:     legacy.MainContainer.Resources,
+			SecurityClass: securityClass,
 		},
-		Network: legacy.Network,
-		EnvVars: cloneStrings(legacy.EnvVars),
-	}, nil
+		EphemeralMounts: ephemeralMounts,
+		Network:         legacy.Network,
+		EnvVars:         cloneStrings(legacy.EnvVars),
+	}
+	if _, err := templatepkg.ResolveEphemeralMounts(spec); err != nil {
+		return sandboxspec.TemplateSpec{}, nil, err
+	}
+	var adjustments []string
+	if securityAdjusted {
+		adjustments = append(adjustments, "mainContainer.securityContext mapped to mainContainer.securityClass")
+	}
+	if podAdjusted {
+		adjustments = append(adjustments, "pod.emptyDirMounts mapped to ephemeralMounts")
+	}
+	if err := validateRetiredVolumeMounts(legacy.VolumeMounts); err != nil {
+		return sandboxspec.TemplateSpec{}, nil, err
+	}
+	if len(legacy.VolumeMounts) != 0 {
+		adjustments = append(adjustments, "retired volumeMounts metadata dropped")
+	}
+	if strings.TrimSpace(legacy.MainContainer.ImagePullPolicy) != "" {
+		adjustments = append(adjustments, "imagePullPolicy dropped after base image digest pinning")
+	}
+	if legacy.Pool.MinIdle != 0 || legacy.Pool.MaxIdle != 0 {
+		adjustments = append(adjustments, "per-template pool metadata dropped for the unified warm pool")
+	}
+	if legacy.ClusterID != nil {
+		adjustments = append(adjustments, "template clusterId replaced by the target Nomad cluster")
+	}
+	return spec, adjustments, nil
+}
+
+func validateRetiredVolumeMounts(mounts []legacyVolumeMount) error {
+	for _, mount := range mounts {
+		if mount.Name != "workspace" || mount.MountPath != "/workspace" || mount.ReadOnly {
+			return fmt.Errorf("unrecognized retired volumeMounts metadata cannot be migrated safely")
+		}
+	}
+	return nil
+}
+
+func mapLegacySecurityContext(context *legacySecurityContext) (sandboxspec.SandboxSecurityClass, bool, error) {
+	if context == nil {
+		return sandboxspec.SandboxSecurityClassStandard, false, nil
+	}
+	if context.Capabilities != nil && (len(context.Capabilities.Add) != 0 || len(context.Capabilities.Drop) != 0) {
+		return "", false, fmt.Errorf("custom Kubernetes capabilities cannot be migrated losslessly")
+	}
+	if context.RunAsUser != nil && *context.RunAsUser != 0 {
+		return "", false, fmt.Errorf("non-root Kubernetes runAsUser cannot be migrated losslessly")
+	}
+	if context.RunAsGroup != nil && *context.RunAsGroup != 0 {
+		return "", false, fmt.Errorf("non-root Kubernetes runAsGroup cannot be migrated losslessly")
+	}
+	if context.RunAsNonRoot != nil && *context.RunAsNonRoot {
+		return "", false, fmt.Errorf("Kubernetes runAsNonRoot cannot be migrated losslessly")
+	}
+	if context.ReadOnlyRootFilesystem != nil && *context.ReadOnlyRootFilesystem {
+		return "", false, fmt.Errorf("read-only Kubernetes rootfs cannot be migrated losslessly")
+	}
+	if context.AllowPrivilegeEscalation != nil && !*context.AllowPrivilegeEscalation {
+		return "", false, fmt.Errorf("disabled Kubernetes privilege escalation cannot be migrated losslessly")
+	}
+	if !emptyJSONValue(context.SeccompProfile) || !emptyJSONValue(context.AppArmorProfile) {
+		return "", false, fmt.Errorf("custom Kubernetes security profiles cannot be migrated losslessly")
+	}
+	if context.Privileged != nil && *context.Privileged {
+		return sandboxspec.SandboxSecurityClassPrivileged, true, nil
+	}
+	return sandboxspec.SandboxSecurityClassStandard, true, nil
+}
+
+func mapLegacyPodOverride(pod *legacyPodOverride) ([]sandboxspec.EphemeralMountSpec, bool, error) {
+	if pod == nil {
+		return nil, false, nil
+	}
+	if len(pod.NodeSelector) != 0 || !emptyJSONValue(pod.Affinity) || len(pod.Tolerations) != 0 ||
+		strings.TrimSpace(pod.ServiceAccountName) != "" {
+		return nil, false, fmt.Errorf("Kubernetes pod scheduling or identity overrides cannot be migrated losslessly")
+	}
+	mounts := make([]sandboxspec.EphemeralMountSpec, 0, len(pod.EmptyDirMounts))
+	for _, mount := range pod.EmptyDirMounts {
+		mounts = append(mounts, sandboxspec.EphemeralMountSpec{
+			MountPath: mount.MountPath, SizeLimit: mount.SizeLimit,
+		})
+	}
+	return mounts, len(mounts) > 0, nil
+}
+
+func decodeStrictJSON(raw []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("JSON document must contain exactly one value")
+	}
+	return nil
 }
 
 func emptyJSONValue(raw json.RawMessage) bool {

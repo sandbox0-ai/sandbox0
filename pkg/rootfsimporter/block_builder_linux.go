@@ -42,6 +42,53 @@ func (b BlockBuilder) Build(
 	ctx context.Context,
 	request BuildRequest,
 ) (result BuildResult, resultErr error) {
+	result, resultErr = b.build(ctx, request, nil)
+	if resultErr != nil {
+		return BuildResult{}, resultErr
+	}
+	if err := result.Validate(); err != nil {
+		return BuildResult{}, err
+	}
+	return result, nil
+}
+
+// BuildMaterializedGeneration builds a complete user-state generation after a
+// trusted mutation of a verified OCI root. It cannot produce a Base artifact
+// publication request.
+func (b BlockBuilder) BuildMaterializedGeneration(
+	ctx context.Context,
+	request MaterializedGenerationBuildRequest,
+) (MaterializedGenerationBuildResult, error) {
+	if request.Mutator == nil {
+		return MaterializedGenerationBuildResult{}, fmt.Errorf("materialized generation root mutator is required")
+	}
+	if err := validateArtifactSHA256Digest(request.MutationDigest); err != nil {
+		return MaterializedGenerationBuildResult{}, fmt.Errorf("materialized generation mutation digest: %w", err)
+	}
+	built, err := b.build(ctx, request.BuildRequest, request.Mutator)
+	if err != nil {
+		return MaterializedGenerationBuildResult{}, err
+	}
+	result := MaterializedGenerationBuildResult{
+		SourceOCIRef: built.SourceOCIRef, SourceOCIDigest: built.SourceOCIDigest,
+		Platform: built.Platform, ProcdDigest: built.ProcdDigest,
+		LogicalSizeBytes: built.LogicalSizeBytes, MutationDigest: request.MutationDigest,
+		DescriptorDigest: built.DescriptorDigest, CurrentBlockHead: built.BaseBlockRoot,
+		Descriptor: built.Descriptor, DescriptorBytes: append([]byte(nil), built.DescriptorBytes...),
+		Objects: built.Objects, Bytes: built.Bytes,
+		References: append([]rootfsblock.ObjectReference(nil), built.References...),
+	}
+	if err := result.Validate(); err != nil {
+		return MaterializedGenerationBuildResult{}, err
+	}
+	return result, nil
+}
+
+func (b BlockBuilder) build(
+	ctx context.Context,
+	request BuildRequest,
+	mutator RootMutator,
+) (result BuildResult, resultErr error) {
 	if b.Unpacker == nil || b.Filesystem == nil || b.Publisher == nil {
 		return BuildResult{}, fmt.Errorf("OCI unpacker, filesystem builder, and immutable publisher are required")
 	}
@@ -81,6 +128,11 @@ func (b BlockBuilder) Build(
 	}()
 	if err := validateImportedEvidence(request.Image, imported); err != nil {
 		return BuildResult{}, err
+	}
+	if mutator != nil {
+		if err := mutator.Mutate(ctx, rootPath); err != nil {
+			return BuildResult{}, fmt.Errorf("mutate imported OCI root: %w", err)
+		}
 	}
 	if _, err := os.Lstat(imagePath); err == nil {
 		return BuildResult{}, fmt.Errorf("OCI block image path already exists")
@@ -128,9 +180,6 @@ func (b BlockBuilder) Build(
 		Descriptor: built.Descriptor, DescriptorBytes: append([]byte(nil), built.Payload...),
 		Objects: built.Objects, Bytes: built.Bytes,
 		References: append([]rootfsblock.ObjectReference(nil), built.References...),
-	}
-	if err := result.Validate(); err != nil {
-		return BuildResult{}, err
 	}
 	return result, nil
 }

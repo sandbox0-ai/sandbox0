@@ -38,9 +38,69 @@ func TestNormalizeProducesPinnedPausedNomadRecords(t *testing.T) {
 	if len(normalized.InferredLayers) != 1 || normalized.InferredLayers[0] != "layer-1" {
 		t.Fatalf("InferredLayers = %#v", normalized.InferredLayers)
 	}
+	if got.Record.TemplateSpec.MainContainer.SecurityClass != "privileged" {
+		t.Fatalf("SecurityClass = %q", got.Record.TemplateSpec.MainContainer.SecurityClass)
+	}
+	if mounts := got.Record.TemplateSpec.EphemeralMounts; len(mounts) != 1 ||
+		mounts[0].MountPath != "/var/lib/docker" || mounts[0].SizeLimit != "16Gi" {
+		t.Fatalf("EphemeralMounts = %#v", mounts)
+	}
+	if len(got.CompatibilityAdjustments) != 5 {
+		t.Fatalf("CompatibilityAdjustments = %#v", got.CompatibilityAdjustments)
+	}
+	if normalized.FilesystemLogicalSizes["filesystem-1"] != 8<<30 ||
+		normalized.SourceSandboxLogicalSize["sandbox-1"] != 8<<30 {
+		t.Fatalf("logical sizes = %#v / %#v", normalized.FilesystemLogicalSizes, normalized.SourceSandboxLogicalSize)
+	}
+	if len(normalized.MaterializedBuilds) != 1 || len(normalized.Filesystems) != 1 || len(normalized.Snapshots) != 1 {
+		t.Fatalf("materialized plan = builds %#v filesystems %#v snapshots %#v",
+			normalized.MaterializedBuilds, normalized.Filesystems, normalized.Snapshots)
+	}
+	build := normalized.MaterializedBuilds[0]
+	if build.ID != normalized.Filesystems[0].HeadBuildID || build.ID != normalized.Snapshots[0].BuildID ||
+		build.MutationDigest == "" || build.ObjectPrefix == "" || build.LogicalSizeBytes != 8<<30 {
+		t.Fatalf("materialized build = %#v", build)
+	}
 	chain := normalized.LayerChains["layer-1"]
 	if len(chain) != 1 || chain[0].PlatformOS != "linux" || chain[0].PlatformArchitecture != "amd64" {
 		t.Fatalf("chain platform = %#v", chain)
+	}
+}
+
+func TestCatalogDigestIsDeterministicAndContentAddressed(t *testing.T) {
+	catalog := validCatalog(t)
+	first, err := catalog.Digest()
+	if err != nil {
+		t.Fatalf("Digest() error = %v", err)
+	}
+	second, err := catalog.Digest()
+	if err != nil {
+		t.Fatalf("Digest() retry error = %v", err)
+	}
+	if first != second || !strings.HasPrefix(first, "sha256:") {
+		t.Fatalf("Digest() = %q then %q", first, second)
+	}
+
+	catalog.Layers[0].DiffSize++
+	changed, err := catalog.Digest()
+	if err != nil {
+		t.Fatalf("Digest() after mutation error = %v", err)
+	}
+	if changed == first {
+		t.Fatal("Digest() did not change with source content")
+	}
+}
+
+func TestNormalizeRecoversSnapshotOnlyFilesystemGeometryFromArchivedSource(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Sandboxes = nil
+	catalog.Bindings = nil
+	normalized, err := catalog.Normalize(testNormalizeOptions())
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if len(normalized.Sandboxes) != 0 || normalized.FilesystemLogicalSizes["filesystem-1"] != 8<<30 {
+		t.Fatalf("normalized catalog = %#v", normalized)
 	}
 }
 
@@ -93,7 +153,7 @@ func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 				spec["pod"] = map[string]any{"serviceAccountName": "custom"}
 				c.Sandboxes[0].TemplateSpec = mustMarshal(t, spec)
 			},
-			wantErr: "pod overrides cannot be migrated losslessly",
+			wantErr: "pod scheduling or identity overrides cannot be migrated losslessly",
 		},
 		{
 			name: "Kubernetes security context",
@@ -104,7 +164,40 @@ func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 				main["securityContext"] = map[string]any{"runAsUser": float64(1000)}
 				c.Sandboxes[0].TemplateSpec = mustMarshal(t, spec)
 			},
-			wantErr: "securityContext cannot be migrated losslessly",
+			wantErr: "non-root Kubernetes runAsUser cannot be migrated losslessly",
+		},
+		{
+			name: "custom capabilities",
+			mutate: func(c *Catalog) {
+				var spec map[string]any
+				mustUnmarshal(t, c.Sandboxes[0].TemplateSpec, &spec)
+				main := spec["mainContainer"].(map[string]any)
+				main["securityContext"] = map[string]any{
+					"capabilities": map[string]any{"add": []any{"SYS_ADMIN"}},
+				}
+				c.Sandboxes[0].TemplateSpec = mustMarshal(t, spec)
+			},
+			wantErr: "custom Kubernetes capabilities cannot be migrated losslessly",
+		},
+		{
+			name: "unknown retired volume mount",
+			mutate: func(c *Catalog) {
+				var spec map[string]any
+				mustUnmarshal(t, c.Sandboxes[0].TemplateSpec, &spec)
+				spec["volumeMounts"] = []any{map[string]any{"name": "other", "mountPath": "/data"}}
+				c.Sandboxes[0].TemplateSpec = mustMarshal(t, spec)
+			},
+			wantErr: "unrecognized retired volumeMounts metadata",
+		},
+		{
+			name: "unknown template field",
+			mutate: func(c *Catalog) {
+				var spec map[string]any
+				mustUnmarshal(t, c.Sandboxes[0].TemplateSpec, &spec)
+				spec["futureField"] = true
+				c.Sandboxes[0].TemplateSpec = mustMarshal(t, spec)
+			},
+			wantErr: "unknown field",
 		},
 		{
 			name: "source schema drift",
@@ -119,6 +212,11 @@ func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			catalog := validCatalog(t)
 			test.mutate(&catalog)
+			if len(catalog.Sandboxes) != 0 && len(catalog.SourceSandboxes) != 0 {
+				catalog.SourceSandboxes[0].TemplateSpec = append(
+					json.RawMessage(nil), catalog.Sandboxes[0].TemplateSpec...,
+				)
+			}
 			_, err := catalog.Normalize(testNormalizeOptions())
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("Normalize() error = %v, want containing %q", err, test.wantErr)
@@ -167,14 +265,23 @@ func validCatalog(t *testing.T) Catalog {
 	templateSpec := map[string]any{
 		"description": "legacy",
 		"mainContainer": map[string]any{
-			"image": "alpine:3.22",
+			"image": "alpine:3.22", "imagePullPolicy": "IfNotPresent",
 			"resources": map[string]any{
 				"cpu": "1", "memory": "2Gi", "ephemeralStorage": "8Gi",
 			},
+			"securityContext": map[string]any{
+				"privileged": true, "runAsUser": float64(0), "runAsGroup": float64(0),
+				"runAsNonRoot": false, "readOnlyRootFilesystem": false,
+				"allowPrivilegeEscalation": true,
+			},
 		},
-		"pool": map[string]any{"minIdle": float64(1), "maxIdle": float64(3)},
+		"pod": map[string]any{
+			"emptyDirMounts": []any{map[string]any{"mountPath": "/var/lib/docker", "sizeLimit": "16Gi"}},
+		},
+		"volumeMounts": []any{map[string]any{"name": "workspace", "mountPath": "/workspace"}},
+		"pool":         map[string]any{"minIdle": float64(1), "maxIdle": float64(3)},
 	}
-	return Catalog{
+	catalog := Catalog{
 		ManagerSchemaVersion: LegacyManagerSchemaVersion,
 		Sandboxes: []Sandbox{{
 			ID: "sandbox-1", TeamID: "team-1", UserID: "user-1",
@@ -202,6 +309,10 @@ func validCatalog(t *testing.T) Catalog {
 			FilesystemID: "filesystem-1", Name: "checkpoint", CreatedAt: now,
 		}},
 	}
+	catalog.SourceSandboxes = []SourceSandbox{{
+		ID: "sandbox-1", TeamID: "team-1", TemplateSpec: append(json.RawMessage(nil), catalog.Sandboxes[0].TemplateSpec...),
+	}}
+	return catalog
 }
 
 func testNormalizeOptions() NormalizeOptions {

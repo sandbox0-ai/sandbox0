@@ -855,7 +855,7 @@ func mapLegacySecurityContext(context *legacySecurityContext) (sandboxspec.Sandb
 		return "", false, fmt.Errorf("non-root Kubernetes runAsGroup cannot be migrated losslessly")
 	}
 	if context.RunAsNonRoot != nil && *context.RunAsNonRoot {
-		return "", false, fmt.Errorf("Kubernetes runAsNonRoot cannot be migrated losslessly")
+		return "", false, fmt.Errorf("kubernetes runAsNonRoot cannot be migrated losslessly")
 	}
 	if context.ReadOnlyRootFilesystem != nil && *context.ReadOnlyRootFilesystem {
 		return "", false, fmt.Errorf("read-only Kubernetes rootfs cannot be migrated losslessly")
@@ -878,7 +878,7 @@ func mapLegacyPodOverride(pod *legacyPodOverride) ([]sandboxspec.EphemeralMountS
 	}
 	if len(pod.NodeSelector) != 0 || !emptyJSONValue(pod.Affinity) || len(pod.Tolerations) != 0 ||
 		strings.TrimSpace(pod.ServiceAccountName) != "" {
-		return nil, false, fmt.Errorf("Kubernetes pod scheduling or identity overrides cannot be migrated losslessly")
+		return nil, false, fmt.Errorf("kubernetes pod scheduling or identity overrides cannot be migrated losslessly")
 	}
 	mounts := make([]sandboxspec.EphemeralMountSpec, 0, len(pod.EmptyDirMounts))
 	for _, mount := range pod.EmptyDirMounts {

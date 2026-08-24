@@ -55,12 +55,7 @@ func DeterministicOperation(input OperationSpec) (string, OperationSpec, error) 
 	if err != nil {
 		return "", OperationSpec{}, err
 	}
-	payload, err := json.Marshal(operationIdentity{
-		SourceOCIRef: normalized.SourceOCIRef, Platform: normalized.Platform,
-		FormatGeneration: normalized.FormatGeneration,
-		ProcdProtocol:    normalized.ProcdProtocol, ProcdDigest: normalized.ProcdDigest,
-		LogicalSizeBytes: normalized.LogicalSizeBytes, BlockOptions: normalized.BlockOptions,
-	})
+	payload, err := json.Marshal(operationIdentity(normalized))
 	if err != nil {
 		return "", OperationSpec{}, fmt.Errorf("encode immutable import identity: %w", err)
 	}

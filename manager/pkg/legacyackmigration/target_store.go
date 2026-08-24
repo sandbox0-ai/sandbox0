@@ -524,7 +524,7 @@ func (s *TargetStore) PublishReadyBuild(
 		return nil, fmt.Errorf("validate migrated generation build: %w", err)
 	}
 	if err := validateCanonicalDigest(baseArtifactDigest); err != nil {
-		return nil, fmt.Errorf("Base artifact digest: %w", err)
+		return nil, fmt.Errorf("base artifact digest: %w", err)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {

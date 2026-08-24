@@ -386,7 +386,7 @@ func makeTargetCommitPlan(
 		sandboxIDs[record.ID] = struct{}{}
 		if !ok || filesystem.Record.TeamID != record.TeamID || record.ClusterID != clusterID ||
 			record.DesiredState != sandboxstore.SandboxDesiredStatePaused || record.RuntimeID != "" ||
-			record.RuntimeNamespace != "" || record.DeletedAt.IsZero() == false ||
+			record.RuntimeNamespace != "" || !record.DeletedAt.IsZero() ||
 			record.ResourceMillicpu <= 0 || record.ResourceMemoryMiB <= 0 {
 			return nil, fmt.Errorf("normalized sandbox %s is not a safe paused target record", record.ID)
 		}

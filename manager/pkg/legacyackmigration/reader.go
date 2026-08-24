@@ -22,7 +22,19 @@ func ReadCatalog(ctx context.Context, pool *pgxpool.Pool) (*Catalog, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	catalog, err := readCatalogSnapshot(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit legacy manager read-only snapshot: %w", err)
+	}
+	return catalog, nil
+}
+
+func readCatalogSnapshot(ctx context.Context, tx pgx.Tx) (*Catalog, error) {
 	catalog := &Catalog{}
+	var err error
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(version_id) FILTER (WHERE is_applied), 0)
 		FROM manager.goose_db_version
@@ -57,9 +69,6 @@ func ReadCatalog(ctx context.Context, pool *pgxpool.Pool) (*Catalog, error) {
 	}
 	if catalog.SourceSandboxes, err = readSourceSandboxes(ctx, tx); err != nil {
 		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit legacy manager read-only snapshot: %w", err)
 	}
 	return catalog, nil
 }

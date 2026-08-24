@@ -211,6 +211,9 @@ func (s *TargetStore) EnsureSession(
 	if captured.SourceCatalogDigest != sourceCatalogDigest || captured.TargetClusterID != targetClusterID {
 		return fmt.Errorf("%w: source capture %s has different immutable inputs", ErrTargetMigrationConflict, sessionID)
 	}
+	if captured.RetiredAt.IsZero() {
+		return fmt.Errorf("%w: %s", ErrLegacyCatalogNotRetired, sessionID)
+	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO legacy_ack_migration.sessions (
 			session_id, source_catalog_digest, target_cluster_id, state

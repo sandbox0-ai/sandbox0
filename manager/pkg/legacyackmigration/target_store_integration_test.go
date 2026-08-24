@@ -46,6 +46,7 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	if _, err := captures.CaptureCatalog(ctx, "migration-session", "ali-ue1-nomad", &sourceCatalog); err != nil {
 		t.Fatal(err)
 	}
+	markTargetStoreCaptureRetired(t, ctx, pool, "migration-session")
 	baseImports := &targetStoreIntegrationBaseImports{}
 	prepared, err := store.PrepareCatalog(
 		ctx, "migration-session", sourceCatalogDigest,
@@ -238,6 +239,23 @@ func TestTargetStoreRejectsSessionWithoutMatchingCapture(t *testing.T) {
 	}
 	if err := store.EnsureSession(ctx, "captured", captured.SourceCatalogDigest, "other-cluster"); !errors.Is(err, ErrTargetMigrationConflict) {
 		t.Fatalf("EnsureSession() with mismatched capture error = %v", err)
+	}
+	if err := store.EnsureSession(ctx, "captured", captured.SourceCatalogDigest, "ali-ue1-nomad"); !errors.Is(err, ErrLegacyCatalogNotRetired) {
+		t.Fatalf("EnsureSession() with unretired capture error = %v", err)
+	}
+}
+
+func markTargetStoreCaptureRetired(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	sessionID string,
+) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		UPDATE legacy_ack_migration.source_catalogs SET retired_at = NOW() WHERE session_id = $1
+	`, sessionID); err != nil {
+		t.Fatal(err)
 	}
 }
 

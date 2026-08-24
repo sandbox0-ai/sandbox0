@@ -303,7 +303,7 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 		Name: protocol.NomadTaskName, AllocDir: filepath.Join(tempDir, "allocation"),
 		Env: map[string]string{
 			"NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel: "172.26.64.2:49983",
-			"UNTRUSTED_TASK_ENV":                               "must-not-enter-procd",
+			"UNTRUSTED_TASK_ENV": "must-not-enter-procd",
 		},
 		Resources: &drivers.Resources{
 			NomadResources: &structs.AllocatedTaskResources{

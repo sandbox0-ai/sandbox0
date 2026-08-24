@@ -166,7 +166,9 @@ func buildSpec(options specOptions) specs.Spec {
 }
 
 var standardCapabilities = []string{
-	"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE",
+	"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID",
+	"CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE", "CAP_NET_RAW", "CAP_SETFCAP",
+	"CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_CHROOT",
 }
 
 // privilegedCapabilities are guest-kernel capabilities. runsc still keeps

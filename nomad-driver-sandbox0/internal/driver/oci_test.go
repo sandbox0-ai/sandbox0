@@ -74,6 +74,10 @@ func TestBuildSpecAppliesSecurityClassAndEphemeralMounts(t *testing.T) {
 	if containsCapability(standard.Process.Capabilities.Effective, "CAP_SYS_ADMIN") {
 		t.Fatal("standard class received CAP_SYS_ADMIN")
 	}
+	if !containsCapability(standard.Process.Capabilities.Effective, "CAP_CHOWN") ||
+		!containsCapability(standard.Process.Capabilities.Effective, "CAP_SETUID") {
+		t.Fatalf("standard OCI capabilities = %#v", standard.Process.Capabilities)
+	}
 	privileged := buildSpec(specOptions{
 		Command: "/procd", SecurityClass: "privileged",
 		EphemeralMounts: []runtimecontrol.EphemeralMount{

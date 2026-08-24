@@ -17,6 +17,9 @@ package driver
 import (
 	"strings"
 	"testing"
+
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 func TestRuntimeLeaseCgroupsPathIsRelativeToUnifiedMount(t *testing.T) {
@@ -59,9 +62,63 @@ func TestBuildSpecAppliesExactRuntimeResourceLease(t *testing.T) {
 		spec.Linux.CgroupsPath != "/sandbox0/s0-lease" {
 		t.Fatalf("OCI PIDs/cgroup resources = %+v", spec.Linux)
 	}
-	if len(spec.Mounts) != 4 || spec.Mounts[3].Source != "/etc/sandbox0/internal-auth/data-public.pem" ||
-		spec.Mounts[3].Destination != procdInternalJWTPublicKeyDestination ||
-		!strings.Contains(strings.Join(spec.Mounts[3].Options, ","), "ro") {
+	keyMount := findOCIMount(spec.Mounts, procdInternalJWTPublicKeyDestination)
+	if keyMount == nil || keyMount.Source != "/etc/sandbox0/internal-auth/data-public.pem" ||
+		!strings.Contains(strings.Join(keyMount.Options, ","), "ro") {
 		t.Fatalf("OCI procd internal JWT public-key mount = %+v", spec.Mounts)
 	}
+}
+
+func TestBuildSpecAppliesSecurityClassAndEphemeralMounts(t *testing.T) {
+	standard := buildSpec(specOptions{Command: "/procd", SecurityClass: "standard"})
+	if containsCapability(standard.Process.Capabilities.Effective, "CAP_SYS_ADMIN") {
+		t.Fatal("standard class received CAP_SYS_ADMIN")
+	}
+	privileged := buildSpec(specOptions{
+		Command: "/procd", SecurityClass: "privileged",
+		EphemeralMounts: []runtimecontrol.EphemeralMount{
+			{MountPath: "/var/lib/docker", SizeBytes: 16 << 30},
+			{MountPath: "/dev/shm", SizeBytes: 2 << 30},
+		},
+	})
+	if !containsCapability(privileged.Process.Capabilities.Effective, "CAP_SYS_ADMIN") ||
+		!containsCapability(privileged.Process.Capabilities.Bounding, "CAP_NET_ADMIN") {
+		t.Fatalf("privileged capabilities = %#v", privileged.Process.Capabilities)
+	}
+	dockerMount := findOCIMount(privileged.Mounts, "/var/lib/docker")
+	if dockerMount == nil || !containsString(dockerMount.Options, "size=17179869184") {
+		t.Fatalf("Docker ephemeral mount = %#v", dockerMount)
+	}
+	shmCount := 0
+	for _, mount := range privileged.Mounts {
+		if mount.Destination == "/dev/shm" {
+			shmCount++
+			if !containsString(mount.Options, "size=2147483648") {
+				t.Fatalf("shm mount = %#v", mount)
+			}
+		}
+	}
+	if shmCount != 1 {
+		t.Fatalf("shm mount count = %d", shmCount)
+	}
+}
+
+func findOCIMount(mounts []specs.Mount, destination string) *specs.Mount {
+	for index := range mounts {
+		if mounts[index].Destination == destination {
+			return &mounts[index]
+		}
+	}
+	return nil
+}
+
+func containsCapability(values []string, target string) bool { return containsString(values, target) }
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

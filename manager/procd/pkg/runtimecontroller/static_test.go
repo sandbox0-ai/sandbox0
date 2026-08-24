@@ -65,7 +65,7 @@ func TestAssignmentFromEnvRejectsMalformedInput(t *testing.T) {
 
 func testStaticAssignment() runtimecontrol.Assignment {
 	return runtimecontrol.Assignment{
-		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 3,
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 3, SecurityClass: "standard",
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
 	}
 }

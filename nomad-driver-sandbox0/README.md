@@ -56,8 +56,15 @@ contains immutable execution inputs only:
 - security class.
 
 CPU and memory do not belong in the digest. The checked-in outer class catalog
-format is version `3`; each compatibility entry is version `2`. Until a public
-selector exists, configure one class per requested cluster.
+format is version `3`; each compatibility entry is version `2`. A cluster may
+publish both `standard` and `privileged` classes. The template
+`mainContainer.securityClass` selects one exact class; omitting it selects
+`standard`.
+
+`privileged` grants Linux capabilities only inside the gVisor guest kernel; it
+does not bypass runsc or expose host devices. Template `ephemeralMounts` become
+size-bounded guest tmpfs mounts and are intentionally absent from every
+durable RootFS generation.
 
 ## RootFS And Failure Safety
 

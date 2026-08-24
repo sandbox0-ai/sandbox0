@@ -5,14 +5,24 @@ import "time"
 
 const DefaultSandboxEphemeralStorage = "8Gi"
 
+// SandboxSecurityClass selects the immutable guest privilege boundary. It is
+// part of warm-slot compatibility and never changes after a sandbox claim.
+type SandboxSecurityClass string
+
+const (
+	SandboxSecurityClassStandard   SandboxSecurityClass = "standard"
+	SandboxSecurityClassPrivileged SandboxSecurityClass = "privileged"
+)
+
 // TemplateSpec defines the reusable runtime inputs for sandbox claims.
 type TemplateSpec struct {
-	Description   string                `json:"description,omitempty"`
-	DisplayName   string                `json:"displayName,omitempty"`
-	Tags          []string              `json:"tags,omitempty"`
-	MainContainer ContainerSpec         `json:"mainContainer"`
-	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
-	EnvVars       map[string]string     `json:"envVars,omitempty"`
+	Description     string                `json:"description,omitempty"`
+	DisplayName     string                `json:"displayName,omitempty"`
+	Tags            []string              `json:"tags,omitempty"`
+	MainContainer   ContainerSpec         `json:"mainContainer"`
+	EphemeralMounts []EphemeralMountSpec  `json:"ephemeralMounts,omitempty"`
+	Network         *SandboxNetworkPolicy `json:"network,omitempty"`
+	EnvVars         map[string]string     `json:"envVars,omitempty"`
 }
 
 // SandboxTemplateSpec is retained as the public product-domain name.
@@ -20,9 +30,30 @@ type SandboxTemplateSpec = TemplateSpec
 
 // ContainerSpec defines the sandbox image, environment, and default resources.
 type ContainerSpec struct {
-	Image     string        `json:"image"`
-	Env       []EnvVar      `json:"env,omitempty"`
-	Resources ResourceQuota `json:"resources"`
+	Image         string               `json:"image"`
+	Env           []EnvVar             `json:"env,omitempty"`
+	Resources     ResourceQuota        `json:"resources"`
+	SecurityClass SandboxSecurityClass `json:"securityClass,omitempty"`
+}
+
+// EphemeralMountSpec declares claim-lifetime storage that is intentionally
+// excluded from pause, resume, fork, and snapshot RootFS generations.
+type EphemeralMountSpec struct {
+	MountPath string `json:"mountPath"`
+	SizeLimit string `json:"sizeLimit"`
+}
+
+// EffectiveSandboxSecurityClass returns the canonical class and treats the
+// omitted legacy value as standard.
+func EffectiveSandboxSecurityClass(value SandboxSecurityClass) (SandboxSecurityClass, bool) {
+	switch value {
+	case "", SandboxSecurityClassStandard:
+		return SandboxSecurityClassStandard, true
+	case SandboxSecurityClassPrivileged:
+		return SandboxSecurityClassPrivileged, true
+	default:
+		return "", false
+	}
 }
 
 // EnvVar represents an environment variable.

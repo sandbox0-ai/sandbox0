@@ -718,7 +718,7 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 	networkPolicy := `{"mode":"block-all"}`
 	token := strings.Repeat("writer-token-", 4)
 	assignment := &runtimecontrol.Assignment{
-		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard",
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
 	}
 	revision, _ := assignment.Revision()

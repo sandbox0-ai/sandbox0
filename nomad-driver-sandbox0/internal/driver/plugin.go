@@ -34,6 +34,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/shared/structs"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -86,10 +87,6 @@ var (
 			hclspec.NewAttr("directfs", "bool", false),
 			hclspec.NewLiteral(`true`),
 		),
-		"security_class": hclspec.NewDefault(
-			hclspec.NewAttr("security_class", "string", false),
-			hclspec.NewLiteral(`"standard"`),
-		),
 		"resource_cgroup_root": hclspec.NewDefault(
 			hclspec.NewAttr("resource_cgroup_root", "string", false),
 			hclspec.NewLiteral(`"/sys/fs/cgroup/sandbox0"`),
@@ -117,6 +114,10 @@ var (
 			hclspec.NewLiteral(`"/procd"`),
 		),
 		"args": hclspec.NewAttr("args", "list(string)", false),
+		"security_class": hclspec.NewDefault(
+			hclspec.NewAttr("security_class", "string", false),
+			hclspec.NewLiteral(`"standard"`),
+		),
 	})
 
 	capabilities = &drivers.Capabilities{
@@ -138,7 +139,6 @@ type PluginConfig struct {
 	Overlay2                      string `codec:"overlay2"`
 	FileAccess                    string `codec:"file_access"`
 	DirectFS                      bool   `codec:"directfs"`
-	SecurityClass                 string `codec:"security_class"`
 	ResourceCgroupRoot            string `codec:"resource_cgroup_root"`
 	RootFSNodeSocket              string `codec:"rootfs_node_socket"`
 	RootFSAuthorityURL            string `codec:"rootfs_authority_url"`
@@ -154,8 +154,9 @@ type PluginConfig struct {
 
 // TaskConfig is the per-allocation driver configuration.
 type TaskConfig struct {
-	Command string   `codec:"command"`
-	Args    []string `codec:"args"`
+	Command       string   `codec:"command"`
+	Args          []string `codec:"args"`
+	SecurityClass string   `codec:"security_class"`
 }
 
 // Plugin implements a Nomad task driver for generic gVisor warm slots.
@@ -210,7 +211,6 @@ func defaultPluginConfig() *PluginConfig {
 		Overlay2:                     "none",
 		FileAccess:                   "shared",
 		DirectFS:                     true,
-		SecurityClass:                "standard",
 		ResourceCgroupRoot:           protocol.RuntimeResourceCgroupRoot,
 		RootFSNodeSocket:             "/run/sandbox0/ctld-nomad-runtime.sock",
 		RuntimeSlotNodeBootIDFile:    "/proc/sys/kernel/random/boot_id",
@@ -244,7 +244,6 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.Platform = strings.TrimSpace(decoded.Platform)
 	decoded.Overlay2 = strings.TrimSpace(decoded.Overlay2)
 	decoded.FileAccess = strings.TrimSpace(decoded.FileAccess)
-	decoded.SecurityClass = strings.TrimSpace(decoded.SecurityClass)
 	decoded.ResourceCgroupRoot = strings.TrimSpace(decoded.ResourceCgroupRoot)
 	if decoded.RunscPath == "" || decoded.RunscRoot == "" || decoded.ControlDir == "" {
 		return errors.New("runsc, control, and rootfs paths must be non-empty")
@@ -265,8 +264,8 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if !filepath.IsAbs(decoded.RunscPath) || !filepath.IsAbs(decoded.RunscRoot) || !filepath.IsAbs(decoded.ControlDir) {
 		return errors.New("runsc and control paths must be absolute")
 	}
-	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" || decoded.SecurityClass == "" {
-		return errors.New("platform, overlay2, file_access, and security_class cannot be empty")
+	if decoded.Platform == "" || decoded.Overlay2 == "" || decoded.FileAccess == "" {
+		return errors.New("platform, overlay2, and file_access cannot be empty")
 	}
 	if decoded.Overlay2 != "none" {
 		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
@@ -408,14 +407,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	if err := config.DecodeDriverConfig(&taskConfig); err != nil {
 		return nil, nil, fmt.Errorf("decode task config: %w", err)
 	}
-	taskConfig.Command = strings.TrimSpace(taskConfig.Command)
-	if taskConfig.Command == "" {
-		taskConfig.Command = "/procd"
-	}
-	if !filepath.IsAbs(taskConfig.Command) {
-		return nil, nil, errors.New("task command must be absolute")
-	}
-	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+	if err := normalizeRuntimeSlotTaskConfig(p.config, &taskConfig); err != nil {
 		return nil, nil, err
 	}
 
@@ -502,14 +494,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	if err := handle.Config.DecodeDriverConfig(&taskConfig); err != nil {
 		return fmt.Errorf("decode recovered task config: %w", err)
 	}
-	taskConfig.Command = strings.TrimSpace(taskConfig.Command)
-	if taskConfig.Command == "" {
-		taskConfig.Command = "/procd"
-	}
-	if !filepath.IsAbs(taskConfig.Command) {
-		return errors.New("recovered task command must be absolute")
-	}
-	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+	if err := normalizeRuntimeSlotTaskConfig(p.config, &taskConfig); err != nil {
 		return err
 	}
 	if state.TaskConfig.ID != handle.Config.ID || state.TaskConfig.AllocID != handle.Config.AllocID {
@@ -575,6 +560,23 @@ func (p *Plugin) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.E
 		return nil, drivers.ErrTaskNotFound
 	}
 	return handle.WaitChannel(ctx), nil
+}
+func normalizeRuntimeSlotTaskConfig(config *PluginConfig, task *TaskConfig) error {
+	if task == nil {
+		return errors.New("task driver config is required")
+	}
+	task.Command = strings.TrimSpace(task.Command)
+	task.SecurityClass = strings.TrimSpace(task.SecurityClass)
+	if task.Command == "" {
+		task.Command = "/procd"
+	}
+	if task.SecurityClass == "" {
+		task.SecurityClass = string(sandboxspec.SandboxSecurityClassStandard)
+	}
+	if !filepath.IsAbs(task.Command) {
+		return errors.New("task command must be absolute")
+	}
+	return validateRuntimeSlotTaskConfig(config, *task)
 }
 
 // StopTask stops a warm or active one-shot gVisor container.

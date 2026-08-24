@@ -41,6 +41,29 @@ type fakeTemplateStore struct {
 	template *templatepkg.Template
 }
 
+func TestRuntimeAssignmentCarriesSecurityClassAndEphemeralMounts(t *testing.T) {
+	spec := v1alpha1.TemplateSpec{
+		MainContainer: v1alpha1.ContainerSpec{SecurityClass: v1alpha1.SandboxSecurityClassPrivileged},
+		EphemeralMounts: []v1alpha1.EphemeralMountSpec{
+			{MountPath: "/var/lib/docker", SizeLimit: "16Gi"},
+		},
+	}
+	assignment, err := runtimeAssignment(spec, &service.ClaimRequest{
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.SecurityClass != "privileged" || len(assignment.EphemeralMounts) != 1 ||
+		assignment.EphemeralMounts[0].MountPath != "/var/lib/docker" ||
+		assignment.EphemeralMounts[0].SizeBytes != 16<<30 {
+		t.Fatalf("assignment = %#v", assignment)
+	}
+	if err := assignment.Validate(); err != nil {
+		t.Fatalf("assignment validation = %v", err)
+	}
+}
+
 func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templateID string) (*templatepkg.Template, error) {
 	if f.template == nil || f.template.TemplateID != templateID ||
 		(f.template.Scope == naming.ScopeTeam && f.template.TeamID != teamID) {

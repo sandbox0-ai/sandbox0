@@ -220,7 +220,12 @@ func (s *Service) nomadTemplateCaptureMetadata(
 	if _, err := s.effectiveResources(desiredSpec, nil); err != nil {
 		return nil, err
 	}
-	runtimeClass, err := s.runtimeClasses.Resolve("")
+	securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(desiredSpec.MainContainer.SecurityClass)
+	if !ok {
+		return nil, fmt.Errorf("%w: captured template security class is invalid",
+			templatepkg.ErrTemplateSourceUnavailable)
+	}
+	runtimeClass, err := s.runtimeClasses.Resolve("", string(securityClass))
 	if err != nil {
 		return nil, fmt.Errorf("%w: no unambiguous Nomad runtime class for captured template",
 			templatepkg.ErrTemplateSourceUnavailable)

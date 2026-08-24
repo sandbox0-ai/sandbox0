@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -164,27 +165,37 @@ func normalizeRuntimeClass(record runtimeClassCatalogRecord) (RuntimeClass, erro
 	}, nil
 }
 
-// Resolve returns the only immutable class for a requested cluster. Until the
-// public API has an explicit class selector, multiple candidates fail closed.
-func (c *RuntimeClassCatalog) Resolve(clusterID string) (RuntimeClass, error) {
+// Resolve returns the only immutable class matching a cluster and canonical
+// template security class. Other compatibility dimensions remain fail-closed
+// until they gain explicit selectors.
+func (c *RuntimeClassCatalog) Resolve(clusterID, requestedSecurityClass string) (RuntimeClass, error) {
 	if c == nil {
 		return RuntimeClass{}, ErrRuntimeClassUnavailable
 	}
 	clusterID = strings.TrimSpace(clusterID)
+	securityClass, ok := sandboxspec.EffectiveSandboxSecurityClass(sandboxspec.SandboxSecurityClass(requestedSecurityClass))
+	if !ok || string(securityClass) != requestedSecurityClass {
+		return RuntimeClass{}, fmt.Errorf("%w for invalid security class %q", ErrRuntimeClassUnavailable, requestedSecurityClass)
+	}
 	var selected RuntimeClass
 	found := false
 	for _, class := range c.classes {
 		if clusterID != "" && class.ClusterID != clusterID {
 			continue
 		}
+		if class.Compatibility.SecurityClass != requestedSecurityClass {
+			continue
+		}
 		if found {
-			return RuntimeClass{}, fmt.Errorf("%w for cluster %q", ErrRuntimeClassAmbiguous, clusterID)
+			return RuntimeClass{}, fmt.Errorf("%w for cluster %q and security class %q",
+				ErrRuntimeClassAmbiguous, clusterID, requestedSecurityClass)
 		}
 		selected = class
 		found = true
 	}
 	if !found {
-		return RuntimeClass{}, fmt.Errorf("%w for cluster %q", ErrRuntimeClassUnavailable, clusterID)
+		return RuntimeClass{}, fmt.Errorf("%w for cluster %q and security class %q",
+			ErrRuntimeClassUnavailable, clusterID, requestedSecurityClass)
 	}
 	return selected, nil
 }

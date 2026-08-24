@@ -34,9 +34,21 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 
 	build, contract, result, baseArtifactDigest, baseDescriptor := targetStoreIntegrationFixture(t)
 	normalized := targetStoreIntegrationCatalog(build)
+	sourceCatalog := validCatalog(t)
+	sourceCatalogDigest, err := sourceCatalog.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captures, err := NewCaptureStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captures.CaptureCatalog(ctx, "migration-session", "ali-ue1-nomad", &sourceCatalog); err != nil {
+		t.Fatal(err)
+	}
 	baseImports := &targetStoreIntegrationBaseImports{}
 	prepared, err := store.PrepareCatalog(
-		ctx, "migration-session", digest.FromString("source-catalog").String(),
+		ctx, "migration-session", sourceCatalogDigest,
 		"ali-ue1-nomad", normalized, contract, baseImports,
 	)
 	if err != nil {
@@ -147,6 +159,85 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	}
 	if _, err := store.GetBuild(ctx, build.ID); !errors.Is(err, ErrTargetMigrationConflict) {
 		t.Fatalf("GetBuild() after durable input tamper error = %v", err)
+	}
+}
+
+func TestCaptureStoreExactRetryConflictAndTamperDetection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	pool := newTargetStoreIntegrationPool(t, ctx)
+	store, err := NewCaptureStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := validCatalog(t)
+	first, err := store.CaptureCatalog(ctx, "capture-session", "ali-ue1-nomad", &catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := store.CaptureCatalog(ctx, "capture-session", "ali-ue1-nomad", &catalog)
+	if err != nil {
+		t.Fatalf("exact CaptureCatalog() retry: %v", err)
+	}
+	if retry.SourceCatalogDigest != first.SourceCatalogDigest || !retry.CapturedAt.Equal(first.CapturedAt) {
+		t.Fatalf("capture retry = %#v, want original %#v", retry, first)
+	}
+	loaded, err := store.LoadCapturedCatalog(ctx, "capture-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedDigest, err := loaded.Catalog.Digest()
+	if err != nil || loadedDigest != first.SourceCatalogDigest {
+		t.Fatalf("loaded catalog digest = %q, %v; want %q", loadedDigest, err, first.SourceCatalogDigest)
+	}
+
+	divergent := catalog
+	divergent.Layers = append([]Layer(nil), catalog.Layers...)
+	divergent.Layers[0].DiffSize++
+	if _, err := store.CaptureCatalog(ctx, "capture-session", "ali-ue1-nomad", &divergent); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("divergent CaptureCatalog() error = %v", err)
+	}
+	if _, err := store.CaptureCatalog(ctx, "capture-session", "other-cluster", &catalog); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("retargeted CaptureCatalog() error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE legacy_ack_migration.source_catalogs
+		SET catalog = jsonb_set(catalog, '{ActiveLifecycleTxns}', '1'::jsonb)
+		WHERE session_id = 'capture-session'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadCapturedCatalog(ctx, "capture-session"); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("LoadCapturedCatalog() after tamper error = %v", err)
+	}
+}
+
+func TestTargetStoreRejectsSessionWithoutMatchingCapture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	pool := newTargetStoreIntegrationPool(t, ctx)
+	store, err := NewTargetStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	digestValue := digest.FromString("source-catalog").String()
+	if err := store.EnsureSession(ctx, "missing", digestValue, "ali-ue1-nomad"); !errors.Is(err, ErrCapturedCatalogNotFound) {
+		t.Fatalf("EnsureSession() without capture error = %v", err)
+	}
+	captures, err := NewCaptureStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := validCatalog(t)
+	captured, err := captures.CaptureCatalog(ctx, "captured", "ali-ue1-nomad", &catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureSession(ctx, "captured", captured.SourceCatalogDigest, "other-cluster"); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("EnsureSession() with mismatched capture error = %v", err)
 	}
 }
 

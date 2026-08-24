@@ -99,7 +99,14 @@ func (s *TargetStore) EnsureSchema(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("target migration store is not configured")
 	}
-	_, err := s.pool.Exec(ctx, `
+	captures, err := NewCaptureStore(s.pool)
+	if err != nil {
+		return err
+	}
+	if err := captures.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
 		CREATE SCHEMA IF NOT EXISTS legacy_ack_migration;
 		CREATE TABLE IF NOT EXISTS legacy_ack_migration.sessions (
 			session_id TEXT PRIMARY KEY CHECK (octet_length(session_id) BETWEEN 1 AND 128),
@@ -193,7 +200,18 @@ func (s *TargetStore) EnsureSession(
 	if err := validateCanonicalDigest(sourceCatalogDigest); err != nil {
 		return fmt.Errorf("source catalog digest: %w", err)
 	}
-	_, err := s.pool.Exec(ctx, `
+	captures, err := NewCaptureStore(s.pool)
+	if err != nil {
+		return err
+	}
+	captured, err := captures.LoadCapturedCatalog(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("require durable source capture: %w", err)
+	}
+	if captured.SourceCatalogDigest != sourceCatalogDigest || captured.TargetClusterID != targetClusterID {
+		return fmt.Errorf("%w: source capture %s has different immutable inputs", ErrTargetMigrationConflict, sessionID)
+	}
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO legacy_ack_migration.sessions (
 			session_id, source_catalog_digest, target_cluster_id, state
 		) VALUES ($1, $2, $3, 'prepared')

@@ -91,6 +91,26 @@ func TestCatalogDigestIsDeterministicAndContentAddressed(t *testing.T) {
 	}
 }
 
+func TestCatalogDigestIgnoresJSONObjectRepresentation(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Sandboxes[0].Config = json.RawMessage(`{"alpha":1,"beta":2}`)
+	reordered := catalog
+	reordered.Sandboxes = append([]Sandbox(nil), catalog.Sandboxes...)
+	reordered.Sandboxes[0].Config = json.RawMessage("{\n  \"beta\": 2,\n  \"alpha\": 1\n}")
+
+	first, err := catalog.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := reordered.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("semantically identical catalog digests differ: %s != %s", first, second)
+	}
+}
+
 func TestNormalizeRecoversSnapshotOnlyFilesystemGeometryFromArchivedSource(t *testing.T) {
 	catalog := validCatalog(t)
 	catalog.Sandboxes = nil

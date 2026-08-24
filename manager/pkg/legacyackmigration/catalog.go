@@ -124,11 +124,36 @@ type Catalog struct {
 // Reader queries use deterministic ordering, so any source-row change produces
 // a different session fence without introducing a second canonical form.
 func (c Catalog) Digest() (string, error) {
-	payload, err := json.Marshal(c)
+	payload, err := canonicalCatalogPayload(c)
 	if err != nil {
-		return "", fmt.Errorf("marshal legacy ACK catalog: %w", err)
+		return "", err
 	}
 	return digest.FromBytes(payload).String(), nil
+}
+
+// canonicalCatalogPayload makes JSON object ordering and insignificant
+// whitespace irrelevant. PostgreSQL JSONB canonicalizes nested Config and
+// TemplateSpec objects when a captured catalog is read back, so the source
+// fence must not depend on their original textual representation.
+func canonicalCatalogPayload(c Catalog) ([]byte, error) {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("marshal legacy ACK catalog: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("canonicalize legacy ACK catalog: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("canonicalize legacy ACK catalog: trailing JSON value")
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode canonical legacy ACK catalog: %w", err)
+	}
+	return canonical, nil
 }
 
 type NormalizeOptions struct {

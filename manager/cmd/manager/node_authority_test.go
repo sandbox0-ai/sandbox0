@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
 
 type managerNodeAuthorityTestStore struct {

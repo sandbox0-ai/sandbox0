@@ -224,7 +224,7 @@ func buildTargetCatalog(
 			},
 		)
 		if errors.Is(err, sandboxstore.ErrRootFSBaseArtifactNotFound) {
-			return nil, fmt.Errorf("Base artifact for build %s is not ready; keep the target importer running and repeat prepare", build.ID)
+			return nil, fmt.Errorf("base artifact for build %s is not ready; keep the target importer running and repeat prepare", build.ID)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("resolve Base artifact for build %s: %w", build.ID, err)

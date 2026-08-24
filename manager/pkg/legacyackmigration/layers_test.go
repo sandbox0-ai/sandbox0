@@ -112,7 +112,10 @@ func legacyTar(t *testing.T, entries ...tarEntry) []byte {
 		if kind == 0 {
 			kind = tar.TypeReg
 		}
-		header := &tar.Header{Name: entry.name, Mode: 0o600, Typeflag: kind}
+		header := &tar.Header{
+			Name: entry.name, Mode: 0o600, Typeflag: kind,
+			Uid: os.Getuid(), Gid: os.Getgid(),
+		}
 		if kind == tar.TypeReg {
 			header.Size = int64(len(entry.body))
 		}

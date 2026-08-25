@@ -177,6 +177,32 @@ func TestImporterRejectsUnknownManifestField(t *testing.T) {
 	assert.Empty(t, mustReadDir(t, fixture.workRoot))
 }
 
+func TestDecodeImageConfigAcceptsBoundedDockerHealthcheck(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"architecture": "amd64",
+		"os":           "linux",
+		"config": map[string]any{
+			"Entrypoint": []string{"/entrypoint"},
+			"Healthcheck": map[string]any{
+				"Test":     []string{"CMD-SHELL", "curl -f http://localhost/ || exit 1"},
+				"Interval": 30_000_000_000,
+				"Timeout":  5_000_000_000,
+				"Retries":  3,
+			},
+		},
+		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{digest.FromString("layer").String()}},
+	})
+	decoded, err := decodeImageConfig(payload)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/entrypoint"}, decoded.Config.Entrypoint)
+
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(payload, &document))
+	document["config"].(map[string]any)["Healthcheck"].(map[string]any)["Unknown"] = true
+	_, err = decodeImageConfig(mustJSON(t, document))
+	require.ErrorContains(t, err, "unknown field")
+}
+
 func TestImporterSelectsRequestedPlatformFromIndex(t *testing.T) {
 	layer := testLayer(t, testTarEntry{name: "value", body: "payload"})
 	fixture := newOCIImportFixture(t, []testLayerBlob{layer})

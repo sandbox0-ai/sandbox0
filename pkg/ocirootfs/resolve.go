@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -44,6 +45,9 @@ const (
 	defaultMaxLayers           = 512
 	defaultMaxLayerBytes       = 8 << 30
 	defaultMaxImageBytes       = 64 << 30
+	maxDockerHealthcheckBytes  = 64 << 10
+	maxDockerHealthcheckItems  = 1024
+	maxDockerHealthcheckString = 4096
 )
 
 var platformPartPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
@@ -242,8 +246,8 @@ func resolveImage(
 	if err != nil {
 		return nil, fmt.Errorf("fetch OCI config %s: %w", manifest.Config.Digest, err)
 	}
-	var config ocispec.Image
-	if err := decodeStrictJSON(configPayload, &config); err != nil {
+	config, err := decodeImageConfig(configPayload)
+	if err != nil {
 		return nil, fmt.Errorf("decode OCI config: %w", err)
 	}
 	if err := validateImage(config, manifest, platform, limits); err != nil {
@@ -254,6 +258,85 @@ func resolveImage(
 		manifestDigest: manifestDescriptor.Digest, configDigest: manifest.Config.Digest,
 		platform: platform, manifest: manifest, config: config, fetcher: fetcher,
 	}, nil
+}
+
+// Docker emits Healthcheck in otherwise valid OCI image configs. RootFS import
+// does not consume execution health checks, but accepting this one bounded,
+// strictly decoded extension avoids rejecting common Linux image filesystems.
+type compatibleImageConfigDocument struct {
+	Created *time.Time `json:"created,omitempty"`
+	Author  string     `json:"author,omitempty"`
+	ocispec.Platform
+	Config  json.RawMessage   `json:"config,omitempty"`
+	RootFS  ocispec.RootFS    `json:"rootfs"`
+	History []ocispec.History `json:"history,omitempty"`
+}
+
+type compatibleDockerImageConfig struct {
+	ocispec.ImageConfig
+	Healthcheck json.RawMessage `json:"Healthcheck,omitempty"`
+}
+
+type dockerHealthcheck struct {
+	Test          []string `json:"Test,omitempty"`
+	Interval      int64    `json:"Interval,omitempty"`
+	Timeout       int64    `json:"Timeout,omitempty"`
+	StartPeriod   int64    `json:"StartPeriod,omitempty"`
+	StartInterval int64    `json:"StartInterval,omitempty"`
+	Retries       int      `json:"Retries,omitempty"`
+}
+
+func decodeImageConfig(payload []byte) (ocispec.Image, error) {
+	var document compatibleImageConfigDocument
+	if err := decodeStrictJSON(payload, &document); err != nil {
+		return ocispec.Image{}, err
+	}
+	if len(document.Config) == 0 {
+		document.Config = []byte("{}")
+	}
+	var config compatibleDockerImageConfig
+	if err := decodeStrictJSON(document.Config, &config); err != nil {
+		return ocispec.Image{}, err
+	}
+	var healthcheck *dockerHealthcheck
+	if len(config.Healthcheck) > 0 && string(config.Healthcheck) != "null" {
+		if len(config.Healthcheck) > maxDockerHealthcheckBytes {
+			return ocispec.Image{}, fmt.Errorf("Docker healthcheck exceeds configured bounds")
+		}
+		healthcheck = &dockerHealthcheck{}
+		if err := decodeStrictJSON(config.Healthcheck, healthcheck); err != nil {
+			return ocispec.Image{}, err
+		}
+	}
+	if err := validateDockerHealthcheck(healthcheck); err != nil {
+		return ocispec.Image{}, err
+	}
+	return ocispec.Image{
+		Created: document.Created, Author: document.Author, Platform: document.Platform,
+		Config: config.ImageConfig, RootFS: document.RootFS, History: document.History,
+	}, nil
+}
+
+func validateDockerHealthcheck(healthcheck *dockerHealthcheck) error {
+	if healthcheck == nil {
+		return nil
+	}
+	if len(healthcheck.Test) > maxDockerHealthcheckItems || healthcheck.Retries < 0 ||
+		healthcheck.Retries > 1_000_000 || healthcheck.Interval < 0 || healthcheck.Timeout < 0 ||
+		healthcheck.StartPeriod < 0 || healthcheck.StartInterval < 0 {
+		return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+	}
+	total := 0
+	for _, item := range healthcheck.Test {
+		if len(item) > maxDockerHealthcheckString {
+			return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+		}
+		total += len(item)
+		if total > maxDockerHealthcheckBytes {
+			return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+		}
+	}
+	return nil
 }
 
 func normalizePinnedReference(raw string) (string, digest.Digest, error) {

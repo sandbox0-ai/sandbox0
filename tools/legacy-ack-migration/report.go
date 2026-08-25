@@ -24,6 +24,7 @@ type validationSummary struct {
 	AdjustedSandboxCount                int    `json:"adjusted_sandbox_count,omitempty"`
 	CompatibilityAdjustmentCount        int    `json:"compatibility_adjustment_count,omitempty"`
 	NormalizedSelfSourceFilesystemCount int    `json:"normalized_self_source_filesystem_count,omitempty"`
+	DeferredActiveRootFSBindingCount    int    `json:"deferred_active_rootfs_binding_count,omitempty"`
 }
 
 type report struct {
@@ -100,6 +101,7 @@ func catalogReport(
 		InferredPlatformCount: len(normalized.InferredLayers), AdjustedSandboxCount: adjustedSandboxes,
 		CompatibilityAdjustmentCount:        adjustments,
 		NormalizedSelfSourceFilesystemCount: len(normalized.NormalizedSelfSourceFilesystems),
+		DeferredActiveRootFSBindingCount:    len(normalized.DeferredActiveRootFSBindings),
 	}
 	return result, normalized, nil
 }

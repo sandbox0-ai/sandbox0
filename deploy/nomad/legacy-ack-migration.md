@@ -18,7 +18,11 @@ digests; they never contain sandbox configuration or storage credentials.
    read-only mode accepts only active or paused sandboxes, validates every
    schema, graph, platform, template, and resource-policy invariant, and emits
    `freeze_ready: false` plus the non-paused count when a final pause barrier is
-   still required. It never captures state and does not weaken later commands.
+   still required. An active ACK sandbox may not have its first durable RootFS
+   binding until pause; preflight reports that explicitly as a deferred binding
+   while still validating its template and resources. Strict validation and
+   capture never permit a missing binding. Preflight never captures state and
+   does not weaken later commands.
 2. Pause every live sandbox. Stop all ACK manager replicas and any writer that
    can mutate manager tables. Drain active lifecycle transactions, RootFS object
    deletions, and deletion-webhook deliveries.

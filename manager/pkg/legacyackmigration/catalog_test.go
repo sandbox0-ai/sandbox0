@@ -301,6 +301,30 @@ func TestNormalizeForPreflightAllowsOnlyActiveOrPausedSandboxes(t *testing.T) {
 	}
 }
 
+func TestNormalizeForPreflightDefersOnlyActiveRootFSBindings(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Sandboxes[0].DesiredState = sandboxstore.SandboxDesiredStateActive
+	catalog.Bindings = nil
+
+	normalized, err := catalog.NormalizeForPreflight(testNormalizeOptions())
+	if err != nil {
+		t.Fatalf("NormalizeForPreflight() error = %v", err)
+	}
+	if len(normalized.DeferredActiveRootFSBindings) != 1 ||
+		normalized.DeferredActiveRootFSBindings[0] != catalog.Sandboxes[0].ID ||
+		len(normalized.Sandboxes) != 1 || normalized.Sandboxes[0].FilesystemID != "" ||
+		normalized.Sandboxes[0].PinnedOCIRef != "" {
+		t.Fatalf("preflight deferred RootFS = %#v, sandboxes = %#v",
+			normalized.DeferredActiveRootFSBindings, normalized.Sandboxes)
+	}
+
+	catalog.Sandboxes[0].DesiredState = sandboxstore.SandboxDesiredStatePaused
+	if _, err := catalog.NormalizeForPreflight(testNormalizeOptions()); err == nil ||
+		!strings.Contains(err.Error(), "no team-consistent rootfs binding") {
+		t.Fatalf("NormalizeForPreflight() paused missing binding error = %v", err)
+	}
+}
+
 func TestNormalizeRequiresExplicitTargetAndPlatform(t *testing.T) {
 	catalog := validCatalog(t)
 	options := testNormalizeOptions()

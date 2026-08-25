@@ -180,6 +180,7 @@ type NormalizedCatalog struct {
 	Snapshots                       []NormalizedSnapshot
 	InferredLayers                  []string
 	NormalizedSelfSourceFilesystems []string
+	DeferredActiveRootFSBindings    []string
 }
 
 // MaterializedBuild is one tenant-scoped, complete generation conversion.
@@ -415,21 +416,6 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 				return nil, fmt.Errorf("legacy sandbox %s has unsupported preflight desired state %s", legacy.ID, legacy.DesiredState)
 			}
 		}
-		binding, ok := bindings[legacy.ID]
-		if !ok || binding.TeamID != legacy.TeamID {
-			return nil, fmt.Errorf("legacy sandbox %s has no team-consistent rootfs binding", legacy.ID)
-		}
-		filesystem := filesystems[binding.FilesystemID]
-		chain, chainErr := chainFor(filesystem.HeadLayerID)
-		if chainErr != nil {
-			return nil, chainErr
-		}
-		if err := validateFilesystemChain(filesystem, chain); err != nil {
-			return nil, err
-		}
-		normalized.LayerChains[filesystem.HeadLayerID] = chain
-		pinnedRef := pinnedRefs[strings.TrimSpace(chain[0].BaseImageDigest)]
-
 		var config sandboxstore.SandboxConfig
 		if err := json.Unmarshal(legacy.Config, &config); err != nil {
 			return nil, fmt.Errorf("decode legacy sandbox %s config: %w", legacy.ID, err)
@@ -438,7 +424,34 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 		if err != nil {
 			return nil, fmt.Errorf("decode legacy sandbox %s template spec: %w", legacy.ID, err)
 		}
-		spec.MainContainer.Image = pinnedRef
+		binding, hasBinding := bindings[legacy.ID]
+		filesystemID, pinnedRef := "", ""
+		if !hasBinding {
+			if requirePaused || legacy.DesiredState != sandboxstore.SandboxDesiredStateActive {
+				return nil, fmt.Errorf("legacy sandbox %s has no team-consistent rootfs binding", legacy.ID)
+			}
+			// The ACK runtime publishes an active sandbox's first durable RootFS
+			// binding during pause. Preflight can still validate its template and
+			// resources, but storage compatibility remains explicitly deferred to
+			// the strict post-pause validation and capture fence.
+			normalized.DeferredActiveRootFSBindings = append(normalized.DeferredActiveRootFSBindings, legacy.ID)
+		} else {
+			if binding.TeamID != legacy.TeamID {
+				return nil, fmt.Errorf("legacy sandbox %s has no team-consistent rootfs binding", legacy.ID)
+			}
+			filesystem := filesystems[binding.FilesystemID]
+			chain, chainErr := chainFor(filesystem.HeadLayerID)
+			if chainErr != nil {
+				return nil, chainErr
+			}
+			if err := validateFilesystemChain(filesystem, chain); err != nil {
+				return nil, err
+			}
+			normalized.LayerChains[filesystem.HeadLayerID] = chain
+			filesystemID = binding.FilesystemID
+			pinnedRef = pinnedRefs[strings.TrimSpace(chain[0].BaseImageDigest)]
+			spec.MainContainer.Image = pinnedRef
+		}
 		var memoryOverride *string
 		if config.Resources != nil && strings.TrimSpace(config.Resources.Memory) != "" {
 			value := strings.TrimSpace(config.Resources.Memory)
@@ -457,7 +470,7 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 			return nil, fmt.Errorf("legacy sandbox %s RootFS logical size changed during normalization", legacy.ID)
 		}
 		normalized.Sandboxes = append(normalized.Sandboxes, NormalizedSandbox{
-			FilesystemID:             binding.FilesystemID,
+			FilesystemID:             filesystemID,
 			PinnedOCIRef:             pinnedRef,
 			CompatibilityAdjustments: adjustments,
 			Record: sandboxstore.SandboxRecord{

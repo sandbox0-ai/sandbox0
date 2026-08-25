@@ -160,11 +160,12 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 		}
 	}
 	if opts.timeout == 0 {
-		if opts.mode == modeBuild {
+		switch opts.mode {
+		case modeBuild:
 			opts.timeout = defaultBuildTimeout
-		} else if opts.mode == modePause || opts.mode == modePauseAccess {
+		case modePause, modePauseAccess:
 			opts.timeout = defaultPauseTimeout
-		} else {
+		default:
 			opts.timeout = defaultControlTimeout
 		}
 	}

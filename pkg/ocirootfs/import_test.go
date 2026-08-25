@@ -105,6 +105,19 @@ func TestImporterRejectsDeviceEntryBeforeCreationAndRemovesPartialRoot(t *testin
 	assert.Empty(t, mustReadDir(t, fixture.workRoot))
 }
 
+func TestImporterPreservesLinuxBackslashFilename(t *testing.T) {
+	layer := testLayer(t, testTarEntry{name: `literal\backslash`, body: "payload"})
+	fixture := newOCIImportFixture(t, []testLayerBlob{layer})
+	importer := fixture.importer(t, Limits{})
+
+	result, err := importer.Import(t.Context(), fixture.request())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(result.RootPath)) })
+	payload, err := os.ReadFile(filepath.Join(result.RootPath, `literal\backslash`))
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(payload))
+}
+
 func TestImporterRejectsCompressedLayerDigestMismatch(t *testing.T) {
 	layer := testLayer(t, testTarEntry{name: "value", body: "payload"})
 	fixture := newOCIImportFixture(t, []testLayerBlob{layer})

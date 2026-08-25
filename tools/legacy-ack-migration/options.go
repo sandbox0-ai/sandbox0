@@ -16,6 +16,7 @@ import (
 const (
 	modeInventory            = "inventory"
 	modePreflight            = "preflight"
+	modePauseAccess          = "pause-access"
 	modePause                = "pause"
 	modeValidate             = "validate"
 	modeCapture              = "capture"
@@ -58,7 +59,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	var opts options
 	set := flag.NewFlagSet("legacy-ack-migration", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
-	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, preflight, pause, validate, capture, retire, prepare, build, or commit")
+	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, preflight, pause-access, pause, validate, capture, retire, prepare, build, or commit")
 	set.StringVar(&opts.sessionID, "session-id", "", "immutable migration session ID")
 	set.StringVar(&opts.confirmSourceDigest, "confirm-source-catalog-digest", "", "required exact capture digest for destructive retirement")
 	set.StringVar(&opts.sourceDSNFile, "source-dsn-file", strings.TrimSpace(getenv("SANDBOX0_LEGACY_SOURCE_DSN_FILE")), "owner-only file containing the source PostgreSQL DSN")
@@ -124,7 +125,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 			return options{}, err
 		}
 	}
-	if opts.mode == modePause {
+	if opts.mode == modePause || opts.mode == modePauseAccess {
 		if _, err := parseLoopbackManagerURL(opts.sourceManagerURL); err != nil {
 			return options{}, err
 		}
@@ -161,7 +162,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	if opts.timeout == 0 {
 		if opts.mode == modeBuild {
 			opts.timeout = defaultBuildTimeout
-		} else if opts.mode == modePause {
+		} else if opts.mode == modePause || opts.mode == modePauseAccess {
 			opts.timeout = defaultPauseTimeout
 		} else {
 			opts.timeout = defaultControlTimeout
@@ -175,7 +176,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 
 func isSupportedMode(mode string) bool {
 	switch mode {
-	case modeInventory, modePreflight, modePause, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
+	case modeInventory, modePreflight, modePauseAccess, modePause, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
 		return true
 	default:
 		return false
@@ -187,7 +188,7 @@ func modeRequiresSession(mode string) bool {
 }
 
 func modeRequiresSource(mode string) bool {
-	return mode == modeInventory || mode == modePreflight || mode == modePause || mode == modeValidate || mode == modeCapture
+	return mode == modeInventory || mode == modePreflight || mode == modePauseAccess || mode == modePause || mode == modeValidate || mode == modeCapture
 }
 
 func modeRequiresTarget(mode string) bool {

@@ -82,6 +82,11 @@ func TestParseOptionsAppliesModeSpecificCredentialAndSafetyContracts(t *testing.
 	if pause.timeout != defaultPauseTimeout {
 		t.Fatalf("pause timeout = %s", pause.timeout)
 	}
+	pauseArgs[1] = modePauseAccess
+	access, err := parseOptions(pauseArgs, getenv)
+	if err != nil || access.timeout != defaultPauseTimeout {
+		t.Fatalf("pause-access parseOptions() = %#v, %v", access, err)
+	}
 }
 
 func TestParseOptionsDoesNotRequireTargetForReadOnlyInventory(t *testing.T) {

@@ -60,6 +60,7 @@ func pauseSourceSandboxes(
 	opts options,
 	getenv func(string) string,
 	normalizeOptions legacyackmigration.NormalizeOptions,
+	accessOnly bool,
 ) (*pauseSummary, *legacyackmigration.Catalog, error) {
 	summary := &pauseSummary{StartedAt: time.Now().UTC()}
 	dsn, err := loadSourceDSN(opts.sourceDSNFile, strings.TrimSpace(getenv("SANDBOX0_LEGACY_SOURCE_DSN")))
@@ -118,6 +119,18 @@ func pauseSourceSandboxes(
 		return summary, initial, err
 	}
 	summary.ManagerAccessVerified = true
+	if accessOnly {
+		summary.FinalActiveCount, summary.FinalPausedCount = sandboxStateCounts(initial)
+		summary.ActiveLifecycleTxns = initial.ActiveLifecycleTxns
+		summary.PendingObjectDeletions, summary.PendingDeletionWebhooks, err = readRetirementQueueCounts(ctx, pool)
+		if err != nil {
+			return summary, initial, err
+		}
+		summary.FinalSourceCatalogDigest = summary.InitialSourceCatalogDigest
+		completedAt := time.Now().UTC()
+		summary.CompletedAt = &completedAt
+		return summary, initial, nil
+	}
 	if summary.PauseCandidateCount > 0 {
 		dispatchStartedAt := time.Now().UTC()
 		summary.PauseDispatchStartedAt = &dispatchStartedAt

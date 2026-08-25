@@ -23,9 +23,12 @@ digests; they never contain sandbox configuration or storage credentials.
    while still validating its template and resources. Strict validation and
    capture never permit a missing binding. Preflight never captures state and
    does not weaken later commands.
-2. Close public and SSH ingress, then run `pause` through a loopback
+2. Before closing ingress, run `pause-access` through a loopback
    `kubectl port-forward` to the old manager. Supply its data-plane signing key
-   through an owner-only file. The tool calls the normal manager lifecycle API
+   through an owner-only file. This read-only check signs a fresh team-bound
+   token and verifies manager ownership access for every live sandbox without
+   dispatching a pause. Then close public and SSH ingress and run `pause` with
+   the same inputs. The tool calls the normal manager lifecycle API
    with a fresh team-bound token for every active sandbox; it never edits
    desired state directly. It rejects any change to the live sandbox set and
    waits for every sandbox to be paused, lifecycle transactions to finish, and

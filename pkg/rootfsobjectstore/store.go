@@ -13,6 +13,25 @@ func Create(
 	cfg config.RootFSObjectStorageConfig,
 	observer objectstore.RequestObserver,
 ) (objectstore.Store, error) {
+	return create(cfg, observer, false)
+}
+
+// CreateLegacyReadCompatible constructs the one-time migration source reader
+// for regions that enabled object encryption after some legacy layers already
+// existed. Callers must independently verify every plaintext object's size and
+// digest; target and active runtime stores must continue to use Create.
+func CreateLegacyReadCompatible(
+	cfg config.RootFSObjectStorageConfig,
+	observer objectstore.RequestObserver,
+) (objectstore.Store, error) {
+	return create(cfg, observer, true)
+}
+
+func create(
+	cfg config.RootFSObjectStorageConfig,
+	observer objectstore.RequestObserver,
+	allowLegacyPlaintext bool,
+) (objectstore.Store, error) {
 	store, err := objectstore.Create(objectstore.Config{
 		Type: cfg.Type, Bucket: cfg.Bucket, Region: cfg.Region, Endpoint: cfg.Endpoint,
 		AccessKey: cfg.AccessKey, SecretKey: cfg.SecretKey, SessionToken: cfg.SessionToken,
@@ -21,12 +40,20 @@ func Create(
 	if err != nil {
 		return nil, err
 	}
-	return WrapEncryption(store, cfg)
+	return wrapEncryption(store, cfg, allowLegacyPlaintext)
 }
 
 func WrapEncryption(
 	store objectstore.Store,
 	cfg config.RootFSObjectStorageConfig,
+) (objectstore.Store, error) {
+	return wrapEncryption(store, cfg, false)
+}
+
+func wrapEncryption(
+	store objectstore.Store,
+	cfg config.RootFSObjectStorageConfig,
+	allowLegacyPlaintext bool,
 ) (objectstore.Store, error) {
 	if store == nil || !cfg.ObjectEncryptionEnabled {
 		return store, nil
@@ -39,7 +66,11 @@ func WrapEncryption(
 	if err != nil {
 		return nil, err
 	}
-	return objectstore.Encrypting(store, objectstore.EncryptionConfig{
+	encryption := objectstore.EncryptionConfig{
 		Enabled: true, Algorithm: cfg.ObjectEncryptionAlgo, KeyEncryptor: keyEncryptor,
-	}), nil
+	}
+	if allowLegacyPlaintext {
+		return objectstore.EncryptingLegacyReadCompatible(store, encryption), nil
+	}
+	return objectstore.Encrypting(store, encryption), nil
 }

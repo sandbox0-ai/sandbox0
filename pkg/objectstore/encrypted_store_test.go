@@ -93,6 +93,54 @@ func TestEncryptedStoreRejectsPlaintextObject(t *testing.T) {
 	}
 }
 
+func TestLegacyReadCompatibleEncryptedStoreReadsMixedObjects(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	if err := base.Put("rootfs/plain.tar", strings.NewReader("0123456789")); err != nil {
+		t.Fatalf("raw Put() error = %v", err)
+	}
+	config := EncryptionConfig{
+		Enabled: true, KeyEncryptor: reversibleTestEncryptor{}, ChunkSize: 4,
+	}
+	strict := Encrypting(base, config)
+	if err := strict.Put("rootfs/encrypted.tar", strings.NewReader("encrypted payload")); err != nil {
+		t.Fatalf("encrypted Put() error = %v", err)
+	}
+	compatible := EncryptingLegacyReadCompatible(base, config)
+	for _, test := range []struct {
+		key   string
+		off   int64
+		limit int64
+		want  string
+	}{
+		{key: "rootfs/plain.tar", off: 2, limit: 5, want: "23456"},
+		{key: "rootfs/plain.tar", off: 50, limit: -1, want: ""},
+		{key: "rootfs/encrypted.tar", off: 0, limit: -1, want: "encrypted payload"},
+	} {
+		reader, err := compatible.Get(test.key, test.off, test.limit)
+		if err != nil {
+			t.Fatalf("Get(%q) error = %v", test.key, err)
+		}
+		got, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil || string(got) != test.want {
+			t.Fatalf("Get(%q) = %q, %v, want %q", test.key, got, err, test.want)
+		}
+	}
+	if err := compatible.Put("rootfs/new.tar", strings.NewReader("new plaintext")); err != nil {
+		t.Fatalf("compatible Put() error = %v", err)
+	}
+	rawReader, err := base.Get("rootfs/new.tar", 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(rawReader)
+	_ = rawReader.Close()
+	if err != nil || bytes.Contains(raw, []byte("new plaintext")) {
+		t.Fatalf("compatible writer did not preserve encryption: contains=%v error=%v",
+			bytes.Contains(raw, []byte("new plaintext")), err)
+	}
+}
+
 func TestEncryptedStoreConditionalCreateDoesNotOverwrite(t *testing.T) {
 	base := NewMemoryStore(t.Name())
 	store := Encrypting(base, EncryptionConfig{

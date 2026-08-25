@@ -215,7 +215,7 @@ func buildTargetCatalog(
 	); err != nil {
 		return nil, err
 	}
-	sourceObjects, err := rootfsobjectstore.Create(sourceConfig.RootFSObjectStorage, nil)
+	sourceObjects, err := rootfsobjectstore.CreateLegacyReadCompatible(sourceConfig.RootFSObjectStorage, nil)
 	if err != nil {
 		return nil, fmt.Errorf("configure legacy source object store: %w", err)
 	}

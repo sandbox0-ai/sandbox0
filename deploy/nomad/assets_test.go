@@ -62,6 +62,10 @@ func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T)
 	if !regexp.MustCompile(`(?m)^\s*node_pool\s*=\s*"sandbox0"\s*$`).MatchString(warmJob) {
 		t.Fatal("warm carriers must target the sandbox0 Nomad node pool")
 	}
+	if strings.Count(warmJob, `attribute = "${node.unique.id}"`) != 2 ||
+		strings.Count(warmJob, `weight    = 100`) != 2 {
+		t.Fatal("both warm carrier classes must spread across dedicated node identities")
+	}
 	restartBlock := regexp.MustCompile(`(?s)restart\s*\{.*?\}`).FindString(warmJob)
 	if restartBlock == "" || !regexp.MustCompile(`(?m)^\s*attempts\s*=\s*0\s*$`).MatchString(restartBlock) ||
 		!regexp.MustCompile(`(?m)^\s*mode\s*=\s*"fail"\s*$`).MatchString(restartBlock) {

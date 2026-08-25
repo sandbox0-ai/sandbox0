@@ -48,6 +48,27 @@ func TestLayerApplierVerifiesChainAndAppliesWhiteouts(t *testing.T) {
 	}
 }
 
+func TestLayerApplierPreservesLinuxBackslashFilename(t *testing.T) {
+	root := t.TempDir()
+	store := objectstore.NewMemoryStore("")
+	payload := legacyTar(t, tarEntry{name: `literal\backslash`, body: "payload"})
+	if err := store.Put("layer", bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := (LayerApplier{Store: store}).Apply(
+		context.Background(), root, []Layer{legacyLayer("layer", "layer", payload)},
+	); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, `literal\backslash`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("backslash file payload = %q", got)
+	}
+}
+
 func TestLayerApplierRejectsSizeDigestAndUnsafeEntries(t *testing.T) {
 	payload := legacyTar(t, tarEntry{name: "file", body: "payload"})
 	tests := []struct {
@@ -78,6 +99,18 @@ func TestLayerApplierRejectsSizeDigestAndUnsafeEntries(t *testing.T) {
 			layer:   func(layer Layer) Layer { return layer },
 			payload: legacyTar(t, tarEntry{name: "device", kind: tar.TypeChar}),
 			wantErr: "device and FIFO",
+		},
+		{
+			name:    "absolute path",
+			layer:   func(layer Layer) Layer { return layer },
+			payload: legacyTar(t, tarEntry{name: "/escape", body: "payload"}),
+			wantErr: "layer path is unsafe",
+		},
+		{
+			name:    "parent traversal",
+			layer:   func(layer Layer) Layer { return layer },
+			payload: legacyTar(t, tarEntry{name: "../escape", body: "payload"}),
+			wantErr: "layer path is unsafe",
 		},
 	}
 	for _, test := range tests {

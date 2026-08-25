@@ -140,8 +140,11 @@ func (s *legacyLayerApplyState) filter(header *tar.Header) (bool, error) {
 		return false, fmt.Errorf("layer chain contains more than %d entries", s.limits.MaxEntries)
 	}
 	name := filepath.ToSlash(header.Name)
+	// The migration and its target runtime are Linux-only. A backslash is a
+	// literal Linux filename byte, not a path separator. Legacy layers can
+	// therefore preserve it without weakening the slash-based traversal checks.
 	if name == "" || len(name) > s.limits.MaxPathBytes || strings.ContainsRune(name, '\x00') ||
-		strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
+		strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
 		return false, fmt.Errorf("layer path is unsafe or exceeds %d bytes", s.limits.MaxPathBytes)
 	}
 	if len(header.Linkname) > s.limits.MaxPathBytes || strings.ContainsRune(header.Linkname, '\x00') {

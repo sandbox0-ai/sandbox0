@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"golang.org/x/oauth2/google"
 )
 
@@ -316,8 +318,11 @@ func newS3Store(cfg Config) (Store, error) {
 		)
 	}
 
+	pathStyle := storageType != TypeOSS
 	options := func(o *s3.Options) {
-		o.UsePathStyle = true
+		// OSS S3-compatible endpoints require virtual-hosted bucket addressing.
+		// Generic S3-compatible stores keep the existing path-style contract.
+		o.UsePathStyle = pathStyle
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
@@ -328,7 +333,7 @@ func newS3Store(cfg Config) (Store, error) {
 		bucket:    strings.TrimSpace(cfg.Bucket),
 		endpoint:  endpoint,
 		provider:  storageType,
-		pathStyle: true,
+		pathStyle: pathStyle,
 	}, nil
 }
 
@@ -337,9 +342,24 @@ func (s *s3Store) String() string {
 }
 
 func (s *s3Store) Create() error {
-	_, err := s.client.CreateBucket(context.Background(), &s3.CreateBucketInput{
+	ctx := context.Background()
+	if _, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); err == nil {
+		return nil
+	} else if !IsNotFound(err) {
+		return fmt.Errorf("check object storage bucket before create: %w", err)
+	}
+	_, err := s.client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(s.bucket),
 	})
+	if err != nil && isBucketCreateRace(err) {
+		// A concurrent creator or providers such as OSS can report a generic
+		// already-exists result. Only accept it after these credentials can HEAD
+		// the exact configured bucket; this never treats another owner's bucket
+		// as successfully initialized.
+		if _, headErr := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); headErr == nil {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -395,15 +415,48 @@ func (s *s3Store) PutIfAbsentContext(ctx context.Context, key string, in io.Read
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket), Key: aws.String(strings.TrimLeft(key, "/")),
-		Body:        withObjectReadContext(ctx, in),
-		IfNoneMatch: aws.String("*"),
-	})
+		Body: withObjectReadContext(ctx, in),
+	}
+	options := make([]func(*s3.Options), 0, 1)
+	if s.provider == TypeOSS {
+		// OSS rejects the standard S3 If-None-Match conditional on PutObject.
+		// Its signed x-oss-forbid-overwrite header provides the corresponding
+		// atomic create-only operation and returns FileAlreadyExists on collision.
+		options = append(options, withOSSForbidOverwrite)
+	} else {
+		input.IfNoneMatch = aws.String("*")
+	}
+	_, err := s.client.PutObject(ctx, input, options...)
 	if isConditionalCreateConflict(err) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+type ossForbidOverwriteMiddleware struct{}
+
+func (ossForbidOverwriteMiddleware) ID() string { return "Sandbox0OSSForbidOverwrite" }
+
+func (ossForbidOverwriteMiddleware) HandleFinalize(
+	ctx context.Context,
+	input middleware.FinalizeInput,
+	next middleware.FinalizeHandler,
+) (middleware.FinalizeOutput, middleware.Metadata, error) {
+	request, ok := input.Request.(*smithyhttp.Request)
+	if !ok || request == nil || request.Request == nil {
+		return middleware.FinalizeOutput{}, middleware.Metadata{},
+			fmt.Errorf("OSS conditional create request is unavailable before signing")
+	}
+	request.Header.Set("x-oss-forbid-overwrite", "true")
+	return next.HandleFinalize(ctx, input)
+}
+
+func withOSSForbidOverwrite(options *s3.Options) {
+	options.APIOptions = append(options.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Finalize.Insert(ossForbidOverwriteMiddleware{}, "Signing", middleware.Before)
+	})
 }
 
 func (s *s3Store) Delete(key string) error {
@@ -1008,7 +1061,23 @@ func isConditionalCreateConflict(err error) bool {
 		return false
 	}
 	switch strings.ToLower(apiErr.ErrorCode()) {
-	case "preconditionfailed", "conditionnotmatch", "412":
+	case "preconditionfailed", "conditionnotmatch", "filealreadyexists", "412":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBucketCreateRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch strings.ToLower(apiErr.ErrorCode()) {
+	case "bucketalreadyexists", "bucketalreadyownedbyyou":
 		return true
 	default:
 		return false

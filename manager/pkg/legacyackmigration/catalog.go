@@ -18,17 +18,19 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 const (
-	LegacyManagerSchemaVersion                int64 = 19
-	minimumLegacyTargetRootFSLogicalSizeBytes       = 8 << 30
-	minimumLegacyTargetRootFSLogicalSize            = "8Gi"
+	LegacyManagerSchemaVersion int64 = 19
+	// The exact retired catalog audit measured a 6.31 GB maximum allocated
+	// image root; 8 GiB preserves bounded XFS metadata headroom as well.
+	legacyBaseImageReserveBytes = 8 << 30
 )
 
-const legacyRootFSMinimumExpansionAdjustment = "mainContainer.resources.ephemeralStorage raised to 8Gi for block-COW RootFS materialization"
+const legacyRootFSExpansionAdjustment = "mainContainer.resources.ephemeralStorage expanded to preserve ACK writable capacity in the complete block-COW RootFS"
 
 type Sandbox struct {
 	ID                  string
@@ -463,8 +465,8 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 			return nil, fmt.Errorf("resolve legacy sandbox %s RootFS logical size: %w", legacy.ID, sizeErr)
 		}
 		if rootFSExpanded {
-			spec.MainContainer.Resources.EphemeralStorage = minimumLegacyTargetRootFSLogicalSize
-			adjustments = append(adjustments, legacyRootFSMinimumExpansionAdjustment)
+			spec.MainContainer.Resources.EphemeralStorage = formatLegacyTargetRootFSLogicalSize(logicalSize)
+			adjustments = append(adjustments, legacyRootFSExpansionAdjustment)
 		}
 		var memoryOverride *string
 		if config.Resources != nil && strings.TrimSpace(config.Resources.Memory) != "" {
@@ -765,18 +767,33 @@ func resolveSourceSandboxLogicalSizes(
 }
 
 // resolveLegacyTargetRootFSLogicalSize maps ACK writable-layer capacity to the
-// complete block-COW filesystem geometry used by the target runtime. Legacy
-// sizes below 8 GiB cannot contain both the materialized image and writable
-// state, so only this one-time migration applies the compatibility floor.
+// complete block-COW filesystem geometry used by the target runtime. ACK did
+// not charge the immutable image layers against ephemeralStorage. The target
+// stores the image and writable state in one block device, so migration keeps
+// a bounded image reserve in addition to the original writable capacity.
 func resolveLegacyTargetRootFSLogicalSize(spec sandboxspec.TemplateSpec) (int64, bool, error) {
-	logicalSize, err := templatepkg.ResolveRootFSLogicalSize(spec)
+	writableSize, err := templatepkg.ResolveRootFSLogicalSize(spec)
 	if err != nil {
 		return 0, false, err
 	}
-	if logicalSize < minimumLegacyTargetRootFSLogicalSizeBytes {
-		return minimumLegacyTargetRootFSLogicalSizeBytes, true, nil
+	if writableSize > rootfsartifact.MaximumLogicalSizeBytes-legacyBaseImageReserveBytes {
+		return 0, false, fmt.Errorf(
+			"legacy writable RootFS size %d leaves no room for the %d-byte materialized image reserve",
+			writableSize, legacyBaseImageReserveBytes,
+		)
 	}
-	return logicalSize, false, nil
+	logicalSize := writableSize + legacyBaseImageReserveBytes
+	return logicalSize, logicalSize != writableSize, nil
+}
+
+func formatLegacyTargetRootFSLogicalSize(logicalSize int64) string {
+	if logicalSize%(1<<30) == 0 {
+		return fmt.Sprintf("%dGi", logicalSize>>30)
+	}
+	if logicalSize%(1<<20) == 0 {
+		return fmt.Sprintf("%dMi", logicalSize>>20)
+	}
+	return fmt.Sprintf("%d", logicalSize)
 }
 
 func validateFilesystemGraph(filesystems map[string]Filesystem) error {

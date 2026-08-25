@@ -67,6 +67,57 @@ func TestNormalizeProducesPinnedPausedNomadRecords(t *testing.T) {
 	}
 }
 
+func TestNormalizeExpandsLegacyWritableRootFSGeometryForBlockMaterialization(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Sandboxes[0].TemplateSpec = setLegacyEphemeralStorage(t, catalog.Sandboxes[0].TemplateSpec, "512Mi")
+	catalog.SourceSandboxes[0].TemplateSpec = append(json.RawMessage(nil), catalog.Sandboxes[0].TemplateSpec...)
+
+	normalized, err := catalog.Normalize(testNormalizeOptions())
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if got := normalized.SourceSandboxLogicalSize["sandbox-1"]; got != 8<<30 {
+		t.Fatalf("source sandbox logical size = %d, want %d", got, int64(8<<30))
+	}
+	if got := normalized.FilesystemLogicalSizes["filesystem-1"]; got != 8<<30 {
+		t.Fatalf("filesystem logical size = %d, want %d", got, int64(8<<30))
+	}
+	if len(normalized.MaterializedBuilds) != 1 || normalized.MaterializedBuilds[0].LogicalSizeBytes != 8<<30 {
+		t.Fatalf("materialized builds = %#v", normalized.MaterializedBuilds)
+	}
+	got := normalized.Sandboxes[0]
+	if got.Record.TemplateSpec.MainContainer.Resources.EphemeralStorage != "8Gi" {
+		t.Fatalf("normalized ephemeral storage = %q", got.Record.TemplateSpec.MainContainer.Resources.EphemeralStorage)
+	}
+	if !strings.Contains(strings.Join(got.CompatibilityAdjustments, "\n"), legacyRootFSMinimumExpansionAdjustment) {
+		t.Fatalf("CompatibilityAdjustments = %#v", got.CompatibilityAdjustments)
+	}
+	if !strings.Contains(string(catalog.Sandboxes[0].TemplateSpec), `"ephemeralStorage":"512Mi"`) {
+		t.Fatal("Normalize() mutated the frozen source catalog")
+	}
+}
+
+func TestNormalizePreservesLegacyRootFSGeometryAtOrAboveMigrationFloor(t *testing.T) {
+	for _, size := range []string{"8Gi", "30Gi"} {
+		t.Run(size, func(t *testing.T) {
+			catalog := validCatalog(t)
+			catalog.Sandboxes[0].TemplateSpec = setLegacyEphemeralStorage(t, catalog.Sandboxes[0].TemplateSpec, size)
+			catalog.SourceSandboxes[0].TemplateSpec = append(json.RawMessage(nil), catalog.Sandboxes[0].TemplateSpec...)
+
+			normalized, err := catalog.Normalize(testNormalizeOptions())
+			if err != nil {
+				t.Fatalf("Normalize() error = %v", err)
+			}
+			if got := normalized.Sandboxes[0].Record.TemplateSpec.MainContainer.Resources.EphemeralStorage; got != size {
+				t.Fatalf("normalized ephemeral storage = %q, want %q", got, size)
+			}
+			if strings.Contains(strings.Join(normalized.Sandboxes[0].CompatibilityAdjustments, "\n"), legacyRootFSMinimumExpansionAdjustment) {
+				t.Fatalf("CompatibilityAdjustments = %#v", normalized.Sandboxes[0].CompatibilityAdjustments)
+			}
+		})
+	}
+}
+
 func TestCatalogDigestIsDeterministicAndContentAddressed(t *testing.T) {
 	catalog := validCatalog(t)
 	first, err := catalog.Digest()
@@ -437,4 +488,14 @@ func mustUnmarshal(t *testing.T, raw []byte, destination any) {
 	if err := json.Unmarshal(raw, destination); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func setLegacyEphemeralStorage(t *testing.T, raw json.RawMessage, value string) json.RawMessage {
+	t.Helper()
+	var spec map[string]any
+	mustUnmarshal(t, raw, &spec)
+	mainContainer := spec["mainContainer"].(map[string]any)
+	resources := mainContainer["resources"].(map[string]any)
+	resources["ephemeralStorage"] = value
+	return mustMarshal(t, spec)
 }

@@ -22,7 +22,13 @@ import (
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
-const LegacyManagerSchemaVersion int64 = 19
+const (
+	LegacyManagerSchemaVersion                int64 = 19
+	minimumLegacyTargetRootFSLogicalSizeBytes       = 8 << 30
+	minimumLegacyTargetRootFSLogicalSize            = "8Gi"
+)
+
+const legacyRootFSMinimumExpansionAdjustment = "mainContainer.resources.ephemeralStorage raised to 8Gi for block-COW RootFS materialization"
 
 type Sandbox struct {
 	ID                  string
@@ -452,6 +458,14 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 			pinnedRef = pinnedRefs[strings.TrimSpace(chain[0].BaseImageDigest)]
 			spec.MainContainer.Image = pinnedRef
 		}
+		logicalSize, rootFSExpanded, sizeErr := resolveLegacyTargetRootFSLogicalSize(spec)
+		if sizeErr != nil {
+			return nil, fmt.Errorf("resolve legacy sandbox %s RootFS logical size: %w", legacy.ID, sizeErr)
+		}
+		if rootFSExpanded {
+			spec.MainContainer.Resources.EphemeralStorage = minimumLegacyTargetRootFSLogicalSize
+			adjustments = append(adjustments, legacyRootFSMinimumExpansionAdjustment)
+		}
 		var memoryOverride *string
 		if config.Resources != nil && strings.TrimSpace(config.Resources.Memory) != "" {
 			value := strings.TrimSpace(config.Resources.Memory)
@@ -462,10 +476,6 @@ func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*Norma
 			return nil, fmt.Errorf("resolve legacy sandbox %s resources: %w", legacy.ID, resourceErr)
 		}
 		spec.MainContainer.Resources = resources.Quota
-		logicalSize, sizeErr := templatepkg.ResolveRootFSLogicalSize(spec)
-		if sizeErr != nil {
-			return nil, fmt.Errorf("resolve legacy sandbox %s RootFS logical size: %w", legacy.ID, sizeErr)
-		}
 		if sourceSize, ok := sourceSizes[legacy.ID]; ok && sourceSize != logicalSize {
 			return nil, fmt.Errorf("legacy sandbox %s RootFS logical size changed during normalization", legacy.ID)
 		}
@@ -743,7 +753,7 @@ func resolveSourceSandboxLogicalSizes(
 		if err := decodeStrictJSON(record.spec, &spec); err != nil {
 			return nil, nil, fmt.Errorf("decode legacy source sandbox %s template geometry: %w", id, err)
 		}
-		logicalSize, err := templatepkg.ResolveRootFSLogicalSize(sandboxspec.TemplateSpec{
+		logicalSize, _, err := resolveLegacyTargetRootFSLogicalSize(sandboxspec.TemplateSpec{
 			MainContainer: sandboxspec.ContainerSpec{Resources: spec.MainContainer.Resources},
 		})
 		if err != nil {
@@ -752,6 +762,21 @@ func resolveSourceSandboxLogicalSizes(
 		sizes[id], teams[id] = logicalSize, record.team
 	}
 	return sizes, teams, nil
+}
+
+// resolveLegacyTargetRootFSLogicalSize maps ACK writable-layer capacity to the
+// complete block-COW filesystem geometry used by the target runtime. Legacy
+// sizes below 8 GiB cannot contain both the materialized image and writable
+// state, so only this one-time migration applies the compatibility floor.
+func resolveLegacyTargetRootFSLogicalSize(spec sandboxspec.TemplateSpec) (int64, bool, error) {
+	logicalSize, err := templatepkg.ResolveRootFSLogicalSize(spec)
+	if err != nil {
+		return 0, false, err
+	}
+	if logicalSize < minimumLegacyTargetRootFSLogicalSizeBytes {
+		return minimumLegacyTargetRootFSLogicalSizeBytes, true, nil
+	}
+	return logicalSize, false, nil
 }
 
 func validateFilesystemGraph(filesystems map[string]Filesystem) error {

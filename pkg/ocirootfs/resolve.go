@@ -301,7 +301,7 @@ func decodeImageConfig(payload []byte) (ocispec.Image, error) {
 	var healthcheck *dockerHealthcheck
 	if len(config.Healthcheck) > 0 && string(config.Healthcheck) != "null" {
 		if len(config.Healthcheck) > maxDockerHealthcheckBytes {
-			return ocispec.Image{}, fmt.Errorf("Docker healthcheck exceeds configured bounds")
+			return ocispec.Image{}, fmt.Errorf("docker healthcheck exceeds configured bounds")
 		}
 		healthcheck = &dockerHealthcheck{}
 		if err := decodeStrictJSON(config.Healthcheck, healthcheck); err != nil {
@@ -324,16 +324,16 @@ func validateDockerHealthcheck(healthcheck *dockerHealthcheck) error {
 	if len(healthcheck.Test) > maxDockerHealthcheckItems || healthcheck.Retries < 0 ||
 		healthcheck.Retries > 1_000_000 || healthcheck.Interval < 0 || healthcheck.Timeout < 0 ||
 		healthcheck.StartPeriod < 0 || healthcheck.StartInterval < 0 {
-		return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+		return fmt.Errorf("docker healthcheck exceeds configured bounds")
 	}
 	total := 0
 	for _, item := range healthcheck.Test {
 		if len(item) > maxDockerHealthcheckString {
-			return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+			return fmt.Errorf("docker healthcheck exceeds configured bounds")
 		}
 		total += len(item)
 		if total > maxDockerHealthcheckBytes {
-			return fmt.Errorf("Docker healthcheck exceeds configured bounds")
+			return fmt.Errorf("docker healthcheck exceeds configured bounds")
 		}
 	}
 	return nil

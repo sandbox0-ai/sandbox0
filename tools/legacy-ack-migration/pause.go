@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/legacyackmigration"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 )
 
 const (
@@ -39,6 +40,7 @@ type pauseSummary struct {
 	ActiveLifecycleTxns        int64      `json:"active_lifecycle_transactions"`
 	PendingObjectDeletions     int64      `json:"pending_object_deletions"`
 	PendingDeletionWebhooks    int64      `json:"pending_deletion_webhooks"`
+	PendingMeteringOperations  int64      `json:"pending_metering_operations"`
 }
 
 func parseLoopbackManagerURL(value string) (*url.URL, error) {
@@ -122,7 +124,8 @@ func pauseSourceSandboxes(
 	if accessOnly {
 		summary.FinalActiveCount, summary.FinalPausedCount = sandboxStateCounts(initial)
 		summary.ActiveLifecycleTxns = initial.ActiveLifecycleTxns
-		summary.PendingObjectDeletions, summary.PendingDeletionWebhooks, err = readRetirementQueueCounts(ctx, pool)
+		summary.PendingObjectDeletions, summary.PendingDeletionWebhooks,
+			summary.PendingMeteringOperations, err = readRetirementQueueCounts(ctx, pool)
 		if err != nil {
 			return summary, initial, err
 		}
@@ -150,7 +153,7 @@ func pauseSourceSandboxes(
 			return summary, nil, readErr
 		}
 		active, paused := sandboxStateCounts(final)
-		objectDeletions, deletionWebhooks, queueErr := readRetirementQueueCounts(ctx, pool)
+		objectDeletions, deletionWebhooks, meteringOperations, queueErr := readRetirementQueueCounts(ctx, pool)
 		if queueErr != nil {
 			return summary, final, queueErr
 		}
@@ -159,11 +162,12 @@ func pauseSourceSandboxes(
 		summary.ActiveLifecycleTxns = final.ActiveLifecycleTxns
 		summary.PendingObjectDeletions = objectDeletions
 		summary.PendingDeletionWebhooks = deletionWebhooks
+		summary.PendingMeteringOperations = meteringOperations
 		if len(final.Sandboxes) != summary.InitialSandboxCount || !sameLiveSandboxSet(initial, final) {
 			return summary, final, fmt.Errorf("legacy live sandbox set changed after ingress closure")
 		}
 		if active == 0 && paused == len(final.Sandboxes) && final.ActiveLifecycleTxns == 0 &&
-			objectDeletions == 0 && deletionWebhooks == 0 {
+			objectDeletions == 0 && deletionWebhooks == 0 && meteringOperations == 0 {
 			if _, normalizeErr := final.Normalize(normalizeOptions); normalizeErr != nil {
 				return summary, final, fmt.Errorf("strict post-pause validation: %w", normalizeErr)
 			}
@@ -304,15 +308,19 @@ func sourceSandboxIsPaused(ctx context.Context, pool *pgxpool.Pool, sandboxID, t
 	}
 }
 
-func readRetirementQueueCounts(ctx context.Context, pool *pgxpool.Pool) (int64, int64, error) {
+func readRetirementQueueCounts(ctx context.Context, pool *pgxpool.Pool) (int64, int64, int64, error) {
 	var objectDeletions, deletionWebhooks int64
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.rootfs_object_deletions`).Scan(&objectDeletions); err != nil {
-		return 0, 0, fmt.Errorf("count pending source RootFS deletions: %w", err)
+		return 0, 0, 0, fmt.Errorf("count pending source RootFS deletions: %w", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.sandbox_deletion_webhook_outbox`).Scan(&deletionWebhooks); err != nil {
-		return 0, 0, fmt.Errorf("count pending source deletion webhooks: %w", err)
+		return 0, 0, 0, fmt.Errorf("count pending source deletion webhooks: %w", err)
 	}
-	return objectDeletions, deletionWebhooks, nil
+	meteringStats, err := meteringoutbox.NewRepository(pool).Stats(ctx)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("count pending source metering operations: %w", err)
+	}
+	return objectDeletions, deletionWebhooks, meteringStats.Pending, nil
 }
 
 func sandboxStateCounts(catalog *legacyackmigration.Catalog) (int, int) {

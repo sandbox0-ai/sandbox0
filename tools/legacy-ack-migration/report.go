@@ -39,9 +39,16 @@ type report struct {
 	Validation          validationSummary                           `json:"validation"`
 	Capture             *captureSummary                             `json:"capture,omitempty"`
 	Pause               *pauseSummary                               `json:"pause,omitempty"`
+	Drain               *sourceDrainSummary                         `json:"drain,omitempty"`
 	Preparation         *legacyackmigration.TargetPreparationResult `json:"preparation,omitempty"`
 	Build               *buildSummary                               `json:"build,omitempty"`
 	Commit              *legacyackmigration.TargetCommitResult      `json:"commit,omitempty"`
+}
+
+type sourceDrainSummary struct {
+	PendingObjectDeletions    int64 `json:"pending_object_deletions"`
+	PendingDeletionWebhooks   int64 `json:"pending_deletion_webhooks"`
+	PendingMeteringOperations int64 `json:"pending_metering_operations"`
 }
 
 type captureSummary struct {

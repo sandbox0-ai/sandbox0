@@ -144,3 +144,19 @@ func TestWriteAtomicOwnerOnly(t *testing.T) {
 		t.Fatalf("payload = %q", payload)
 	}
 }
+
+func TestRequireSourceDrain(t *testing.T) {
+	if err := requireSourceDrain(&sourceDrainSummary{}); err != nil {
+		t.Fatalf("requireSourceDrain(empty) error = %v", err)
+	}
+	for _, drain := range []*sourceDrainSummary{
+		{PendingObjectDeletions: 1},
+		{PendingDeletionWebhooks: 1},
+		{PendingMeteringOperations: 1},
+		nil,
+	} {
+		if err := requireSourceDrain(drain); err == nil {
+			t.Fatalf("requireSourceDrain(%#v) succeeded", drain)
+		}
+	}
+}

@@ -39,6 +39,44 @@ func readSourceCatalog(
 	return legacyackmigration.ReadCatalog(ctx, pool)
 }
 
+func readSourceDrain(
+	ctx context.Context,
+	opts options,
+	getenv func(string) string,
+) (*sourceDrainSummary, error) {
+	dsn, err := loadSourceDSN(opts.sourceDSNFile, strings.TrimSpace(getenv("SANDBOX0_LEGACY_SOURCE_DSN")))
+	if err != nil {
+		return nil, err
+	}
+	pool, err := openDatabase(ctx, dsn, "legacy source drain")
+	if err != nil {
+		return nil, err
+	}
+	defer pool.Close()
+	objectDeletions, deletionWebhooks, meteringOperations, err := readRetirementQueueCounts(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	return &sourceDrainSummary{
+		PendingObjectDeletions: objectDeletions, PendingDeletionWebhooks: deletionWebhooks,
+		PendingMeteringOperations: meteringOperations,
+	}, nil
+}
+
+func requireSourceDrain(drain *sourceDrainSummary) error {
+	if drain == nil {
+		return fmt.Errorf("source drain status is required")
+	}
+	if drain.PendingObjectDeletions != 0 || drain.PendingDeletionWebhooks != 0 ||
+		drain.PendingMeteringOperations != 0 {
+		return fmt.Errorf(
+			"source durable queues are not drained: RootFS deletions=%d, deletion webhooks=%d, metering operations=%d",
+			drain.PendingObjectDeletions, drain.PendingDeletionWebhooks, drain.PendingMeteringOperations,
+		)
+	}
+	return nil
+}
+
 func captureSourceCatalog(
 	ctx context.Context,
 	opts options,

@@ -44,6 +44,12 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 			return readErr
 		}
 		result, _, operationErr = catalogReport(opts, platform, normalizeOptions, catalog)
+		if operationErr == nil && opts.mode == modeValidate {
+			result.Drain, operationErr = readSourceDrain(ctx, opts, getenv)
+			if operationErr == nil {
+				operationErr = requireSourceDrain(result.Drain)
+			}
+		}
 	case modePauseAccess, modePause:
 		catalog, readErr := readSourceCatalog(ctx, opts, getenv)
 		if readErr != nil {
@@ -76,6 +82,12 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		}
 		var normalized *legacyackmigration.NormalizedCatalog
 		result, normalized, operationErr = catalogReport(opts, platform, normalizeOptions, catalog)
+		if operationErr == nil {
+			result.Drain, operationErr = readSourceDrain(ctx, opts, getenv)
+		}
+		if operationErr == nil {
+			operationErr = requireSourceDrain(result.Drain)
+		}
 		if operationErr == nil && normalized != nil {
 			var captured *legacyackmigration.CapturedCatalog
 			captured, operationErr = captureSourceCatalog(ctx, opts, getenv, catalog)

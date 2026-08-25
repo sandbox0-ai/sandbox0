@@ -9,10 +9,13 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/legacyackmigration"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 )
 
 type validationSummary struct {
 	Valid                               bool   `json:"valid"`
+	FreezeReady                         bool   `json:"freeze_ready"`
+	NonPausedSandboxCount               int    `json:"non_paused_sandbox_count,omitempty"`
 	Error                               string `json:"error,omitempty"`
 	SandboxCount                        int    `json:"sandbox_count,omitempty"`
 	LayerChainCount                     int    `json:"layer_chain_count,omitempty"`
@@ -61,12 +64,23 @@ func catalogReport(
 		FormatVersion: 1, CapturedAt: time.Now().UTC(), Mode: opts.mode, SessionID: opts.sessionID,
 		TargetClusterID: opts.targetClusterID, Platform: platform, Inventory: catalog.BuildInventory(),
 	}
+	for _, sandbox := range catalog.Sandboxes {
+		if sandbox.DesiredState != sandboxstore.SandboxDesiredStatePaused {
+			result.Validation.NonPausedSandboxCount++
+		}
+	}
 	digestValue, err := catalog.Digest()
 	if err != nil {
 		return result, nil, err
 	}
 	result.SourceCatalogDigest = digestValue
-	normalized, validationErr := catalog.Normalize(normalizeOptions)
+	var normalized *legacyackmigration.NormalizedCatalog
+	var validationErr error
+	if opts.mode == modePreflight {
+		normalized, validationErr = catalog.NormalizeForPreflight(normalizeOptions)
+	} else {
+		normalized, validationErr = catalog.Normalize(normalizeOptions)
+	}
 	if validationErr != nil {
 		result.Validation.Error = validationErr.Error()
 		return result, nil, validationErr
@@ -79,8 +93,10 @@ func catalogReport(
 		}
 	}
 	result.Validation = validationSummary{
-		Valid: true, SandboxCount: len(normalized.Sandboxes),
-		LayerChainCount: len(normalized.LayerChains), PinnedBaseImageCount: len(normalized.PinnedImageRefs),
+		Valid: true, FreezeReady: result.Validation.NonPausedSandboxCount == 0,
+		NonPausedSandboxCount: result.Validation.NonPausedSandboxCount,
+		SandboxCount:          len(normalized.Sandboxes),
+		LayerChainCount:       len(normalized.LayerChains), PinnedBaseImageCount: len(normalized.PinnedImageRefs),
 		InferredPlatformCount: len(normalized.InferredLayers), AdjustedSandboxCount: adjustedSandboxes,
 		CompatibilityAdjustmentCount:        adjustments,
 		NormalizedSelfSourceFilesystemCount: len(normalized.NormalizedSelfSourceFilesystems),

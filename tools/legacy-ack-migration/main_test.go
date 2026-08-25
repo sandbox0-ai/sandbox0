@@ -80,6 +80,9 @@ func TestParseOptionsDoesNotRequireTargetForReadOnlyInventory(t *testing.T) {
 	if _, err := parseOptions([]string{"-mode", modeInventory, "-target-cluster-id", "ali-ue1-nomad"}, getenv); err != nil {
 		t.Fatalf("inventory parseOptions() error = %v", err)
 	}
+	if _, err := parseOptions([]string{"-mode", modePreflight, "-target-cluster-id", "ali-ue1-nomad"}, getenv); err != nil {
+		t.Fatalf("preflight parseOptions() error = %v", err)
+	}
 }
 
 func TestLoadSourceDSNRequiresOwnerOnlyFile(t *testing.T) {

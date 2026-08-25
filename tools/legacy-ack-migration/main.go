@@ -38,7 +38,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	var result report
 	var operationErr error
 	switch opts.mode {
-	case modeInventory, modeValidate:
+	case modeInventory, modePreflight, modeValidate:
 		catalog, readErr := readSourceCatalog(ctx, opts, getenv)
 		if readErr != nil {
 			return readErr
@@ -91,6 +91,9 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	if operationErr != nil {
 		if opts.mode == modeInventory {
 			return nil
+		}
+		if opts.mode == modePreflight {
+			return fmt.Errorf("migration preflight validation failed: %w", operationErr)
 		}
 		if opts.mode == modeValidate || opts.mode == modeCapture {
 			return fmt.Errorf("migration freeze validation failed: %w", operationErr)

@@ -211,8 +211,23 @@ type NormalizedSnapshot struct {
 }
 
 // Normalize validates the frozen source graph and produces runtime-neutral
-// sandbox records plus deterministic parent-to-child layer chains.
+// sandbox records plus deterministic parent-to-child layer chains. It always
+// requires every live sandbox to be paused, including when called on a catalog
+// that was previously checked with NormalizeForPreflight.
 func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error) {
+	return c.normalize(options, true)
+}
+
+// NormalizeForPreflight validates every migration compatibility invariant that
+// is independent of the final pause barrier. It accepts active sandboxes only
+// so operators can discover incompatible templates and storage graphs before
+// closing ingress. It never relaxes lifecycle-transaction checks and must not
+// be used by capture, retirement, or target materialization.
+func (c Catalog) NormalizeForPreflight(options NormalizeOptions) (*NormalizedCatalog, error) {
+	return c.normalize(options, false)
+}
+
+func (c Catalog) normalize(options NormalizeOptions, requirePaused bool) (*NormalizedCatalog, error) {
 	if c.ManagerSchemaVersion != LegacyManagerSchemaVersion {
 		return nil, fmt.Errorf("legacy manager schema version is %d, expected %d", c.ManagerSchemaVersion, LegacyManagerSchemaVersion)
 	}
@@ -393,7 +408,12 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 			return nil, fmt.Errorf("legacy sandbox has an empty ID or team")
 		}
 		if legacy.DesiredState != sandboxstore.SandboxDesiredStatePaused {
-			return nil, fmt.Errorf("legacy sandbox %s is %s; every live sandbox must be paused", legacy.ID, legacy.DesiredState)
+			if requirePaused {
+				return nil, fmt.Errorf("legacy sandbox %s is %s; every live sandbox must be paused", legacy.ID, legacy.DesiredState)
+			}
+			if legacy.DesiredState != sandboxstore.SandboxDesiredStateActive {
+				return nil, fmt.Errorf("legacy sandbox %s has unsupported preflight desired state %s", legacy.ID, legacy.DesiredState)
+			}
 		}
 		binding, ok := bindings[legacy.ID]
 		if !ok || binding.TeamID != legacy.TeamID {

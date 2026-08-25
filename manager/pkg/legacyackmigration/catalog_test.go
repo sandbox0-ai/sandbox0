@@ -277,6 +277,30 @@ func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 	}
 }
 
+func TestNormalizeForPreflightAllowsOnlyActiveOrPausedSandboxes(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Sandboxes[0].DesiredState = sandboxstore.SandboxDesiredStateActive
+
+	normalized, err := catalog.NormalizeForPreflight(testNormalizeOptions())
+	if err != nil {
+		t.Fatalf("NormalizeForPreflight() error = %v", err)
+	}
+	if len(normalized.Sandboxes) != 1 ||
+		normalized.Sandboxes[0].Record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
+		t.Fatalf("preflight normalized sandboxes = %#v", normalized.Sandboxes)
+	}
+	if _, err := catalog.Normalize(testNormalizeOptions()); err == nil ||
+		!strings.Contains(err.Error(), "every live sandbox must be paused") {
+		t.Fatalf("Normalize() after preflight error = %v", err)
+	}
+
+	catalog.Sandboxes[0].DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	if _, err := catalog.NormalizeForPreflight(testNormalizeOptions()); err == nil ||
+		!strings.Contains(err.Error(), "unsupported preflight desired state") {
+		t.Fatalf("NormalizeForPreflight() terminating error = %v", err)
+	}
+}
+
 func TestNormalizeRequiresExplicitTargetAndPlatform(t *testing.T) {
 	catalog := validCatalog(t)
 	options := testNormalizeOptions()

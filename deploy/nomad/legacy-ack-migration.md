@@ -14,10 +14,15 @@ digests; they never contain sandbox configuration or storage credentials.
 
 ## Ordered transition
 
-1. Pause every live sandbox. Stop all ACK manager replicas and any writer that
+1. While the old runtime is still serving traffic, run `preflight`. This
+   read-only mode accepts only active or paused sandboxes, validates every
+   schema, graph, platform, template, and resource-policy invariant, and emits
+   `freeze_ready: false` plus the non-paused count when a final pause barrier is
+   still required. It never captures state and does not weaken later commands.
+2. Pause every live sandbox. Stop all ACK manager replicas and any writer that
    can mutate manager tables. Drain active lifecycle transactions, RootFS object
    deletions, and deletion-webhook deliveries.
-2. Run `inventory` and `validate` against schema version 19. Preserve the
+3. Run `inventory` and strict `validate` against schema version 19. Preserve the
    owner-only validation report.
 
    A legacy manager could recreate an exact
@@ -26,33 +31,33 @@ digests; they never contain sandbox configuration or storage credentials.
    restore edges and canonicalizes only those edges to no source lineage in the
    target graph. The captured source catalog and its retirement digest retain
    the original row. Any multi-filesystem cycle still fails validation.
-3. Run `capture` with one immutable session ID and the target Nomad cluster ID.
+4. Run `capture` with one immutable session ID and the target Nomad cluster ID.
    Capture revalidates the complete graph and stores the full catalog in
    PostgreSQL. Preserve its `source_catalog_digest`.
-4. Run `retire` with that exact digest in
+5. Run `retire` with that exact digest in
    `--confirm-source-catalog-digest`. Retirement takes exclusive `NOWAIT`
    locks, rereads the source catalog, compares the digest, rejects non-empty
    deletion queues, and atomically drops only the legacy `manager` schema while
    marking the independent capture retired. An exact retry returns the original
    retirement marker.
-5. Start the new manager with public traffic still closed. Its normal migrations
+6. Start the new manager with public traffic still closed. Its normal migrations
    create a fresh Nomad-only manager schema. Keep the durable OCI RootFS importer
    running.
-6. Run `prepare` with the new manager configuration. It creates exact migration
+7. Run `prepare` with the new manager configuration. It creates exact migration
    build operations and reuses the normal Base-artifact importer. Repeat until
    `pending_base_imports` is zero.
-7. Run `build` as root on a dedicated Linux host with XFS tools, loop/mount
+8. Run `build` as root on a dedicated Linux host with XFS tools, loop/mount
    support, sufficient staging space, the pinned `procd`, and access to both the
    legacy and target object-store configurations. Every immutable object is
    journaled before PUT, uses conditional create, and converges through a fenced
    ready CAS.
-8. Run `commit`. It atomically installs paused sandbox, filesystem, generation,
+9. Run `commit`. It atomically installs paused sandbox, filesystem, generation,
    snapshot, and binding rows only after every required build and Base artifact
    is ready. Exact retries return the same commit digest.
-9. Enable Nomad carriers, resume representative sandboxes, verify files,
+10. Enable Nomad carriers, resume representative sandboxes, verify files,
    snapshots, process execution, network policy, metering, and public routing,
    then complete traffic cutover.
-10. After the acceptance record is durable, drop the temporary
+11. After the acceptance record is durable, drop the temporary
     `legacy_ack_migration` schema, remove the migration binary and secret files,
     delete the ACK cluster and obsolete ECS resources, and audit DNS, security
     groups, credentials, object prefixes, and deployment policies for residue.

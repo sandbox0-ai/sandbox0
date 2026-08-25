@@ -15,6 +15,7 @@ import (
 
 const (
 	modeInventory            = "inventory"
+	modePreflight            = "preflight"
 	modeValidate             = "validate"
 	modeCapture              = "capture"
 	modeRetire               = "retire"
@@ -53,7 +54,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	var opts options
 	set := flag.NewFlagSet("legacy-ack-migration", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
-	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, validate, capture, retire, prepare, build, or commit")
+	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, preflight, validate, capture, retire, prepare, build, or commit")
 	set.StringVar(&opts.sessionID, "session-id", "", "immutable migration session ID")
 	set.StringVar(&opts.confirmSourceDigest, "confirm-source-catalog-digest", "", "required exact capture digest for destructive retirement")
 	set.StringVar(&opts.sourceDSNFile, "source-dsn-file", strings.TrimSpace(getenv("SANDBOX0_LEGACY_SOURCE_DSN_FILE")), "owner-only file containing the source PostgreSQL DSN")
@@ -156,7 +157,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 
 func isSupportedMode(mode string) bool {
 	switch mode {
-	case modeInventory, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
+	case modeInventory, modePreflight, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
 		return true
 	default:
 		return false
@@ -168,7 +169,7 @@ func modeRequiresSession(mode string) bool {
 }
 
 func modeRequiresSource(mode string) bool {
-	return mode == modeInventory || mode == modeValidate || mode == modeCapture
+	return mode == modeInventory || mode == modePreflight || mode == modeValidate || mode == modeCapture
 }
 
 func modeRequiresTarget(mode string) bool {

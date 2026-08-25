@@ -12,14 +12,15 @@ import (
 )
 
 type validationSummary struct {
-	Valid                        bool   `json:"valid"`
-	Error                        string `json:"error,omitempty"`
-	SandboxCount                 int    `json:"sandbox_count,omitempty"`
-	LayerChainCount              int    `json:"layer_chain_count,omitempty"`
-	PinnedBaseImageCount         int    `json:"pinned_base_image_count,omitempty"`
-	InferredPlatformCount        int    `json:"inferred_platform_count,omitempty"`
-	AdjustedSandboxCount         int    `json:"adjusted_sandbox_count,omitempty"`
-	CompatibilityAdjustmentCount int    `json:"compatibility_adjustment_count,omitempty"`
+	Valid                               bool   `json:"valid"`
+	Error                               string `json:"error,omitempty"`
+	SandboxCount                        int    `json:"sandbox_count,omitempty"`
+	LayerChainCount                     int    `json:"layer_chain_count,omitempty"`
+	PinnedBaseImageCount                int    `json:"pinned_base_image_count,omitempty"`
+	InferredPlatformCount               int    `json:"inferred_platform_count,omitempty"`
+	AdjustedSandboxCount                int    `json:"adjusted_sandbox_count,omitempty"`
+	CompatibilityAdjustmentCount        int    `json:"compatibility_adjustment_count,omitempty"`
+	NormalizedSelfSourceFilesystemCount int    `json:"normalized_self_source_filesystem_count,omitempty"`
 }
 
 type report struct {
@@ -81,7 +82,8 @@ func catalogReport(
 		Valid: true, SandboxCount: len(normalized.Sandboxes),
 		LayerChainCount: len(normalized.LayerChains), PinnedBaseImageCount: len(normalized.PinnedImageRefs),
 		InferredPlatformCount: len(normalized.InferredLayers), AdjustedSandboxCount: adjustedSandboxes,
-		CompatibilityAdjustmentCount: adjustments,
+		CompatibilityAdjustmentCount:        adjustments,
+		NormalizedSelfSourceFilesystemCount: len(normalized.NormalizedSelfSourceFilesystems),
 	}
 	return result, normalized, nil
 }

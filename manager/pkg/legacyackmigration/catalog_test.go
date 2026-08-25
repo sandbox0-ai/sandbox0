@@ -124,6 +124,34 @@ func TestNormalizeRecoversSnapshotOnlyFilesystemGeometryFromArchivedSource(t *te
 	}
 }
 
+func TestNormalizeCanonicalizesLegacySameFilesystemRestoreEdge(t *testing.T) {
+	catalog := validCatalog(t)
+	catalog.Filesystems[0].SourceFilesystemID = catalog.Filesystems[0].ID
+	before, err := catalog.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	normalized, err := catalog.Normalize(testNormalizeOptions())
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if len(normalized.Filesystems) != 1 || normalized.Filesystems[0].Record.SourceFilesystemID != "" {
+		t.Fatalf("normalized filesystems = %#v", normalized.Filesystems)
+	}
+	if len(normalized.NormalizedSelfSourceFilesystems) != 1 ||
+		normalized.NormalizedSelfSourceFilesystems[0] != "filesystem-1" {
+		t.Fatalf("normalized self sources = %#v", normalized.NormalizedSelfSourceFilesystems)
+	}
+	after, err := catalog.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before || catalog.Filesystems[0].SourceFilesystemID != "filesystem-1" {
+		t.Fatal("source catalog or its retirement digest was mutated during normalization")
+	}
+}
+
 func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -161,7 +189,11 @@ func TestNormalizeRejectsUnsafeFrozenCatalogs(t *testing.T) {
 		{
 			name: "filesystem cycle",
 			mutate: func(c *Catalog) {
-				c.Filesystems[0].SourceFilesystemID = c.Filesystems[0].ID
+				second := c.Filesystems[0]
+				second.ID = "filesystem-2"
+				second.SourceFilesystemID = c.Filesystems[0].ID
+				c.Filesystems[0].SourceFilesystemID = second.ID
+				c.Filesystems = append(c.Filesystems, second)
 			},
 			wantErr: "filesystem graph contains a cycle",
 		},

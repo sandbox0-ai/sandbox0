@@ -170,15 +170,16 @@ type NormalizedSandbox struct {
 }
 
 type NormalizedCatalog struct {
-	Sandboxes                []NormalizedSandbox
-	LayerChains              map[string][]Layer
-	PinnedImageRefs          map[string]string
-	FilesystemLogicalSizes   map[string]int64
-	SourceSandboxLogicalSize map[string]int64
-	MaterializedBuilds       []MaterializedBuild
-	Filesystems              []NormalizedFilesystem
-	Snapshots                []NormalizedSnapshot
-	InferredLayers           []string
+	Sandboxes                       []NormalizedSandbox
+	LayerChains                     map[string][]Layer
+	PinnedImageRefs                 map[string]string
+	FilesystemLogicalSizes          map[string]int64
+	SourceSandboxLogicalSize        map[string]int64
+	MaterializedBuilds              []MaterializedBuild
+	Filesystems                     []NormalizedFilesystem
+	Snapshots                       []NormalizedSnapshot
+	InferredLayers                  []string
+	NormalizedSelfSourceFilesystems []string
 }
 
 // MaterializedBuild is one tenant-scoped, complete generation conversion.
@@ -268,6 +269,8 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 	}
 
 	filesystems := make(map[string]Filesystem, len(c.Filesystems))
+	normalizedFilesystems := make([]Filesystem, 0, len(c.Filesystems))
+	var normalizedSelfSources []string
 	for _, filesystem := range c.Filesystems {
 		if strings.TrimSpace(filesystem.ID) == "" || strings.TrimSpace(filesystem.TeamID) == "" {
 			return nil, fmt.Errorf("legacy filesystem has an empty ID or team")
@@ -275,9 +278,20 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 		if _, exists := filesystems[filesystem.ID]; exists {
 			return nil, fmt.Errorf("duplicate legacy filesystem %s", filesystem.ID)
 		}
+		// ACK managers that predate migration 00016 could reintroduce a
+		// same-filesystem restore edge after the additive cleanup ran. That
+		// edge carries no lineage information: the restored head already
+		// describes the complete state and following the edge only loops back
+		// to itself. Preserve it in the captured source catalog and digest, but
+		// canonicalize exactly this historical shape in the target graph.
+		if filesystem.SourceFilesystemID == filesystem.ID {
+			filesystem.SourceFilesystemID = ""
+			normalizedSelfSources = append(normalizedSelfSources, filesystem.ID)
+		}
 		filesystems[filesystem.ID] = filesystem
+		normalizedFilesystems = append(normalizedFilesystems, filesystem)
 	}
-	for _, filesystem := range c.Filesystems {
+	for _, filesystem := range normalizedFilesystems {
 		if filesystem.SourceFilesystemID != "" {
 			source, ok := filesystems[filesystem.SourceFilesystemID]
 			if !ok || source.TeamID != filesystem.TeamID {
@@ -367,6 +381,7 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 	normalized := &NormalizedCatalog{
 		LayerChains: make(map[string][]Layer), PinnedImageRefs: pinnedRefs,
 		FilesystemLogicalSizes: make(map[string]int64), SourceSandboxLogicalSize: sourceSizes,
+		NormalizedSelfSourceFilesystems: normalizedSelfSources,
 	}
 	seenSandboxes := make(map[string]struct{}, len(c.Sandboxes))
 	for _, legacy := range c.Sandboxes {
@@ -503,7 +518,7 @@ func (c Catalog) Normalize(options NormalizeOptions) (*NormalizedCatalog, error)
 		}
 		normalized.FilesystemLogicalSizes[filesystemID] = logicalSize
 	}
-	if err := normalized.planMaterializedBuilds(c.Filesystems, c.Snapshots); err != nil {
+	if err := normalized.planMaterializedBuilds(normalizedFilesystems, c.Snapshots); err != nil {
 		return nil, err
 	}
 

@@ -19,6 +19,13 @@ digests; they never contain sandbox configuration or storage credentials.
    deletions, and deletion-webhook deliveries.
 2. Run `inventory` and `validate` against schema version 19. Preserve the
    owner-only validation report.
+
+   A legacy manager could recreate an exact
+   `source_filesystem_id = filesystem_id` edge after additive migration 00016
+   cleaned it. Validation records the number of these historical same-filesystem
+   restore edges and canonicalizes only those edges to no source lineage in the
+   target graph. The captured source catalog and its retirement digest retain
+   the original row. Any multi-filesystem cycle still fails validation.
 3. Run `capture` with one immutable session ID and the target Nomad cluster ID.
    Capture revalidates the complete graph and stores the full catalog in
    PostgreSQL. Preserve its `source_catalog_digest`.

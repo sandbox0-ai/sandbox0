@@ -38,6 +38,7 @@ type report struct {
 	Inventory           legacyackmigration.Inventory                `json:"inventory"`
 	Validation          validationSummary                           `json:"validation"`
 	Capture             *captureSummary                             `json:"capture,omitempty"`
+	Pause               *pauseSummary                               `json:"pause,omitempty"`
 	Preparation         *legacyackmigration.TargetPreparationResult `json:"preparation,omitempty"`
 	Build               *buildSummary                               `json:"build,omitempty"`
 	Commit              *legacyackmigration.TargetCommitResult      `json:"commit,omitempty"`

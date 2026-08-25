@@ -68,6 +68,20 @@ func TestParseOptionsAppliesModeSpecificCredentialAndSafetyContracts(t *testing.
 	if _, err := parseOptions(retireArgs, getenv); err != nil {
 		t.Fatalf("retire with exact digest parseOptions() error = %v", err)
 	}
+
+	environment["SANDBOX0_LEGACY_SOURCE_DSN"] = "postgres://source"
+	pauseArgs := []string{
+		"-mode", modePause, "-target-cluster-id", "ali-ue1-nomad",
+		"-source-manager-url", "http://127.0.0.1:18080",
+		"-source-internal-private-key-file", "/secret/data-private.key",
+	}
+	pause, err := parseOptions(pauseArgs, getenv)
+	if err != nil {
+		t.Fatalf("pause parseOptions() error = %v", err)
+	}
+	if pause.timeout != defaultPauseTimeout {
+		t.Fatalf("pause timeout = %s", pause.timeout)
+	}
 }
 
 func TestParseOptionsDoesNotRequireTargetForReadOnlyInventory(t *testing.T) {

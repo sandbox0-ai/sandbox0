@@ -16,6 +16,7 @@ import (
 const (
 	modeInventory            = "inventory"
 	modePreflight            = "preflight"
+	modePause                = "pause"
 	modeValidate             = "validate"
 	modeCapture              = "capture"
 	modeRetire               = "retire"
@@ -25,6 +26,7 @@ const (
 	maxDSNFileBytes          = 16 << 10
 	maxManagerConfigBytes    = 1 << 20
 	defaultControlTimeout    = 2 * time.Minute
+	defaultPauseTimeout      = 30 * time.Minute
 	defaultBuildTimeout      = 12 * time.Hour
 	defaultBuildLeaseTTL     = 2 * time.Minute
 	defaultBuildLeaseRenewal = 30 * time.Second
@@ -39,6 +41,8 @@ type options struct {
 	sourceManagerConfigFile string
 	targetManagerConfigFile string
 	targetClusterID         string
+	sourceManagerURL        string
+	sourceInternalKeyFile   string
 	platformArch            string
 	platformVariant         string
 	memoryPerCPU            string
@@ -54,7 +58,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	var opts options
 	set := flag.NewFlagSet("legacy-ack-migration", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
-	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, preflight, validate, capture, retire, prepare, build, or commit")
+	set.StringVar(&opts.mode, "mode", modeInventory, "inventory, preflight, pause, validate, capture, retire, prepare, build, or commit")
 	set.StringVar(&opts.sessionID, "session-id", "", "immutable migration session ID")
 	set.StringVar(&opts.confirmSourceDigest, "confirm-source-catalog-digest", "", "required exact capture digest for destructive retirement")
 	set.StringVar(&opts.sourceDSNFile, "source-dsn-file", strings.TrimSpace(getenv("SANDBOX0_LEGACY_SOURCE_DSN_FILE")), "owner-only file containing the source PostgreSQL DSN")
@@ -62,6 +66,8 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	set.StringVar(&opts.sourceManagerConfigFile, "source-manager-config-file", "", "owner-only source manager config used to read legacy objects")
 	set.StringVar(&opts.targetManagerConfigFile, "target-manager-config-file", "", "owner-only target manager config used by prepare and build")
 	set.StringVar(&opts.targetClusterID, "target-cluster-id", "", "target Nomad cluster ID")
+	set.StringVar(&opts.sourceManagerURL, "source-manager-url", "", "loopback URL for the frozen ACK manager")
+	set.StringVar(&opts.sourceInternalKeyFile, "source-internal-private-key-file", "", "owner-only ACK data-plane signing key")
 	set.StringVar(&opts.platformArch, "platform-architecture", "amd64", "canonical OCI architecture")
 	set.StringVar(&opts.platformVariant, "platform-variant", "", "canonical OCI architecture variant")
 	set.StringVar(&opts.memoryPerCPU, "memory-per-cpu", "2Gi", "target resource policy memory per CPU")
@@ -101,6 +107,8 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 		return options{}, fmt.Errorf("platform-architecture is required")
 	}
 	opts.platformVariant = strings.TrimSpace(opts.platformVariant)
+	opts.sourceManagerURL = strings.TrimSpace(opts.sourceManagerURL)
+	opts.sourceInternalKeyFile = strings.TrimSpace(opts.sourceInternalKeyFile)
 	opts.sourceDSNFile = strings.TrimSpace(opts.sourceDSNFile)
 	opts.targetDSNFile = strings.TrimSpace(opts.targetDSNFile)
 	opts.sourceManagerConfigFile = strings.TrimSpace(opts.sourceManagerConfigFile)
@@ -114,6 +122,14 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	if modeRequiresTarget(opts.mode) {
 		if err := validateDSNSource("target", opts.targetDSNFile, strings.TrimSpace(getenv("SANDBOX0_MIGRATION_TARGET_DSN"))); err != nil {
 			return options{}, err
+		}
+	}
+	if opts.mode == modePause {
+		if _, err := parseLoopbackManagerURL(opts.sourceManagerURL); err != nil {
+			return options{}, err
+		}
+		if opts.sourceInternalKeyFile == "" {
+			return options{}, fmt.Errorf("source-internal-private-key-file is required for pause mode")
 		}
 	}
 	if (opts.mode == modePrepare || opts.mode == modeBuild) && opts.targetManagerConfigFile == "" {
@@ -145,6 +161,8 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	if opts.timeout == 0 {
 		if opts.mode == modeBuild {
 			opts.timeout = defaultBuildTimeout
+		} else if opts.mode == modePause {
+			opts.timeout = defaultPauseTimeout
 		} else {
 			opts.timeout = defaultControlTimeout
 		}
@@ -157,7 +175,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 
 func isSupportedMode(mode string) bool {
 	switch mode {
-	case modeInventory, modePreflight, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
+	case modeInventory, modePreflight, modePause, modeValidate, modeCapture, modeRetire, modePrepare, modeBuild, modeCommit:
 		return true
 	default:
 		return false
@@ -169,7 +187,7 @@ func modeRequiresSession(mode string) bool {
 }
 
 func modeRequiresSource(mode string) bool {
-	return mode == modeInventory || mode == modePreflight || mode == modeValidate || mode == modeCapture
+	return mode == modeInventory || mode == modePreflight || mode == modePause || mode == modeValidate || mode == modeCapture
 }
 
 func modeRequiresTarget(mode string) bool {

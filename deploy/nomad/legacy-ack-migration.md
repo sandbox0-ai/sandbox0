@@ -23,9 +23,14 @@ digests; they never contain sandbox configuration or storage credentials.
    while still validating its template and resources. Strict validation and
    capture never permit a missing binding. Preflight never captures state and
    does not weaken later commands.
-2. Pause every live sandbox. Stop all ACK manager replicas and any writer that
-   can mutate manager tables. Drain active lifecycle transactions, RootFS object
-   deletions, and deletion-webhook deliveries.
+2. Close public and SSH ingress, then run `pause` through a loopback
+   `kubectl port-forward` to the old manager. Supply its data-plane signing key
+   through an owner-only file. The tool calls the normal manager lifecycle API
+   with a fresh team-bound token for every active sandbox; it never edits
+   desired state directly. It rejects any change to the live sandbox set and
+   waits for every sandbox to be paused, lifecycle transactions to finish, and
+   RootFS deletion and deletion-webhook queues to drain. Preserve its report.
+   Then stop all ACK manager replicas and remaining writers.
 3. Run `inventory` and strict `validate` against schema version 19. Preserve the
    owner-only validation report.
 

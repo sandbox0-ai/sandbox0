@@ -44,6 +44,29 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 			return readErr
 		}
 		result, _, operationErr = catalogReport(opts, platform, normalizeOptions, catalog)
+	case modePause:
+		catalog, readErr := readSourceCatalog(ctx, opts, getenv)
+		if readErr != nil {
+			return readErr
+		}
+		preflightOpts := opts
+		preflightOpts.mode = modePreflight
+		result, _, operationErr = catalogReport(preflightOpts, platform, normalizeOptions, catalog)
+		result.Mode = modePause
+		if operationErr == nil {
+			var finalCatalog *legacyackmigration.Catalog
+			result.Pause, finalCatalog, operationErr = pauseSourceSandboxes(ctx, opts, getenv, normalizeOptions)
+			if finalCatalog != nil {
+				var finalReport report
+				var finalErr error
+				finalReport, _, finalErr = catalogReport(opts, platform, normalizeOptions, finalCatalog)
+				finalReport.Pause = result.Pause
+				result = finalReport
+				if operationErr == nil {
+					operationErr = finalErr
+				}
+			}
+		}
 	case modeCapture:
 		catalog, readErr := readSourceCatalog(ctx, opts, getenv)
 		if readErr != nil {
@@ -94,6 +117,9 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		}
 		if opts.mode == modePreflight {
 			return fmt.Errorf("migration preflight validation failed: %w", operationErr)
+		}
+		if opts.mode == modePause {
+			return fmt.Errorf("migration pause failed: %w", operationErr)
 		}
 		if opts.mode == modeValidate || opts.mode == modeCapture {
 			return fmt.Errorf("migration freeze validation failed: %w", operationErr)

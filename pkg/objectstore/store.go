@@ -342,6 +342,12 @@ func (s *s3Store) String() string {
 }
 
 func (s *s3Store) Create() error {
+	if s.provider == TypeOSS {
+		// OSS bucket lifecycle belongs to regional infrastructure. Runtime
+		// credentials are intentionally object-scoped and must not require
+		// HeadBucket or CreateBucket permissions just to open that bucket.
+		return nil
+	}
 	ctx := context.Background()
 	if _, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); err == nil {
 		return nil

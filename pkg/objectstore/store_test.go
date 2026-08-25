@@ -357,14 +357,11 @@ func TestOSSConditionalCreateUsesNativeAtomicHeaderAndVirtualHost(t *testing.T) 
 	}
 }
 
-func TestOSSCreateReusesAccessibleBucketWithoutCreateRequest(t *testing.T) {
-	methods := make([]string, 0, 1)
+func TestOSSCreateDoesNotManageInfrastructureBucket(t *testing.T) {
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		methods = append(methods, request.Method)
-		if !strings.HasPrefix(request.Host, "rootfs.localhost:") || request.URL.Path != "/" {
-			t.Errorf("bucket request address = %s%s, want OSS virtual-host root", request.Host, request.URL.Path)
-		}
-		response.WriteHeader(http.StatusOK)
+		requests++
+		response.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
 	endpoint := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
@@ -378,8 +375,8 @@ func TestOSSCreateReusesAccessibleBucketWithoutCreateRequest(t *testing.T) {
 	if err := createdStore.Create(); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if len(methods) != 1 || methods[0] != http.MethodHead {
-		t.Fatalf("bucket methods = %#v, want one HEAD", methods)
+	if requests != 0 {
+		t.Fatalf("Create() made %d OSS bucket-management requests, want 0", requests)
 	}
 }
 

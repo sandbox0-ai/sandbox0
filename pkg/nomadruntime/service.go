@@ -1595,7 +1595,7 @@ func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[
 	}
 	response.Body.Close()
 	if job.ID != s.jobID || job.Namespace != s.namespace {
-		return nil, fmt.Errorf("Nomad allocation catalog visibility anchor does not match configured job")
+		return nil, errors.New("nomad allocation catalog visibility anchor does not match configured job")
 	}
 
 	request, err = http.NewRequestWithContext(ctx, http.MethodGet, s.allocationURL, nil)

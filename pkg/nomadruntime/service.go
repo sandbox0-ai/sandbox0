@@ -1240,11 +1240,10 @@ func (d *nodeRuntime) health(ctx context.Context) error {
 	if _, err := d.runtime.RecoverySessions(); err != nil {
 		return fmt.Errorf("read durable RootFS recovery journal: %w: %w", err, errdefs.ErrUnavailable)
 	}
-	if d.allocations != nil {
-		if _, err := d.allocations.ActiveAllocations(ctx); err != nil {
-			return fmt.Errorf("read Nomad allocation authority: %w: %w", err, errdefs.ErrUnavailable)
-		}
-	}
+	// The Nomad catalog is a fail-closed reclamation hint, not a serving
+	// dependency. The reconciliation scan logs catalog failures and falls back
+	// to durable lease expiry; readiness must not restart the current HA owner
+	// or promote its standby during a Nomad outage or a planned job purge.
 	if d.journal == nil {
 		return fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
 	}

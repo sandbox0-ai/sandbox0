@@ -286,6 +286,27 @@ func TestNodeRuntimeThrottlesCompletedProofPruning(t *testing.T) {
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
 }
 
+type failingNomadAllocationSource struct {
+	calls int
+}
+
+func (s *failingNomadAllocationSource) ActiveAllocations(context.Context) (map[string]bool, error) {
+	s.calls++
+	return nil, errors.New("Nomad unavailable")
+}
+
+func TestNodeRuntimeHealthDoesNotDependOnNomadReclamationHint(t *testing.T) {
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	allocations := &failingNomadAllocationSource{}
+	daemon := &nodeRuntime{
+		runtime: &fakeRootFSRuntime{}, journal: journal, allocations: allocations,
+	}
+	require.NoError(t, daemon.health(t.Context()))
+	require.Zero(t, allocations.calls, "readiness must not turn an optional reclamation hint into an HA dependency")
+}
+
 func TestNodeRuntimeFencesRegisteredRunscAndStableMount(t *testing.T) {
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")

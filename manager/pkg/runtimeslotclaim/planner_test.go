@@ -479,6 +479,40 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 	}
 }
 
+func TestPlannerAdvancesPastTerminalWriterEpoch(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.filesystem.WriterEpoch = fixture.store.generation.WriterEpoch + 1
+
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	issues := append([]*sandboxstore.IssueRootFSWriterGrantRequest(nil), fixture.store.issues...)
+	fixture.store.mu.Unlock()
+	if len(issues) != 1 || issues[0].ExpectedWriterEpoch != 8 {
+		t.Fatalf("writer issue requests = %+v", issues)
+	}
+	if result.Stage.Identity.WriterEpoch != 9 {
+		t.Fatalf("writer epoch = %d, want 9", result.Stage.Identity.WriterEpoch)
+	}
+}
+
+func TestPlannerRejectsGenerationWriterEpochAheadOfFilesystem(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.filesystem.WriterEpoch = fixture.store.generation.WriterEpoch - 1
+
+	_, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err == nil || !strings.Contains(err.Error(), "generation writer epoch exceeds filesystem writer epoch") {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	defer fixture.store.mu.Unlock()
+	if len(fixture.store.acquires) != 0 || len(fixture.store.issues) != 0 {
+		t.Fatalf("store calls = acquire %d issue %d", len(fixture.store.acquires), len(fixture.store.issues))
+	}
+}
+
 func TestPlannerRecoversWriterIssueResponseLossWithExactBinding(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.store.issueLost = true

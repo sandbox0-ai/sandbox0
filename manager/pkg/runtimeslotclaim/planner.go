@@ -344,9 +344,9 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 			recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 			return nil, err
 		}
-	} else if generation.WriterEpoch != filesystem.WriterEpoch {
+	} else if generation.WriterEpoch > filesystem.WriterEpoch {
 		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
-		return nil, errors.New("RootFS generation and writer epoch are inconsistent")
+		return nil, errors.New("RootFS generation writer epoch exceeds filesystem writer epoch")
 	}
 	recordPhase(PhaseRootFSMetadata, phaseStarted, true)
 

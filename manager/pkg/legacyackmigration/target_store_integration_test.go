@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -139,6 +141,36 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 		t.Fatalf("committed paused graph = runtime %q/%q epoch %d durability %q",
 			runtimeNamespace, runtimeID, writerEpoch, durability)
 	}
+	assertTargetStoreMigratedClaim(t, ctx, pool, store, "migration-session", "sandbox-1")
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM manager.sandbox_runtime_claims WHERE sandbox_id = 'sandbox-1'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := store.CommitCatalog(ctx, "migration-session", normalized)
+	if err != nil {
+		t.Fatalf("CommitCatalog() missing-claim repair: %v", err)
+	}
+	if *repaired != *committed {
+		t.Fatalf("claim repair commit = %#v, want %#v", repaired, committed)
+	}
+	assertTargetStoreMigratedClaim(t, ctx, pool, store, "migration-session", "sandbox-1")
+	if _, err := pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET credential_binding_digest = 'sha256:' || repeat('0', 64)
+		WHERE sandbox_id = 'sandbox-1'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitCatalog(ctx, "migration-session", normalized); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("CommitCatalog() after claim tamper error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims SET credential_binding_digest = $2
+		WHERE sandbox_id = $1
+	`, "sandbox-1", credentialbinding.EmptyDigest); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE manager.sandboxes SET template_name = 'tampered' WHERE sandbox_id = 'sandbox-1'
 	`); err != nil {
@@ -160,6 +192,157 @@ func TestTargetStoreDurablePublicationAndExactReadyRetry(t *testing.T) {
 	}
 	if _, err := store.GetBuild(ctx, build.ID); !errors.Is(err, ErrTargetMigrationConflict) {
 		t.Fatalf("GetBuild() after durable input tamper error = %v", err)
+	}
+}
+
+func assertTargetStoreMigratedClaim(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store *TargetStore,
+	sessionID, sandboxID string,
+) {
+	t.Helper()
+	var operationID, phase, bindingDigest string
+	var completedAt time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT operation_id, phase, credential_binding_digest, completed_at
+		FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
+	`, sandboxID).Scan(&operationID, &phase, &bindingDigest, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if operationID != targetRuntimeClaimOperationID(sessionID, sandboxID) ||
+		phase != sandboxstore.SandboxRuntimeClaimPhaseReady ||
+		bindingDigest != credentialbinding.EmptyDigest || completedAt.IsZero() {
+		t.Fatalf("migrated claim = operation %q phase %q digest %q completed %s",
+			operationID, phase, bindingDigest, completedAt)
+	}
+	bindings, err := sandboxstore.NewPGSandboxStore(pool).GetNomadSandboxCredentialBindings(
+		ctx, "team-1", sandboxID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bindings == nil || bindings.Digest != credentialbinding.EmptyDigest || len(bindings.Bindings) != 0 {
+		t.Fatalf("migrated credential authority = %#v", bindings)
+	}
+}
+
+func TestTargetRuntimeClaimOperationIDIsDeterministicAndSessionBound(t *testing.T) {
+	first := targetRuntimeClaimOperationID("session-1", "sandbox-1")
+	if first != targetRuntimeClaimOperationID("session-1", "sandbox-1") {
+		t.Fatal("target runtime claim operation ID is not deterministic")
+	}
+	if first == targetRuntimeClaimOperationID("session-2", "sandbox-1") ||
+		first == targetRuntimeClaimOperationID("session-1", "sandbox-2") {
+		t.Fatal("target runtime claim operation ID is not bound to both identities")
+	}
+	if len(first) > 512 || !strings.HasPrefix(first, "legacy-ack-claim-") {
+		t.Fatalf("target runtime claim operation ID = %q", first)
+	}
+}
+
+func TestTargetCommitClaimBindsSurvivingCredentialProjectionIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	pool := newTargetStoreIntegrationPool(t, ctx)
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO credential_sources (
+			team_id, name, resolver_kind, current_version, status
+		) VALUES ('team-1', 'source-1', 'static_headers', 1, 'active')
+		RETURNING id
+	`).Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO credential_source_versions (
+			source_id, version, spec_json, resolver_kind
+		) VALUES ($1, 1, '{}'::jsonb, 'static_headers')
+	`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sandbox_egress_credential_bindings (
+			team_id, sandbox_id, ref, source_ref, source_id, source_version,
+			projection, cache_policy
+		) VALUES (
+			'team-1', 'sandbox-1', 'binding-1', 'source-1', $1, 1,
+			'{"type":"http_headers","httpHeaders":{"headers":[{"name":"Authorization","valueTemplate":"Bearer {{.token}}"}]}}'::jsonb,
+			'null'::jsonb
+		)
+	`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	plan := &targetCommitPlan{
+		SessionID: "migration-session",
+		Sandboxes: []targetCommitSandbox{{Record: sandboxstore.SandboxRecord{
+			ID: "sandbox-1", TeamID: "team-1",
+		}}},
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := bindTargetCommitClaims(ctx, tx, plan); err != nil {
+		t.Fatal(err)
+	}
+	expected := credentialbinding.DigestStore([]egressauthstore.CredentialBinding{{
+		Ref: "binding-1", SourceRef: "source-1", SourceID: sourceID, SourceVersion: 1,
+		Projection: egressauthstore.ProjectionSpec{
+			Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &egressauthstore.HTTPHeadersProjection{Headers: []egressauthstore.ProjectedHeader{{
+				Name: "Authorization", ValueTemplate: "Bearer {{.token}}",
+			}}},
+		},
+	}})
+	if plan.Sandboxes[0].CredentialBindingDigest != expected {
+		t.Fatalf("credential binding digest = %q, want %q",
+			plan.Sandboxes[0].CredentialBindingDigest, expected)
+	}
+	if plan.Sandboxes[0].ClaimOperationID != targetRuntimeClaimOperationID("migration-session", "sandbox-1") {
+		t.Fatalf("claim operation ID = %q", plan.Sandboxes[0].ClaimOperationID)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var foreignSourceID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO credential_sources (
+			team_id, name, resolver_kind, current_version, status
+		) VALUES ('team-2', 'source-2', 'static_headers', 1, 'active')
+		RETURNING id
+	`).Scan(&foreignSourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO credential_source_versions (
+			source_id, version, spec_json, resolver_kind
+		) VALUES ($1, 1, '{}'::jsonb, 'static_headers')
+	`, foreignSourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sandbox_egress_credential_bindings (
+			team_id, sandbox_id, ref, source_ref, source_id, source_version,
+			projection, cache_policy
+		) VALUES (
+			'team-2', 'sandbox-1', 'binding-2', 'source-2', $1, 1,
+			'{"type":"http_headers","httpHeaders":{"headers":[]}}'::jsonb,
+			'null'::jsonb
+		)
+	`, foreignSourceID); err != nil {
+		t.Fatal(err)
+	}
+	foreignTx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = foreignTx.Rollback(ctx) }()
+	if err := bindTargetCommitClaims(ctx, foreignTx, plan); !errors.Is(err, ErrTargetMigrationConflict) {
+		t.Fatalf("bindTargetCommitClaims() cross-team error = %v", err)
 	}
 }
 

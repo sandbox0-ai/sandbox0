@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/opencontainers/go-digest"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
@@ -38,10 +40,12 @@ type targetCommitPlan struct {
 }
 
 type targetCommitSandbox struct {
-	Record       sandboxstore.SandboxRecord `json:"record"`
-	FilesystemID string                     `json:"filesystem_id"`
-	Config       json.RawMessage            `json:"config"`
-	TemplateSpec json.RawMessage            `json:"template_spec"`
+	Record                  sandboxstore.SandboxRecord `json:"record"`
+	FilesystemID            string                     `json:"filesystem_id"`
+	Config                  json.RawMessage            `json:"config"`
+	TemplateSpec            json.RawMessage            `json:"template_spec"`
+	ClaimOperationID        string                     `json:"-"`
+	CredentialBindingDigest string                     `json:"-"`
 }
 
 type targetCommitFilesystem struct {
@@ -140,6 +144,9 @@ func (s *TargetStore) CommitCatalog(
 	if err != nil {
 		return nil, err
 	}
+	if err := bindTargetCommitClaims(ctx, tx, plan); err != nil {
+		return nil, err
+	}
 	commitDigest, err := plan.digest()
 	if err != nil {
 		return nil, err
@@ -151,6 +158,16 @@ func (s *TargetStore) CommitCatalog(
 			return nil, fmt.Errorf("%w: committed session has another product graph", ErrTargetMigrationConflict)
 		}
 		if err := verifyTargetCommitPlan(ctx, tx, plan); err != nil {
+			return nil, err
+		}
+		// The first production catalog commit predates durable claim
+		// materialization for imported paused sandboxes. Install only a missing
+		// claim with deterministic authority; an existing divergent claim is
+		// never overwritten and fails the exact verification below.
+		if err := ensureTargetCommitClaims(ctx, tx, plan); err != nil {
+			return nil, err
+		}
+		if err := verifyTargetCommitClaims(ctx, tx, plan); err != nil {
 			return nil, err
 		}
 		if err := commitTargetTx(ctx, tx, "existing product catalog"); err != nil {
@@ -167,6 +184,9 @@ func (s *TargetStore) CommitCatalog(
 	if err := insertTargetCommitPlan(ctx, tx, plan); err != nil {
 		return nil, err
 	}
+	if err := ensureTargetCommitClaims(ctx, tx, plan); err != nil {
+		return nil, err
+	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE legacy_ack_migration.sessions
 		SET state = 'committed', commit_digest = $2, committed_at = NOW(), updated_at = NOW()
@@ -181,10 +201,89 @@ func (s *TargetStore) CommitCatalog(
 	if err := verifyTargetCommitPlan(ctx, tx, plan); err != nil {
 		return nil, err
 	}
+	if err := verifyTargetCommitClaims(ctx, tx, plan); err != nil {
+		return nil, err
+	}
 	if err := commitTargetTx(ctx, tx, "product catalog"); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func bindTargetCommitClaims(ctx context.Context, tx pgx.Tx, plan *targetCommitPlan) error {
+	if plan == nil || tx == nil {
+		return fmt.Errorf("target migration claim plan is not configured")
+	}
+	for index := range plan.Sandboxes {
+		sandbox := &plan.Sandboxes[index]
+		record := sandbox.Record
+		var foreignBindings int
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM sandbox_egress_credential_bindings
+			WHERE sandbox_id = $1 AND team_id <> $2
+		`, record.ID, record.TeamID).Scan(&foreignBindings); err != nil {
+			return fmt.Errorf("audit migrated sandbox %s credential ownership: %w", record.ID, err)
+		}
+		if foreignBindings != 0 {
+			return fmt.Errorf("%w: migrated sandbox %s has cross-team credential bindings",
+				ErrTargetMigrationConflict, record.ID)
+		}
+		bindings, err := egressauthstore.GetCurrentBindings(ctx, tx, record.TeamID, record.ID)
+		if err != nil {
+			return fmt.Errorf("load migrated sandbox %s credential bindings: %w", record.ID, err)
+		}
+		var materialized []egressauthstore.CredentialBinding
+		if bindings != nil {
+			materialized = bindings.Bindings
+		}
+		sandbox.ClaimOperationID = targetRuntimeClaimOperationID(plan.SessionID, record.ID)
+		sandbox.CredentialBindingDigest = credentialbinding.DigestStore(materialized)
+	}
+	return nil
+}
+
+func targetRuntimeClaimOperationID(sessionID, sandboxID string) string {
+	hash := sha256.Sum256([]byte(sessionID + "\x00" + sandboxID))
+	return "legacy-ack-claim-" + hex.EncodeToString(hash[:])
+}
+
+func ensureTargetCommitClaims(ctx context.Context, tx pgx.Tx, plan *targetCommitPlan) error {
+	for _, sandbox := range plan.Sandboxes {
+		if sandbox.ClaimOperationID == "" || sandbox.CredentialBindingDigest == "" {
+			return fmt.Errorf("target migration claim authority is incomplete for %s", sandbox.Record.ID)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO manager.sandbox_runtime_claims (
+				sandbox_id, operation_id, phase, lease_expires_at, last_error,
+				completed_at, cleanup_started_at, cleaned_at, credential_binding_digest
+			) VALUES ($1, $2, $3, NULL, '', NOW(), NULL, NULL, $4)
+			ON CONFLICT (sandbox_id) DO NOTHING
+		`, sandbox.Record.ID, sandbox.ClaimOperationID,
+			sandboxstore.SandboxRuntimeClaimPhaseReady, sandbox.CredentialBindingDigest); err != nil {
+			return fmt.Errorf("ensure migrated sandbox claim %s: %w", sandbox.Record.ID, err)
+		}
+	}
+	return nil
+}
+
+func verifyTargetCommitClaims(ctx context.Context, tx pgx.Tx, plan *targetCommitPlan) error {
+	for _, sandbox := range plan.Sandboxes {
+		if err := requireTargetRow(ctx, tx, `
+			SELECT EXISTS (
+				SELECT 1 FROM manager.sandbox_runtime_claims
+				WHERE sandbox_id = $1 AND operation_id = $2 AND phase = $3
+					AND lease_expires_at IS NULL AND last_error = ''
+					AND completed_at IS NOT NULL AND cleanup_started_at IS NULL
+					AND cleaned_at IS NULL AND credential_binding_digest = $4
+			)
+		`, "sandbox runtime claim "+sandbox.Record.ID, sandbox.Record.ID,
+			sandbox.ClaimOperationID, sandboxstore.SandboxRuntimeClaimPhaseReady,
+			sandbox.CredentialBindingDigest); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func loadTargetCommitInputs(

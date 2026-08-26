@@ -575,10 +575,11 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	}, nil
 }
 
-// probeCommandReady closes the runsc-create/procd-listen race without hiding
-// an end-to-end SLO miss. The first attempt is immediate; transient failures
-// are retried only inside the trusted ingress budget and the durable slot
-// claim lease.
+// probeCommandReady closes the runsc-create/procd-listen race without turning
+// the latency SLO into an availability deadline. The first attempt is
+// immediate. Attempts inside retryDeadline can satisfy the SLO; later attempts
+// remain valid until the durable slot claim lease and are reported as an SLO
+// miss by Claim's end-to-end observation.
 func (p *Planner) probeCommandReady(
 	ctx context.Context,
 	procdAddress, internalToken string,
@@ -586,16 +587,12 @@ func (p *Planner) probeCommandReady(
 ) (*procdapi.CommandReadyProbeResult, error) {
 	retryDelay := commandProbeRetryInitial
 	var lastErr error
-	firstAttempt := true
 	for {
 		attemptCtx := ctx
 		cancel := func() {}
+		now := time.Now()
 		attemptDeadline := retryDeadline
-		if firstAttempt && !retryDeadline.After(time.Now()) {
-			// An SLO miss must remain observable as a successful late claim when
-			// procd is already command-ready. Always make one bounded probe even
-			// after the retry budget has elapsed; the durable claim lease remains
-			// the hard deadline.
+		if !retryDeadline.After(now) {
 			attemptDeadline = hardDeadline
 		}
 		if !hardDeadline.IsZero() && (attemptDeadline.IsZero() || hardDeadline.Before(attemptDeadline)) {
@@ -610,13 +607,16 @@ func (p *Planner) probeCommandReady(
 			return probe, nil
 		}
 		lastErr = err
-		firstAttempt = false
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("command-ready probe canceled: %w", ctx.Err())
 		}
-		remaining := time.Until(retryDeadline)
-		if retryDeadline.IsZero() || remaining <= 0 {
-			return nil, fmt.Errorf("command-ready probe deadline exceeded: %w", lastErr)
+		nextDeadline := retryDeadline
+		if !retryDeadline.After(time.Now()) {
+			nextDeadline = hardDeadline
+		}
+		remaining := time.Until(nextDeadline)
+		if nextDeadline.IsZero() || remaining <= 0 {
+			return nil, fmt.Errorf("command-ready probe lease deadline exceeded: %w", lastErr)
 		}
 		wait := min(retryDelay, remaining)
 		timer := time.NewTimer(wait)

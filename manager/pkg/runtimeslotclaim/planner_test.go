@@ -270,13 +270,13 @@ func TestPlannerRetriesProcdListenRaceInsideTrustedSLOBudget(t *testing.T) {
 	}
 }
 
-func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
+func TestPlannerBoundsPersistentProcdProbeFailureByClaimLease(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.prober.error = errors.New("connect: connection refused")
 	planner, err := New(Config{
 		Store: fixture.store, Network: fixture.network, Node: fixture.node,
 		Prober: fixture.prober, TokenGenerator: fixture.tokens, Observer: fixture.observer,
-		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: 20 * time.Second,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: time.Second,
 		SLO: 30 * time.Millisecond,
 	})
 	if err != nil {
@@ -284,10 +284,10 @@ func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
 	}
 	started := time.Now()
 	_, err = planner.Claim(context.Background(), fixture.request)
-	if err == nil || !strings.Contains(err.Error(), "command-ready probe deadline exceeded") {
+	if err == nil || !strings.Contains(err.Error(), "command-ready probe lease deadline exceeded") {
 		t.Fatalf("Claim() error = %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("persistent probe failure took %s", elapsed)
 	}
 	fixture.prober.mu.Lock()
@@ -295,6 +295,31 @@ func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
 	fixture.prober.mu.Unlock()
 	if attempts < 2 || len(fixture.observer.observations) != 1 || fixture.observer.observations[0].Succeeded {
 		t.Fatalf("attempts = %d, observations = %+v", attempts, fixture.observer.observations)
+	}
+}
+
+func TestPlannerCommitsLateProcdReadinessAsSLOMiss(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.prober.errors = []error{errors.New("connect: connection refused")}
+	planner, err := New(Config{
+		Store: fixture.store, Network: fixture.network, Node: fixture.node,
+		Prober: fixture.prober, TokenGenerator: fixture.tokens, Observer: fixture.observer,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: time.Second,
+		SLO: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.prober.mu.Lock()
+	attempts := len(fixture.prober.addresses)
+	fixture.prober.mu.Unlock()
+	if attempts != 2 || result.WithinSLO || len(fixture.observer.observations) != 1 ||
+		!fixture.observer.observations[0].Succeeded || fixture.observer.observations[0].WithinSLO {
+		t.Fatalf("attempts = %d, result = %+v, observations = %+v", attempts, result, fixture.observer.observations)
 	}
 }
 

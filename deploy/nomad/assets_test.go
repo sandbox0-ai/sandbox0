@@ -141,6 +141,7 @@ func TestControlServiceUnitUsesDirectPerServiceConfiguration(t *testing.T) {
 		"ExecStart=/usr/local/bin/%i",
 		"User=sandbox0",
 		"ProtectSystem=strict",
+		"WantedBy=sandbox0-control.target multi-user.target",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("control unit is missing %q", required)

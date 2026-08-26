@@ -13,8 +13,6 @@ host namespaces.
   NBD devices, and Nomad client plugin configuration.
 - [`nomad-driver-sandbox0/example/`](../../nomad-driver-sandbox0/example/)
   contains the runtime-class catalog, endpoint catalog, and warm-slot job.
-- [`legacy-ack-migration.md`](legacy-ack-migration.md) defines the one-time,
-  capture-fenced transition from the final ACK manager schema.
 
 ## Immutable deployment inputs
 

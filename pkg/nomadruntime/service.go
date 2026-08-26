@@ -1592,7 +1592,13 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 	}
 	if session.Consumer != nil {
 		deadline, err := session.Consumer.Validate()
-		return err != nil || !session.Live || !now.Before(deadline)
+		// Live is process-local and cannot establish orphanhood when the A/B
+		// ctld pair shares one durable session journal. The standby observes the
+		// active owner's session as not live even while the task driver keeps its
+		// durable consumer lease renewed. Reconcile early only through a forced
+		// lease-loss/allocation-absence path; periodic scans wait for the durable
+		// consumer lease to expire.
+		return err != nil || !now.Before(deadline)
 	}
 	return now.Sub(session.CreatedAt) >= rootFSSessionAttachGrace
 }

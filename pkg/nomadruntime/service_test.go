@@ -226,7 +226,10 @@ func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
 	}
 	require.False(t, rootFSSessionNeedsReconciliation(base, now, false))
 	base.Live = false
-	require.True(t, rootFSSessionNeedsReconciliation(base, now, false))
+	require.False(t, rootFSSessionNeedsReconciliation(base, now, false),
+		"standby process-local ownership must not override a valid durable consumer lease")
+	require.True(t, rootFSSessionNeedsReconciliation(base, now, true),
+		"an explicit lease-loss or allocation-absence trigger must still reconcile immediately")
 	base.Live = true
 	base.Consumer.LeaseExpiresAt = now.Add(-time.Second).Format(time.RFC3339Nano)
 	require.True(t, rootFSSessionNeedsReconciliation(base, now, false))

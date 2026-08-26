@@ -357,7 +357,7 @@ func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind strin
 }
 
 // ListPendingRuntimeRecoverySandboxIDs returns paused sandboxes whose latest
-// committed lifecycle transition requires automatic runtime reconstruction.
+// durable lifecycle outcome requires automatic runtime reconstruction.
 func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
@@ -365,32 +365,10 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT s.sandbox_id
-		FROM manager.sandboxes s
-		JOIN LATERAL (
-			SELECT kind, source
-			FROM manager.sandbox_lifecycle_txns
-			WHERE sandbox_id = s.sandbox_id
-				AND phase = $1
-			ORDER BY epoch DESC
-			LIMIT 1
-		) latest ON TRUE
-			WHERE s.deleted_at IS NULL
-				AND s.desired_state = $2
-				AND latest.kind = $3
-				AND latest.source IN ($4, $5, $6)
-			ORDER BY s.updated_at ASC
-			LIMIT $7
-		`,
-		SandboxLifecyclePhaseCommitted,
-		SandboxDesiredStatePaused,
-		SandboxLifecycleKindPause,
-		SandboxLifecycleSourceCrash,
-		SandboxLifecycleSourceHealth,
-		SandboxLifecycleSourceLost,
-		limit,
-	)
+	rows, err := s.pool.Query(ctx, pendingRuntimeRecoverySandboxSelectSQL()+`
+		ORDER BY s.updated_at ASC
+		LIMIT $9
+	`, pendingRuntimeRecoveryQueryArgs(limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("list pending runtime recovery sandboxes: %w", err)
 	}
@@ -407,6 +385,89 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 		return nil, fmt.Errorf("iterate pending runtime recovery sandboxes: %w", err)
 	}
 	return sandboxIDs, nil
+}
+
+// IsRuntimeRecoveryPending revalidates one queued recovery against either its
+// exact in-flight crash lifecycle or the durable crash-abandon outcome.
+func (s *PGSandboxStore) IsRuntimeRecoveryPending(ctx context.Context, sandboxID string) (bool, error) {
+	if s == nil || s.pool == nil {
+		return false, nil
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return false, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	args := pendingRuntimeRecoveryQueryArgs(sandboxID)
+	var pending bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+	`+pendingRuntimeRecoverySandboxSelectSQL()+`
+				AND s.sandbox_id = $9
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM manager.sandboxes AS s
+				JOIN manager.sandbox_lifecycle_txns AS txn
+					ON txn.sandbox_id = s.sandbox_id
+				WHERE s.sandbox_id = $9
+					AND s.deleted_at IS NULL
+					AND s.desired_state IN ('active', 'paused')
+					AND txn.epoch = s.lifecycle_epoch
+					AND txn.kind = $4
+					AND txn.source IN ($5, $6, $7)
+					AND txn.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			)
+	`, args...).Scan(&pending); err != nil {
+		return false, fmt.Errorf("check pending runtime recovery sandbox: %w", err)
+	}
+	return pending, nil
+}
+
+// pendingRuntimeRecoverySandboxSelectSQL deliberately treats an exact
+// crash-abandon as a durable recovery outcome even though that transaction is
+// aborted: aborting discards the failed writer generation, not the obligation
+// to reconstruct the runtime. Failed resume attempts are excluded so they do
+// not hide that obligation; a later committed resume or manual pause does.
+func pendingRuntimeRecoverySandboxSelectSQL() string {
+	return `
+		SELECT s.sandbox_id
+		FROM manager.sandboxes AS s
+		JOIN LATERAL (
+			SELECT kind, phase, source
+			FROM manager.sandbox_lifecycle_txns
+			WHERE sandbox_id = s.sandbox_id
+				AND (
+					phase = $1
+					OR (
+						phase = $2
+						AND kind = $4
+						AND source IN ($5, $6, $7)
+						AND error = $8
+					)
+				)
+			ORDER BY epoch DESC
+			LIMIT 1
+		) AS latest ON TRUE
+		WHERE s.deleted_at IS NULL
+			AND s.desired_state = $3
+			AND latest.kind = $4
+			AND latest.source IN ($5, $6, $7)
+	`
+}
+
+func pendingRuntimeRecoveryQueryArgs(last any) []any {
+	return []any{
+		SandboxLifecyclePhaseCommitted,
+		SandboxLifecyclePhaseAborted,
+		SandboxDesiredStatePaused,
+		SandboxLifecycleKindPause,
+		SandboxLifecycleSourceCrash,
+		SandboxLifecycleSourceHealth,
+		SandboxLifecycleSourceLost,
+		RootFSWriterCrashAbandonReason,
+		last,
+	}
 }
 
 func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {

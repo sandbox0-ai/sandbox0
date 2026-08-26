@@ -212,6 +212,23 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, alreadyActiveRetry.AlreadyActive)
+	pendingRecovery, err := fixture.store.IsRuntimeRecoveryPending(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.False(t, pendingRecovery)
+
+	resumedPause, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	require.Equal(t, claimed.ID, resumedPause.SlotID)
+	require.Equal(t, requested.OperationID, resumedPause.ClaimOperationID,
+		"pause must fence the current resumed slot operation")
+	var admissionOperationID string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT operation_id FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
+	`, fixture.sandboxID).Scan(&admissionOperationID))
+	require.NotEqual(t, admissionOperationID, resumedPause.ClaimOperationID,
+		"the logical admission workflow remains separate from runtime incarnations")
 	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
 		fixture.ctx, fixture.sandboxID, "delete resumed sandbox",
 	)

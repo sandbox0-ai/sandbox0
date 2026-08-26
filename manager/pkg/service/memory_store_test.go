@@ -162,21 +162,8 @@ func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Cont
 		limit = len(s.records)
 	}
 	var sandboxIDs []string
-	for sandboxID, record := range s.records {
-		if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
-			continue
-		}
-		var latest *sandboxstore.SandboxLifecycleTxn
-		for _, txn := range s.lifecycleTxns {
-			if txn == nil || txn.SandboxID != sandboxID || txn.Phase != sandboxstore.SandboxLifecyclePhaseCommitted {
-				continue
-			}
-			if latest == nil || txn.Epoch > latest.Epoch {
-				latest = txn
-			}
-		}
-		if latest == nil || latest.Kind != sandboxstore.SandboxLifecycleKindPause ||
-			!sandboxLifecycleSourceReconstructsRuntime(latest.Source) {
+	for sandboxID := range s.records {
+		if !s.runtimeRecoveryPendingLocked(sandboxID) {
 			continue
 		}
 		sandboxIDs = append(sandboxIDs, sandboxID)
@@ -185,6 +172,49 @@ func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Cont
 		}
 	}
 	return sandboxIDs, nil
+}
+
+func (s *memorySandboxStore) IsRuntimeRecoveryPending(_ context.Context, sandboxID string) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runtimeRecoveryPendingLocked(sandboxID), nil
+}
+
+func (s *memorySandboxStore) runtimeRecoveryPendingLocked(sandboxID string) bool {
+	record := s.records[sandboxID]
+	if record == nil || !record.DeletedAt.IsZero() ||
+		record.DesiredState != sandboxstore.SandboxDesiredStateActive &&
+			record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
+		return false
+	}
+	var latest *sandboxstore.SandboxLifecycleTxn
+	for _, txn := range s.lifecycleTxns {
+		if txn == nil || txn.SandboxID != sandboxID {
+			continue
+		}
+		if txn.Epoch == record.LifecycleEpoch && sandboxLifecyclePhaseActive(txn.Phase) &&
+			txn.Kind == sandboxstore.SandboxLifecycleKindPause &&
+			sandboxLifecycleSourceReconstructsRuntime(txn.Source) {
+			return true
+		}
+		durableOutcome := txn.Phase == sandboxstore.SandboxLifecyclePhaseCommitted ||
+			txn.Phase == sandboxstore.SandboxLifecyclePhaseAborted &&
+				txn.Kind == sandboxstore.SandboxLifecycleKindPause &&
+				sandboxLifecycleSourceReconstructsRuntime(txn.Source) &&
+				txn.Error == sandboxstore.RootFSWriterCrashAbandonReason
+		if !durableOutcome {
+			continue
+		}
+		if latest == nil || txn.Epoch > latest.Epoch {
+			latest = txn
+		}
+	}
+	return record.DesiredState == sandboxstore.SandboxDesiredStatePaused &&
+		latest != nil && latest.Kind == sandboxstore.SandboxLifecycleKindPause &&
+		sandboxLifecycleSourceReconstructsRuntime(latest.Source)
 }
 
 func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {

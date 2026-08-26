@@ -189,9 +189,22 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		(slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned)
 	activeBindingMatches := alreadyPaused ||
 		(slot.AllocationID == record.RuntimeID && slot.AllocationNamespace == record.RuntimeNamespace)
-	if !validSlotState || slot.ClaimOperationID != claim.OperationID ||
+	resourceBindingMatches := !slot.ResourceLease.IsZero() &&
+		slot.ResourceLease.OperationID == slot.ClaimOperationID &&
+		slot.ResourceLease.ClaimID == slot.ClaimID &&
+		slot.ResourceLease.SlotID == slot.ID &&
+		slot.ResourceLease.ClusterID == slot.ClusterID &&
+		slot.ResourceLease.NodeID == slot.NodeID &&
+		slot.ResourceLease.NodeUID == slot.NodeUID &&
+		slot.ResourceLease.NodeBootID == slot.NodeBootID &&
+		slot.ResourceLeaseState == RuntimeResourceLeaseActive &&
+		slot.ResourceLeaseReleasedAt.IsZero()
+	if !validSlotState || slot.ClaimOperationID == "" ||
 		slot.ClaimID == "" || slot.WriterGrantID == "" || !activeBindingMatches || slot.ClusterID != record.ClusterID {
 		return nil, fmt.Errorf("%w: active runtime slot does not match the sandbox claim", ErrNomadSandboxPauseNotReady)
+	}
+	if !resourceBindingMatches {
+		return nil, fmt.Errorf("%w: active runtime slot resource lease does not match the slot claim", ErrNomadSandboxPauseNotReady)
 	}
 	grantRecord, err := getRootFSWriterGrantForUpdate(ctx, tx, slot.WriterGrantID)
 	if err != nil {
@@ -258,7 +271,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	candidate := &NomadSandboxPauseCandidate{
 		SandboxID: sandboxID, OperationID: operationID, Source: lifecycle.Source,
 		LifecyclePhase: lifecycle.Phase, AlreadyPaused: alreadyPaused,
-		ClaimOperationID: claim.OperationID, ClaimID: slot.ClaimID,
+		ClaimOperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 		SlotID: slot.ID, SlotState: slot.State, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, AllocationNamespace: slot.AllocationNamespace,
 		NodeID: slot.NodeID, WriterGrantID: grant.ID, WriterGrantState: grant.State,

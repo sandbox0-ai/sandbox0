@@ -19,12 +19,10 @@ type sandboxPauseItem struct {
 	Resume    bool
 }
 
-type pendingRuntimeRecoveryStore interface {
-	ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
-}
-
 type sandboxPauseLifecycleStore interface {
 	ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error)
+	ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
+	IsRuntimeRecoveryPending(ctx context.Context, sandboxID string) (bool, error)
 }
 
 // SandboxPauseController completes durable pause transactions outside the API request path.
@@ -142,11 +140,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 			}
 		}
 	}
-	recoveryStore, ok := c.store.(pendingRuntimeRecoveryStore)
-	if !ok {
-		return
-	}
-	sandboxIDs, err := recoveryStore.ListPendingRuntimeRecoverySandboxIDs(ctx, c.scanLimit)
+	sandboxIDs, err := c.store.ListPendingRuntimeRecoverySandboxIDs(ctx, c.scanLimit)
 	if err != nil {
 		c.logger.Warn("Failed to list pending sandbox runtime recoveries", zap.Error(err))
 		return
@@ -176,6 +170,21 @@ func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
 		c.queue.Forget(item)
 		return true
 	}
+	if item.Resume {
+		pending, err := c.runtimeRecoveryPending(ctx, item.SandboxID)
+		if err != nil {
+			c.logger.Warn("Sandbox runtime recovery preflight failed, requeueing",
+				zap.String("sandboxID", item.SandboxID),
+				zap.Error(err),
+			)
+			c.queue.AddRateLimited(item)
+			return true
+		}
+		if !pending {
+			c.queue.Forget(item)
+			return true
+		}
+	}
 	if err := c.complete(ctx, item.SandboxID); err != nil {
 		c.logger.Warn("Sandbox pause completion failed, requeueing",
 			zap.String("sandboxID", item.SandboxID),
@@ -185,6 +194,19 @@ func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
 		return true
 	}
 	if item.Resume {
+		pending, err := c.runtimeRecoveryPending(ctx, item.SandboxID)
+		if err != nil {
+			c.logger.Warn("Sandbox runtime recovery revalidation failed, requeueing",
+				zap.String("sandboxID", item.SandboxID),
+				zap.Error(err),
+			)
+			c.queue.AddRateLimited(item)
+			return true
+		}
+		if !pending {
+			c.queue.Forget(item)
+			return true
+		}
 		if c.resume == nil {
 			c.queue.Forget(item)
 			return true
@@ -200,4 +222,11 @@ func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
 	}
 	c.queue.Forget(item)
 	return true
+}
+
+func (c *SandboxPauseController) runtimeRecoveryPending(ctx context.Context, sandboxID string) (bool, error) {
+	if c.store == nil {
+		return false, nil
+	}
+	return c.store.IsRuntimeRecoveryPending(ctx, sandboxID)
 }

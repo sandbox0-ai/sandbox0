@@ -22,6 +22,10 @@ func TestRootFSWriterCrashAbandonPreservesDurableGenerationAndAbortsLifecycleAto
 	require.Equal(t, RootFSWriterGrantStateRetiring, begun.State)
 	require.Equal(t, RootFSWriterRetireKindCrashAbandon, begun.RetireKind)
 	beginStartedAt := begun.RetireStartedAt
+	pendingRecovery, err := fixture.store.IsRuntimeRecoveryPending(ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.True(t, pendingRecovery,
+		"an in-flight crash lifecycle must authorize its queued completion")
 	begunRetry, err := fixture.store.BeginRootFSWriterCrashAbandon(ctx, fixture.beginRequest)
 	require.NoError(t, err)
 	require.Equal(t, beginStartedAt, begunRetry.RetireStartedAt)
@@ -87,6 +91,13 @@ func TestRootFSWriterCrashAbandonPreservesDurableGenerationAndAbortsLifecycleAto
 	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
 	require.Equal(t, RootFSWriterCrashAbandonReason, lifecycleError)
 	require.Empty(t, preparedHead)
+	pendingRecovery, err = fixture.store.IsRuntimeRecoveryPending(ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.True(t, pendingRecovery,
+		"an exact crash-abandon must remain a durable reconstruction obligation")
+	pendingIDs, err := fixture.store.ListPendingRuntimeRecoverySandboxIDs(ctx, 10)
+	require.NoError(t, err)
+	require.Contains(t, pendingIDs, fixture.sandboxID)
 
 	var retried *RootFSWriterGrant
 	err = fixture.store.WithSandboxLock(ctx, fixture.sandboxID, func(

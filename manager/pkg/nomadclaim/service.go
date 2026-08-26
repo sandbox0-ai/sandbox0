@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/containerd/errdefs"
 	distref "github.com/distribution/reference"
@@ -56,6 +57,7 @@ type Store interface {
 	RequestNomadSandboxTTLPause(context.Context, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
 	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
 	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
+	AbortNomadSandboxResume(context.Context, string, string, string) (bool, error)
 	CompleteNomadSandboxResume(context.Context, *sandboxstore.CompleteNomadSandboxResumeRequest) (*sandboxstore.SandboxRecord, error)
 	RequestNomadSandboxRunningFork(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.NomadSandboxRunningForkCandidate, error)
 	AbortNomadSandboxRunningFork(context.Context, string, string, string, string) (bool, error)
@@ -425,12 +427,14 @@ func (s *Service) resumeNomadSandbox(
 	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
 	plan.assignment, err = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
 	if err != nil {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	if err := plan.assignment.Validate(); err != nil {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
 		OperationID: candidate.OperationID, SandboxID: candidate.SandboxID,
@@ -440,6 +444,7 @@ func (s *Service) resumeNomadSandbox(
 		NetworkPolicy: plan.policy, Runtime: plan.assignment, StartedAt: startedAt,
 	})
 	if err != nil {
+		err = s.abortFailedNomadResume(ctx, candidate, err)
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
 			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
 		}
@@ -447,8 +452,9 @@ func (s *Service) resumeNomadSandbox(
 	}
 	if result == nil || result.Slot == nil || result.Slot.ID == "" ||
 		result.Slot.AllocationID == "" || result.Slot.AllocationNamespace == "" {
-		return nil, nil, fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
+		resumeErr := fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
 			service.ErrSandboxLifecycleUnavailable)
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
@@ -473,6 +479,39 @@ func (s *Service) resumeNomadSandbox(
 		zap.Duration("endToEndDuration", result.Duration),
 	)
 	return completed, result, nil
+}
+
+func (s *Service) abortFailedNomadResume(
+	ctx context.Context,
+	candidate *sandboxstore.NomadSandboxResumeCandidate,
+	resumeErr error,
+) error {
+	if candidate == nil || candidate.AlreadyActive || candidate.SandboxID == "" || candidate.OperationID == "" {
+		return resumeErr
+	}
+	const abortTimeout = 5 * time.Second
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	reason := "resume runtime did not reach command-ready"
+	if resumeErr != nil {
+		reason = fmt.Sprintf("%s: %v", reason, resumeErr)
+	}
+	reason = strings.ToValidUTF8(reason, "\uFFFD")
+	for len(reason) > 2_048 {
+		_, size := utf8.DecodeLastRuneInString(reason)
+		reason = reason[:len(reason)-size]
+	}
+	_, err := s.store.AbortNomadSandboxResume(
+		abortCtx, candidate.SandboxID, candidate.OperationID, reason,
+	)
+	if err == nil {
+		return resumeErr
+	}
+	abortErr := fmt.Errorf("abort failed Nomad resume %s: %w", candidate.OperationID, err)
+	if resumeErr == nil {
+		return abortErr
+	}
+	return errors.Join(resumeErr, abortErr)
 }
 
 func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxstore.SandboxRecord) (nomadResumePlan, error) {

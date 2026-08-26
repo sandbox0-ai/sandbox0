@@ -252,6 +252,25 @@ func (s *PGSandboxStore) GetRuntimeSlot(ctx context.Context, slotID string) (*Ru
 	return slot, err
 }
 
+// GetRuntimeSlot exposes the same immutable slot projection to controllers
+// already holding a sandbox transaction. It is intentionally not part of the
+// broad SandboxStoreTx contract; only recovery paths that must prove a slot's
+// lifecycle ownership should opt into this narrower capability.
+func (t sandboxStoreTx) GetRuntimeSlot(ctx context.Context, slotID string) (*RuntimeSlot, error) {
+	slotID = strings.TrimSpace(slotID)
+	if slotID == "" {
+		return nil, fmt.Errorf("slot_id is required")
+	}
+	slot, err := scanRuntimeSlot(t.tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+		WHERE slot_id = $1
+		FOR SHARE OF runtime_slots
+	`, slotID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRuntimeSlotNotFound, slotID)
+	}
+	return slot, err
+}
+
 // GetRuntimeSlotBySandboxID returns the one non-terminal physical runtime
 // incarnation currently bound to a logical sandbox.
 func (s *PGSandboxStore) GetRuntimeSlotBySandboxID(ctx context.Context, sandboxID string) (*RuntimeSlot, error) {

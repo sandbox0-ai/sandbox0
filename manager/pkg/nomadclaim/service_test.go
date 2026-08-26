@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
@@ -95,6 +96,8 @@ type fakeClaimStore struct {
 	resumeRetryErr           error
 	resumeRetryRequests      []*sandboxstore.RetryNomadSandboxResumeRequest
 	resumeRequests           []*sandboxstore.RequestNomadSandboxResumeRequest
+	resumeAbortCalls         [][3]string
+	resumeAbortErr           error
 	resumeCompleteErr        error
 	resumeCompleteCalls      []*sandboxstore.CompleteNomadSandboxResumeRequest
 	forkCandidate            *sandboxstore.NomadSandboxRunningForkCandidate
@@ -433,6 +436,18 @@ func (f *fakeClaimStore) RequestNomadSandboxResume(
 	candidate := *f.resumeCandidate
 	candidate.Record = cloneClaimRecord(record)
 	return &candidate, nil
+}
+
+func (f *fakeClaimStore) AbortNomadSandboxResume(
+	_ context.Context,
+	sandboxID, operationID, reason string,
+) (bool, error) {
+	f.resumeAbortCalls = append(f.resumeAbortCalls, [3]string{sandboxID, operationID, reason})
+	if f.resumeAbortErr != nil {
+		return false, f.resumeAbortErr
+	}
+	f.resumeRequested = false
+	return true, nil
 }
 
 func (f *fakeClaimStore) CompleteNomadSandboxResume(
@@ -805,12 +820,16 @@ func (f *fakeClaimStore) RestoreRootFSFromSnapshot(_ context.Context, request *s
 type fakePlanner struct {
 	requests []runtimeslotclaim.Request
 	err      error
+	result   *runtimeslotclaim.Result
 }
 
 func (f *fakePlanner) Claim(_ context.Context, request runtimeslotclaim.Request) (*runtimeslotclaim.Result, error) {
 	f.requests = append(f.requests, request)
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
 	}
 	return &runtimeslotclaim.Result{
 		Slot: &sandboxstore.RuntimeSlot{
@@ -1236,7 +1255,7 @@ func TestServiceProjectsResumedAndAlreadyActiveNomadRuntime(t *testing.T) {
 	}
 }
 
-func TestServiceRetriesDurableNomadResumeWhenQuotaPolicyIsUnavailable(t *testing.T) {
+func TestServiceAbortsFailedNomadResumeBeforeStartingANewAttempt(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	sandboxID := preparePausedNomadResume(t, fixture)
 	fixture.quotaLimits.limit = &quota.Limit{
@@ -1246,19 +1265,58 @@ func TestServiceRetriesDurableNomadResumeWhenQuotaPolicyIsUnavailable(t *testing
 	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID); err == nil {
 		t.Fatal("initial resume unexpectedly succeeded")
 	}
+	if len(fixture.store.resumeAbortCalls) != 1 ||
+		fixture.store.resumeAbortCalls[0][0] != sandboxID ||
+		fixture.store.resumeAbortCalls[0][1] != "nomad-resume-operation-1" ||
+		!strings.Contains(fixture.store.resumeAbortCalls[0][2], "node channel unavailable") {
+		t.Fatalf("resume abort calls = %+v", fixture.store.resumeAbortCalls)
+	}
 	fixture.planner.err = nil
-	fixture.quotaLimits.err = errors.New("quota database unavailable")
+	fixture.store.resumeCandidate.OperationID = "nomad-resume-operation-2"
 
 	response, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.SandboxID != sandboxID || len(fixture.store.resumeRequests) != 1 ||
-		len(fixture.store.resumeRetryRequests) != 2 || len(fixture.quotaLimits.calls) != 1 ||
+	if response.SandboxID != sandboxID || len(fixture.store.resumeRequests) != 2 ||
+		len(fixture.store.resumeRetryRequests) != 2 || len(fixture.quotaLimits.calls) != 2 ||
 		len(fixture.planner.requests) != 2 || len(fixture.store.resumeCompleteCalls) != 1 {
 		t.Fatalf("response=%+v requests=%d retries=%d quota=%d planner=%d complete=%d",
 			response, len(fixture.store.resumeRequests), len(fixture.store.resumeRetryRequests),
 			len(fixture.quotaLimits.calls), len(fixture.planner.requests), len(fixture.store.resumeCompleteCalls))
+	}
+}
+
+func TestServiceSurfacesResumeAbortFailureWithPlannerError(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.planner.err = errors.New("command-ready probe failed")
+	fixture.store.resumeAbortErr = errors.New("database unavailable")
+
+	_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err == nil || !strings.Contains(err.Error(), "command-ready probe failed") ||
+		!strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("joined resume failure = %v", err)
+	}
+	if len(fixture.store.resumeAbortCalls) != 1 || len(fixture.store.resumeCompleteCalls) != 0 {
+		t.Fatalf("abort=%+v complete=%+v", fixture.store.resumeAbortCalls, fixture.store.resumeCompleteCalls)
+	}
+}
+
+func TestServiceTruncatesResumeAbortReasonAtAValidUTF8Boundary(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.planner.err = errors.New(strings.Repeat("界", 1_000))
+
+	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID); err == nil {
+		t.Fatal("resume unexpectedly succeeded")
+	}
+	if len(fixture.store.resumeAbortCalls) != 1 {
+		t.Fatalf("resume abort calls = %+v", fixture.store.resumeAbortCalls)
+	}
+	reason := fixture.store.resumeAbortCalls[0][2]
+	if len(reason) > 2_048 || !utf8.ValidString(reason) {
+		t.Fatalf("resume abort reason bytes=%d validUTF8=%t", len(reason), utf8.ValidString(reason))
 	}
 }
 
@@ -1273,6 +1331,22 @@ func TestServiceMapsNomadResumeUnavailableConflictAndQuotaErrors(t *testing.T) {
 		}
 		if len(fixture.store.resumeCompleteCalls) != 0 {
 			t.Fatalf("resume completed without a slot: %+v", fixture.store.resumeCompleteCalls)
+		}
+		if len(fixture.store.resumeAbortCalls) != 1 {
+			t.Fatalf("resume abort calls = %+v", fixture.store.resumeAbortCalls)
+		}
+	})
+
+	t.Run("planner returned no exact binding", func(t *testing.T) {
+		fixture := newClaimServiceFixture(t)
+		sandboxID := preparePausedNomadResume(t, fixture)
+		fixture.planner.result = &runtimeslotclaim.Result{}
+		_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+		if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+			t.Fatalf("resume error = %v", err)
+		}
+		if len(fixture.store.resumeAbortCalls) != 1 || len(fixture.store.resumeCompleteCalls) != 0 {
+			t.Fatalf("abort=%+v complete=%+v", fixture.store.resumeAbortCalls, fixture.store.resumeCompleteCalls)
 		}
 	})
 

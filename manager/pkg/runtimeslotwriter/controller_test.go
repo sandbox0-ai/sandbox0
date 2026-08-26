@@ -16,7 +16,10 @@ type fakeStore struct {
 	grant         *sandboxstore.RootFSWriterGrant
 	record        *sandboxstore.SandboxRecord
 	claim         *sandboxstore.SandboxRuntimeClaim
+	slot          *sandboxstore.RuntimeSlot
 	lifecycle     *sandboxstore.SandboxLifecycleTxn
+	aborted       *sandboxstore.SandboxLifecycleTxn
+	abortCalls    int
 	cancelCalls   int
 	beginCalls    int
 	completeCalls int
@@ -101,6 +104,14 @@ func (f fakeTx) GetSandboxRuntimeClaim(context.Context, string) (*sandboxstore.S
 	return &clone, nil
 }
 
+func (f fakeTx) GetRuntimeSlot(_ context.Context, slotID string) (*sandboxstore.RuntimeSlot, error) {
+	if f.store.slot == nil || f.store.slot.ID != slotID {
+		return nil, sandboxstore.ErrRuntimeSlotNotFound
+	}
+	clone := *f.store.slot
+	return &clone, nil
+}
+
 func (f fakeTx) GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error) {
 	if f.store.lifecycle == nil || f.store.lifecycle.Phase == sandboxstore.SandboxLifecyclePhaseAborted ||
 		f.store.lifecycle.Phase == sandboxstore.SandboxLifecyclePhaseCommitted {
@@ -164,7 +175,16 @@ func (fakeTx) RequestLifecycleTxnCancel(context.Context, string, string) (bool, 
 	return false, nil
 }
 func (fakeTx) CommitLifecycleTxn(context.Context, string, string) error { return nil }
-func (fakeTx) AbortLifecycleTxn(context.Context, string, string) error  { return nil }
+func (f fakeTx) AbortLifecycleTxn(_ context.Context, txnID, reason string) error {
+	if f.store.lifecycle == nil || f.store.lifecycle.ID != txnID {
+		return errors.New("active lifecycle not found")
+	}
+	f.store.abortCalls++
+	f.store.lifecycle.Phase = sandboxstore.SandboxLifecyclePhaseAborted
+	f.store.lifecycle.Error = reason
+	f.store.aborted = cloneLifecycle(f.store.lifecycle)
+	return nil
+}
 
 func TestControllerFencesAndCompletesConsumedWriterExactly(t *testing.T) {
 	store, controller, fenceRequest := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
@@ -359,6 +379,80 @@ func TestControllerRejectsUnfencedInitialClaimWithoutRuntimeBinding(t *testing.T
 	_, err := controller.Fence(context.Background(), request)
 	if err == nil || store.lifecycle != nil || store.beginCalls != 0 {
 		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)
+	}
+}
+
+func TestControllerPreemptsExactFailedResumeBeforeCrashCleanup(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	store.record.RuntimeGeneration = 6
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.record.LifecycleEpoch = 4
+	resumeOperationID := sandboxstore.NomadSandboxResumeOperationID(
+		store.record.ID, store.record.RuntimeGeneration, store.grant.InitialGenerationID, store.record.LifecycleEpoch,
+	)
+	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: resumeOperationID, SandboxID: store.record.ID,
+		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
+		ExpectedGenerationID: store.grant.InitialGenerationID,
+	}
+	store.slot = &sandboxstore.RuntimeSlot{
+		ID: store.grant.SlotID, SandboxID: store.record.ID, ClaimOperationID: resumeOperationID,
+		ClaimID: store.grant.ClaimID, WriterGrantID: store.grant.ID,
+		SourceGenerationID: store.grant.InitialGenerationID,
+		AllocationID:       store.grant.RuntimeIncarnationID, AllocationNamespace: store.grant.RuntimeNamespace,
+		State: sandboxstore.RuntimeSlotStateQuiescing,
+	}
+
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fence.ProofDigest) != 32 || store.abortCalls != 1 || store.aborted == nil ||
+		store.aborted.ID != resumeOperationID || store.aborted.Phase != sandboxstore.SandboxLifecyclePhaseAborted ||
+		store.lifecycle == nil || store.lifecycle.ID != request.OperationID ||
+		store.lifecycle.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		store.lifecycle.Source != sandboxstore.SandboxLifecycleSourceCrash ||
+		store.lifecycle.FromGeneration != 7 ||
+		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
+		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
+		t.Fatalf("fence=%+v abort=%+v lifecycle=%+v", fence, store.aborted, store.lifecycle)
+	}
+}
+
+func TestControllerDoesNotPreemptResumeOwnedByAnotherSlot(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	store.record.RuntimeGeneration = 6
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.record.LifecycleEpoch = 4
+	resumeOperationID := sandboxstore.NomadSandboxResumeOperationID(
+		store.record.ID, store.record.RuntimeGeneration, store.grant.InitialGenerationID, store.record.LifecycleEpoch,
+	)
+	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: resumeOperationID, SandboxID: store.record.ID,
+		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
+		ExpectedGenerationID: store.grant.InitialGenerationID,
+	}
+	store.slot = &sandboxstore.RuntimeSlot{
+		ID: store.grant.SlotID, SandboxID: store.record.ID, ClaimOperationID: "another-resume-operation",
+		ClaimID: store.grant.ClaimID, WriterGrantID: store.grant.ID,
+		SourceGenerationID: store.grant.InitialGenerationID,
+		AllocationID:       store.grant.RuntimeIncarnationID, AllocationNamespace: store.grant.RuntimeNamespace,
+		State: sandboxstore.RuntimeSlotStateQuiescing,
+	}
+
+	_, err := controller.Fence(context.Background(), request)
+	if err == nil || store.abortCalls != 0 || store.beginCalls != 0 ||
+		store.lifecycle.ID != resumeOperationID || store.grant.State != sandboxstore.RootFSWriterGrantStateConsumed {
+		t.Fatalf("Fence()=%v abort=%d begin=%d lifecycle=%+v grant=%+v",
+			err, store.abortCalls, store.beginCalls, store.lifecycle, store.grant)
 	}
 }
 

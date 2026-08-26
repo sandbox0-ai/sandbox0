@@ -40,6 +40,8 @@ func validNomadAllocationConfig() NomadAllocationConfig {
 		ClusterID:                    "cluster-1",
 		Address:                      "https://nomad.internal:4646",
 		NodeID:                       "node-1",
+		Namespace:                    "default",
+		JobID:                        "sandbox0-warm-slots",
 		TokenFile:                    "/etc/sandbox0/tokens/nomad.token",
 		CAFile:                       "/etc/sandbox0/pki/nomad-ca.pem",
 		CertFile:                     "/etc/sandbox0/pki/nomad.pem",
@@ -100,6 +102,8 @@ func TestValidateNomadAllocationConfigRejectsUntrustedEndpoints(t *testing.T) {
 		match  string
 	}{
 		{name: "insecure endpoint", mutate: func(c *NomadAllocationConfig) { c.Address = "http://nomad.internal:4646" }, match: "HTTPS origin"},
+		{name: "missing namespace", mutate: func(c *NomadAllocationConfig) { c.Namespace = "" }, match: "nomad_namespace"},
+		{name: "missing job", mutate: func(c *NomadAllocationConfig) { c.JobID = "" }, match: "nomad_job_id"},
 		{name: "relative token", mutate: func(c *NomadAllocationConfig) { c.TokenFile = "nomad.token" }, match: "canonical"},
 		{name: "missing peer identity", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotChannelPeerURISAN = "" }, match: "SPIFFE"},
 		{name: "query in peer identity", mutate: func(c *NomadAllocationConfig) { c.RuntimeSlotChannelPeerURISAN += "?node=1" }, match: "SPIFFE"},

@@ -40,6 +40,8 @@ func validCtldNomadConfig() *apiconfig.CtldConfig {
 			AuthorityPeerURISAN:     "spiffe://sandbox0.internal/region/runtime-slot-channel",
 			NomadAddress:            "https://127.0.0.1:4646",
 			NomadNodeID:             "node-1",
+			NomadNamespace:          "default",
+			NomadJobID:              "sandbox0-warm-slots",
 			NomadTokenFile:          "/etc/sandbox0/tokens/nomad.token",
 			NomadCAFile:             "/etc/sandbox0/pki/nomad-ca.pem",
 			NomadCertFile:           "/etc/sandbox0/pki/nomad.pem",

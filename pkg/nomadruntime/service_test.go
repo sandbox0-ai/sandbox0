@@ -1224,18 +1224,26 @@ func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "nomad.token")
 	require.NoError(t, os.WriteFile(tokenFile, []byte("secret-token\n"), 0o600))
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		require.Equal(t, "/v1/node/node-a/allocations", request.URL.Path)
 		require.Equal(t, "secret-token", request.Header.Get("X-Nomad-Token"))
-		_, _ = writer.Write([]byte(`[
+		switch request.URL.Path {
+		case "/v1/job/sandbox0-warm-slots":
+			require.Equal(t, "default", request.URL.Query().Get("namespace"))
+			_, _ = writer.Write([]byte(`{"ID":"sandbox0-warm-slots","Namespace":"default"}`))
+		case "/v1/node/node-a/allocations":
+			_, _ = writer.Write([]byte(`[
             {"ID":"running","DesiredStatus":"run","ClientStatus":"running"},
             {"ID":"pending","DesiredStatus":"run","ClientStatus":"pending"},
             {"ID":"stopping","DesiredStatus":"stop","ClientStatus":"running"},
             {"ID":"complete","DesiredStatus":"run","ClientStatus":"complete"}
         ]`))
+		default:
+			http.NotFound(writer, request)
+		}
 	}))
 	defer server.Close()
 	source, err := newNomadAllocationSource(NomadAllocationConfig{
-		Address: server.URL, NodeID: "node-a", TokenFile: tokenFile,
+		Address: server.URL, NodeID: "node-a", Namespace: "default",
+		JobID: "sandbox0-warm-slots", TokenFile: tokenFile,
 	})
 	require.NoError(t, err)
 	active, err := source.ActiveAllocations(t.Context())
@@ -1244,4 +1252,31 @@ func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {
 		"running": true, "pending": true, "stopping": true, "complete": true,
 	}, active)
 	require.False(t, active["purged"])
+}
+
+func TestNomadAllocationSourceRejectsACLFilteredCatalog(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "nomad.token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("node-only-token\n"), 0o600))
+	nodeListCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/job/sandbox0-warm-slots":
+			http.Error(writer, "Permission denied", http.StatusForbidden)
+		case "/v1/node/node-a/allocations":
+			nodeListCalled = true
+			_, _ = writer.Write([]byte(`[]`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	source, err := newNomadAllocationSource(NomadAllocationConfig{
+		Address: server.URL, NodeID: "node-a", Namespace: "default",
+		JobID: "sandbox0-warm-slots", TokenFile: tokenFile,
+	})
+	require.NoError(t, err)
+	active, err := source.ActiveAllocations(t.Context())
+	require.ErrorContains(t, err, "verify Nomad allocation catalog visibility: HTTP 403")
+	require.Nil(t, active)
+	require.False(t, nodeListCalled, "an ACL-filterable empty list must never establish allocation absence")
 }

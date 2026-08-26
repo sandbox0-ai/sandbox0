@@ -274,6 +274,8 @@ type NomadAllocationConfig struct {
 	ClusterID                     string
 	Address                       string
 	NodeID                        string
+	Namespace                     string
+	JobID                         string
 	TokenFile                     string
 	CAFile                        string
 	CertFile                      string
@@ -435,6 +437,8 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 		"cluster_id":                       config.ClusterID,
 		"nomad_address":                    config.Address,
 		"nomad_node_id":                    config.NodeID,
+		"nomad_namespace":                  config.Namespace,
+		"nomad_job_id":                     config.JobID,
 		"runtime_slot_node_uid":            config.RuntimeSlotNodeUID,
 		"runtime_slot_ctld_network_socket": config.RuntimeSlotCtldNetworkSocket,
 	} {
@@ -1343,6 +1347,9 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		d.logger.Error("list durable RootFS recovery sessions", "error", err)
 		return
 	}
+	if len(sessions) == 0 {
+		return
+	}
 	now = time.Now()
 	var activeAllocations map[string]bool
 	if d.allocations != nil {
@@ -1485,26 +1492,38 @@ func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 }
 
 type httpNomadAllocationSource struct {
-	url       string
-	tokenFile string
-	http      *http.Client
+	allocationURL string
+	visibilityURL string
+	namespace     string
+	jobID         string
+	tokenFile     string
+	http          *http.Client
 }
 
 func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSource, error) {
 	address := strings.TrimSpace(config.Address)
 	nodeID := strings.TrimSpace(config.NodeID)
-	if address == "" && nodeID == "" {
+	namespace := strings.TrimSpace(config.Namespace)
+	jobID := strings.TrimSpace(config.JobID)
+	if address == "" && nodeID == "" && namespace == "" && jobID == "" {
 		return nil, nil
 	}
-	if address == "" || nodeID == "" {
-		return nil, fmt.Errorf("nomad address and node ID must be configured together")
+	if address == "" || nodeID == "" || namespace == "" || jobID == "" {
+		return nil, fmt.Errorf("nomad address, node ID, namespace, and job ID must be configured together")
 	}
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("nomad address must be an HTTP(S) origin")
 	}
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
+	basePath := strings.TrimSuffix(parsed.Path, "/")
+	parsed.Path = basePath + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
+	allocationURL := parsed.String()
+	parsed.Path = basePath + "/v1/job/" + url.PathEscape(jobID)
+	query := parsed.Query()
+	query.Set("namespace", namespace)
+	parsed.RawQuery = query.Encode()
+	visibilityURL := parsed.String()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	if parsed.Scheme == "https" {
@@ -1533,24 +1552,61 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		transport.TLSClientConfig = tlsConfig
 	}
 	return &httpNomadAllocationSource{
-		url: parsed.String(), tokenFile: strings.TrimSpace(config.TokenFile),
+		allocationURL: allocationURL, visibilityURL: visibilityURL,
+		namespace: namespace, jobID: jobID, tokenFile: strings.TrimSpace(config.TokenFile),
 		http: &http.Client{Timeout: 2 * time.Second, Transport: transport},
 	}, nil
 }
 
 func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[string]bool, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
-	if err != nil {
-		return nil, err
-	}
+	token := ""
 	if s.tokenFile != "" {
-		token, err := os.ReadFile(s.tokenFile)
+		payload, err := os.ReadFile(s.tokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("read Nomad token: %w", err)
 		}
-		request.Header.Set("X-Nomad-Token", strings.TrimSpace(string(token)))
+		token = strings.TrimSpace(string(payload))
+	}
+	// Nomad intentionally returns an ACL-filtered 200 response from the node
+	// allocation list. Prove read-job access to the exact workload namespace
+	// before an empty list is allowed to establish physical absence.
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.visibilityURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		request.Header.Set("X-Nomad-Token", token)
 	}
 	response, err := s.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("verify Nomad allocation catalog visibility: %w", err)
+	}
+	if response.StatusCode/100 != 2 {
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+		response.Body.Close()
+		return nil, fmt.Errorf("verify Nomad allocation catalog visibility: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var job struct {
+		ID        string `json:"ID"`
+		Namespace string `json:"Namespace"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, nomadAllocationResponseMaxBytes)).Decode(&job); err != nil {
+		response.Body.Close()
+		return nil, fmt.Errorf("decode Nomad allocation catalog visibility anchor: %w", err)
+	}
+	response.Body.Close()
+	if job.ID != s.jobID || job.Namespace != s.namespace {
+		return nil, fmt.Errorf("Nomad allocation catalog visibility anchor does not match configured job")
+	}
+
+	request, err = http.NewRequestWithContext(ctx, http.MethodGet, s.allocationURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		request.Header.Set("X-Nomad-Token", token)
+	}
+	response, err = s.http.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("list Nomad node allocations: %w", err)
 	}

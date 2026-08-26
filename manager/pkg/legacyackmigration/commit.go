@@ -214,13 +214,19 @@ func bindTargetCommitClaims(ctx context.Context, tx pgx.Tx, plan *targetCommitPl
 	if plan == nil || tx == nil {
 		return fmt.Errorf("target migration claim plan is not configured")
 	}
+	// The standalone migration tool intentionally opens an unscoped pool, while
+	// credential projections are owned by the scheduler schema. Pin the local
+	// transaction path instead of depending on the caller's connection setup.
+	if _, err := tx.Exec(ctx, `SET LOCAL search_path TO scheduler, public`); err != nil {
+		return fmt.Errorf("select scheduler credential schema for migrated claims: %w", err)
+	}
 	for index := range plan.Sandboxes {
 		sandbox := &plan.Sandboxes[index]
 		record := sandbox.Record
 		var foreignBindings int
 		if err := tx.QueryRow(ctx, `
 			SELECT COUNT(*)
-			FROM sandbox_egress_credential_bindings
+			FROM scheduler.sandbox_egress_credential_bindings
 			WHERE sandbox_id = $1 AND team_id <> $2
 		`, record.ID, record.TeamID).Scan(&foreignBindings); err != nil {
 			return fmt.Errorf("audit migrated sandbox %s credential ownership: %w", record.ID, err)

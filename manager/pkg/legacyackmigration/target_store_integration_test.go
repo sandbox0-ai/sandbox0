@@ -246,6 +246,7 @@ func TestTargetCommitClaimBindsSurvivingCredentialProjectionIntegration(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	pool := newTargetStoreIntegrationPool(t, ctx)
+	unscopedPool := newTargetStoreUnscopedIntegrationPool(t, ctx)
 	var sourceID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO credential_sources (
@@ -280,7 +281,7 @@ func TestTargetCommitClaimBindsSurvivingCredentialProjectionIntegration(t *testi
 			ID: "sandbox-1", TeamID: "team-1",
 		}}},
 	}
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := unscopedPool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +337,7 @@ func TestTargetCommitClaimBindsSurvivingCredentialProjectionIntegration(t *testi
 	`, foreignSourceID); err != nil {
 		t.Fatal(err)
 	}
-	foreignTx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	foreignTx, err := unscopedPool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,6 +642,35 @@ func newTargetStoreIntegrationPool(t *testing.T, ctx context.Context) *pgxpool.P
 	if err := sandboxstore.RunSandboxStoreMigrations(ctx, pool, logger); err != nil {
 		t.Fatal(err)
 	}
+	return pool
+}
+
+func newTargetStoreUnscopedIntegrationPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
+	t.Helper()
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("TEST_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("missing INTEGRATION_DATABASE_URL or TEST_DATABASE_URL")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ConnConfig.RuntimeParams == nil {
+		config.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = "public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	return pool
 }
 

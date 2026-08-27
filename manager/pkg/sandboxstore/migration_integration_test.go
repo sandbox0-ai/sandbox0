@@ -114,6 +114,18 @@ func applySandboxStoreBaselineOnly(t *testing.T, ctx context.Context, pool *pgxp
 func prepareMixedRuntimeSchemaForCutover(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
+		DROP INDEX manager.idx_sandbox_lifecycle_txns_recovery_due;
+		ALTER TABLE manager.sandbox_lifecycle_txns
+			DROP CONSTRAINT sandbox_lifecycle_txns_recovery_last_error_check,
+			DROP CONSTRAINT sandbox_lifecycle_txns_recovery_claim_check,
+			DROP CONSTRAINT sandbox_lifecycle_txns_recovery_attempts_check,
+			DROP COLUMN recovery_last_error,
+			DROP COLUMN recovery_claimed_until,
+			DROP COLUMN recovery_claim_token,
+			DROP COLUMN recovery_claimed_by,
+			DROP COLUMN recovery_next_attempt_at,
+			DROP COLUMN recovery_attempts;
+
 		ALTER TABLE manager.runtime_slots
 			DROP CONSTRAINT runtime_slots_resource_lease_claim,
 			DROP COLUMN resource_lease_id;
@@ -241,6 +253,12 @@ func assertFinalNomadBlockCOWSchema(t *testing.T, ctx context.Context, pool *pgx
 		"rootfs_base_artifacts.procd_digest",
 		"rootfs_base_artifacts.logical_size_bytes",
 		"runtime_slots.resource_lease_id",
+		"sandbox_lifecycle_txns.recovery_attempts",
+		"sandbox_lifecycle_txns.recovery_next_attempt_at",
+		"sandbox_lifecycle_txns.recovery_claimed_by",
+		"sandbox_lifecycle_txns.recovery_claim_token",
+		"sandbox_lifecycle_txns.recovery_claimed_until",
+		"sandbox_lifecycle_txns.recovery_last_error",
 	} {
 		parts := strings.Split(identity, ".")
 		var exists bool
@@ -274,6 +292,15 @@ func assertFinalNomadBlockCOWSchema(t *testing.T, ctx context.Context, pool *pgx
 	require.Contains(t, artifactIndex, "logical_size_bytes")
 	require.Contains(t, artifactIndex, "procd_protocol")
 	require.Contains(t, artifactIndex, "procd_digest")
+
+	var recoveryIndex string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT indexdef FROM pg_indexes
+		WHERE schemaname = 'manager'
+			AND indexname = 'idx_sandbox_lifecycle_txns_recovery_due'
+	`).Scan(&recoveryIndex))
+	require.Contains(t, recoveryIndex, "recovery_next_attempt_at")
+	require.Contains(t, recoveryIndex, "recovery_claimed_until")
 
 	_, err := pool.Exec(ctx, `
 		INSERT INTO manager.sandboxes (

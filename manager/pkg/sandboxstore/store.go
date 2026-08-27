@@ -356,8 +356,8 @@ func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind strin
 	return txns, nil
 }
 
-// ListPendingRuntimeRecoverySandboxIDs returns paused sandboxes whose latest
-// durable lifecycle outcome requires automatic runtime reconstruction.
+// ListPendingRuntimeRecoverySandboxIDs returns due, unclaimed paused
+// sandboxes whose latest durable lifecycle outcome requires reconstruction.
 func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
@@ -366,6 +366,8 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 		limit = 500
 	}
 	rows, err := s.pool.Query(ctx, pendingRuntimeRecoverySandboxSelectSQL()+`
+		AND latest.recovery_next_attempt_at <= NOW()
+		AND (latest.recovery_claimed_until IS NULL OR latest.recovery_claimed_until <= NOW())
 		ORDER BY s.updated_at ASC
 		LIMIT $9
 	`, pendingRuntimeRecoveryQueryArgs(limit)...)
@@ -434,7 +436,8 @@ func pendingRuntimeRecoverySandboxSelectSQL() string {
 		SELECT s.sandbox_id
 		FROM manager.sandboxes AS s
 		JOIN LATERAL (
-			SELECT kind, phase, source
+			SELECT kind, phase, source,
+				recovery_next_attempt_at, recovery_claimed_until
 			FROM manager.sandbox_lifecycle_txns
 			WHERE sandbox_id = s.sandbox_id
 				AND (

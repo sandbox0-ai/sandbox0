@@ -109,6 +109,17 @@ func (q *retryQueue[T]) AddRateLimited(item T) {
 	time.AfterFunc(delay, func() { q.Add(item) })
 }
 
+func (q *retryQueue[T]) AddAfter(item T, delay time.Duration) {
+	if q == nil {
+		return
+	}
+	if delay <= 0 {
+		q.Add(item)
+		return
+	}
+	time.AfterFunc(delay, func() { q.Add(item) })
+}
+
 func (q *retryQueue[T]) NumRequeues(item T) int {
 	if q == nil {
 		return 0

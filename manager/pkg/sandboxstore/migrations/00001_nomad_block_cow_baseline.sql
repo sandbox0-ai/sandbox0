@@ -654,6 +654,15 @@ CREATE TABLE manager.sandbox_lifecycle_txns (
     worker_node_uid text DEFAULT ''::text NOT NULL,
     worker_proof_digest bytea DEFAULT '\x'::bytea NOT NULL,
     worker_acknowledged_at timestamp with time zone,
+    recovery_attempts integer DEFAULT 0 NOT NULL,
+    recovery_next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    recovery_claimed_by text DEFAULT ''::text NOT NULL,
+    recovery_claim_token text DEFAULT ''::text NOT NULL,
+    recovery_claimed_until timestamp with time zone,
+    recovery_last_error text DEFAULT ''::text NOT NULL,
+    CONSTRAINT sandbox_lifecycle_txns_recovery_attempts_check CHECK (((recovery_attempts >= 0) AND (recovery_attempts <= 1000000))),
+    CONSTRAINT sandbox_lifecycle_txns_recovery_claim_check CHECK ((((recovery_claimed_by = ''::text) AND (recovery_claim_token = ''::text) AND (recovery_claimed_until IS NULL)) OR ((octet_length(recovery_claimed_by) >= 1) AND (octet_length(recovery_claimed_by) <= 256) AND (octet_length(recovery_claim_token) = 36) AND (recovery_claimed_until IS NOT NULL)))),
+    CONSTRAINT sandbox_lifecycle_txns_recovery_last_error_check CHECK ((octet_length(recovery_last_error) <= 4096)),
     CONSTRAINT sandbox_lifecycle_txns_rebase_identity_check CHECK (((kind <> 'rebase'::text) OR ((source = 'manual'::text) AND (NOT cancelable) AND (from_generation = to_generation) AND (from_runtime_namespace = ''::text) AND (from_runtime_id = ''::text) AND (to_runtime_namespace = ''::text) AND (to_runtime_id = ''::text) AND (target_sandbox_id = ''::text) AND (octet_length(target_record_digest) = 0) AND (target_generation_id <> ''::text) AND (source_base_artifact_digest <> ''::text) AND (target_base_artifact_digest <> ''::text) AND (source_base_artifact_digest <> target_base_artifact_digest) AND (expected_generation_id <> ''::text) AND (rollback_expires_at IS NOT NULL) AND (((worker_cluster_id = ''::text) AND (worker_node_id = ''::text) AND (worker_node_uid = ''::text) AND (phase = ANY (ARRAY['committed'::text, 'aborted'::text]))) OR ((worker_cluster_id <> ''::text) AND (worker_node_id <> ''::text) AND (worker_node_uid <> ''::text))) AND (octet_length(worker_proof_digest) = ANY (ARRAY[0, 32])) AND ((worker_acknowledged_at IS NULL) OR ((phase = ANY (ARRAY['committed'::text, 'aborted'::text])) AND (octet_length(worker_proof_digest) = 32))))))
 );
 
@@ -1030,6 +1039,8 @@ CREATE UNIQUE INDEX idx_sandbox_lifecycle_txns_active ON manager.sandbox_lifecyc
 CREATE INDEX idx_sandbox_lifecycle_txns_active_target ON manager.sandbox_lifecycle_txns USING btree (target_sandbox_id) WHERE ((target_sandbox_id <> ''::text) AND (phase = ANY (ARRAY['preparing'::text, 'barriered'::text, 'publishing'::text, 'committing'::text])));
 
 CREATE INDEX idx_sandbox_lifecycle_txns_kind_phase_updated ON manager.sandbox_lifecycle_txns USING btree (kind, phase, updated_at);
+
+CREATE INDEX idx_sandbox_lifecycle_txns_recovery_due ON manager.sandbox_lifecycle_txns USING btree (recovery_next_attempt_at, recovery_claimed_until, sandbox_id, epoch) WHERE ((kind = 'pause'::text) AND (source = ANY (ARRAY['crash'::text, 'health'::text, 'lost'::text])));
 
 CREATE INDEX idx_sandbox_metering_projection_queue_due ON manager.sandbox_metering_projection_queue USING btree (available_at, revision, sandbox_id);
 

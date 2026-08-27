@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	defaultClaimTTL            = 15 * time.Second
+	defaultClaimTTL            = time.Minute
 	defaultSLO                 = time.Second
 	maxTrustedIngressClockSkew = 5 * time.Second
 	commandProbeRetryInitial   = 5 * time.Millisecond

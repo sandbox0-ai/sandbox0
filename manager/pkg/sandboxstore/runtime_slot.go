@@ -28,7 +28,7 @@ const (
 	RuntimeSlotStateTerminal      = string(protocol.StateTerminal)
 
 	DefaultRuntimeSlotHeartbeatTTL   = 30 * time.Second
-	DefaultRuntimeSlotClaimTTL       = 15 * time.Second
+	DefaultRuntimeSlotClaimTTL       = time.Minute
 	MaxRuntimeSlotReconcileLimit     = 1_000
 	maxRuntimeSlotCapacityCandidates = 1_024
 )

@@ -32,6 +32,7 @@ const (
 	NodeChannelCommandNetworkPrepare NodeChannelCommandKind = "network_prepare"
 	NodeChannelCommandClaim          NodeChannelCommandKind = "claim"
 	NodeChannelCommandCommandReady   NodeChannelCommandKind = "command_ready"
+	NodeChannelCommandPlannedRetire  NodeChannelCommandKind = "planned_retire"
 	NodeChannelCommandRunningFork    NodeChannelCommandKind = "running_fork"
 	NodeChannelCommandPausedRebase   NodeChannelCommandKind = "paused_rebase"
 	NodeChannelCommandCleanup        NodeChannelCommandKind = "cleanup"
@@ -120,17 +121,24 @@ func (h NodeChannelHello) Validate() error {
 	if len(capabilities) > 0 && capabilities[0] == NodeChannelCommandNetworkPrepare {
 		capabilities = capabilities[1:]
 	}
-	if len(capabilities) < 3 || len(capabilities) > 5 ||
+	if len(capabilities) < 3 || len(capabilities) > 6 ||
 		capabilities[0] != NodeChannelCommandClaim || capabilities[1] != NodeChannelCommandCommandReady ||
 		capabilities[len(capabilities)-1] != NodeChannelCommandCleanup {
 		return fmt.Errorf("node channel capabilities are incomplete")
 	}
 	optional := capabilities[2 : len(capabilities)-1]
-	if len(optional) == 1 && optional[0] != NodeChannelCommandRunningFork && optional[0] != NodeChannelCommandPausedRebase {
-		return fmt.Errorf("node channel capabilities must use the canonical order")
+	canonical := []NodeChannelCommandKind{
+		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
 	}
-	if len(optional) == 2 && (optional[0] != NodeChannelCommandRunningFork || optional[1] != NodeChannelCommandPausedRebase) {
-		return fmt.Errorf("node channel capabilities must use the canonical order")
+	canonicalIndex := 0
+	for _, capability := range optional {
+		for canonicalIndex < len(canonical) && canonical[canonicalIndex] != capability {
+			canonicalIndex++
+		}
+		if canonicalIndex == len(canonical) {
+			return fmt.Errorf("node channel capabilities must use the canonical order")
+		}
+		canonicalIndex++
 	}
 	return nil
 }
@@ -213,9 +221,87 @@ type NodeChannelCommand struct {
 	NetworkPrepare *NodeNetworkPrepareControlRequest `json:"network_prepare,omitempty"`
 	Claim          *NodeClaimControlRequest          `json:"claim,omitempty"`
 	CommandReady   *CommandReadyControlRequest       `json:"command_ready,omitempty"`
+	PlannedRetire  *NodePlannedRetireControlRequest  `json:"planned_retire,omitempty"`
 	RunningFork    *NodeRunningForkControlRequest    `json:"running_fork,omitempty"`
 	PausedRebase   *NodePausedRebaseControlRequest   `json:"paused_rebase,omitempty"`
 	Cleanup        *NodeCleanupControlRequest        `json:"cleanup,omitempty"`
+}
+
+const NodePlannedRetireProofVersion = 1
+
+// NodePlannedRetireControlRequest binds a durable local RootFS retirement
+// marker to the exact regional pause transaction and writer incarnation. The
+// node persists this marker before the manager quiesces or stops the allocation.
+type NodePlannedRetireControlRequest struct {
+	OperationID    string `json:"operation_id"`
+	ClaimID        string `json:"claim_id"`
+	SlotID         string `json:"slot_id"`
+	AllocationID   string `json:"allocation_id"`
+	WriterGrantID  string `json:"writer_grant_id"`
+	WriterEpoch    int64  `json:"writer_epoch"`
+	BindingVersion int    `json:"binding_version"`
+	BindingDigest  string `json:"binding_digest"`
+}
+
+// Validate rejects a retirement plan detached from its exact slot and writer.
+func (r NodePlannedRetireControlRequest) Validate() error {
+	for name, value := range map[string]string{
+		"operation_id": r.OperationID, "claim_id": r.ClaimID, "slot_id": r.SlotID,
+		"allocation_id": r.AllocationID, "writer_grant_id": r.WriterGrantID,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	if r.WriterEpoch <= 0 || r.BindingVersion != rootfshandoff.WriterBindingVersion {
+		return fmt.Errorf("writer epoch or binding version is invalid")
+	}
+	binding, err := hex.DecodeString(r.BindingDigest)
+	if err != nil || len(binding) != sha256.Size || hex.EncodeToString(binding) != r.BindingDigest {
+		return fmt.Errorf("binding_digest must be canonical 32-byte hexadecimal")
+	}
+	return nil
+}
+
+// NodePlannedRetireControlProof is byte-stable evidence that the exact request
+// was persisted in the node RootFS session journal.
+type NodePlannedRetireControlProof struct {
+	Version       int    `json:"version"`
+	OperationID   string `json:"operation_id"`
+	SlotID        string `json:"slot_id"`
+	AllocationID  string `json:"allocation_id"`
+	WriterGrantID string `json:"writer_grant_id"`
+	ProofDigest   string `json:"proof_digest"`
+}
+
+// NewNodePlannedRetireControlProof builds the deterministic acknowledgement
+// returned only after the local retirement marker is durable.
+func NewNodePlannedRetireControlProof(request NodePlannedRetireControlRequest) (NodePlannedRetireControlProof, error) {
+	if err := request.Validate(); err != nil {
+		return NodePlannedRetireControlProof{}, err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return NodePlannedRetireControlProof{}, err
+	}
+	digest := sha256.Sum256(payload)
+	return NodePlannedRetireControlProof{
+		Version: NodePlannedRetireProofVersion, OperationID: request.OperationID,
+		SlotID: request.SlotID, AllocationID: request.AllocationID,
+		WriterGrantID: request.WriterGrantID, ProofDigest: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+// ValidateFor proves that an acknowledgement belongs to the exact plan.
+func (p NodePlannedRetireControlProof) ValidateFor(request NodePlannedRetireControlRequest) error {
+	expected, err := NewNodePlannedRetireControlProof(request)
+	if err != nil {
+		return err
+	}
+	if p != expected {
+		return fmt.Errorf("planned-retire proof belongs to another request")
+	}
+	return nil
 }
 
 // NodePausedRebaseControlRequest carries exact PostgreSQL pre-operation
@@ -374,6 +460,19 @@ func NewNodeChannelCommandReadyCommand(target NodeChannelTarget, request Command
 	return sealNodeChannelCommand(command)
 }
 
+// NewNodeChannelPlannedRetireCommand builds an exact durable RootFS retirement
+// planning command for an authenticated source node boot.
+func NewNodeChannelPlannedRetireCommand(
+	target NodeChannelTarget,
+	request NodePlannedRetireControlRequest,
+) (NodeChannelCommand, error) {
+	command := NodeChannelCommand{
+		Version: NodeChannelVersion, Kind: NodeChannelCommandPlannedRetire,
+		Target: target, PlannedRetire: &request,
+	}
+	return sealNodeChannelCommand(command)
+}
+
 // NewNodeChannelRunningForkCommand builds an exact live RootFS checkpoint
 // command for an authenticated source node boot.
 func NewNodeChannelRunningForkCommand(
@@ -481,6 +580,20 @@ func (c NodeChannelCommand) Validate() error {
 		if c.CommandReady.Proof.SlotID != c.Target.SlotID {
 			return fmt.Errorf("command-ready request does not match the node channel target")
 		}
+	case NodeChannelCommandPlannedRetire:
+		if c.PlannedRetire == nil || c.payloadCount() != 1 {
+			return fmt.Errorf("planned-retire command must contain only a retirement request")
+		}
+		if err := c.Target.validate(false); err != nil {
+			return err
+		}
+		if err := c.PlannedRetire.Validate(); err != nil {
+			return fmt.Errorf("planned-retire request: %w", err)
+		}
+		if c.PlannedRetire.SlotID != c.Target.SlotID ||
+			c.PlannedRetire.AllocationID != c.Target.AllocationID {
+			return fmt.Errorf("planned-retire request does not match the node channel target")
+		}
 	case NodeChannelCommandRunningFork:
 		if c.RunningFork == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("running-fork command must contain only a running-fork request")
@@ -527,7 +640,7 @@ func (c NodeChannelCommand) payloadCount() int {
 	count := 0
 	for _, present := range []bool{
 		c.NetworkPrepare != nil, c.Claim != nil, c.CommandReady != nil,
-		c.RunningFork != nil, c.PausedRebase != nil, c.Cleanup != nil,
+		c.PlannedRetire != nil, c.RunningFork != nil, c.PausedRebase != nil, c.Cleanup != nil,
 	} {
 		if present {
 			count++
@@ -554,6 +667,7 @@ type NodeChannelResult struct {
 	Kind               NodeChannelCommandKind                     `json:"kind"`
 	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken          `json:"network_policy_token,omitempty"`
 	ControlResponse    *NodeControlResponse                       `json:"control_response,omitempty"`
+	PlannedRetireProof *NodePlannedRetireControlProof             `json:"planned_retire_proof,omitempty"`
 	RunningFork        *rootfshandoff.RunningForkCheckpointResult `json:"running_fork,omitempty"`
 	PausedRebase       *rootfsrebase.WorkerResult                 `json:"paused_rebase,omitempty"`
 	PausedRebaseReject *rootfsrebase.WorkerRejection              `json:"paused_rebase_rejection,omitempty"`
@@ -600,6 +714,11 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 			return fmt.Errorf("node channel control result is incomplete")
 		}
 		return r.ControlResponse.Validate()
+	case NodeChannelCommandPlannedRetire:
+		if r.PlannedRetireProof == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("node channel planned-retire result is incomplete")
+		}
+		return r.PlannedRetireProof.ValidateFor(*command.PlannedRetire)
 	case NodeChannelCommandRunningFork:
 		if r.RunningFork == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel running-fork result is incomplete")
@@ -661,7 +780,7 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 func (r NodeChannelResult) payloadCount() int {
 	count := 0
 	for _, present := range []bool{
-		r.NetworkPolicyToken != nil, r.ControlResponse != nil, r.RunningFork != nil,
+		r.NetworkPolicyToken != nil, r.ControlResponse != nil, r.PlannedRetireProof != nil, r.RunningFork != nil,
 		r.PausedRebase != nil, r.PausedRebaseReject != nil,
 		r.PausedRebaseAck != nil, r.CleanupProof != nil,
 	} {

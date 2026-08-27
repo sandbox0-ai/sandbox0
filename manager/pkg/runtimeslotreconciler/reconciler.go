@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -26,6 +28,7 @@ var ErrAllocationStillPresent = errors.New("runtime slot allocation remains phys
 type Store interface {
 	ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
+	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
 	FenceRuntimeSlotForReconcile(context.Context, *sandboxstore.FenceRuntimeSlotForReconcileRequest) (*sandboxstore.RuntimeSlot, error)
 	GetRootFSWriterGrant(context.Context, string) (*sandboxstore.RootFSWriterGrant, error)
 	MarkRuntimeSlotAllocationMissing(context.Context, *sandboxstore.MarkRuntimeSlotAllocationMissingRequest) (*sandboxstore.RuntimeSlot, error)
@@ -284,6 +287,13 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 			}
 			writerAlreadyTerminal = true
 		} else {
+			plannedPending, pendingErr := r.plannedPausePending(ctx, slot, grant)
+			if pendingErr != nil {
+				return false, pendingErr
+			}
+			if plannedPending {
+				return false, nil
+			}
 			writerFence, err = r.writer.Fence(ctx, WriterFenceRequest{
 				OperationID: ids.writer, IssueOperationID: grant.IssueOperationID,
 				SlotID: slot.ID, SandboxID: slot.SandboxID,
@@ -440,6 +450,54 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	}
 	if terminal.State != sandboxstore.RuntimeSlotStateTerminal || terminal.TerminalReason != reason {
 		return false, errors.New("runtime slot authority did not persist terminal state")
+	}
+	return true, nil
+}
+
+func (r *Reconciler) plannedPausePending(
+	ctx context.Context,
+	slot *sandboxstore.RuntimeSlot,
+	grant *sandboxstore.RootFSWriterGrant,
+) (bool, error) {
+	if slot == nil || grant == nil || grant.GateParent == "" {
+		return false, nil
+	}
+	operationID := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+	switch grant.State {
+	case sandboxstore.RootFSWriterGrantStateConsumed:
+		if grant.RetireOperationID != "" || grant.RetireKind != "" || len(grant.RetireProofDigest) != 0 {
+			return false, nil
+		}
+	case sandboxstore.RootFSWriterGrantStateRetiring:
+		if grant.RetireOperationID != operationID ||
+			grant.RetireKind != sandboxstore.RootFSWriterRetireKindPlannedPublish {
+			return false, nil
+		}
+	default:
+		return false, nil
+	}
+	lifecycle, err := r.store.GetActiveLifecycleTxn(ctx, slot.SandboxID)
+	if err != nil {
+		return false, fmt.Errorf("load active planned-pause lifecycle: %w", err)
+	}
+	runtimeGeneration, parseErr := strconv.ParseInt(grant.RuntimeGeneration, 10, 64)
+	if parseErr != nil || runtimeGeneration <= 0 {
+		return false, nil
+	}
+	if lifecycle == nil || lifecycle.ID != operationID || lifecycle.SandboxID != slot.SandboxID ||
+		lifecycle.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		(lifecycle.Source != sandboxstore.SandboxLifecycleSourceManual &&
+			lifecycle.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
+		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
+		(lifecycle.Phase != sandboxstore.SandboxLifecyclePhasePreparing &&
+			lifecycle.Phase != sandboxstore.SandboxLifecyclePhaseBarriered &&
+			lifecycle.Phase != sandboxstore.SandboxLifecyclePhasePublishing &&
+			lifecycle.Phase != sandboxstore.SandboxLifecyclePhaseCommitting) ||
+		lifecycle.FromGeneration != runtimeGeneration ||
+		lifecycle.FromRuntimeNamespace != grant.RuntimeNamespace ||
+		lifecycle.FromRuntimeID != grant.RuntimeIncarnationID ||
+		lifecycle.ExpectedGenerationID != grant.InitialGenerationID || lifecycle.PreparedGenerationID != "" {
+		return false, nil
 	}
 	return true, nil
 }

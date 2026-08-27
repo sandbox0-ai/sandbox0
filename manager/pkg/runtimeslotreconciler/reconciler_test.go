@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -21,6 +22,7 @@ type fakeStore struct {
 	markCalls     int
 	finalizeCalls int
 	terminalProof []byte
+	lifecycle     *sandboxstore.SandboxLifecycleTxn
 }
 
 func (f *fakeStore) ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error) {
@@ -59,6 +61,11 @@ func (f *fakeStore) GetRootFSWriterGrant(context.Context, string) (*sandboxstore
 	clone := *f.grant
 	clone.BindingDigest = append([]byte(nil), f.grant.BindingDigest...)
 	return &clone, nil
+}
+
+func (f *fakeStore) GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error) {
+	f.record("get-lifecycle")
+	return sandboxstore.CloneSandboxLifecycleTxn(f.lifecycle), nil
 }
 
 func (f *fakeStore) MarkRuntimeSlotAllocationMissing(_ context.Context, request *sandboxstore.MarkRuntimeSlotAllocationMissingRequest) (*sandboxstore.RuntimeSlot, error) {
@@ -437,6 +444,72 @@ func TestReconcilerCleansPlannedRetiredWriterWithoutReplacingItsAuthority(t *tes
 	}
 	if !reflect.DeepEqual(*fixture.order, wantOrder) {
 		t.Fatalf("operation order = %v, want %v", *fixture.order, wantOrder)
+	}
+}
+
+func TestReconcilerLeavesActivePlannedPauseForNodePublication(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	fixture.store.slot.State = sandboxstore.RuntimeSlotStateOrphaned
+	fixture.store.slot.OrphanObservationDigest = bytes.Repeat([]byte{0x33}, 32)
+	fixture.store.grant.GateParent = "gate-parent-1"
+	fixture.store.grant.RuntimeGeneration = "1"
+	fixture.store.grant.RuntimeNamespace = fixture.store.slot.AllocationNamespace
+	fixture.store.grant.RuntimeIncarnationID = fixture.store.slot.AllocationID
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		fixture.store.grant.GateParent, fixture.store.grant.ID, fixture.store.grant.WriterEpoch,
+	)
+	fixture.store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: operationID, SandboxID: fixture.store.slot.SandboxID,
+		Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Cancelable: false,
+		FromGeneration: 1, FromRuntimeNamespace: fixture.store.grant.RuntimeNamespace,
+		FromRuntimeID:        fixture.store.grant.RuntimeIncarnationID,
+		ExpectedGenerationID: fixture.store.grant.InitialGenerationID,
+	}
+
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result != (Result{Candidates: 1, Skipped: 1}) {
+		t.Fatalf("RunOnce() = %+v, %v", result, err)
+	}
+	if len(fixture.writer.fences) != 0 || len(fixture.writer.completes) != 0 ||
+		len(fixture.node.requests) != 0 || len(fixture.allocation.purges) != 0 ||
+		fixture.store.markCalls != 0 || fixture.store.finalizeCalls != 0 {
+		t.Fatalf("planned pause was replaced by crash cleanup")
+	}
+	wantOrder := []string{"list", "get-slot", "observe-allocation", "get-grant", "get-lifecycle"}
+	if !reflect.DeepEqual(*fixture.order, wantOrder) {
+		t.Fatalf("operation order = %v, want %v", *fixture.order, wantOrder)
+	}
+}
+
+func TestReconcilerDoesNotTrustPlannedPauseForAnotherAllocation(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	fixture.store.slot.State = sandboxstore.RuntimeSlotStateOrphaned
+	fixture.store.slot.OrphanObservationDigest = bytes.Repeat([]byte{0x33}, 32)
+	fixture.store.grant.GateParent = "gate-parent-1"
+	fixture.store.grant.RuntimeGeneration = "1"
+	fixture.store.grant.RuntimeNamespace = fixture.store.slot.AllocationNamespace
+	fixture.store.grant.RuntimeIncarnationID = fixture.store.slot.AllocationID
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		fixture.store.grant.GateParent, fixture.store.grant.ID, fixture.store.grant.WriterEpoch,
+	)
+	fixture.store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: operationID, SandboxID: fixture.store.slot.SandboxID,
+		Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Cancelable: false,
+		FromGeneration: 1, FromRuntimeNamespace: fixture.store.grant.RuntimeNamespace,
+		FromRuntimeID:        "another-allocation",
+		ExpectedGenerationID: fixture.store.grant.InitialGenerationID,
+	}
+
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result != (Result{Candidates: 1, Completed: 1}) {
+		t.Fatalf("RunOnce() = %+v, %v", result, err)
+	}
+	if len(fixture.writer.fences) != 1 || len(fixture.writer.completes) != 1 ||
+		len(fixture.node.requests) != 1 || len(fixture.allocation.purges) != 1 ||
+		fixture.store.finalizeCalls != 1 {
+		t.Fatal("mismatched planned pause suppressed crash cleanup")
 	}
 }
 

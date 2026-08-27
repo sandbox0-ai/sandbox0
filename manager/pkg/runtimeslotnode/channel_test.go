@@ -70,20 +70,21 @@ func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Id
 }
 
 type channelTestExecutor struct {
-	mu            sync.Mutex
-	cleanupErr    error
-	calls         []protocol.NodeCleanupControlRequest
-	networks      []protocol.NodeNetworkPrepareControlRequest
-	claims        []protocol.NodeClaimControlRequest
-	commands      []protocol.CommandReadyControlRequest
-	forks         []protocol.NodeRunningForkControlRequest
-	runningFork   rootfshandoff.RunningForkCheckpointResult
-	rebases       []protocol.NodePausedRebaseControlRequest
-	rebaseRejects []protocol.NodePausedRebaseControlRequest
-	rebaseAcks    []protocol.NodePausedRebaseControlRequest
-	pausedRebase  rootfsrebase.WorkerResult
-	entered       chan<- struct{}
-	release       <-chan struct{}
+	mu             sync.Mutex
+	cleanupErr     error
+	calls          []protocol.NodeCleanupControlRequest
+	networks       []protocol.NodeNetworkPrepareControlRequest
+	claims         []protocol.NodeClaimControlRequest
+	commands       []protocol.CommandReadyControlRequest
+	plannedRetires []protocol.NodePlannedRetireControlRequest
+	forks          []protocol.NodeRunningForkControlRequest
+	runningFork    rootfshandoff.RunningForkCheckpointResult
+	rebases        []protocol.NodePausedRebaseControlRequest
+	rebaseRejects  []protocol.NodePausedRebaseControlRequest
+	rebaseAcks     []protocol.NodePausedRebaseControlRequest
+	pausedRebase   rootfsrebase.WorkerResult
+	entered        chan<- struct{}
+	release        <-chan struct{}
 }
 
 func (e *channelTestExecutor) PrepareNetwork(
@@ -340,6 +341,17 @@ func (e *channelTestExecutor) CommandReady(
 	return protocol.NodeControlResponse{Phase: string(protocol.StateActive)}, nil
 }
 
+func (e *channelTestExecutor) PlannedRetire(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	e.mu.Lock()
+	e.plannedRetires = append(e.plannedRetires, request)
+	e.mu.Unlock()
+	return protocol.NewNodePlannedRetireControlProof(request)
+}
+
 func (e *channelTestExecutor) RunningFork(
 	_ context.Context,
 	_ protocol.NodeChannelTarget,
@@ -441,7 +453,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: executor, RunningForkExecutor: executor,
+		Executor: executor, PlannedRetireExecutor: executor, RunningForkExecutor: executor,
 		PausedRebaseExecutor: executor, NetworkExecutor: executor,
 		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
@@ -506,6 +518,14 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	if err != nil || commandResponse.Phase != string(protocol.StateActive) {
 		t.Fatalf("node command-ready response = %+v, %v", commandResponse, err)
 	}
+	plannedRetireRequest := testChannelPlannedRetire(t)
+	plannedRetireProof, err := hub.PlannedRetire(t.Context(), protocol.NodeChannelTarget{
+		SlotID: nodeTarget.SlotID, ClusterID: nodeTarget.ClusterID, AllocationID: nodeTarget.AllocationID,
+		NodeID: nodeTarget.NodeID, NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, plannedRetireRequest)
+	if err != nil || plannedRetireProof.ValidateFor(plannedRetireRequest) != nil {
+		t.Fatalf("node planned-retire proof = %+v, %v", plannedRetireProof, err)
+	}
 	forkResult, err := hub.RunningFork(t.Context(), protocol.NodeChannelTarget{
 		SlotID: nodeTarget.SlotID, ClusterID: nodeTarget.ClusterID, AllocationID: nodeTarget.AllocationID,
 		NodeID: nodeTarget.NodeID, NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
@@ -548,6 +568,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		PolicyDigest: networkRequest.PolicyDigest,
 	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
 		len(executor.commands) != 1 || executor.commands[0] != commandRequest ||
+		len(executor.plannedRetires) != 1 || executor.plannedRetires[0] != plannedRetireRequest ||
 		len(executor.forks) != 1 || executor.forks[0] != forkRequest ||
 		len(executor.rebases) != 1 || len(executor.rebaseRejects) != 1 || len(executor.rebaseAcks) != 1 {
 		t.Fatalf("node control calls = claims %d, commands %d, forks %d, rebases %d, rejects %d",
@@ -762,6 +783,24 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID, PolicyToken: token,
 		WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10), Stage: stage,
 		NetworkPolicy: networkPolicy, Runtime: assignment, Resources: resources,
+	}
+}
+
+func testChannelPlannedRetire(t *testing.T) protocol.NodePlannedRetireControlRequest {
+	t.Helper()
+	stage := testChannelClaimRequest().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.NodePlannedRetireControlRequest{
+		OperationID: rootfshandoff.PlannedRetireOperationID(
+			stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+		),
+		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce,
+		AllocationID: stage.Identity.AllocationID, WriterGrantID: stage.Identity.WriterGrantID,
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]),
 	}
 }
 

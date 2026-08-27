@@ -1,10 +1,12 @@
 package nomadclaim
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +131,7 @@ type fakeClaimStore struct {
 	rebaseAckErr             error
 	rebaseAcks               [][]byte
 	writeCount               int
+	pauseOrder               *[]string
 }
 
 func (f *fakeClaimStore) RequestNomadSandboxRunningFork(
@@ -508,6 +511,7 @@ func (f *fakeClaimStore) RequestNomadSandboxPause(
 		return nil, sandboxstore.ErrNomadSandboxPauseNotReady
 	}
 	copy := *f.pauseCandidate
+	copy.BindingDigest = append([]byte(nil), f.pauseCandidate.BindingDigest...)
 	return &copy, nil
 }
 
@@ -541,12 +545,16 @@ func (f *fakeClaimStore) BeginRuntimeSlotQuiesce(
 ) (*sandboxstore.RuntimeSlot, error) {
 	copy := *request
 	f.quiesceCalls = append(f.quiesceCalls, &copy)
+	if f.pauseOrder != nil {
+		*f.pauseOrder = append(*f.pauseOrder, "quiesce")
+	}
 	return &sandboxstore.RuntimeSlot{ID: request.SlotID, State: sandboxstore.RuntimeSlotStateQuiescing}, nil
 }
 
 type fakeAllocationStopper struct {
-	requests []runtimeslotreconciler.AllocationPurgeRequest
-	err      error
+	requests   []runtimeslotreconciler.AllocationPurgeRequest
+	err        error
+	pauseOrder *[]string
 }
 
 func (f *fakeAllocationStopper) Stop(
@@ -554,6 +562,9 @@ func (f *fakeAllocationStopper) Stop(
 	request runtimeslotreconciler.AllocationPurgeRequest,
 ) error {
 	f.requests = append(f.requests, request)
+	if f.pauseOrder != nil {
+		*f.pauseOrder = append(*f.pauseOrder, "stop")
+	}
 	return f.err
 }
 
@@ -1043,6 +1054,8 @@ func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 		SandboxID: "sandbox-1", OperationID: "retire-1", Source: sandboxstore.SandboxLifecycleSourceManual,
 		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
 		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", WriterGrantID: "grant-1", WriterEpoch: 7,
+		BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: bytes.Repeat([]byte{0x41}, 32),
 	}
 	enqueuer := &recordingPauseEnqueuer{}
 	fixture.service.SetPauseEnqueuer(enqueuer)
@@ -1060,8 +1073,11 @@ func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 	if len(fixture.allocation.requests) != 1 {
 		t.Fatalf("allocation stops = %+v", fixture.allocation.requests)
 	}
-	if len(fixture.store.quiesceCalls) != 0 {
-		t.Fatalf("slot quiesced before planned publication: %+v", fixture.store.quiesceCalls)
+	if len(fixture.plannedRetire.requests) != 1 || len(fixture.store.quiesceCalls) != 1 {
+		t.Fatalf("planned-retire/quiesce calls = %+v / %+v", fixture.plannedRetire.requests, fixture.store.quiesceCalls)
+	}
+	if !reflect.DeepEqual(*fixture.pauseOrder, []string{"plan", "quiesce", "stop"}) {
+		t.Fatalf("unsafe pause order = %v", *fixture.pauseOrder)
 	}
 	stop := fixture.allocation.requests[0]
 	if stop.OperationID != "retire-1" || stop.Target.AllocationID != "allocation-1" ||
@@ -1070,12 +1086,71 @@ func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotQuiesceAfterPlannedRetireResponseLoss(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", OperationID: "retire-1", Source: sandboxstore.SandboxLifecycleSourceManual,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", WriterGrantID: "grant-1", WriterEpoch: 7,
+		BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: bytes.Repeat([]byte{0x43}, 32),
+	}
+	fixture.plannedRetire.err = errors.New("planned-retire response lost")
+
+	err := fixture.service.CompletePausingSandboxRuntime(t.Context(), "sandbox-1")
+	require.ErrorContains(t, err, "planned-retire response lost")
+	require.Len(t, fixture.plannedRetire.requests, 1)
+	require.Empty(t, fixture.store.quiesceCalls)
+	require.Empty(t, fixture.allocation.requests)
+	require.Equal(t, []string{"plan"}, *fixture.pauseOrder)
+
+	fixture.plannedRetire.err = nil
+	require.ErrorIs(t, fixture.service.CompletePausingSandboxRuntime(t.Context(), "sandbox-1"), errNomadSandboxPausePending)
+	require.Len(t, fixture.plannedRetire.requests, 2)
+	require.Equal(t, fixture.plannedRetire.requests[0], fixture.plannedRetire.requests[1])
+	require.Equal(t, fixture.plannedRetire.targets[0], fixture.plannedRetire.targets[1])
+	require.Len(t, fixture.store.quiesceCalls, 1)
+	require.Len(t, fixture.allocation.requests, 1)
+	require.Equal(t, []string{"plan", "plan", "quiesce", "stop"}, *fixture.pauseOrder)
+}
+
+func TestServiceRetriesExactPauseAfterAllocationStopResponseLoss(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", OperationID: "retire-1", Source: sandboxstore.SandboxLifecycleSourceManual,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", WriterGrantID: "grant-1", WriterEpoch: 7,
+		BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: bytes.Repeat([]byte{0x44}, 32),
+	}
+	fixture.allocation.err = errors.New("allocation stop response lost")
+
+	err := fixture.service.CompletePausingSandboxRuntime(t.Context(), "sandbox-1")
+	require.ErrorContains(t, err, "allocation stop response lost")
+	require.Len(t, fixture.plannedRetire.requests, 1)
+	require.Len(t, fixture.store.quiesceCalls, 1)
+	require.Len(t, fixture.allocation.requests, 1)
+	require.Equal(t, []string{"plan", "quiesce", "stop"}, *fixture.pauseOrder)
+
+	fixture.allocation.err = nil
+	require.ErrorIs(t, fixture.service.CompletePausingSandboxRuntime(t.Context(), "sandbox-1"), errNomadSandboxPausePending)
+	require.Len(t, fixture.plannedRetire.requests, 2)
+	require.Equal(t, fixture.plannedRetire.requests[0], fixture.plannedRetire.requests[1])
+	require.Len(t, fixture.store.quiesceCalls, 2)
+	require.Equal(t, fixture.store.quiesceCalls[0], fixture.store.quiesceCalls[1])
+	require.Len(t, fixture.allocation.requests, 2)
+	require.Equal(t, fixture.allocation.requests[0], fixture.allocation.requests[1])
+	require.Equal(t, []string{"plan", "quiesce", "stop", "plan", "quiesce", "stop"}, *fixture.pauseOrder)
+}
+
 func TestServiceAutomaticPausePersistsAutoSourceBeforeStop(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
 		SandboxID: "sandbox-1", OperationID: "retire-auto-1", Source: sandboxstore.SandboxLifecycleSourceAuto,
 		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
 		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", WriterGrantID: "grant-1", WriterEpoch: 7,
+		BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: bytes.Repeat([]byte{0x42}, 32),
 	}
 	enqueuer := &recordingPauseEnqueuer{}
 	fixture.service.SetPauseEnqueuer(enqueuer)
@@ -2497,15 +2572,40 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 }
 
 type claimServiceFixture struct {
-	service      *Service
-	store        *fakeClaimStore
-	planner      *fakePlanner
-	allocation   *fakeAllocationStopper
-	runningFork  *fakeRunningForkController
-	pausedRebase *fakePausedRebaseController
-	quotaLimits  *fakeQuotaLimitStore
-	runtimeClass RuntimeClass
-	now          time.Time
+	service       *Service
+	store         *fakeClaimStore
+	planner       *fakePlanner
+	allocation    *fakeAllocationStopper
+	plannedRetire *fakePlannedRetireController
+	runningFork   *fakeRunningForkController
+	pausedRebase  *fakePausedRebaseController
+	quotaLimits   *fakeQuotaLimitStore
+	runtimeClass  RuntimeClass
+	now           time.Time
+	pauseOrder    *[]string
+}
+
+type fakePlannedRetireController struct {
+	requests   []protocol.NodePlannedRetireControlRequest
+	targets    []protocol.NodeChannelTarget
+	err        error
+	pauseOrder *[]string
+}
+
+func (f *fakePlannedRetireController) PlannedRetire(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	f.targets = append(f.targets, target)
+	f.requests = append(f.requests, request)
+	if f.pauseOrder != nil {
+		*f.pauseOrder = append(*f.pauseOrder, "plan")
+	}
+	if f.err != nil {
+		return protocol.NodePlannedRetireControlProof{}, f.err
+	}
+	return protocol.NewNodePlannedRetireControlProof(request)
 }
 
 type fakeRunningForkController struct {
@@ -2646,7 +2746,10 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		},
 	}
 	planner := &fakePlanner{}
-	allocation := &fakeAllocationStopper{}
+	pauseOrder := &[]string{}
+	store.pauseOrder = pauseOrder
+	allocation := &fakeAllocationStopper{pauseOrder: pauseOrder}
+	plannedRetire := &fakePlannedRetireController{pauseOrder: pauseOrder}
 	runningFork := &fakeRunningForkController{}
 	pausedRebase := &fakePausedRebaseController{target: protocol.NodeChannelTarget{
 		ClusterID: "cluster-1", NodeID: "node-rebase-1", NodeUID: "node-rebase-uid-1", NodeBootID: "boot-rebase-1",
@@ -2656,6 +2759,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{runtimeClass}}, Planner: planner, Allocation: allocation,
+		PlannedRetire:          plannedRetire,
 		RunningFork:            runningFork,
 		PausedRebase:           pausedRebase,
 		QuotaLimits:            quotaLimits,
@@ -2671,9 +2775,10 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		t.Fatal(err)
 	}
 	return claimServiceFixture{
-		service: claimService, store: store, planner: planner, allocation: allocation, runningFork: runningFork,
+		service: claimService, store: store, planner: planner, allocation: allocation,
+		plannedRetire: plannedRetire, runningFork: runningFork,
 		pausedRebase: pausedRebase,
-		quotaLimits:  quotaLimits, runtimeClass: runtimeClass, now: now,
+		quotaLimits:  quotaLimits, runtimeClass: runtimeClass, now: now, pauseOrder: pauseOrder,
 	}
 }
 

@@ -458,6 +458,25 @@ func (h *ChannelHub) CommandReady(
 	return *result.ControlResponse, nil
 }
 
+// PlannedRetire persists one exact RootFS retirement marker on the source node
+// before the caller may quiesce or stop its Nomad allocation.
+func (h *ChannelHub) PlannedRetire(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	command, err := protocol.NewNodeChannelPlannedRetireCommand(target, request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("build node planned-retire command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	return *result.PlannedRetireProof, nil
+}
+
 // RunningFork dispatches an exact live RootFS checkpoint to the source node.
 // The node publishes the checkpoint through writer authority before replying.
 func (h *ChannelHub) RunningFork(

@@ -244,6 +244,19 @@ func (c *Component) RunningFork(
 	return c.hub.RunningFork(ctx, target, request)
 }
 
+// PlannedRetire durably marks the exact source-node RootFS session before any
+// manager-owned quiesce or Nomad stop side effect.
+func (c *Component) PlannedRetire(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	if c == nil || c.hub == nil {
+		return protocol.NodePlannedRetireControlProof{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.PlannedRetire(ctx, target, request)
+}
+
 // Prepare applies one exact active or claiming runtime-slot network policy
 // through this replica's authenticated node channel. Durable retry authority
 // remains in PostgreSQL; the channel itself is deliberately transient.

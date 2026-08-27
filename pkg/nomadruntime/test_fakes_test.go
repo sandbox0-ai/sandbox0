@@ -122,26 +122,29 @@ func (m *fakeMounter) Unmount(target string) error {
 }
 
 type fakeRootFSRuntime struct {
-	mu               sync.Mutex
-	source           string
-	ensureErr        error
-	consumerErr      error
-	crashErr         error
-	retireErr        error
-	ensureCalls      int
-	retireCalls      int
-	crashCalls       int
-	externalReclaims int
-	lastParent       string
-	lastOperation    string
-	leaseLoss        func(error)
-	pressureSignal   chan struct{}
-	pressures        []rootfssession.DirtyTailPressureSession
-	pressurePlans    []rootfssession.DirtyTailPressureSession
-	pressurePlanErr  error
-	recoverySessions []rootfssession.RecoverySession
-	runtimeInfo      RuntimeInfo
-	runtimeInfoErr   error
+	mu                       sync.Mutex
+	source                   string
+	ensureErr                error
+	consumerErr              error
+	crashErr                 error
+	retireErr                error
+	ensureCalls              int
+	retireCalls              int
+	crashCalls               int
+	externalReclaims         int
+	lastParent               string
+	lastOperation            string
+	leaseLoss                func(error)
+	pressureSignal           chan struct{}
+	pressures                []rootfssession.DirtyTailPressureSession
+	pressurePlans            []rootfssession.DirtyTailPressureSession
+	pressurePlanErr          error
+	planRetireCalls          int
+	planRetireErr            error
+	planRetireCrashOperation string
+	recoverySessions         []rootfssession.RecoverySession
+	runtimeInfo              RuntimeInfo
+	runtimeInfoErr           error
 }
 
 func (r *fakeRootFSRuntime) RuntimeInfo() (RuntimeInfo, error) {
@@ -231,6 +234,29 @@ func (r *fakeRootFSRuntime) PlanDirtyTailPressure(
 		pressure.Stage.Identity.WriterGrantID,
 		pressure.Stage.Identity.WriterEpoch,
 	), nil
+}
+
+func (r *fakeRootFSRuntime) PlanRetire(
+	_ context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.planRetireCalls++
+	r.lastParent = stage.Parent
+	r.lastOperation = operationID
+	if r.planRetireErr != nil {
+		return r.planRetireErr
+	}
+	for index := range r.recoverySessions {
+		if r.recoverySessions[index].Stage.Parent == stage.Parent {
+			r.recoverySessions[index].Kind = rootfssession.RecoveryPlannedRetire
+			r.recoverySessions[index].RetireOperationID = operationID
+			r.recoverySessions[index].CrashOperationID = r.planRetireCrashOperation
+		}
+	}
+	return nil
 }
 
 func (r *fakeRootFSRuntime) Retire(

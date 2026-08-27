@@ -36,8 +36,13 @@ type NomadSandboxPauseCandidate struct {
 	AllocationID        string
 	AllocationNamespace string
 	NodeID              string
+	NodeUID             string
+	NodeBootID          string
 	WriterGrantID       string
 	WriterGrantState    string
+	WriterEpoch         int64
+	BindingVersion      int
+	BindingDigest       []byte
 }
 
 // RootFSWriterPressurePauseRequest fences automatic pressure handling to one
@@ -185,8 +190,6 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	if err != nil {
 		return nil, fmt.Errorf("lock Nomad pause runtime slot: %w", err)
 	}
-	validSlotState := slot.State == RuntimeSlotStateActive || alreadyPaused &&
-		(slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned)
 	activeBindingMatches := alreadyPaused ||
 		(slot.AllocationID == record.RuntimeID && slot.AllocationNamespace == record.RuntimeNamespace)
 	resourceBindingMatches := !slot.ResourceLease.IsZero() &&
@@ -199,7 +202,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		slot.ResourceLease.NodeBootID == slot.NodeBootID &&
 		slot.ResourceLeaseState == RuntimeResourceLeaseActive &&
 		slot.ResourceLeaseReleasedAt.IsZero()
-	if !validSlotState || slot.ClaimOperationID == "" ||
+	if slot.ClaimOperationID == "" ||
 		slot.ClaimID == "" || slot.WriterGrantID == "" || !activeBindingMatches || slot.ClusterID != record.ClusterID {
 		return nil, fmt.Errorf("%w: active runtime slot does not match the sandbox claim", ErrNomadSandboxPauseNotReady)
 	}
@@ -225,6 +228,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	}
 	operationID := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
 	var lifecycle *SandboxLifecycleTxn
+	recoveringPlannedPause := false
 	if alreadyPaused {
 		if grant.State != RootFSWriterGrantStateRetired || grant.RetireOperationID != operationID ||
 			grant.RetireKind != RootFSWriterRetireKindPlannedPublish || len(grant.RetireProofDigest) == 0 {
@@ -255,6 +259,9 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 			return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
 		}
 		if lifecycle == nil {
+			if slot.State != RuntimeSlotStateActive {
+				return nil, fmt.Errorf("%w: cannot start a pause from runtime slot state %s", ErrNomadSandboxPauseNotReady, slot.State)
+			}
 			lifecycle = &SandboxLifecycleTxn{
 				ID: operationID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
 				Phase: SandboxLifecyclePhasePreparing, Source: source, Cancelable: false,
@@ -264,9 +271,18 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 			if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 				return nil, fmt.Errorf("begin Nomad planned pause lifecycle: %w", err)
 			}
-		} else if !nomadPlannedPauseLifecycleMatches(lifecycle, record, grant, operationID) {
-			return nil, fmt.Errorf("%w: lifecycle %s owns the sandbox", ErrNomadSandboxPauseConflict, lifecycle.ID)
+		} else {
+			if !nomadPlannedPauseLifecycleMatches(lifecycle, record, grant, operationID) {
+				return nil, fmt.Errorf("%w: lifecycle %s owns the sandbox", ErrNomadSandboxPauseConflict, lifecycle.ID)
+			}
+			recoveringPlannedPause = true
 		}
+	}
+	validSlotState := slot.State == RuntimeSlotStateActive ||
+		(alreadyPaused || recoveringPlannedPause) &&
+			(slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned)
+	if !validSlotState {
+		return nil, fmt.Errorf("%w: runtime slot state %s does not match the planned pause", ErrNomadSandboxPauseNotReady, slot.State)
 	}
 	candidate := &NomadSandboxPauseCandidate{
 		SandboxID: sandboxID, OperationID: operationID, Source: lifecycle.Source,
@@ -274,7 +290,9 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		ClaimOperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 		SlotID: slot.ID, SlotState: slot.State, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, AllocationNamespace: slot.AllocationNamespace,
-		NodeID: slot.NodeID, WriterGrantID: grant.ID, WriterGrantState: grant.State,
+		NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
+		WriterGrantID: grant.ID, WriterGrantState: grant.State, WriterEpoch: grant.WriterEpoch,
+		BindingVersion: grant.BindingVersion, BindingDigest: append([]byte(nil), grant.BindingDigest...),
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit Nomad sandbox pause request: %w", err)

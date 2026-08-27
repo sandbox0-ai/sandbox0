@@ -39,6 +39,7 @@ type nodeRuntimeChannelExecutor struct {
 	nodeUID       string
 	control       *protocol.NodeClient
 	cleaner       runtimeSlotCleaner
+	plannedRetire runtimeSlotPlannedRetirer
 	forker        runtimeSlotRunningForker
 	rebaser       runtimeSlotPausedRebaser
 	network       runtimeSlotNetworkControl
@@ -47,6 +48,7 @@ type nodeRuntimeChannelExecutor struct {
 }
 
 var _ protocol.NodeChannelExecutor = (*nodeRuntimeChannelExecutor)(nil)
+var _ protocol.NodeChannelPlannedRetireExecutor = (*nodeRuntimeChannelExecutor)(nil)
 var _ protocol.NodeChannelRunningForkExecutor = (*nodeRuntimeChannelExecutor)(nil)
 var _ protocol.NodeChannelPausedRebaseExecutor = (*nodeRuntimeChannelExecutor)(nil)
 var _ protocol.NodeChannelNetworkExecutor = (*nodeRuntimeChannelExecutor)(nil)
@@ -68,6 +70,14 @@ type runtimeSlotRunningForker interface {
 		protocol.NodeChannelTarget,
 		protocol.NodeRunningForkControlRequest,
 	) (rootfshandoff.RunningForkCheckpointResult, error)
+}
+
+type runtimeSlotPlannedRetirer interface {
+	PlanRuntimeSlotRetire(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePlannedRetireControlRequest,
+	) (protocol.NodePlannedRetireControlProof, error)
 }
 
 type runtimeSlotPausedRebaser interface {
@@ -131,6 +141,9 @@ func newNodeRuntimeChannelAgent(
 	if forker, ok := cleaner.(runtimeSlotRunningForker); ok {
 		executor.forker = forker
 	}
+	if plannedRetire, ok := cleaner.(runtimeSlotPlannedRetirer); ok {
+		executor.plannedRetire = plannedRetire
+	}
 	if rebaser, ok := cleaner.(runtimeSlotPausedRebaser); ok {
 		executor.rebaser = rebaser
 	}
@@ -156,6 +169,9 @@ func newNodeRuntimeChannelAgent(
 		Executor:         executor,
 		Capacity:         runtimeNodeCapacity(nomadConfig),
 		OperationTimeout: runtimeSlotNodeChannelOperationTimeout(nomadConfig),
+	}
+	if executor.plannedRetire != nil {
+		agentConfig.PlannedRetireExecutor = executor
 	}
 	if executor.forker != nil {
 		agentConfig.RunningForkExecutor = executor
@@ -255,6 +271,21 @@ func (e *nodeRuntimeChannelExecutor) RunningFork(
 			fmt.Errorf("runtime slot running-fork controller is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	return e.forker.CaptureRunningRootFSFork(ctx, target, request)
+}
+
+func (e *nodeRuntimeChannelExecutor) PlannedRetire(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	if err := e.validateTarget(target); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if e.plannedRetire == nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("runtime slot planned-retire controller is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return e.plannedRetire.PlanRuntimeSlotRetire(ctx, target, request)
 }
 
 func (e *nodeRuntimeChannelExecutor) PausedRebase(

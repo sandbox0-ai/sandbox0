@@ -71,6 +71,59 @@ func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.
 	require.Nil(t, active)
 }
 
+func TestRequestNomadSandboxPauseRecoversExactOrphanedSlotIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "orphaned-retry")
+	first, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	orphanProof := bytes.Repeat([]byte{0xd1}, sha256.Size)
+	orphaned, err := fixture.store.MarkRuntimeSlotAllocationMissing(
+		fixture.ctx,
+		&MarkRuntimeSlotAllocationMissingRequest{
+			SlotID: first.SlotID, AllocationID: first.AllocationID,
+			NodeUID: first.NodeUID, NodeBootID: first.NodeBootID,
+			ObservationDigest: orphanProof,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateOrphaned, orphaned.State)
+
+	retry, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceAuto,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.OperationID, retry.OperationID)
+	require.Equal(t, RuntimeSlotStateOrphaned, retry.SlotState)
+	require.Equal(t, SandboxLifecycleSourceManual, retry.Source)
+	require.Equal(t, first.WriterGrantID, retry.WriterGrantID)
+}
+
+func TestRequestNomadSandboxPauseRecoversExactQuiescingSlotIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "quiescing-retry")
+	first, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	quiescing, err := fixture.store.BeginRuntimeSlotQuiesce(
+		fixture.ctx,
+		&BeginRuntimeSlotQuiesceRequest{
+			SlotID: first.SlotID, OperationID: first.ClaimOperationID, ClaimID: first.ClaimID,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+
+	retry, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceAuto,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.OperationID, retry.OperationID)
+	require.Equal(t, RuntimeSlotStateQuiescing, retry.SlotState)
+	require.Equal(t, SandboxLifecycleSourceManual, retry.Source)
+	require.Equal(t, first.WriterGrantID, retry.WriterGrantID)
+}
+
 func TestRequestNomadSandboxTTLPauseRechecksDeadlinesUnderLockIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "ttl-recheck")
 	_, err := fixture.pool.Exec(fixture.ctx, `

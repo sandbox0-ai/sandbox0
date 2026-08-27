@@ -5,6 +5,7 @@ package nomadclaim
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -104,6 +105,14 @@ type runningForkController interface {
 	) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
+type plannedRetireController interface {
+	PlannedRetire(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePlannedRetireControlRequest,
+	) (protocol.NodePlannedRetireControlProof, error)
+}
+
 type pausedRebaseController interface {
 	SelectPausedRebaseNode(context.Context, string, string) (protocol.NodeChannelTarget, error)
 	ResolvePausedRebaseNode(context.Context, string, string, string) (protocol.NodeChannelTarget, error)
@@ -119,6 +128,7 @@ type Config struct {
 	RuntimeClasses         *RuntimeClassCatalog
 	Planner                planner
 	Allocation             allocationStopper
+	PlannedRetire          plannedRetireController
 	RunningFork            runningForkController
 	PausedRebase           pausedRebaseController
 	QuotaLimits            QuotaLimitStore
@@ -140,6 +150,7 @@ type Service struct {
 	runtimeClasses         *RuntimeClassCatalog
 	planner                planner
 	allocation             allocationStopper
+	plannedRetire          plannedRetireController
 	runningFork            runningForkController
 	pausedRebase           pausedRebaseController
 	quotaLimits            QuotaLimitStore
@@ -158,7 +169,7 @@ type Service struct {
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.RuntimeClasses == nil ||
-		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
+		config.Planner == nil || config.Allocation == nil || config.PlannedRetire == nil || config.RunningFork == nil ||
 		config.PausedRebase == nil ||
 		config.QuotaLimits == nil || config.NetworkPolicies == nil {
 		return nil, fmt.Errorf("nomad claim store, templates, runtime classes, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
@@ -189,7 +200,8 @@ func New(config Config) (*Service, error) {
 	}
 	return &Service{
 		store: config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
-		planner: config.Planner, allocation: config.Allocation, runningFork: config.RunningFork,
+		planner: config.Planner, allocation: config.Allocation, plannedRetire: config.PlannedRetire,
+		runningFork:  config.RunningFork,
 		pausedRebase: config.PausedRebase,
 		quotaLimits:  config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
@@ -318,9 +330,10 @@ func (s *Service) RequestRootFSWriterPressurePause(
 	return candidate.OperationID, nil
 }
 
-// CompletePausingSandboxRuntime asks Nomad to cooperatively stop the exact
-// allocation, then makes the slot terminally reconcilable only after the node
-// has atomically published a planned RootFS generation.
+// CompletePausingSandboxRuntime first persists the exact planned-retire marker
+// on the source node, then quiesces the slot, and only then asks Nomad to stop
+// the allocation. Retries preserve this ordering across every response-loss
+// boundary while node recovery publishes the planned RootFS generation.
 func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID string) error {
 	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceManual)
 	if err != nil {
@@ -337,6 +350,32 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 			return fmt.Errorf("quiesce planned-paused Nomad runtime slot: %w", err)
 		}
 		return nil
+	}
+	target := protocol.NodeChannelTarget{
+		SlotID: candidate.SlotID, ClusterID: candidate.ClusterID,
+		AllocationID: candidate.AllocationID, NodeID: candidate.NodeID,
+		NodeUID: candidate.NodeUID, NodeBootID: candidate.NodeBootID,
+	}
+	request := protocol.NodePlannedRetireControlRequest{
+		OperationID: candidate.OperationID, ClaimID: candidate.ClaimID,
+		SlotID: candidate.SlotID, AllocationID: candidate.AllocationID,
+		WriterGrantID: candidate.WriterGrantID, WriterEpoch: candidate.WriterEpoch,
+		BindingVersion: candidate.BindingVersion, BindingDigest: hex.EncodeToString(candidate.BindingDigest),
+	}
+	if _, err := s.plannedRetire.PlannedRetire(ctx, target, request); err != nil {
+		return fmt.Errorf("persist node planned retirement before Nomad pause: %w", err)
+	}
+	if _, err := s.store.BeginRuntimeSlotQuiesce(ctx, &sandboxstore.BeginRuntimeSlotQuiesceRequest{
+		SlotID: candidate.SlotID, OperationID: candidate.ClaimOperationID, ClaimID: candidate.ClaimID,
+	}); err != nil {
+		// A physically absent allocation can publish and terminalize between the
+		// node acknowledgement and this CAS. Accept only a fresh authoritative
+		// observation that the exact pause has already committed.
+		refreshed, refreshErr := s.requestNomadSandboxPause(ctx, sandboxID, candidate.Source)
+		if refreshErr == nil && refreshed.AlreadyPaused && refreshed.SlotID == "" {
+			return nil
+		}
+		return fmt.Errorf("quiesce Nomad runtime slot after planning pause: %w", errors.Join(err, refreshErr))
 	}
 	if err := s.allocation.Stop(ctx, runtimeslotreconciler.AllocationPurgeRequest{
 		OperationID: candidate.OperationID,

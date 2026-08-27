@@ -191,6 +191,139 @@ type dirtyTailPressureRuntime interface {
 	PlanDirtyTailPressure(context.Context, rootfssession.DirtyTailPressureSession) (string, error)
 }
 
+type plannedRetireRuntime interface {
+	PlanRetire(context.Context, rootfshandoff.StageRequest, string) error
+}
+
+// PlanRuntimeSlotRetire durably marks one exact local RootFS writer for the
+// already-authoritative regional pause operation. It deliberately returns
+// before stopping runsc; the allocation stop remains a separate manager-owned
+// side effect and the node recovery loop seals only after physical absence.
+func (d *nodeRuntime) PlanRuntimeSlotRetire(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	if err := request.Validate(); err != nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("validate planned runtime-slot retirement: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil || target.ClusterID != d.clusterID || target.NodeID != d.nodeID ||
+		target.NodeUID != d.nodeUID || target.SlotID != request.SlotID ||
+		target.AllocationID != request.AllocationID || target.ControlEndpoint != "" {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned runtime-slot retirement target is invalid: %w", errdefs.ErrPermissionDenied)
+	}
+	runtime, ok := d.runtime.(plannedRetireRuntime)
+	if !ok {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	sessions, err := d.runtime.RecoverySessions()
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, fmt.Errorf("list durable RootFS sessions: %w", err)
+	}
+	matched, err := matchRuntimeSlotPlannedRetireSession(sessions, target, request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched == nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS writer session is absent: %w", errdefs.ErrNotFound)
+	}
+	if err := validateRuntimeSlotPlannedRetireSession(*matched, target, request); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if err := runtime.PlanRetire(ctx, matched.Stage, request.OperationID); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+
+	// Re-read the journal before acknowledging so a response proves the exact
+	// operation survived the durable write and still owns this incarnation.
+	sessions, err = d.runtime.RecoverySessions()
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, fmt.Errorf("verify planned RootFS retirement: %w", err)
+	}
+	matched, err = matchRuntimeSlotPlannedRetireSession(sessions, target, request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched == nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement disappeared after persistence: %w", errdefs.ErrUnavailable)
+	}
+	if err := validateRuntimeSlotPlannedRetireSession(*matched, target, request); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched.Kind != rootfssession.RecoveryPlannedRetire ||
+		matched.RetireOperationID != request.OperationID {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement was not persisted: %w", errdefs.ErrUnavailable)
+	}
+	proof, err := protocol.NewNodePlannedRetireControlProof(request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	return proof, nil
+}
+
+func matchRuntimeSlotPlannedRetireSession(
+	sessions []rootfssession.RecoverySession,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (*rootfssession.RecoverySession, error) {
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		session := sessions[index]
+		identity := session.Stage.Identity
+		sameIncarnation := identity.SlotNonce == target.SlotID || identity.AllocationID == target.AllocationID
+		if identity.WriterGrantID != request.WriterGrantID {
+			if sameIncarnation {
+				return nil, fmt.Errorf("runtime slot incarnation is owned by another RootFS writer: %w", errdefs.ErrFailedPrecondition)
+			}
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("writer grant has multiple local sessions: %w", errdefs.ErrFailedPrecondition)
+		}
+		candidate := session
+		matched = &candidate
+	}
+	return matched, nil
+}
+
+func validateRuntimeSlotPlannedRetireSession(
+	session rootfssession.RecoverySession,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) error {
+	stage := session.Stage
+	if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+		return fmt.Errorf("planned RootFS session has an invalid durable binding: %v: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		return fmt.Errorf("digest planned RootFS session binding: %w", err)
+	}
+	expectedOperationID := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	identity := stage.Identity
+	if expectedOperationID != request.OperationID || identity.ClaimID != request.ClaimID ||
+		identity.SlotNonce != target.SlotID || identity.AllocationID != target.AllocationID ||
+		identity.NodeUID != target.NodeUID || identity.BootID != target.NodeBootID ||
+		identity.WriterGrantID != request.WriterGrantID || identity.WriterEpoch != request.WriterEpoch ||
+		stage.BindingVersion != request.BindingVersion || hex.EncodeToString(binding[:]) != request.BindingDigest ||
+		identity.TaskName != protocol.NomadTaskName {
+		return fmt.Errorf("planned RootFS session belongs to another runtime slot writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if session.CrashOperationID != "" || session.ExternalCrash || session.BranchRemoved ||
+		(session.RetireOperationID != "" && session.RetireOperationID != request.OperationID) {
+		return fmt.Errorf("RootFS session is already owned by another terminal operation: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
 // RejectPausedRootFSRebase serializes termination with exact node execution.
 func (d *nodeRuntime) RejectPausedRootFSRebase(
 	ctx context.Context,

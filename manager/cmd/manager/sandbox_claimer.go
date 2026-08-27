@@ -66,6 +66,7 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 	claimer, err := nomadclaim.New(nomadclaim.Config{
 		Store: deps.store, Templates: deps.templates, RuntimeClasses: deps.runtimeClasses, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
+		PlannedRetire:   deps.nodeAuthority,
 		RunningFork:     deps.nodeAuthority,
 		PausedRebase:    deps.nodeAuthority,
 		QuotaLimits:     deps.quotaLimits,

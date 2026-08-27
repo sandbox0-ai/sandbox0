@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -1239,6 +1241,84 @@ func TestNodeRuntimeConvergesDurablePlannedAndCrashIntents(t *testing.T) {
 	require.Equal(t, 1, runtime.crashCalls)
 	require.Equal(t, 1, runtime.externalReclaims)
 	runtime.mu.Unlock()
+}
+
+func TestNodeRuntimePersistsExactPlannedRetireBeforeAcknowledging(t *testing.T) {
+	claim := testNomadNodeClaimControlRequest(t)
+	stage := claim.Stage.WithoutWriterGrantToken()
+	blockHead := digest.FromString("planned-retire-block-head").String()
+	blockDescriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: rootfsblock.LogicalBlockSize,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/maps/planned-retire.page", Length: 1,
+				Checksum: digest.FromString("planned-retire-page").String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	stage.Generation = &rootfshandoff.GenerationDescriptor{
+		Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: stage.InitialGeneration,
+		FilesystemID: stage.Identity.RootFSID, SourceOCIDigest: digest.FromString("planned-retire-oci").String(),
+		BaseArtifactDigest: digest.FromString("planned-retire-artifact").String(),
+		BaseBlockRoot:      blockHead, CurrentBlockHead: blockHead, WriterEpoch: stage.Identity.WriterEpoch - 1,
+		FormatGeneration: 1, DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 1,
+		Descriptor: blockDescriptor,
+	}
+	require.NoError(t, stage.ValidateDurableBinding())
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	binding, err := stage.BindingDigest()
+	require.NoError(t, err)
+	target := protocol.NodeChannelTarget{
+		SlotID: stage.Identity.SlotNonce, ClusterID: "cluster-1",
+		AllocationID: stage.Identity.AllocationID, NodeID: "node-1",
+		NodeUID: stage.Identity.NodeUID, NodeBootID: stage.Identity.BootID,
+	}
+	request := protocol.NodePlannedRetireControlRequest{
+		OperationID: operationID, ClaimID: stage.Identity.ClaimID,
+		SlotID: target.SlotID, AllocationID: target.AllocationID,
+		WriterGrantID: stage.Identity.WriterGrantID, WriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+	}
+	runtime := &fakeRootFSRuntime{recoverySessions: []rootfssession.RecoverySession{{
+		Stage: stage, Kind: rootfssession.RecoveryCrashAbandon,
+	}}}
+	daemon := &nodeRuntime{
+		runtime: runtime, clusterID: target.ClusterID, nodeID: target.NodeID, nodeUID: target.NodeUID,
+	}
+
+	first, err := daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.NoError(t, err)
+	require.NoError(t, first.ValidateFor(request))
+	retry, err := daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.NoError(t, err)
+	require.Equal(t, first, retry)
+	runtime.mu.Lock()
+	require.Equal(t, 2, runtime.planRetireCalls)
+	require.Equal(t, rootfssession.RecoveryPlannedRetire, runtime.recoverySessions[0].Kind)
+	require.Equal(t, operationID, runtime.recoverySessions[0].RetireOperationID)
+	runtime.mu.Unlock()
+
+	changed := request
+	changed.WriterGrantID = "another-grant"
+	_, err = daemon.PlanRuntimeSlotRetire(t.Context(), target, changed)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	runtime.mu.Lock()
+	require.Equal(t, 2, runtime.planRetireCalls)
+	runtime.mu.Unlock()
+
+	runtime.mu.Lock()
+	runtime.recoverySessions[0] = rootfssession.RecoverySession{
+		Stage: stage, Kind: rootfssession.RecoveryCrashAbandon,
+	}
+	runtime.planRetireCrashOperation = "concurrent-crash-operation"
+	runtime.mu.Unlock()
+	_, err = daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }
 
 func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {

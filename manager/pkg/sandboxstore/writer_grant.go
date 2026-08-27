@@ -708,6 +708,9 @@ func renewRootFSWriterGrant(
 	if err != nil {
 		return nil, err
 	}
+	// A consumed writer cannot outlive the bounded launch claim that created
+	// it. Rejecting renewal here makes old and new node agents fail closed even
+	// when the separate runtime-slot heartbeat has already been rejected.
 	tag, err := db.Exec(ctx, `
 		UPDATE manager.rootfs_writer_grants AS g
 		SET lease_expires_at = NOW() + ($2::bigint * INTERVAL '1 millisecond'),
@@ -723,9 +726,18 @@ func renewRootFSWriterGrant(
 			AND g.lease_expires_at > NOW() - ($8::bigint * INTERVAL '1 millisecond')
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.runtime_slots AS slot
+				WHERE slot.slot_id = g.slot_id
+					AND slot.writer_grant_id = g.grant_id
+					AND slot.state IN ($9, $10)
+					AND slot.claim_lease_expires_at <= NOW()
+			)
 	`, normalized.GrantID, policy.LeaseTTL.Milliseconds(), RootFSWriterGrantStateConsumed,
 		normalized.WriterEpoch, normalized.BindingVersion,
-		normalized.BindingDigest, normalized.ConsumerNodeUID, policy.GracePeriod.Milliseconds())
+		normalized.BindingDigest, normalized.ConsumerNodeUID, policy.GracePeriod.Milliseconds(),
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant: %w", err)
 	}
@@ -818,9 +830,18 @@ func renewRootFSWriterGrants(
 			AND g.lease_expires_at > authority_clock.observed_at - ($8::bigint * INTERVAL '1 millisecond')
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.runtime_slots AS slot
+				WHERE slot.slot_id = g.slot_id
+					AND slot.writer_grant_id = g.grant_id
+					AND slot.state IN ($9, $10)
+					AND slot.claim_lease_expires_at <= authority_clock.observed_at
+			)
 		RETURNING g.grant_id
 	`, grantIDs, epochs, versions, digests, nodeUIDs, policy.LeaseTTL.Milliseconds(),
-		RootFSWriterGrantStateConsumed, policy.GracePeriod.Milliseconds())
+		RootFSWriterGrantStateConsumed, policy.GracePeriod.Milliseconds(),
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant batch: %w", err)
 	}

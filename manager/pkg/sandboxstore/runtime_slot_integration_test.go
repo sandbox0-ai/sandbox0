@@ -125,6 +125,20 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateActive, active.State)
 	require.Equal(t, "http://192.0.2.2:49983", active.ProcdAddress)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE slot_id = $1
+	`, claimed.ID)
+	require.NoError(t, err)
+	renewedActiveWriter, err := store.RenewRootFSWriterGrant(ctx, &RenewRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID,
+	}, RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second})
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, renewedActiveWriter.State,
+		"claim availability no longer fences a writer after command readiness")
 	projected, err := store.GetRuntimeSlotBySandboxID(ctx, acquire.SandboxID)
 	require.NoError(t, err)
 	require.Equal(t, active.ID, projected.ID)
@@ -557,6 +571,14 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateStarting, started.State)
+	renewRequest := &RenewRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID,
+	}
+	renewPolicy := RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second}
+	renewedBeforeClaimExpiry, err := store.RenewRootFSWriterGrant(ctx, renewRequest, renewPolicy)
+	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		UPDATE manager.runtime_slots
 		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
@@ -568,6 +590,17 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID, TTL: time.Minute,
 	})
 	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	_, err = store.RenewRootFSWriterGrant(ctx, renewRequest, renewPolicy)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantInvalidState)
+	batchRenewal, err := store.RenewRootFSWriterGrants(ctx, []*RenewRootFSWriterGrantRequest{renewRequest}, renewPolicy)
+	require.NoError(t, err)
+	require.Len(t, batchRenewal, 1)
+	require.ErrorIs(t, batchRenewal[0].Err, ErrRootFSWriterGrantInvalidState)
+	require.Nil(t, batchRenewal[0].Grant)
+	writerAfterRejectedRenewal, err := store.GetRootFSWriterGrant(ctx, issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, renewedBeforeClaimExpiry.LeaseExpiresAt, writerAfterRejectedRenewal.LeaseExpiresAt,
+		"an abandoned pre-command-ready claim must not extend writer authority")
 	_, err = store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
 		SlotID: claimed.ID, AllocationID: registration.AllocationID,
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,

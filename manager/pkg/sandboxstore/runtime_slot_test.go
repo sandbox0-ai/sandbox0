@@ -90,6 +90,29 @@ func TestNormalizeAcquireRuntimeSlotRequestUsesMillisecondTTLPrecision(t *testin
 	require.Equal(t, 1500*time.Millisecond, normalized.ClaimTTL)
 }
 
+func TestRuntimeSlotPreCommandReadyClaimExpired(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		state  string
+		expiry time.Time
+		want   bool
+	}{
+		{name: "claiming expired", state: RuntimeSlotStateClaiming, expiry: now.Add(-time.Second), want: true},
+		{name: "starting expired", state: RuntimeSlotStateStarting, expiry: now, want: true},
+		{name: "starting live", state: RuntimeSlotStateStarting, expiry: now.Add(time.Second), want: false},
+		{name: "active ignores claim lease", state: RuntimeSlotStateActive, expiry: now.Add(-time.Second), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			slot := &RuntimeSlot{
+				State: test.state, ClaimLeaseExpiresAt: test.expiry, AuthorityObservedAt: now,
+			}
+			require.Equal(t, test.want, runtimeSlotPreCommandReadyClaimExpired(slot))
+		})
+	}
+}
+
 func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(t *testing.T) {
 	valid := &AcquireRuntimeSlotRequest{
 		OperationID: "operation", ClaimID: "claim", SandboxID: "sandbox",

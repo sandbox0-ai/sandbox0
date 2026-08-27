@@ -547,12 +547,39 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
+	started, err := store.StartRuntimeSlot(ctx, &StartRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		LaunchAttempt: "launch-reconcile-writer", RunscContainerID: "runsc-reconcile-writer",
+		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x7e}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
+	})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateStarting, started.State)
 	_, err = pool.Exec(ctx, `
 		UPDATE manager.runtime_slots
 		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
 		WHERE slot_id = $1
 	`, claimed.ID)
 	require.NoError(t, err)
+	_, err = store.HeartbeatRuntimeSlot(ctx, &HeartbeatRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID, TTL: time.Minute,
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	_, err = store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		ProcdInstanceID: "late-procd", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: bytes.Repeat([]byte{0x7f}, 32),
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, claimed.ID, candidates[0].ID)
 
 	current, err := store.GetRuntimeSlot(ctx, claimed.ID)
 	require.NoError(t, err)
@@ -561,7 +588,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	require.ErrorIs(t, err, ErrRuntimeSlotNotDue)
 	stillClaimed, err := store.GetRuntimeSlot(ctx, claimed.ID)
 	require.NoError(t, err)
-	require.Equal(t, RuntimeSlotStateClaiming, stillClaimed.State)
+	require.Equal(t, RuntimeSlotStateStarting, stillClaimed.State)
 	require.Equal(t, current.Revision, stillClaimed.Revision)
 
 	_, err = pool.Exec(ctx, `

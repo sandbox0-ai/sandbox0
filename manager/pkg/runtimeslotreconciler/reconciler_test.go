@@ -363,6 +363,22 @@ func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 	}
 }
 
+func TestReconcilerCleansStartingSlotAfterClaimLeaseExpiryDespiteLiveHeartbeat(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	fixture.store.slot.State = sandboxstore.RuntimeSlotStateStarting
+	fixture.store.slot.HeartbeatExpiresAt = fixture.store.slot.AuthorityObservedAt.Add(time.Minute)
+	fixture.store.slot.ClaimLeaseExpiresAt = fixture.store.slot.AuthorityObservedAt.Add(-time.Second)
+
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result != (Result{Candidates: 1, Completed: 1}) {
+		t.Fatalf("RunOnce() = %+v, %v", result, err)
+	}
+	if fixture.store.fenceCalls != 1 || fixture.store.slot.State != sandboxstore.RuntimeSlotStateTerminal ||
+		fixture.store.slot.TerminalReason != "reconciled_orphan" {
+		t.Fatalf("expired starting slot = %+v, fence calls = %d", fixture.store.slot, fixture.store.fenceCalls)
+	}
+}
+
 func TestReconcilerReleasesExactResourceLeaseOnlyAfterCgroupCleanupAndPurge(t *testing.T) {
 	fixture := newReconcileFixture(t, true)
 	lease := attachResourceLease(t, fixture)

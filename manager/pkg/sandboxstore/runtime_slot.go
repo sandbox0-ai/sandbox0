@@ -342,6 +342,9 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 			slot.State == RuntimeSlotStateTerminal {
 			return nil, fmt.Errorf("%w: slot in %s cannot heartbeat", ErrRuntimeSlotInvalid, slot.State)
 		}
+		if runtimeSlotPreCommandReadyClaimExpired(slot) {
+			return nil, fmt.Errorf("%w: slot claim lease expired before command readiness", ErrRuntimeSlotInvalid)
+		}
 		_, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
 			SET heartbeat_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'), updated_at = NOW()
@@ -376,10 +379,8 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 		if slot.Revision != normalized.ExpectedRevision {
 			return nil, fmt.Errorf("%w: runtime slot revision changed", ErrRuntimeSlotConflict)
 		}
-		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt)
-		if slot.State == RuntimeSlotStateClaiming {
-			due = due || !slot.ClaimLeaseExpiresAt.After(slot.AuthorityObservedAt)
-		}
+		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) ||
+			runtimeSlotPreCommandReadyClaimExpired(slot)
 		if !due {
 			return nil, ErrRuntimeSlotNotDue
 		}
@@ -832,6 +833,9 @@ func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRun
 		if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
 			return nil, fmt.Errorf("%w: slot heartbeat expired before start", ErrRuntimeSlotInvalid)
 		}
+		if runtimeSlotPreCommandReadyClaimExpired(slot) {
+			return nil, fmt.Errorf("%w: slot claim lease expired before start", ErrRuntimeSlotInvalid)
+		}
 		var grantState string
 		if err := tx.QueryRow(ctx, `
 			SELECT state FROM manager.rootfs_writer_grants
@@ -883,6 +887,9 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 		}
 		if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
 			return nil, fmt.Errorf("%w: slot heartbeat expired before command readiness", ErrRuntimeSlotInvalid)
+		}
+		if runtimeSlotPreCommandReadyClaimExpired(slot) {
+			return nil, fmt.Errorf("%w: slot claim lease expired before command readiness", ErrRuntimeSlotInvalid)
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
@@ -1058,13 +1065,13 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 	rows, err := s.pool.Query(ctx, runtimeSlotSelectSQL()+`
 		WHERE state IN ($1, $2)
 			OR (state <> $3 AND heartbeat_expires_at <= NOW())
-			OR (state = $4 AND claim_lease_expires_at <= NOW())
+			OR (state IN ($4, $5) AND claim_lease_expires_at <= NOW())
 		ORDER BY
 			CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
 			heartbeat_expires_at, slot_id
-		LIMIT $5
+		LIMIT $6
 	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
-		RuntimeSlotStateClaiming, limit)
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,6 +1085,16 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 		result = append(result, *slot)
 	}
 	return result, rows.Err()
+}
+
+// runtimeSlotPreCommandReadyClaimExpired keeps the bounded claim lease
+// authoritative until procd command readiness is committed. Node heartbeats
+// prove only physical liveness and must not preserve an abandoned launch.
+func runtimeSlotPreCommandReadyClaimExpired(slot *RuntimeSlot) bool {
+	if slot == nil || (slot.State != RuntimeSlotStateClaiming && slot.State != RuntimeSlotStateStarting) {
+		return false
+	}
+	return slot.ClaimLeaseExpiresAt.IsZero() || !slot.ClaimLeaseExpiresAt.After(slot.AuthorityObservedAt)
 }
 
 func (s *PGSandboxStore) withLockedRuntimeSlot(

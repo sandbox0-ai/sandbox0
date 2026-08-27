@@ -515,7 +515,8 @@ func runtimeSlotDue(slot *sandboxstore.RuntimeSlot) bool {
 	if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
 		return true
 	}
-	return slot.State == sandboxstore.RuntimeSlotStateClaiming &&
+	return (slot.State == sandboxstore.RuntimeSlotStateClaiming ||
+		slot.State == sandboxstore.RuntimeSlotStateStarting) &&
 		!slot.ClaimLeaseExpiresAt.After(slot.AuthorityObservedAt)
 }
 

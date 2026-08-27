@@ -218,6 +218,64 @@ func TestRequestNomadSandboxPauseReturnsExactSlotAfterCommittedPublishIntegratio
 	require.Equal(t, RuntimeSlotStateQuiescing, retry.SlotState)
 }
 
+func TestBeginRootFSWriterRetireAllowsExpiredLeaseForExactPlannedPauseIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "expired-exact-retire")
+	candidate, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE grant_id = $1
+	`, fixture.issue.GrantID)
+	require.NoError(t, err)
+
+	fixture.publishPlannedPause(t, candidate.OperationID)
+	retired, err := fixture.store.GetRootFSWriterGrant(fixture.ctx, fixture.issue.GrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
+	require.Equal(t, candidate.OperationID, retired.RetireOperationID)
+	require.Equal(t, RootFSWriterRetireKindPlannedPublish, retired.RetireKind)
+	paused, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStatePaused, paused.DesiredState)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+}
+
+func TestBeginRootFSWriterRetireRejectsExpiredLeaseForAnotherRuntimeIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "expired-mismatched-retire")
+	candidate, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE grant_id = $1
+	`, fixture.issue.GrantID)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = 'publishing', from_runtime_id = 'another-allocation'
+		WHERE txn_id = $1
+	`, candidate.OperationID)
+	require.NoError(t, err)
+
+	_, err = fixture.store.BeginRootFSWriterRetire(
+		fixture.ctx,
+		&BeginRootFSWriterRetireRequest{
+			GrantID: fixture.issue.GrantID, WriterEpoch: fixture.writerEpoch,
+			OperationID: candidate.OperationID, BindingVersion: RootFSWriterBindingVersion,
+			BindingDigest:           fixture.issue.BindingDigest,
+			ExpectedOldGenerationID: fixture.initial.ID,
+		},
+	)
+	require.ErrorIs(t, err, ErrRootFSWriterLeaseExpired)
+}
+
 type nomadPauseStoreFixture struct {
 	ctx                 context.Context
 	pool                *pgxpool.Pool

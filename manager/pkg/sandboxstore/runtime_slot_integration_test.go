@@ -394,6 +394,42 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 	require.Equal(t, int64(2<<30), activeMemory)
 }
 
+func TestRuntimeNodeCapacityExpiryPreservesExactBootRowIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	registration := runtimeSlotTestRegistration("unused-expiry", "unused-expiry")
+	request := &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: registration.ClusterID, NodeID: registration.NodeID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		CPUMillicores: 2_000, MemoryBytes: 2 << 30,
+		CPUSetCPUs: "0-1", CPUSetMems: "0", TTL: time.Minute,
+	}
+	registered, err := store.RegisterRuntimeNodeCapacity(ctx, request)
+	require.NoError(t, err)
+	require.True(t, registered.HeartbeatExpiresAt.After(registered.AuthorityObservedAt))
+
+	err = store.ExpireRuntimeNodeCapacity(ctx, &ExpireRuntimeNodeCapacityRequest{
+		ClusterID: request.ClusterID, NodeID: request.NodeID,
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+	})
+	require.NoError(t, err)
+	expired, err := store.GetRuntimeNodeCapacity(
+		ctx, request.ClusterID, request.NodeID, request.NodeUID, request.NodeBootID,
+	)
+	require.NoError(t, err)
+	require.False(t, expired.HeartbeatExpiresAt.After(expired.AuthorityObservedAt))
+	require.Equal(t, registered.Revision+1, expired.Revision)
+	require.Equal(t, registered.CPUMillicores, expired.CPUMillicores)
+	require.Equal(t, registered.MemoryBytes, expired.MemoryBytes)
+
+	err = store.ExpireRuntimeNodeCapacity(ctx, &ExpireRuntimeNodeCapacityRequest{
+		ClusterID: request.ClusterID, NodeID: "missing-node",
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+	})
+	require.NoError(t, err)
+}
+
 func TestRuntimeSlotUnclaimedPurgeBecomesTerminalIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))

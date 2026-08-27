@@ -41,6 +41,12 @@ type channelTestVerifier struct{}
 
 type channelTestCapacityStore struct{}
 
+type channelTrackingCapacityStore struct {
+	mu            sync.Mutex
+	registrations int
+	expirations   int
+}
+
 func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
 	_ context.Context,
 	request *sandboxstore.RegisterRuntimeNodeCapacityRequest,
@@ -51,6 +57,44 @@ func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
 		MemoryBytes: request.MemoryBytes, CPUSetCPUs: request.CPUSetCPUs,
 		CPUSetMems: request.CPUSetMems, HeartbeatExpiresAt: time.Now().Add(request.TTL), Revision: 1,
 	}, nil
+}
+
+func (channelTestCapacityStore) ExpireRuntimeNodeCapacity(
+	context.Context,
+	*sandboxstore.ExpireRuntimeNodeCapacityRequest,
+) error {
+	return nil
+}
+
+func (s *channelTrackingCapacityStore) RegisterRuntimeNodeCapacity(
+	_ context.Context,
+	request *sandboxstore.RegisterRuntimeNodeCapacityRequest,
+) (*sandboxstore.RuntimeNodeCapacity, error) {
+	s.mu.Lock()
+	s.registrations++
+	s.mu.Unlock()
+	return &sandboxstore.RuntimeNodeCapacity{
+		ClusterID: request.ClusterID, NodeID: request.NodeID, NodeUID: request.NodeUID,
+		NodeBootID: request.NodeBootID, CPUMillicores: request.CPUMillicores,
+		MemoryBytes: request.MemoryBytes, CPUSetCPUs: request.CPUSetCPUs,
+		CPUSetMems: request.CPUSetMems, HeartbeatExpiresAt: time.Now().Add(request.TTL), Revision: 1,
+	}, nil
+}
+
+func (s *channelTrackingCapacityStore) ExpireRuntimeNodeCapacity(
+	_ context.Context,
+	_ *sandboxstore.ExpireRuntimeNodeCapacityRequest,
+) error {
+	s.mu.Lock()
+	s.expirations++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *channelTrackingCapacityStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.registrations, s.expirations
 }
 
 func channelTestCapacity() protocol.NodeChannelCapacity {
@@ -123,6 +167,57 @@ func TestNodeChannelIdentityMustMatchAuthenticatedRoute(t *testing.T) {
 	}
 }
 
+func TestNodeChannelHubDoesNotAdmitClaimsWithoutPlannedRetire(t *testing.T) {
+	capacity := &channelTrackingCapacityStore{}
+	hub, err := NewChannelHub(channelTestVerifier{}, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	executor := &channelTestExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token,
+		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
+		Capacity:     channelTestCapacity(),
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		AgentInstanceID: "agent-without-planned-retire",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx) }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-1")
+	registrations, expirations := capacity.counts()
+	if registrations != 0 || expirations != 1 {
+		t.Fatalf("capacity registrations = %d, expirations = %d", registrations, expirations)
+	}
+	_, err = hub.Claim(t.Context(), runtimeslotclaim.NodeTarget{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
+	}, testChannelClaimRequest())
+	if !errdefs.IsFailedPrecondition(err) || !strings.Contains(err.Error(), "planned retirement") {
+		t.Fatalf("ineligible claim error = %v", err)
+	}
+	cleanup := testChannelCleanupRequest()
+	if _, err := hub.CleanupRuntimeSlot(t.Context(), Target{
+		ClusterID: cleanup.ClusterID, NodeID: cleanup.NodeID,
+		NodeUID: cleanup.NodeUID, NodeBootID: cleanup.NodeBootID,
+	}, cleanup); err != nil {
+		t.Fatalf("existing-workload cleanup over ineligible channel: %v", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("agent stop = %v", err)
+	}
+}
+
 func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
@@ -158,8 +253,9 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
-		Capacity:     channelTestCapacity(),
-		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		PlannedRetireExecutor: executor,
+		Capacity:              channelTestCapacity(),
+		ReconnectMin:          time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
 	if err != nil {

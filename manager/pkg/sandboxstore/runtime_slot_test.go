@@ -35,6 +35,22 @@ func TestNormalizeRuntimeSlotRegistrationRequiresCanonicalIdentity(t *testing.T)
 	require.ErrorContains(t, err, "absolute path")
 }
 
+func TestNormalizeExpireRuntimeNodeCapacityRequiresExactIdentity(t *testing.T) {
+	normalized, err := normalizeExpireRuntimeNodeCapacityRequest(&ExpireRuntimeNodeCapacityRequest{
+		ClusterID: " cluster-a ", NodeID: " node-a ", NodeUID: " uid-a ", NodeBootID: " boot-a ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "cluster-a", normalized.ClusterID)
+	require.Equal(t, "node-a", normalized.NodeID)
+	require.Equal(t, "uid-a", normalized.NodeUID)
+	require.Equal(t, "boot-a", normalized.NodeBootID)
+
+	_, err = normalizeExpireRuntimeNodeCapacityRequest(&ExpireRuntimeNodeCapacityRequest{
+		ClusterID: "cluster-a", NodeID: "node-a", NodeUID: "uid-a",
+	})
+	require.ErrorContains(t, err, "node_boot_id")
+}
+
 func TestNormalizeRuntimeSlotProofsClonesAndBoundsInputs(t *testing.T) {
 	proof := bytes.Repeat([]byte{0x41}, 32)
 	request := &ReportRuntimeSlotReadyRequest{

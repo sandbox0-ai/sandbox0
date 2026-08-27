@@ -52,6 +52,10 @@ type CapacityStore interface {
 		context.Context,
 		*sandboxstore.RegisterRuntimeNodeCapacityRequest,
 	) (*sandboxstore.RuntimeNodeCapacity, error)
+	ExpireRuntimeNodeCapacity(
+		context.Context,
+		*sandboxstore.ExpireRuntimeNodeCapacityRequest,
+	) error
 }
 
 type nodeChannelKey struct {
@@ -193,14 +197,23 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		_ = connection.Close()
 		return
 	}
-	if _, err := h.capacityStore.RegisterRuntimeNodeCapacity(request.Context(),
-		&sandboxstore.RegisterRuntimeNodeCapacityRequest{
-			ClusterID: hello.ClusterID, NodeID: hello.NodeID, NodeUID: hello.NodeUID,
-			NodeBootID: hello.NodeBootID, CPUMillicores: hello.Capacity.CPUMillicores,
-			MemoryBytes: hello.Capacity.MemoryBytes, CPUSetCPUs: hello.Capacity.CPUSetCPUs,
-			CPUSetMems: hello.Capacity.CPUSetMems,
-			TTL:        time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
-		}); err != nil {
+	if nodeChannelSupportsClaimAdmission(hello) {
+		_, err = h.capacityStore.RegisterRuntimeNodeCapacity(request.Context(),
+			&sandboxstore.RegisterRuntimeNodeCapacityRequest{
+				ClusterID: hello.ClusterID, NodeID: hello.NodeID, NodeUID: hello.NodeUID,
+				NodeBootID: hello.NodeBootID, CPUMillicores: hello.Capacity.CPUMillicores,
+				MemoryBytes: hello.Capacity.MemoryBytes, CPUSetCPUs: hello.Capacity.CPUSetCPUs,
+				CPUSetMems: hello.Capacity.CPUSetMems,
+				TTL:        time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
+			})
+	} else {
+		err = h.capacityStore.ExpireRuntimeNodeCapacity(request.Context(),
+			&sandboxstore.ExpireRuntimeNodeCapacityRequest{
+				ClusterID: hello.ClusterID, NodeID: hello.NodeID,
+				NodeUID: hello.NodeUID, NodeBootID: hello.NodeBootID,
+			})
+	}
+	if err != nil {
 		_ = connection.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "node capacity registration failed"),
 			time.Now().Add(time.Second))
@@ -219,6 +232,14 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	}
 	<-registered.done
 	h.unregister(registered)
+}
+
+// nodeChannelSupportsClaimAdmission is the capability floor for assigning a
+// new sandbox to a node. A less-capable channel remains routable for cleanup
+// and recovery of existing workloads, but cannot advertise schedulable
+// capacity or complete a new claim that cannot later retire durably.
+func nodeChannelSupportsClaimAdmission(hello protocol.NodeChannelHello) bool {
+	return hello.Supports(protocol.NodeChannelCommandPlannedRetire)
 }
 
 func nodeChannelIdentityMatches(identity nodeauth.Identity, hello protocol.NodeChannelHello) bool {
@@ -618,6 +639,14 @@ func (h *ChannelHub) dispatch(
 			return protocol.NodeChannelResult{}, fmt.Errorf("runtime slot node channel hub is closed: %w", errdefs.ErrUnavailable)
 		}
 		if connection != nil && !connection.isClosed() {
+			if (command.Kind == protocol.NodeChannelCommandClaim ||
+				command.Kind == protocol.NodeChannelCommandCommandReady) &&
+				!nodeChannelSupportsClaimAdmission(connection.hello) {
+				return protocol.NodeChannelResult{}, fmt.Errorf(
+					"node channel cannot admit claims without durable planned retirement: %w",
+					errdefs.ErrFailedPrecondition,
+				)
+			}
 			if !connection.hello.Supports(command.Kind) {
 				return protocol.NodeChannelResult{}, fmt.Errorf("node channel does not support %s: %w", command.Kind, errdefs.ErrFailedPrecondition)
 			}

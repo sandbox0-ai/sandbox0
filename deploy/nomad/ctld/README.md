@@ -11,6 +11,11 @@ control sockets, and per-lease cgroups. Do not add systemd filesystem isolation 
 create a private mount/device namespace and break the exact mount namespace
 shared with the Nomad task driver.
 
+The A/B pair protects node-local runtime availability during a process crash or
+certificate rollout. It does not make the ECS worker stateful and it is not a
+stopped standby server. Both processes run on the same disposable node; all
+durable sandbox truth remains in PostgreSQL and S3.
+
 Build the three pinned binaries, provision the files referenced by
 `ctld.yaml` under `/etc/sandbox0/pki` and `/etc/sandbox0/tokens`, copy the
 examples, and replace every placeholder. The supplied host check requires the

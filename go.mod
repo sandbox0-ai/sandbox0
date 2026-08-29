@@ -43,6 +43,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/quic-go/quic-go v0.56.0
 	github.com/redis/go-redis/v9 v9.17.2
+	github.com/smallstep/pkcs7 v0.1.1
 	github.com/stretchr/testify v1.11.1
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/vishvananda/netlink v1.3.1

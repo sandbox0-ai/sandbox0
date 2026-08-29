@@ -45,6 +45,14 @@ type Store interface {
 	BindRuntimeSlotWriterGrant(context.Context, *sandboxstore.BindRuntimeSlotWriterGrantRequest) (*sandboxstore.RuntimeSlot, error)
 }
 
+// CapacityDemandRecorder persists a short-lived, idempotent pressure signal
+// when no compatible warm slot has enough truthful node capacity. Recording
+// is best effort because a temporary autoscaler outage must not change the
+// claim API's canonical unavailable result.
+type CapacityDemandRecorder interface {
+	RecordRuntimeNodePoolDemand(context.Context, *sandboxstore.RuntimeNodePoolDemandRequest) error
+}
+
 // NodeTarget contains only durable routing identity. NodeExecutor must deliver
 // through an authenticated node channel; manager must not dial ControlEndpoint
 // as though its unix:// path were region-reachable.
@@ -145,6 +153,9 @@ type Config struct {
 	Prober         CommandProber
 	TokenGenerator TokenGenerator
 	Observer       Observer
+	DemandRecorder CapacityDemandRecorder
+	DemandPoolID   string
+	DemandTTL      time.Duration
 	// WriterTokenKey must remain stable for the lifetime of every retryable
 	// operation, including during rolling upgrades.
 	WriterTokenKey []byte
@@ -192,6 +203,9 @@ type Planner struct {
 	prober         CommandProber
 	tokenGenerator TokenGenerator
 	observer       Observer
+	demandRecorder CapacityDemandRecorder
+	demandPoolID   string
+	demandTTL      time.Duration
 	writerTokenKey []byte
 	claimTTL       time.Duration
 	slo            time.Duration
@@ -226,11 +240,31 @@ func New(config Config) (*Planner, error) {
 	if now == nil {
 		now = time.Now
 	}
+	demandPoolID := strings.TrimSpace(config.DemandPoolID)
+	demandTTL := config.DemandTTL
+	if demandPoolID != "" {
+		if config.DemandRecorder == nil {
+			return nil, errors.New("runtime node demand recorder is required when a demand pool is configured")
+		}
+		if demandPoolID == "" || len(demandPoolID) > 128 {
+			return nil, errors.New("runtime node demand pool ID is required and bounded")
+		}
+		if demandTTL == 0 {
+			demandTTL = 2 * time.Minute
+		}
+		if demandTTL < time.Second || demandTTL > 30*time.Minute {
+			return nil, errors.New("runtime node demand TTL must be between one second and 30 minutes")
+		}
+	} else {
+		config.DemandRecorder = nil
+	}
 	return &Planner{
 		store: config.Store, network: config.Network, node: config.Node,
 		prober: config.Prober, tokenGenerator: config.TokenGenerator,
 		observer: config.Observer, writerTokenKey: append([]byte(nil), config.WriterTokenKey...),
-		claimTTL: claimTTL, slo: slo, now: now,
+		demandRecorder: config.DemandRecorder, demandPoolID: demandPoolID,
+		demandTTL: demandTTL,
+		claimTTL:  claimTTL, slo: slo, now: now,
 	}, nil
 }
 
@@ -361,6 +395,13 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	})
 	if err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
+		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && p.demandRecorder != nil {
+			_ = p.demandRecorder.RecordRuntimeNodePoolDemand(ctx, &sandboxstore.RuntimeNodePoolDemandRequest{
+				PoolID: p.demandPoolID, OperationID: normalized.OperationID,
+				ClusterID: normalized.ClusterID, CPUMillicores: normalized.Resources.CPUMillicores,
+				MemoryBytes: normalized.Resources.MemoryBytes, Slots: 1, TTL: p.demandTTL,
+			})
+		}
 		return nil, fmt.Errorf("acquire runtime slot: %w", err)
 	}
 	observedSlotID = slot.ID

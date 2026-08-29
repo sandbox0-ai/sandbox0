@@ -62,11 +62,12 @@ closed instead of selecting an ambiguous runtime.
 
 ## Capacity And Replenishment
 
-The platform administrator controls the number of carriers with the `count` in
-`nomad-driver-sandbox0/example/warm-slot.nomad`. A carrier is single-use:
-a terminal sandbox consumes its allocation, and Nomad creates a fresh
-allocation with a fresh network namespace. Task restart in the old allocation
-is disabled.
+The platform administrator controls carrier width with the reviewed task-group
+inventory in the `system` job at
+`nomad-driver-sandbox0/example/warm-slot.nomad`. The current job creates eight
+single-use carriers on every admitted dedicated node. A terminal sandbox
+consumes its allocation, and Nomad creates a fresh allocation with a fresh
+network namespace. Task restart in the old allocation is disabled.
 
 A ready carrier alone is insufficient. A claim also requires all of the
 following:
@@ -85,6 +86,13 @@ Production Sandbox0 Nomad clients must belong to the dedicated `sandbox0` node
 pool and advertise `sandbox0_dedicated=true`. Do not place general Nomad jobs on
 those nodes, because Sandbox0's PostgreSQL resource leases—not Nomad allocation
 resources—are the node's sandbox capacity authority.
+
+Workers may be a fixed warm baseline plus a provider-managed elastic pool with
+minimum zero. Workers remain stateless: PostgreSQL and S3-compatible storage
+retain durable truth, while node disks are disposable caches. A new elastic
+node is excluded from claims until signed enrollment, live capacity, all eight
+carriers, and provider lifecycle admission complete. Failed enrollment is
+abandoned and its route and per-node network lease are released.
 
 ## Release Safety
 

@@ -28,10 +28,11 @@ type fakeStore struct {
 	slot       *sandboxstore.RuntimeSlot
 	grant      *sandboxstore.RootFSWriterGrant
 
-	acquires  []*sandboxstore.AcquireRuntimeSlotRequest
-	issues    []*sandboxstore.IssueRootFSWriterGrantRequest
-	binds     []*sandboxstore.BindRuntimeSlotWriterGrantRequest
-	issueLost bool
+	acquires   []*sandboxstore.AcquireRuntimeSlotRequest
+	issues     []*sandboxstore.IssueRootFSWriterGrantRequest
+	binds      []*sandboxstore.BindRuntimeSlotWriterGrantRequest
+	issueLost  bool
+	acquireErr error
 }
 
 func (f *fakeStore) GetRootFSFilesystem(context.Context, string) (*sandboxstore.RootFSFilesystem, error) {
@@ -63,6 +64,9 @@ func (f *fakeStore) AcquireRuntimeSlot(_ context.Context, request *sandboxstore.
 	defer f.mu.Unlock()
 	cloneRequest := *request
 	f.acquires = append(f.acquires, &cloneRequest)
+	if f.acquireErr != nil {
+		return nil, f.acquireErr
+	}
 	if f.slot.ClaimOperationID == "" {
 		now := time.Now().UTC()
 		f.slot.State = sandboxstore.RuntimeSlotStateClaiming
@@ -353,6 +357,17 @@ type fakeObserver struct {
 	observations []Observation
 }
 
+type fakeDemandRecorder struct {
+	requests []*sandboxstore.RuntimeNodePoolDemandRequest
+	err      error
+}
+
+func (f *fakeDemandRecorder) RecordRuntimeNodePoolDemand(_ context.Context, request *sandboxstore.RuntimeNodePoolDemandRequest) error {
+	clone := *request
+	f.requests = append(f.requests, &clone)
+	return f.err
+}
+
 func (f *fakeObserver) ObserveRuntimeSlotClaim(observation Observation) {
 	f.observations = append(f.observations, observation)
 }
@@ -535,6 +550,34 @@ func TestPlannerRejectsGenerationWriterEpochAheadOfFilesystem(t *testing.T) {
 	defer fixture.store.mu.Unlock()
 	if len(fixture.store.acquires) != 0 || len(fixture.store.issues) != 0 {
 		t.Fatalf("store calls = acquire %d issue %d", len(fixture.store.acquires), len(fixture.store.issues))
+	}
+}
+
+func TestPlannerRecordsIdempotentCapacityDemandWhenSlotUnavailable(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.acquireErr = sandboxstore.ErrRuntimeSlotUnavailable
+	recorder := &fakeDemandRecorder{}
+	planner, err := New(Config{
+		Store: fixture.store, Network: fixture.network, Node: fixture.node,
+		Prober: fixture.prober, TokenGenerator: fixture.tokens,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: 20 * time.Second,
+		DemandRecorder: recorder, DemandPoolID: "elastic", DemandTTL: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = planner.Claim(context.Background(), fixture.request)
+	if !errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if len(recorder.requests) != 1 {
+		t.Fatalf("demand requests = %d", len(recorder.requests))
+	}
+	demand := recorder.requests[0]
+	if demand.PoolID != "elastic" || demand.OperationID != fixture.request.OperationID ||
+		demand.ClusterID != fixture.request.ClusterID || demand.CPUMillicores != fixture.request.Resources.CPUMillicores ||
+		demand.MemoryBytes != fixture.request.Resources.MemoryBytes || demand.TTL != 2*time.Minute {
+		t.Fatalf("demand = %+v", demand)
 	}
 }
 

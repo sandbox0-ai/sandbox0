@@ -214,8 +214,11 @@ rules.
 
 ## Warm Carrier Job
 
-`nomad-driver-sandbox0/example/warm-slot.nomad` is the resource-neutral carrier
-job. Adjust `count` for burst width and keep:
+`nomad-driver-sandbox0/example/warm-slot.nomad` is the resource-neutral
+`system` carrier job. The current job has eight task groups, so each admitted
+dedicated node receives exactly eight one-shot carriers. Change the reviewed
+group inventory—not a per-template pool or task resource profile—only when
+changing node carrier width. Keep:
 
 ```hcl
 restart {
@@ -227,6 +230,12 @@ restart {
 Each carrier is one-shot. Nomad replaces the allocation after consumption.
 Pool width, node capacity, and NBD count are independent constraints and should
 be monitored together.
+
+Autoscaled clients must start with `sandbox0_admitted=false`. After exact node
+identity and a live ctld capacity heartbeat are established, bootstrap may set
+it to `true` so the system job creates carriers. PostgreSQL must retain a
+separate `warming` claim fence until the provider confirms scale-out; Nomad
+metadata alone is not provider admission.
 
 ## Gateway Identity And Routing
 

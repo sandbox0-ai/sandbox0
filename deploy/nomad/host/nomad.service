@@ -1,0 +1,24 @@
+[Unit]
+Description=Sandbox0 Nomad agent
+Documentation=https://developer.hashicorp.com/nomad/docs
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/nomad.d/nomad.hcl
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/sbin/sandbox0-nomad-agent
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=5
+LimitCORE=0
+LimitNOFILE=1048576
+TasksMax=infinity
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

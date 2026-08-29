@@ -164,7 +164,9 @@ that creates private mount or device namespaces.
 Review and submit the warm-slot job:
 
 ```bash
-nomad job run nomad-driver-sandbox0/example/warm-slot.nomad
+nomad job run \
+    -var='datacenter=<region-id-with-hyphens-replaced-by-underscores>' \
+    nomad-driver-sandbox0/example/warm-slot.nomad
 ```
 
 Keep `restart { attempts = 0 }`. A carrier is one-shot and must be replaced by a

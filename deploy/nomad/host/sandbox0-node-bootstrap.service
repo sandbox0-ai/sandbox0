@@ -1,0 +1,15 @@
+[Unit]
+Description=Renew Sandbox0 disposable worker identity
+Documentation=https://github.com/sandbox0-ai/sandbox0
+After=network-online.target nomad.service sandbox0-ctld.target
+Wants=network-online.target
+ConditionPathExists=/etc/sandbox0/node-bootstrap-complete
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/sandbox0/current/bin/node-bootstrap --config /etc/sandbox0/node-bootstrap.json --renew
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=idle

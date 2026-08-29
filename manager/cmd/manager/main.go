@@ -140,6 +140,18 @@ func main() {
 	}
 
 	sandboxStore := sandboxstore.NewPGSandboxStore(pool)
+	nodePoolAutoscaler, err := configureNodePoolAutoscaler(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure sandbox node pool autoscaler", zap.Error(err))
+	}
+	nodePoolLifecycle, err := configureNodePoolLifecycle(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure sandbox node pool lifecycle", zap.Error(err))
+	}
+	nodeEnrollment, err := configureNodeEnrollment(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure sandbox node enrollment", zap.Error(err))
+	}
 	managerNodeAuthority, err := buildManagerNodeAuthority(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Failed to configure manager node authority", zap.Error(err))
@@ -463,6 +475,9 @@ func main() {
 		logger:                 logger,
 		httpServer:             httpServer,
 		nodeAuthority:          managerNodeAuthority,
+		nodeEnrollment:         nodeEnrollment,
+		nodePoolAutoscaler:     nodePoolAutoscaler,
+		nodePoolLifecycle:      nodePoolLifecycle,
 		rootFSMaterializer:     rootFSCompositeMaterializer,
 		rootFSImportDiscovery:  rootFSImportDiscovery,
 		rootFSImporter:         rootFSImportWorker,

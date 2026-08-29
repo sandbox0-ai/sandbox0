@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically renew Sandbox0 disposable worker identity
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -47,6 +47,7 @@ func buildManagerNodeAuthority(
 	}
 	return nodeauthority.New(nodeauthority.Config{
 		Store: store, Address: net.JoinHostPort(host, strconv.Itoa(nodeConfig.Port)),
+		RegionID: cfg.RegionID,
 		CertFile: nodeConfig.CertFile, KeyFile: nodeConfig.KeyFile,
 		ClientCAFile: nodeConfig.ClientCAFile, Identities: identities,
 		WriterLeaseTTL:          nodeConfig.WriterLeaseTTL.Duration,

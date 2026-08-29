@@ -54,6 +54,21 @@ CPU weight, cpuset, memory, and PIDs are dynamic claim properties and do not
 split the pool. Production nodes must be dedicated to Sandbox0 so Nomad cannot
 allocate the same physical capacity to unrelated jobs.
 
+## Stateless Node Pools
+
+Dedicated workers are disposable compute, not storage authorities. PostgreSQL
+owns resource leases, enrollment, fences, and lifecycle state; S3-compatible
+storage owns RootFS and volume blocks. Node-local disks contain reconstructible
+cache, runtime journals, mounts, and short-lived credentials only.
+
+A production deployment can combine an always-running fixed baseline with a
+provider autoscaling pool whose minimum is zero. Manager derives desired
+capacity from live fixed carriers, active leases, and short-lived failed-claim
+demand. New nodes remain claim-fenced until identity, ctld capacity, all warm
+carriers, and the provider scale-out lifecycle action are complete. Scale-in
+removes a node only after leases, allocations, routes, and runtime state are
+absent.
+
 ## RootFS Boundary
 
 Manager owns regional RootFS metadata and the durable OCI importer. `ctld` owns

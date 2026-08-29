@@ -20,26 +20,48 @@ type CertificateIdentity struct {
 
 type certificateVerifier struct {
 	identities map[string]CertificateIdentity
+	lookup     CertificateIdentityLookup
 }
+
+// CertificateIdentityLookup resolves dynamically enrolled worker identities
+// from the regional authority. Revoked workers must not be returned.
+type CertificateIdentityLookup func(context.Context, string) (CertificateIdentity, error)
 
 // NewCertificateVerifier returns a verifier backed by an immutable client
 // certificate identity catalog.
 func NewCertificateVerifier(identities []CertificateIdentity) (Verifier, error) {
-	byName, err := certificateIdentityMap(identities)
-	if err != nil {
-		return nil, err
-	}
-	return certificateVerifier{identities: byName}, nil
+	return NewCertificateVerifierWithLookup(identities, nil)
 }
 
-func (v certificateVerifier) Verify(_ context.Context, bearer string) (Identity, error) {
+// NewCertificateVerifierWithLookup combines migration-time static identities
+// with the dynamic worker catalog. Static identities remain exact and cannot
+// be shadowed by a dynamic record.
+func NewCertificateVerifierWithLookup(identities []CertificateIdentity, lookup CertificateIdentityLookup) (Verifier, error) {
+	byName, err := certificateIdentityMap(identities)
+	if err != nil {
+		if lookup == nil || len(identities) != 0 {
+			return nil, err
+		}
+		byName = map[string]CertificateIdentity{}
+	}
+	return certificateVerifier{identities: byName, lookup: lookup}, nil
+}
+
+func (v certificateVerifier) Verify(ctx context.Context, bearer string) (Identity, error) {
 	fields := strings.Fields(bearer)
 	if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") {
 		bearer = fields[1]
 	}
 	name := strings.TrimSpace(bearer)
 	identity, ok := v.identities[name]
-	if !ok || name == "" {
+	if !ok && name != "" && v.lookup != nil {
+		var err error
+		identity, err = v.lookup(ctx, name)
+		if err == nil {
+			ok = true
+		}
+	}
+	if !ok || name == "" || identity.CommonName != name {
 		return Identity{}, fmt.Errorf("unknown node authority client %q", name)
 	}
 	return Identity{
@@ -53,9 +75,18 @@ func (v certificateVerifier) Verify(_ context.Context, bearer string) (Identity,
 // listener must already require and verify client certificates; this wrapper
 // checks that invariant again and fails closed if it is miswired.
 func NewCertificateMiddleware(identities []CertificateIdentity, next http.Handler) (http.Handler, error) {
-	byName, err := certificateIdentityMap(identities)
+	verifier, err := NewCertificateVerifier(identities)
 	if err != nil {
 		return nil, err
+	}
+	return NewVerifiedCertificateMiddleware(verifier, next)
+}
+
+// NewVerifiedCertificateMiddleware accepts only a TLS-verified certificate
+// whose common name resolves through the same verifier used by handlers.
+func NewVerifiedCertificateMiddleware(verifier Verifier, next http.Handler) (http.Handler, error) {
+	if verifier == nil {
+		return nil, fmt.Errorf("node authority certificate verifier is required")
 	}
 	if next == nil {
 		return nil, fmt.Errorf("node authority handler is required")
@@ -66,7 +97,7 @@ func NewCertificateMiddleware(identities []CertificateIdentity, next http.Handle
 			return
 		}
 		name := certificateCommonName(request.TLS.PeerCertificates[0])
-		if _, ok := byName[name]; !ok {
+		if _, err := verifier.Verify(request.Context(), name); err != nil {
 			http.Error(writer, "unknown node authority client certificate", http.StatusUnauthorized)
 			return
 		}

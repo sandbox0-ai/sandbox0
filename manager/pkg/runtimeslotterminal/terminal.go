@@ -28,6 +28,8 @@ type Config struct {
 	Interval           time.Duration
 	PassTimeout        time.Duration
 	ScanLimit          int
+	DynamicNodeStore   runtimeslotnomad.DynamicNodeStore
+	DynamicRegionID    string
 }
 
 // New constructs the complete plugin-independent terminal path. A disabled
@@ -59,9 +61,16 @@ func NewWithAllocation(
 	if store == nil || transport == nil {
 		return nil, nil, fmt.Errorf("runtime slot terminal store and node transport are required")
 	}
-	resolver, err := runtimeslotnomad.LoadStaticEndpointResolver(config.NomadEndpointsFile)
+	staticResolver, err := runtimeslotnomad.LoadStaticEndpointResolver(config.NomadEndpointsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load runtime slot Nomad endpoints: %w", err)
+	}
+	var resolver runtimeslotnomad.EndpointResolver = staticResolver
+	if config.DynamicNodeStore != nil {
+		resolver, err = runtimeslotnomad.NewDynamicEndpointResolver(staticResolver, config.DynamicNodeStore, config.DynamicRegionID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create dynamic runtime slot Nomad resolver: %w", err)
+		}
 	}
 	nomadAPI, err := runtimeslotnomad.NewHTTPAPI(resolver)
 	if err != nil {

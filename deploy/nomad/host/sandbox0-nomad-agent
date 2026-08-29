@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=(agent -config=/etc/nomad.d)
+intro_token_file=/etc/nomad.d/client-intro.token
+exact_identity=/etc/sandbox0/nomad-exact-node.json
+if [[ -s "${intro_token_file}" && ! -e "${exact_identity}" ]]; then
+  intro_token="$(tr -d '\r\n' <"${intro_token_file}")"
+  [[ -n "${intro_token}" ]] || { echo "Nomad client introduction token is empty" >&2; exit 1; }
+  args+=("-client-intro-token=${intro_token}")
+fi
+exec /opt/sandbox0/current/bin/nomad "${args[@]}"

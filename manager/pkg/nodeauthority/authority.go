@@ -40,6 +40,9 @@ type Store interface {
 	runtimeslotnode.CapacityStore
 	runtimeslotterminal.Store
 	GetRootFSCompositeBacklogUsage(context.Context) (sandboxstore.RootFSCompositeBacklogUsage, error)
+	RecordRuntimeNodePoolDemand(context.Context, *sandboxstore.RuntimeNodePoolDemandRequest) error
+	GetRuntimeNodeCertificateIdentity(context.Context, string) (*sandboxstore.RuntimeNodeCertificateIdentity, error)
+	GetRuntimeNodeEndpointIdentity(context.Context, string, string) (*sandboxstore.RuntimeNodeEndpointIdentity, error)
 }
 
 // Config defines the dedicated verified-mTLS listener and regional lease
@@ -56,6 +59,7 @@ type Config struct {
 	WriterRenewalGrace      time.Duration
 	RuntimeSlotHeartbeatTTL time.Duration
 	Terminal                runtimeslotterminal.Config
+	RegionID                string
 }
 
 // ClaimPlannerConfig provides the non-listener dependencies needed by the
@@ -64,6 +68,8 @@ type ClaimPlannerConfig struct {
 	Prober         runtimeslotclaim.CommandProber
 	TokenGenerator runtimeslotclaim.TokenGenerator
 	Observer       runtimeslotclaim.Observer
+	DemandPoolID   string
+	DemandTTL      time.Duration
 	WriterTokenKey []byte
 	ClaimTTL       time.Duration
 	SLO            time.Duration
@@ -124,7 +130,16 @@ func New(config Config) (*Component, error) {
 		config.RuntimeSlotHeartbeatTTL = defaultRuntimeSlotHeartbeatTTL
 	}
 
-	verifier, err := nodeauth.NewCertificateVerifier(config.Identities)
+	verifier, err := nodeauth.NewCertificateVerifierWithLookup(config.Identities, func(ctx context.Context, commonName string) (nodeauth.CertificateIdentity, error) {
+		identity, err := config.Store.GetRuntimeNodeCertificateIdentity(ctx, commonName)
+		if err != nil {
+			return nodeauth.CertificateIdentity{}, err
+		}
+		return nodeauth.CertificateIdentity{
+			CommonName: identity.CommonName, ClusterID: identity.ClusterID,
+			NodeID: identity.NodeID, NodeUID: identity.NodeUID, AgentUID: identity.AgentUID,
+		}, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create node authority verifier: %w", err)
 	}
@@ -155,6 +170,8 @@ func New(config Config) (*Component, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot node channel: %w", err)
 	}
+	config.Terminal.DynamicNodeStore = config.Store
+	config.Terminal.DynamicRegionID = config.RegionID
 	terminal, allocation, err := runtimeslotterminal.NewWithAllocation(config.Store, hub, config.Terminal)
 	if err != nil {
 		_ = hub.Close()
@@ -168,7 +185,7 @@ func New(config Config) (*Component, error) {
 	mux.Handle(protocol.PathPrefix, runtimeSlotHandler)
 	mux.Handle(protocol.NodeChannelPath, hub)
 	mux.HandleFunc("/healthz", backlogHealthHandler(config.Store))
-	authorized, err := nodeauth.NewCertificateMiddleware(config.Identities, mux)
+	authorized, err := nodeauth.NewVerifiedCertificateMiddleware(verifier, mux)
 	if err != nil {
 		_ = hub.Close()
 		return nil, fmt.Errorf("create node authority certificate middleware: %w", err)
@@ -357,6 +374,7 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 		Store: c.store, Network: c.hub, Node: c.hub,
 		Prober: config.Prober, TokenGenerator: config.TokenGenerator,
 		Observer: config.Observer, WriterTokenKey: config.WriterTokenKey,
+		DemandRecorder: c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
 		ClaimTTL: config.ClaimTTL, SLO: config.SLO, Now: config.Now,
 	})
 }

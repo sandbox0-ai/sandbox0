@@ -60,6 +60,7 @@ type ManagerConfig struct {
 	RootFSImporter      RootFSImporterConfig      `yaml:"rootfs_importer" json:"-"`
 	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 	NodeAuthority       NodeAuthorityConfig       `yaml:"node_authority" json:"-"`
+	NodePoolAutoscaler  NodePoolAutoscalerConfig  `yaml:"node_pool_autoscaler" json:"-"`
 
 	// Metering configures the optional region usage ledger.
 	Metering MeteringConfig `yaml:"metering" json:"metering"`
@@ -76,6 +77,76 @@ type ManagerConfig struct {
 	EgressAuthDefaultResolveTTL Duration                 `yaml:"egress_auth_default_resolve_ttl" json:"-"`
 	EgressAuthStaticAuth        []StaticEgressAuthConfig `yaml:"egress_auth_static_auth" json:"-"`
 	CredentialStore             CredentialStoreConfig    `yaml:"credential_store" json:"-"`
+}
+
+// NodePoolAutoscalerConfig controls the single fixed worker plus Aliyun ESS
+// elastic worker pool. Exact 1 + (0..299) bounds are validated by manager.
+type NodePoolAutoscalerConfig struct {
+	Enabled                   bool                 `yaml:"enabled" json:"-"`
+	Provider                  string               `yaml:"provider" json:"-"`
+	PoolID                    string               `yaml:"pool_id" json:"-"`
+	Region                    string               `yaml:"region" json:"-"`
+	ScalingGroupID            string               `yaml:"scaling_group_id" json:"-"`
+	ScaleOutHookID            string               `yaml:"scale_out_hook_id" json:"-"`
+	ScaleInHookID             string               `yaml:"scale_in_hook_id" json:"-"`
+	FixedNodes                int                  `yaml:"fixed_nodes" json:"-"`
+	MinElasticNodes           int                  `yaml:"min_elastic_nodes" json:"-"`
+	MaxElasticNodes           int                  `yaml:"max_elastic_nodes" json:"-"`
+	NodeCPUMillicores         int64                `yaml:"node_cpu_millicores" json:"-"`
+	NodeMemoryBytes           int64                `yaml:"node_memory_bytes" json:"-"`
+	WarmSlotsPerNode          int                  `yaml:"warm_slots_per_node" json:"-"`
+	HeadroomCPUMillicores     int64                `yaml:"headroom_cpu_millicores" json:"-"`
+	HeadroomMemoryBytes       int64                `yaml:"headroom_memory_bytes" json:"-"`
+	HeadroomSlots             int                  `yaml:"headroom_slots" json:"-"`
+	DemandTTL                 Duration             `yaml:"demand_ttl" json:"-"`
+	Interval                  Duration             `yaml:"interval" json:"-"`
+	ControllerLeaseTTL        Duration             `yaml:"controller_lease_ttl" json:"-"`
+	ScaleInStabilization      Duration             `yaml:"scale_in_stabilization" json:"-"`
+	ScaleOutCooldown          Duration             `yaml:"scale_out_cooldown" json:"-"`
+	LifecycleInterval         Duration             `yaml:"lifecycle_interval" json:"-"`
+	LifecycleHeartbeat        Duration             `yaml:"lifecycle_heartbeat" json:"-"`
+	ScaleOutEnrollmentTimeout Duration             `yaml:"scale_out_enrollment_timeout" json:"-"`
+	Enrollment                NodeEnrollmentConfig `yaml:"enrollment" json:"-"`
+}
+
+// NodeEnrollmentConfig controls the private, server-authenticated endpoint
+// used only by disposable elastic workers while they establish exact Nomad and
+// node-authority identities. It is nested under the node-pool configuration so
+// its cloud and capacity policy cannot drift from the scaler.
+type NodeEnrollmentConfig struct {
+	Enabled                  bool     `yaml:"enabled" json:"-"`
+	ListenHost               string   `yaml:"listen_host" json:"-"`
+	Port                     int      `yaml:"port" json:"-"`
+	OwnerAccountID           string   `yaml:"owner_account_id" json:"-"`
+	ImageID                  string   `yaml:"image_id" json:"-"`
+	InstanceTypes            []string `yaml:"instance_types" json:"-"`
+	AllocationSupernet       string   `yaml:"allocation_supernet" json:"-"`
+	AllocationPrefix         int      `yaml:"allocation_prefix" json:"-"`
+	RouteTableIDs            []string `yaml:"route_table_ids" json:"-"`
+	ChallengeTTL             Duration `yaml:"challenge_ttl" json:"-"`
+	TLSCertFile              string   `yaml:"tls_cert_file" json:"-"`
+	TLSKeyFile               string   `yaml:"tls_key_file" json:"-"`
+	NomadCACertFile          string   `yaml:"nomad_ca_cert_file" json:"-"`
+	NomadCAKeyFile           string   `yaml:"nomad_ca_key_file" json:"-"`
+	AuthorityCACertFile      string   `yaml:"authority_ca_cert_file" json:"-"`
+	AuthorityCAKeyFile       string   `yaml:"authority_ca_key_file" json:"-"`
+	NomadBinary              string   `yaml:"nomad_binary" json:"-"`
+	NomadAddress             string   `yaml:"nomad_address" json:"-"`
+	NomadClientCertFile      string   `yaml:"nomad_client_cert_file" json:"-"`
+	NomadClientKeyFile       string   `yaml:"nomad_client_key_file" json:"-"`
+	NomadTokenFile           string   `yaml:"nomad_token_file" json:"-"`
+	NomadNodePool            string   `yaml:"nomad_node_pool" json:"-"`
+	NomadIntroductionTTL     Duration `yaml:"nomad_introduction_ttl" json:"-"`
+	ExactCertificateTTL      Duration `yaml:"exact_certificate_ttl" json:"-"`
+	RuntimeSourceCommit      string   `yaml:"runtime_source_commit" json:"-"`
+	RuntimeBundleKey         string   `yaml:"runtime_bundle_key" json:"-"`
+	RuntimeBundleSHA256      string   `yaml:"runtime_bundle_sha256" json:"-"`
+	RuntimeOSSEndpoint       string   `yaml:"runtime_oss_endpoint" json:"-"`
+	RuntimeOSSBucket         string   `yaml:"runtime_oss_bucket" json:"-"`
+	RuntimeManifestFile      string   `yaml:"runtime_manifest_file" json:"-"`
+	RuntimeConfigArchiveFile string   `yaml:"runtime_config_archive_file" json:"-"`
+	ManagerAuthorityURL      string   `yaml:"manager_authority_url" json:"-"`
+	ManagerAuthorityPeerURI  string   `yaml:"manager_authority_peer_uri" json:"-"`
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an

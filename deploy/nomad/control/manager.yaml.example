@@ -12,6 +12,63 @@ team_template_memory_per_cpu: 2Gi
 sandbox_max_memory: 32Gi
 procd_client_timeout: 5s
 
+node_pool_autoscaler:
+  enabled: true
+  provider: aliyun
+  pool_id: replace-with-ess-pool-id
+  region: us-east-1
+  scaling_group_id: replace-with-ess-scaling-group-id
+  scale_out_hook_id: replace-with-ess-scale-out-hook-id
+  scale_in_hook_id: replace-with-ess-scale-in-hook-id
+  fixed_nodes: 1
+  min_elastic_nodes: 0
+  max_elastic_nodes: 299
+  node_cpu_millicores: 14000
+  node_memory_bytes: 60129542144
+  warm_slots_per_node: 8
+  headroom_cpu_millicores: 1000
+  headroom_memory_bytes: 1073741824
+  headroom_slots: 1
+  demand_ttl: 2m
+  interval: 10s
+  controller_lease_ttl: 30s
+  scale_in_stabilization: 10m
+  scale_out_cooldown: 30s
+  lifecycle_interval: 10s
+  lifecycle_heartbeat: 2m
+  scale_out_enrollment_timeout: 20m
+  enrollment:
+    enabled: true
+    listen_host: 0.0.0.0
+    port: 8422
+    owner_account_id: replace-with-aliyun-account-id
+    image_id: replace-with-pinned-image-id
+    instance_types:
+      - replace-with-primary-instance-type
+    allocation_supernet: 172.27.0.0/17
+    allocation_prefix: 26
+    route_table_ids:
+      - replace-with-route-table-id
+    challenge_ttl: 2m
+    tls_cert_file: /etc/sandbox0/node-authority/tls/tls.crt
+    tls_key_file: /etc/sandbox0/node-authority/tls/tls.key
+    nomad_ca_cert_file: /etc/nomad.d/nomad-ca.pem
+    nomad_ca_key_file: /etc/sandbox0/node-enrollment/nomad-ca-key.pem
+    authority_ca_cert_file: /etc/sandbox0/node-enrollment/authority-ca.pem
+    authority_ca_key_file: /etc/sandbox0/node-enrollment/authority-ca-key.pem
+    nomad_binary: /usr/local/bin/nomad
+    nomad_address: https://127.0.0.1:4646
+    nomad_client_cert_file: /etc/nomad.d/nomad-cli.pem
+    nomad_client_key_file: /etc/nomad.d/nomad-cli-key.pem
+    nomad_token_file: /etc/sandbox0/tokens/nomad-management.token
+    nomad_node_pool: sandbox0
+    nomad_introduction_ttl: 30m
+    exact_certificate_ttl: 24h
+    runtime_manifest_file: /etc/sandbox0/node-enrollment/runtime-artifact.json
+    runtime_config_archive_file: /etc/sandbox0/node-enrollment/runtime-config-template.tar.gz
+    manager_authority_url: https://replace-with-authority-nlb:8421
+    manager_authority_peer_uri: spiffe://sandbox0.internal/replace-with-region/runtime-slot-channel
+
 rootfs_object_storage:
   type: s3
   bucket: replace-with-rootfs-bucket

@@ -59,6 +59,7 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		Prober: deps.prober, TokenGenerator: deps.tokenGenerator, Observer: deps.observer,
 		WriterTokenKey: writerTokenKey, ClaimTTL: claim.ClaimTTL.Duration,
 		SLO: claim.SLO.Duration, Now: deps.now,
+		DemandPoolID: demandPoolID(cfg), DemandTTL: cfg.NodePoolAutoscaler.DemandTTL.Duration,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create Nomad runtime slot claim planner: %w", err)
@@ -81,6 +82,13 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		return nil, fmt.Errorf("create Nomad sandbox claimer: %w", err)
 	}
 	return claimer, nil
+}
+
+func demandPoolID(cfg *config.ManagerConfig) string {
+	if cfg == nil || !cfg.NodePoolAutoscaler.Enabled {
+		return ""
+	}
+	return cfg.NodePoolAutoscaler.PoolID
 }
 
 func loadWriterTokenKey(path string) ([]byte, error) {

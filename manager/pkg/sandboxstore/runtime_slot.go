@@ -551,12 +551,20 @@ func selectRuntimeSlotResourceLease(
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-			WHERE state = $1
-				AND heartbeat_expires_at > NOW()
-				AND compatibility_digest = $2
-				AND ($3 = '' OR cluster_id = $3)
-				AND slot_id <> ALL($6::text[])
-				AND EXISTS (
+				WHERE state = $1
+					AND heartbeat_expires_at > NOW()
+					AND compatibility_digest = $2
+					AND ($3 = '' OR cluster_id = $3)
+					AND slot_id <> ALL($6::text[])
+					AND NOT EXISTS (
+						SELECT 1
+						FROM manager.runtime_node_fences AS fence
+						WHERE fence.cluster_id = runtime_slots.cluster_id
+							AND fence.node_id = runtime_slots.node_id
+							AND fence.node_uid = runtime_slots.node_uid
+							AND fence.state IN ('warming', 'draining', 'revoked')
+					)
+					AND EXISTS (
 					SELECT 1
 					FROM manager.runtime_node_capacities AS capacity
 					WHERE capacity.cluster_id = runtime_slots.cluster_id

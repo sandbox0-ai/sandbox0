@@ -8,6 +8,9 @@ import (
 
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodepoolautoscaler"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodepoollifecycle"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportdiscovery"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportworker"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
@@ -25,6 +28,9 @@ type managerApp struct {
 	logger                 *zap.Logger
 	httpServer             *httpserver.Server
 	nodeAuthority          *nodeauthority.Component
+	nodeEnrollment         *nodeenrollment.Server
+	nodePoolAutoscaler     *nodepoolautoscaler.Worker
+	nodePoolLifecycle      *nodepoollifecycle.Worker
 	rootFSMaterializer     *rootfsmaterializer.Worker
 	rootFSImportDiscovery  *rootfsimportdiscovery.Worker
 	rootFSImporter         *rootfsimportworker.Worker
@@ -37,6 +43,39 @@ func (a *managerApp) Run() {
 	go startMetricsServer(a.metricsPort, a.logger)
 	if !a.startNodeAuthority() {
 		return
+	}
+	if !a.startNodeEnrollment() {
+		return
+	}
+	if a.nodePoolAutoscaler != nil {
+		go a.nodePoolAutoscaler.Run(a.ctx, func(decision nodepoolautoscaler.Decision, err error) {
+			fields := []zap.Field{
+				zap.String("action", decision.Action),
+				zap.Int("current_elastic", decision.CurrentElastic),
+				zap.Int("target_elastic", decision.TargetElastic),
+			}
+			if err != nil {
+				a.logger.Warn("Sandbox node pool reconcile failed", append(fields, zap.Error(err))...)
+				return
+			}
+			if decision.Action == "scale_out" || decision.Action == "scale_in" {
+				a.logger.Info("Sandbox node pool desired capacity changed", fields...)
+			}
+		})
+		a.logger.Info("Sandbox node pool autoscaler started")
+	}
+	if a.nodePoolLifecycle != nil {
+		go a.nodePoolLifecycle.Run(a.ctx, func(result nodepoollifecycle.Result, err error) {
+			fields := []zap.Field{
+				zap.Int("observed", result.Observed),
+				zap.Int("completed", result.Completed),
+				zap.Int("rolled_back", result.RolledBack),
+			}
+			if err != nil {
+				a.logger.Warn("Sandbox node lifecycle reconcile failed", append(fields, zap.Error(err))...)
+			}
+		})
+		a.logger.Info("Sandbox node lifecycle controller started")
 	}
 	if a.rootFSMaterializer != nil {
 		go a.rootFSMaterializer.Run(a.ctx, func(result rootfsmaterializer.Result, err error) {
@@ -79,6 +118,33 @@ func (a *managerApp) Run() {
 	// Give components time to finish their context-driven shutdown paths.
 	time.Sleep(2 * time.Second)
 	a.logger.Info("Manager stopped")
+}
+
+func (a *managerApp) startNodeEnrollment() bool {
+	if a.nodeEnrollment == nil {
+		return true
+	}
+	errorsCh := make(chan error, 1)
+	go func() { errorsCh <- a.nodeEnrollment.Run(a.ctx) }()
+	select {
+	case <-a.ctx.Done():
+		return false
+	case err := <-errorsCh:
+		if err != nil {
+			a.logger.Error("Manager node enrollment failed before becoming ready", zap.Error(err))
+		}
+		a.cancel()
+		return false
+	case <-a.nodeEnrollment.Ready():
+		a.logger.Info("Manager node enrollment listener is ready")
+	}
+	go func() {
+		if err := <-errorsCh; err != nil && !errors.Is(err, context.Canceled) {
+			a.logger.Error("Manager node enrollment stopped", zap.Error(err))
+			a.cancel()
+		}
+	}()
+	return true
 }
 
 func (a *managerApp) startNodeAuthority() bool {

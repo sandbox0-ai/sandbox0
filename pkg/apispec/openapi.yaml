@@ -6934,6 +6934,11 @@ components:
             type: string
         mainContainer:
           $ref: "#/components/schemas/ContainerSpec"
+        ephemeralMounts:
+          type: array
+          description: Claim-lifetime tmpfs mounts excluded from pause, resume, fork, and snapshot RootFS generations.
+          items:
+            $ref: "#/components/schemas/EphemeralMountSpec"
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         envVars:
@@ -6954,7 +6959,23 @@ components:
             $ref: "#/components/schemas/EnvVar"
         resources:
           $ref: "#/components/schemas/ResourceQuota"
+        securityClass:
+          type: string
+          enum: [standard, privileged]
+          default: standard
+          description: Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
       required: [image, resources]
+
+    EphemeralMountSpec:
+      type: object
+      properties:
+        mountPath:
+          type: string
+          pattern: '^/.*'
+        sizeLimit:
+          type: string
+          description: Exact byte quantity between 1Mi and 1Ti. The tmpfs remains subject to the sandbox memory cgroup.
+      required: [mountPath, sizeLimit]
 
     EnvVar:
       type: object

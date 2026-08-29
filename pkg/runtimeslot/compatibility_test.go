@@ -46,6 +46,7 @@ func TestRuntimeCompatibilityRejectsAmbiguousClasses(t *testing.T) {
 		"spaced architecture":    func(runtimeClass *RuntimeCompatibility) { runtimeClass.Architecture = " amd64" },
 		"missing runsc version":  func(runtimeClass *RuntimeCompatibility) { runtimeClass.RunscVersion = "" },
 		"missing security class": func(runtimeClass *RuntimeCompatibility) { runtimeClass.SecurityClass = "" },
+		"unknown security class": func(runtimeClass *RuntimeCompatibility) { runtimeClass.SecurityClass = "host" },
 		"wrong command":          func(runtimeClass *RuntimeCompatibility) { runtimeClass.Command = "/bin/sh" },
 		"wrong port":             func(runtimeClass *RuntimeCompatibility) { runtimeClass.ProcdPort++ },
 		"wrong mode":             func(runtimeClass *RuntimeCompatibility) { runtimeClass.RuntimeMode = "watch" },

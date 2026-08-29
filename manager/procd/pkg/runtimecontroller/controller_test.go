@@ -23,6 +23,7 @@ func TestControllerActivatesImmutableAssignment(t *testing.T) {
 	assignment := runtimecontrol.Assignment{
 		SandboxID:         "sandbox-1",
 		RuntimeGeneration: 2,
+		SecurityClass:     "standard",
 		EnvVars:           map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
 	}
 	if err := controller.Activate(context.Background(), assignment); err != nil {
@@ -70,6 +71,7 @@ func TestControllerFailsClosedOnCopiedSessionStateWithoutExplicitReset(t *testin
 	assignment := runtimecontrol.Assignment{
 		SandboxID:         "target-sandbox",
 		RuntimeGeneration: 1,
+		SecurityClass:     "standard",
 	}
 	if err := controller.Activate(context.Background(), assignment); err == nil {
 		t.Fatal("Activate() accepted copied state without an explicit reset")
@@ -90,6 +92,7 @@ func TestFreshProcdRecoversImmutableAssignmentWithoutExternalRequest(t *testing.
 	assignment := runtimecontrol.Assignment{
 		SandboxID:         "sandbox-1",
 		RuntimeGeneration: 4,
+		SecurityClass:     "standard",
 	}
 
 	activate := func() {

@@ -624,7 +624,7 @@ func runtimeSlotResourceLease(
 
 func runtimeSlotAssignment() *runtimecontrol.Assignment {
 	return &runtimecontrol.Assignment{
-		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard",
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
 	}
 }
@@ -918,6 +918,33 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 	}
 	if phase := handle.TaskStatus().DriverAttributes["phase"]; phase != string(phaseWarm) {
 		t.Fatalf("phase = %s, want reusable warm slot before writer consumption", phase)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRuntimeSlotClaimRejectsAnotherSecurityClassBeforeConsumingWriter(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	assignment := runtimeSlotAssignment()
+	assignment.SecurityClass = "privileged"
+	revision, err := assignment.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage.Labels[protocol.RuntimeAssignmentRevisionLabel] = revision
+	err = handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1",
+		Stage: &stage, NetworkPolicy: networkPolicy, Runtime: assignment,
+		Resources: runtimeSlotResourceLease(t, fixture, stage),
+	})
+	if err == nil || !strings.Contains(err.Error(), "security class does not match") {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	ensureCalls, retireCalls, _, _ := fixture.rootfs.snapshot()
+	if ensureCalls != 0 || retireCalls != 0 {
+		t.Fatalf("RootFS calls = ensure %d retire %d, mismatched class consumed writer", ensureCalls, retireCalls)
 	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
@@ -1315,7 +1342,8 @@ func TestRuntimeSlotNetNSReplacementChangesReadinessIdentity(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle := newTaskHandle(taskHandleOptions{
 		taskConfig: fixture.task, bundleDir: filepath.Join(t.TempDir(), "bundle"),
-		containerID: safeContainerID(fixture.task.ID), rootMount: filepath.Join(t.TempDir(), "root"),
+		driverConfig: TaskConfig{Command: "/procd", SecurityClass: "standard"},
+		containerID:  safeContainerID(fixture.task.ID), rootMount: filepath.Join(t.TempDir(), "root"),
 		socketPath: controlSocketPath(fixture.config.ControlDir, fixture.task.ID), runner: fixture.runner,
 		mounter: &fakeMounter{}, rootfs: fixture.rootfs, logger: hclog.NewNullLogger(),
 	})
@@ -1351,8 +1379,9 @@ func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
 		name string
 		task TaskConfig
 	}{
-		{name: "different command", task: TaskConfig{Command: "/bin/sh"}},
-		{name: "arguments", task: TaskConfig{Command: "/procd", Args: []string{"--unsafe"}}},
+		{name: "different command", task: TaskConfig{Command: "/bin/sh", SecurityClass: "standard"}},
+		{name: "arguments", task: TaskConfig{Command: "/procd", Args: []string{"--unsafe"}, SecurityClass: "standard"}},
+		{name: "unknown security class", task: TaskConfig{Command: "/procd", SecurityClass: "host"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1361,7 +1390,7 @@ func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
 			}
 		})
 	}
-	if err := validateRuntimeSlotTaskConfig(config, TaskConfig{Command: "/procd"}); err != nil {
+	if err := validateRuntimeSlotTaskConfig(config, TaskConfig{Command: "/procd", SecurityClass: "standard"}); err != nil {
 		t.Fatalf("valid regional runtime slot task was rejected: %v", err)
 	}
 }
@@ -1385,16 +1414,23 @@ func TestRuntimeCompatibilityDigestIgnoresCarrierResources(t *testing.T) {
 			CPUShares: 2, CpusetCpus: "0-7", MemoryLimitBytes: 64 * 1024 * 1024,
 		},
 	}}
-	digest, err := runtimeCompatibilityDigest(defaultPluginConfig(), first, "runsc version test")
+	digest, err := runtimeCompatibilityDigest(defaultPluginConfig(), first, "standard", "runsc version test")
 	if err != nil {
 		t.Fatalf("runtimeCompatibilityDigest() error = %v", err)
 	}
-	secondDigest, err := runtimeCompatibilityDigest(defaultPluginConfig(), second, "runsc version test")
+	secondDigest, err := runtimeCompatibilityDigest(defaultPluginConfig(), second, "standard", "runsc version test")
 	if err != nil {
 		t.Fatalf("runtimeCompatibilityDigest(second) error = %v", err)
 	}
 	if digest != secondDigest {
 		t.Fatalf("carrier resources changed compatibility: %q != %q", digest, secondDigest)
+	}
+	privilegedDigest, err := runtimeCompatibilityDigest(defaultPluginConfig(), first, "privileged", "runsc version test")
+	if err != nil {
+		t.Fatalf("privileged runtimeCompatibilityDigest() error = %v", err)
+	}
+	if privilegedDigest == digest {
+		t.Fatal("security class did not change runtime compatibility")
 	}
 	wantDigest, err := (protocol.RuntimeCompatibility{
 		Version: protocol.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,

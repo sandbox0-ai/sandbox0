@@ -26,9 +26,10 @@ Pin one build of every service, `nomad-driver-sandbox0`, `procd`, and stock
 - RootFS artifact OS and architecture.
 
 Runtime-class catalog version `3` contains immutable carrier compatibility only.
-CPU, memory, PIDs, quota/weight, and cpuset do not belong in the catalog. Until
-an explicit class selector is public, configure exactly one class per requested
-cluster; zero or multiple matches fail closed.
+CPU, memory, PIDs, quota/weight, and cpuset do not belong in the catalog. Each
+cluster may publish one `standard` and one `privileged` class; template
+`mainContainer.securityClass` selects between them. Zero or multiple matches
+for the same cluster and security class fail closed.
 
 Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers.
 Manager atomically leases exact CPU and memory from ctld-reported node capacity;

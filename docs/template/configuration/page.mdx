@@ -1,9 +1,10 @@
 # Template Configuration
 
 A template describes reusable sandbox inputs. The public spec is
-runtime-neutral: it contains an image, default memory and ephemeral storage,
-environment variables, metadata, and a default network policy. Scheduling and
-warm-pool topology are platform concerns and are not embedded in a template.
+runtime-neutral: it contains an image, default memory and RootFS storage,
+guest security class, claim-lifetime ephemeral mounts, environment variables,
+metadata, and a default network policy. Scheduling and warm-pool topology are
+platform concerns and are not embedded in a template.
 
 ## Example
 
@@ -17,12 +18,17 @@ spec:
 
     mainContainer:
         image: registry.example.com/t-<team-key>/my-ds-env@sha256:<64-hex-digest>
+        securityClass: privileged
         resources:
             memory: 8Gi
             ephemeralStorage: 8Gi
         env:
             - name: PYTHONPATH
               value: /workspace
+
+    ephemeralMounts:
+        - mountPath: /var/lib/docker
+          sizeLimit: 16Gi
 
     envVars:
         LOG_LEVEL: info
@@ -48,6 +54,7 @@ spec:
 | `image` | Yes | Normalized public or team-scoped private OCI reference pinned as `@sha256:<64 lowercase hex>`. Mutable tags and shorthand names are rejected. |
 | `resources.memory` | Yes | Default sandbox memory, such as `2Gi` or `512Mi`. It must be within the platform limits. |
 | `resources.ephemeralStorage` | No | Immutable RootFS block-device size. The default is `8Gi`; values must be exact bytes, between `300Mi` and `1Ti`, and 4096-byte aligned. |
+| `securityClass` | No | `standard` by default. `privileged` grants guest-kernel capabilities inside gVisor but never bypasses runsc or exposes host devices. The value is immutable for a sandbox. |
 | `env` | No | Base environment entries with `name` and `value`. |
 
 CPU is platform-derived from memory and is intentionally absent from the
@@ -58,6 +65,18 @@ lease. Every value remains subject to the platform maximum.
 Carrier allocation resources do not define these limits. Manager leases exact
 CPU and memory from ctld-reported dedicated-node capacity and the task driver
 writes the committed lease into the OCI spec.
+
+## `ephemeralMounts`
+
+Each entry creates a size-bounded tmpfs for one runtime generation. Its files
+are intentionally discarded on pause, runtime replacement, fork, snapshot,
+or deletion and never enter the block-COW RootFS ledger. Mount paths must be
+canonical absolute paths, cannot overlap, and cannot shadow runtime-owned
+paths such as `/proc`, `/sys`, `/config`, or `/procd`. Size limits range from
+`1Mi` to `1Ti` and remain subject to the sandbox memory cgroup.
+
+Use this for throwaway Docker state such as `/var/lib/docker`. Keep source and
+durable outputs outside ephemeral mounts.
 
 ## `envVars`
 
@@ -110,13 +129,15 @@ Metadata does not change runtime compatibility.
 
 ## Scheduling And Resources
 
-Template specs define the image, environment, memory, ephemeral storage,
-network policy, and metadata. CPU is derived from memory by platform policy.
-The API uses strict decoding and rejects unknown fields.
+Template specs define the image, environment, memory, RootFS storage, security
+class, ephemeral mounts, network policy, and metadata. CPU is derived from
+memory by platform policy. The API uses strict decoding and rejects unknown
+fields.
 
-Platform administrators configure immutable runtime classes, dedicated node
-capacity, and the unified resource-neutral carrier pool outside template
-specs. See
+Platform administrators configure the concrete runtime classes, dedicated
+node capacity, and the unified resource-neutral carrier pool. A template
+selects only its public `securityClass`; manager resolves that selector to one
+exact compatible carrier class. See
 [Unified Warm Pool](/docs/sandbox/template/pool).
 
 ## Next Steps

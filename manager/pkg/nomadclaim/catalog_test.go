@@ -41,7 +41,7 @@ func TestLoadRuntimeClassCatalogResolvesWithoutResourceShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	class, err := catalog.Resolve("cluster-1")
+	class, err := catalog.Resolve("cluster-1", "standard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestLoadRuntimeClassCatalogResolvesWithoutResourceShape(t *testing.T) {
 		class.Compatibility.SecurityClass != "standard" || class.CompatibilityDigest == "" {
 		t.Fatalf("runtime class = %+v", class)
 	}
-	if _, err := catalog.Resolve("cluster-2"); !errors.Is(err, ErrRuntimeClassUnavailable) {
+	if _, err := catalog.Resolve("cluster-2", "standard"); !errors.Is(err, ErrRuntimeClassUnavailable) {
 		t.Fatalf("missing cluster error = %v", err)
 	}
 }
@@ -97,10 +97,28 @@ func TestRuntimeClassCatalogRejectsAmbiguousOrLooseInput(t *testing.T) {
 
 func TestRuntimeClassCatalogRejectsImplicitAmbiguousSelection(t *testing.T) {
 	catalog := &RuntimeClassCatalog{classes: []RuntimeClass{
-		{Name: "standard", ClusterID: "cluster-1"},
-		{Name: "gpu", ClusterID: "cluster-1"},
+		{Name: "standard-a", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
+		{Name: "standard-b", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
 	}}
-	if _, err := catalog.Resolve("cluster-1"); !errors.Is(err, ErrRuntimeClassAmbiguous) {
+	if _, err := catalog.Resolve("cluster-1", "standard"); !errors.Is(err, ErrRuntimeClassAmbiguous) {
 		t.Fatalf("ambiguous class error = %v", err)
+	}
+}
+
+func TestRuntimeClassCatalogResolvesSecurityClassesIndependently(t *testing.T) {
+	catalog := &RuntimeClassCatalog{classes: []RuntimeClass{
+		{Name: "standard", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
+		{Name: "privileged", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "privileged"}},
+	}}
+	standard, err := catalog.Resolve("cluster-1", "standard")
+	if err != nil || standard.Name != "standard" {
+		t.Fatalf("standard = %+v, %v", standard, err)
+	}
+	privileged, err := catalog.Resolve("cluster-1", "privileged")
+	if err != nil || privileged.Name != "privileged" {
+		t.Fatalf("privileged = %+v, %v", privileged, err)
+	}
+	if _, err := catalog.Resolve("cluster-1", "host"); !errors.Is(err, ErrRuntimeClassUnavailable) {
+		t.Fatalf("invalid security class error = %v", err)
 	}
 }

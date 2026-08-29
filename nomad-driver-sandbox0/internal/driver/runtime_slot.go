@@ -36,6 +36,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"golang.org/x/sys/unix"
 )
 
@@ -163,6 +164,10 @@ func validateRuntimeSlotTaskConfig(config *PluginConfig, task TaskConfig) error 
 	if task.Command != "/procd" || len(task.Args) != 0 {
 		return fmt.Errorf("regional runtime slots require command=/procd without arguments")
 	}
+	securityClass, ok := sandboxspec.EffectiveSandboxSecurityClass(sandboxspec.SandboxSecurityClass(task.SecurityClass))
+	if !ok || string(securityClass) != task.SecurityClass {
+		return fmt.Errorf("regional runtime slot security class is unsupported")
+	}
 	return nil
 }
 
@@ -285,7 +290,7 @@ func newRuntimeSlotLifecycle(
 	if err != nil {
 		return nil, fmt.Errorf("read runtime slot mount namespace: %w", err)
 	}
-	compatibility, err := runtimeCompatibilityDigest(config, task, runscVersion)
+	compatibility, err := runtimeCompatibilityDigest(config, task, handle.driverConfig.SecurityClass, runscVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -710,7 +715,7 @@ func runtimeSlotHeartbeatDelay(leaseWindow time.Duration) time.Duration {
 	return delay
 }
 
-func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, runscVersion string) (string, error) {
+func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, securityClass, runscVersion string) (string, error) {
 	if task == nil {
 		return "", fmt.Errorf("runtime slot task is required: %w", errdefs.ErrInvalidArgument)
 	}
@@ -719,7 +724,7 @@ func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, 
 		DriverVersion: PluginVersion, RunscVersion: strings.TrimSpace(runscVersion),
 		Platform: config.Platform, Overlay2: config.Overlay2, FileAccess: config.FileAccess,
 		DirectFS: config.DirectFS, Command: "/procd", ProcdPort: protocol.NomadProcdPort,
-		RuntimeMode: runtimecontrol.ControlModeStatic, SecurityClass: config.SecurityClass,
+		RuntimeMode: runtimecontrol.ControlModeStatic, SecurityClass: securityClass,
 	}).Digest()
 }
 

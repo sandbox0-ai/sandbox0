@@ -10,7 +10,7 @@ job "sandbox0-warm-slots" {
     value     = "true"
   }
 
-  group "warm" {
+  group "standard" {
     # Eight is the minimum pool width used by the production acceptance gate.
     # Keep replacement capacity and the matching ctld NBD pool at least this
     # wide when changing this value.
@@ -39,12 +39,45 @@ job "sandbox0-warm-slots" {
       config {
         command        = "/procd"
         args           = []
+        security_class = "standard"
       }
 
       resources {
         # These values reserve only the carrier/driver overhead. They are not
         # the sandbox limit and must not be copied into OCI. Manager leases
         # sandbox CPU and memory from ctld-reported dedicated-node capacity.
+        cpu    = 50
+        memory = 64
+      }
+    }
+  }
+
+  group "privileged" {
+    count = 2
+
+    restart {
+      attempts = 0
+      mode     = "fail"
+    }
+
+    network {
+      mode = "bridge"
+
+      port "procd" {
+        to = 49983
+      }
+    }
+
+    task "slot" {
+      driver = "sandbox0-gvisor"
+
+      config {
+        command        = "/procd"
+        args           = []
+        security_class = "privileged"
+      }
+
+      resources {
         cpu    = 50
         memory = 64
       }

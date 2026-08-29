@@ -204,6 +204,9 @@ func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpe
 	if err := rejectExplicitTemplateCPU(raw); err != nil {
 		return out, err
 	}
+	if securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(out.MainContainer.SecurityClass); ok {
+		out.MainContainer.SecurityClass = securityClass
+	}
 	return out, nil
 }
 

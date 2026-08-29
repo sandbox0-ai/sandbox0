@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 type specOptions struct {
@@ -32,6 +34,8 @@ type specOptions struct {
 	NetNSPath                     string
 	ProcdInternalJWTPublicKeyFile string
 	Resources                     *driversResources
+	SecurityClass                 string
+	EphemeralMounts               []runtimecontrol.EphemeralMount
 }
 
 const procdInternalJWTPublicKeyDestination = "/config/internal_jwt_public.key"
@@ -48,6 +52,10 @@ type driversResources struct {
 }
 
 func buildSpec(options specOptions) specs.Spec {
+	capabilities := standardCapabilities
+	if options.SecurityClass == string(sandboxspec.SandboxSecurityClassPrivileged) {
+		capabilities = privilegedCapabilities
+	}
 	process := specs.Process{
 		User: specs.User{UID: 0, GID: 0},
 		Args: append([]string{options.Command}, options.Args...),
@@ -57,10 +65,10 @@ func buildSpec(options specOptions) specs.Spec {
 		},
 		Cwd: "/",
 		Capabilities: &specs.LinuxCapabilities{
-			Bounding:    []string{"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"},
-			Effective:   []string{"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"},
+			Bounding:    append([]string(nil), capabilities...),
+			Effective:   append([]string(nil), capabilities...),
 			Inheritable: []string{},
-			Permitted:   []string{"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"},
+			Permitted:   append([]string(nil), capabilities...),
 			Ambient:     []string{},
 		},
 		Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024}},
@@ -110,8 +118,28 @@ func buildSpec(options specOptions) specs.Spec {
 
 	mounts := []specs.Mount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
-		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs"},
+		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
+		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=67108864"}},
+		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+	}
+	for _, mount := range options.EphemeralMounts {
+		ephemeral := specs.Mount{
+			Destination: mount.MountPath, Type: "tmpfs", Source: "tmpfs",
+			Options: []string{"nosuid", "nodev", "mode=1777", fmt.Sprintf("size=%d", mount.SizeBytes)},
+		}
+		if mount.MountPath == "/dev/shm" {
+			ephemeral.Source = "shm"
+			ephemeral.Options = append(ephemeral.Options, "noexec")
+			for index := range mounts {
+				if mounts[index].Destination == mount.MountPath {
+					mounts[index] = ephemeral
+				}
+			}
+			continue
+		}
+		mounts = append(mounts, ephemeral)
 	}
 	if options.ProcdInternalJWTPublicKeyFile != "" {
 		mounts = append(mounts, specs.Mount{
@@ -135,6 +163,26 @@ func buildSpec(options specOptions) specs.Spec {
 			"com.sandbox0.slot-state": "created",
 		},
 	}
+}
+
+var standardCapabilities = []string{
+	"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID",
+	"CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE", "CAP_NET_RAW", "CAP_SETFCAP",
+	"CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_CHROOT",
+}
+
+// privilegedCapabilities are guest-kernel capabilities. runsc still keeps
+// the process inside the gVisor sandbox and never grants host-kernel access.
+var privilegedCapabilities = []string{
+	"CAP_AUDIT_CONTROL", "CAP_AUDIT_READ", "CAP_AUDIT_WRITE", "CAP_BLOCK_SUSPEND",
+	"CAP_BPF", "CAP_CHECKPOINT_RESTORE", "CAP_CHOWN", "CAP_DAC_OVERRIDE",
+	"CAP_DAC_READ_SEARCH", "CAP_FOWNER", "CAP_FSETID", "CAP_IPC_LOCK", "CAP_IPC_OWNER",
+	"CAP_KILL", "CAP_LEASE", "CAP_LINUX_IMMUTABLE", "CAP_MAC_ADMIN", "CAP_MAC_OVERRIDE",
+	"CAP_MKNOD", "CAP_NET_ADMIN", "CAP_NET_BIND_SERVICE", "CAP_NET_BROADCAST", "CAP_NET_RAW",
+	"CAP_PERFMON", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_ADMIN",
+	"CAP_SYS_BOOT", "CAP_SYS_CHROOT", "CAP_SYS_MODULE", "CAP_SYS_NICE", "CAP_SYS_PACCT",
+	"CAP_SYS_PTRACE", "CAP_SYS_RAWIO", "CAP_SYS_RESOURCE", "CAP_SYS_TIME", "CAP_SYS_TTY_CONFIG",
+	"CAP_SYSLOG", "CAP_WAKE_ALARM",
 }
 
 func writeBundle(bundleDir string, spec specs.Spec) error {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const RuntimeCompatibilityVersion = 2
@@ -53,6 +54,10 @@ func (c RuntimeCompatibility) Validate() error {
 	}
 	if c.RuntimeMode != runtimecontrol.ControlModeStatic {
 		return fmt.Errorf("runtime compatibility mode must be %s", runtimecontrol.ControlModeStatic)
+	}
+	securityClass, ok := sandboxspec.EffectiveSandboxSecurityClass(sandboxspec.SandboxSecurityClass(c.SecurityClass))
+	if !ok || string(securityClass) != c.SecurityClass {
+		return fmt.Errorf("runtime compatibility security class is unsupported")
 	}
 	return nil
 }

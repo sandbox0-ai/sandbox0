@@ -350,6 +350,7 @@ func (h *taskHandle) writeClaimBundle(
 	procdPort := h.procdPort
 	h.mu.Unlock()
 	var runtimeEnv []string
+	var ephemeralMounts []runtimecontrol.EphemeralMount
 	if assignment != nil {
 		if procdPort != protocol.NomadProcdPort {
 			return fmt.Errorf("static procd port must be %d", protocol.NomadProcdPort)
@@ -364,6 +365,7 @@ func (h *taskHandle) writeClaimBundle(
 			runtimecontrol.EnvControlMode + "=" + runtimecontrol.ControlModeStatic,
 			runtimecontrol.EnvStaticAssignment + "=" + string(payload),
 		}
+		ephemeralMounts = append([]runtimecontrol.EphemeralMount(nil), assignment.EphemeralMounts...)
 	}
 	spec := buildSpec(specOptions{
 		Command:                       command,
@@ -374,6 +376,8 @@ func (h *taskHandle) writeClaimBundle(
 		NetNSPath:                     netnsPath,
 		ProcdInternalJWTPublicKeyFile: h.procdInternalJWTPublicKeyFile,
 		Resources:                     resources,
+		SecurityClass:                 h.driverConfig.SecurityClass,
+		EphemeralMounts:               ephemeralMounts,
 	})
 	if err := writeBundle(h.bundleDir, spec); err != nil {
 		return err
@@ -458,6 +462,10 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 	if err != nil {
 		h.setPhase(phaseWarm)
 		return fmt.Errorf("derive static runtime assignment revision: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if request.Runtime.SecurityClass != h.driverConfig.SecurityClass {
+		h.setPhase(phaseWarm)
+		return fmt.Errorf("runtime assignment security class does not match the warm slot: %w", errdefs.ErrInvalidArgument)
 	}
 	rootfsSource := ""
 	allowedRoot := h.rootfsAllowedRoot

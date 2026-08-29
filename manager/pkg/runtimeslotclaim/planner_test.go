@@ -401,7 +401,7 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 		CompatibilityDigest: store.slot.CompatibilityDigest, ClusterID: store.slot.ClusterID,
 		NetworkPolicy: `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"allow-all"}`,
 		Runtime: runtimecontrol.Assignment{
-			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 19,
+			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 19, SecurityClass: "standard",
 			EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
 		},
 		Resources: protocol.RuntimeResourceRequest{

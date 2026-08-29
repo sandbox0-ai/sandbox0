@@ -100,8 +100,34 @@ func TestCreateTemplatePersistsRuntimeNeutralSpec(t *testing.T) {
 	if got := store.createdOrUpdatedSpec.MainContainer.Resources.EphemeralStorage; got != "768Mi" {
 		t.Fatalf("ephemeral storage = %q, want 768Mi", got)
 	}
+	if got := store.createdOrUpdatedSpec.MainContainer.SecurityClass; got != v1alpha1.SandboxSecurityClassStandard {
+		t.Fatalf("default security class = %q", got)
+	}
 	if strings.Contains(response.Body.String(), `"cpu"`) {
 		t.Fatalf("public response leaked platform-derived CPU: %s", response.Body.String())
+	}
+}
+
+func TestCreateTemplateAcceptsPrivilegedClassAndEphemeralMounts(t *testing.T) {
+	store := &testTemplateStore{}
+	handler := &Handler{Store: store, Logger: zap.NewNop()}
+	router := templateTestRouter(http.MethodPost, "/api/v1/templates", handler.CreateTemplate,
+		&internalauth.Claims{TeamID: "team-1", UserID: "user-1"})
+	body := `{
+		"template_id":"docker",
+		"spec":{
+			"mainContainer":{"image":"registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","securityClass":"privileged","resources":{"memory":"4Gi"}},
+			"ephemeralMounts":[{"mountPath":"/var/lib/docker","sizeLimit":"16Gi"}]
+		}
+	}`
+	response := performTemplateRequest(router, http.MethodPost, "/api/v1/templates", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d; body=%s", response.Code, response.Body.String())
+	}
+	got := store.createdOrUpdatedSpec
+	if got.MainContainer.SecurityClass != v1alpha1.SandboxSecurityClassPrivileged ||
+		len(got.EphemeralMounts) != 1 || got.EphemeralMounts[0].MountPath != "/var/lib/docker" {
+		t.Fatalf("persisted spec = %#v", got)
 	}
 }
 

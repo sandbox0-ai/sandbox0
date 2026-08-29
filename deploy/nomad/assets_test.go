@@ -32,13 +32,21 @@ const minimumAcceptanceWidth = 8
 
 func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T) {
 	warmJob := readAsset(t, "../../nomad-driver-sandbox0/example/warm-slot.nomad")
-	countMatch := regexp.MustCompile(`(?m)^\s*count\s*=\s*([0-9]+)\s*$`).FindStringSubmatch(warmJob)
-	if len(countMatch) != 2 {
-		t.Fatal("warm-slot example does not contain one literal group count")
+	countMatches := regexp.MustCompile(`(?m)^\s*count\s*=\s*([0-9]+)\s*$`).FindAllStringSubmatch(warmJob, -1)
+	if len(countMatches) != 2 {
+		t.Fatalf("warm-slot example group count records = %d, want standard and privileged", len(countMatches))
 	}
-	warmCount, err := strconv.Atoi(countMatch[1])
+	warmCount, err := strconv.Atoi(countMatches[0][1])
 	if err != nil || warmCount < minimumAcceptanceWidth {
-		t.Fatalf("warm-slot count = %q, want at least %d", countMatch[1], minimumAcceptanceWidth)
+		t.Fatalf("standard warm-slot count = %q, want at least %d", countMatches[0][1], minimumAcceptanceWidth)
+	}
+	privilegedCount, err := strconv.Atoi(countMatches[1][1])
+	if err != nil || privilegedCount < 1 {
+		t.Fatalf("privileged warm-slot count = %q, want at least 1", countMatches[1][1])
+	}
+	if !strings.Contains(warmJob, `security_class = "standard"`) ||
+		!strings.Contains(warmJob, `security_class = "privileged"`) {
+		t.Fatal("warm carriers must publish both explicit security classes")
 	}
 	if regexp.MustCompile(`(?m)^\s*cores\s*=`).MatchString(warmJob) {
 		t.Fatal("warm carriers must not encode sandbox CPU as Nomad dedicated cores")
@@ -70,6 +78,9 @@ func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T)
 	}
 	if len(devices) < minimumAcceptanceWidth {
 		t.Fatalf("ctld example configures %d NBD devices, want at least %d", len(devices), minimumAcceptanceWidth)
+	}
+	if len(devices) < warmCount+privilegedCount {
+		t.Fatalf("ctld configures %d NBD devices for %d total warm slots", len(devices), warmCount+privilegedCount)
 	}
 	seen := make(map[string]struct{}, len(devices))
 	devicePattern := regexp.MustCompile(`^/dev/nbd[0-9]+$`)

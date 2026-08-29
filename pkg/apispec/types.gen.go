@@ -23,6 +23,12 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
+// Defines values for ContainerSpecSecurityClass.
+const (
+	Privileged ContainerSpecSecurityClass = "privileged"
+	Standard   ContainerSpecSecurityClass = "standard"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders             CredentialProjectionType = "http_headers"
@@ -842,7 +848,13 @@ type ContainerSpec struct {
 	// Image Canonical normalized OCI reference pinned by a lowercase SHA-256 digest. Mutable tags are rejected.
 	Image     string        `json:"image"`
 	Resources ResourceQuota `json:"resources"`
+
+	// SecurityClass Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
+	SecurityClass *ContainerSpecSecurityClass `json:"securityClass,omitempty"`
 }
+
+// ContainerSpecSecurityClass Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
+type ContainerSpecSecurityClass string
 
 // ContextExecResponse defines model for ContextExecResponse.
 type ContextExecResponse struct {
@@ -1134,6 +1146,14 @@ type EgressTLSMode string
 type EnvVar struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// EphemeralMountSpec defines model for EphemeralMountSpec.
+type EphemeralMountSpec struct {
+	MountPath string `json:"mountPath"`
+
+	// SizeLimit Exact byte quantity between 1Mi and 1Ti. The tmpfs remains subject to the sandbox memory cgroup.
+	SizeLimit string `json:"sizeLimit"`
 }
 
 // Error defines model for Error.
@@ -2421,12 +2441,15 @@ type SandboxSummary struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	Description   *string               `json:"description,omitempty"`
-	DisplayName   *string               `json:"displayName,omitempty"`
-	EnvVars       *map[string]string    `json:"envVars,omitempty"`
-	MainContainer ContainerSpec         `json:"mainContainer"`
-	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
-	Tags          *[]string             `json:"tags,omitempty"`
+	Description *string            `json:"description,omitempty"`
+	DisplayName *string            `json:"displayName,omitempty"`
+	EnvVars     *map[string]string `json:"envVars,omitempty"`
+
+	// EphemeralMounts Claim-lifetime tmpfs mounts excluded from pause, resume, fork, and snapshot RootFS generations.
+	EphemeralMounts *[]EphemeralMountSpec `json:"ephemeralMounts,omitempty"`
+	MainContainer   ContainerSpec         `json:"mainContainer"`
+	Network         *SandboxNetworkPolicy `json:"network,omitempty"`
+	Tags            *[]string             `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.

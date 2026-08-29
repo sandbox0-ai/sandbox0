@@ -423,7 +423,11 @@ func (s *Service) resumeNomadSandbox(
 	}
 
 	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
-	plan.assignment = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
+	plan.assignment, err = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
+	if err != nil {
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+	}
 	if err := plan.assignment.Validate(); err != nil {
 		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
@@ -490,7 +494,12 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad resources are invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
 	}
-	runtimeClass, err := s.runtimeClasses.Resolve(record.ClusterID)
+	securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(record.TemplateSpec.MainContainer.SecurityClass)
+	if !ok {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad security class is invalid",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	runtimeClass, err := s.runtimeClasses.Resolve(record.ClusterID, string(securityClass))
 	if err != nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: no compatible Nomad warm-slot class for the stored sandbox",
 			service.ErrSandboxLifecycleUnavailable)
@@ -531,7 +540,11 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad credential binding semantics changed",
 			service.ErrSandboxLifecycleUnavailable)
 	}
-	assignment := runtimeAssignment(record.TemplateSpec, &req)
+	assignment, err := runtimeAssignment(record.TemplateSpec, &req)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored runtime assignment is invalid: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
 	if err := assignment.Validate(); err != nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored runtime assignment is invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
@@ -786,7 +799,11 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, err
 	}
-	runtimeClass, err := s.runtimeClasses.Resolve("")
+	securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(tpl.Spec.MainContainer.SecurityClass)
+	if !ok {
+		return nil, fmt.Errorf("%w: template security class is invalid", service.ErrInvalidClaimRequest)
+	}
+	runtimeClass, err := s.runtimeClasses.Resolve("", string(securityClass))
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve Nomad runtime class: %v", service.ErrDataPlaneNotReady, err)
 	}
@@ -815,7 +832,10 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	}
 	storeBindings := credentialbinding.ToStore(credentials)
 	sanitizeNomadCredentialBindings(req.Config)
-	assignment := runtimeAssignment(tpl.Spec, &req)
+	assignment, err := runtimeAssignment(tpl.Spec, &req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
+	}
 	if err := assignment.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
@@ -1243,7 +1263,7 @@ func bytesToMiBRoundUp(value int64) int64 {
 	return 1 + (value-1)/mib
 }
 
-func runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) runtimecontrol.Assignment {
+func runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) (runtimecontrol.Assignment, error) {
 	environment := make(map[string]string, len(spec.EnvVars)+len(spec.MainContainer.Env)+2)
 	for _, item := range spec.MainContainer.Env {
 		environment[item.Name] = item.Value
@@ -1257,15 +1277,30 @@ func runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequ
 		}
 	}
 	environment[runtimecontrol.EnvSandboxID] = req.SandboxID
+	securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(spec.MainContainer.SecurityClass)
+	if !ok {
+		return runtimecontrol.Assignment{}, fmt.Errorf("template security class is invalid")
+	}
+	resolvedMounts, err := templatepkg.ResolveEphemeralMounts(spec)
+	if err != nil {
+		return runtimecontrol.Assignment{}, err
+	}
+	ephemeralMounts := make([]runtimecontrol.EphemeralMount, 0, len(resolvedMounts))
+	for _, mount := range resolvedMounts {
+		ephemeralMounts = append(ephemeralMounts, runtimecontrol.EphemeralMount{
+			MountPath: mount.MountPath, SizeBytes: mount.SizeBytes,
+		})
+	}
 	assignment := runtimecontrol.Assignment{
 		SandboxID: req.SandboxID, TeamID: req.TeamID,
-		RuntimeGeneration: req.RuntimeGeneration, EnvVars: environment,
+		RuntimeGeneration: req.RuntimeGeneration, SecurityClass: string(securityClass),
+		EphemeralMounts: ephemeralMounts, EnvVars: environment,
 	}
 	if req.Config != nil && req.Config.Webhook != nil {
 		webhook := *req.Config.Webhook
 		assignment.Webhook = &webhook
 	}
-	return assignment
+	return assignment, nil
 }
 
 func digestPinnedImage(image string) (string, error) {

@@ -67,6 +67,12 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if _, err := s0template.ResolveRootFSLogicalSize(spec); err != nil {
 		return err
 	}
+	if _, ok := v1alpha1.EffectiveSandboxSecurityClass(spec.MainContainer.SecurityClass); !ok {
+		return fmt.Errorf("spec.mainContainer.securityClass must be one of: standard, privileged")
+	}
+	if _, err := s0template.ResolveEphemeralMounts(spec); err != nil {
+		return err
+	}
 
 	if spec.Network != nil {
 		if spec.Network.Mode != v1alpha1.NetworkModeAllowAll && spec.Network.Mode != v1alpha1.NetworkModeBlockAll {

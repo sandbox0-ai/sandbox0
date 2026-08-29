@@ -64,6 +64,7 @@ func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {
 		"SANDBOX0_NODE_UID=ecs/us-east-1/i-123",
 		"SANDBOX0_REGION_ID=ali-ue1",
 		"SANDBOX0_CLUSTER_ID=nomad",
+		"SANDBOX0_AUTHORITY_URL=https://authority.ali-ue1.internal:8421",
 	}, "\n") + "\n"
 	files["opt/cni/config/10-sandbox0.conflist"] = `{"subnet":"172.27.0.0/26"}`
 	staged, err := stageRuntimeConfigAt(runtimeConfigArchive(t, files), t.TempDir())
@@ -72,6 +73,36 @@ func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {
 	require.NoError(t, validateRuntimeConfigIdentity(staged,
 		"s0-i-123", "11111111-1111-1111-1111-111111111111", "ecs/us-east-1/i-123",
 		"ali-ue1", "nomad", "172.27.0.0/26"))
+}
+
+func TestRemoveRuntimeAuthorityHostAliasesKeepsDNSAuthoritative(t *testing.T) {
+	hostsFile := filepath.Join(t.TempDir(), "hosts")
+	require.NoError(t, os.WriteFile(hostsFile, []byte(strings.Join([]string{
+		"127.0.0.1 localhost",
+		"10.60.7.110 authority.ali-ue1.internal",
+		"10.60.31.124 authority.ali-ue1.internal old-alias # stale endpoint",
+		"10.60.7.111 AUTHORITY.ALI-UE1.INTERNAL",
+		"# retained comment",
+	}, "\n")+"\n"), 0o644))
+
+	require.NoError(t, removeRuntimeAuthorityHostAliases(hostsFile, "authority.ali-ue1.internal"))
+	payload, err := os.ReadFile(hostsFile)
+	require.NoError(t, err)
+	require.Equal(t, strings.Join([]string{
+		"127.0.0.1 localhost",
+		"10.60.31.124\told-alias # stale endpoint",
+		"# retained comment",
+	}, "\n")+"\n", string(payload))
+}
+
+func TestRuntimeAuthorityHostRejectsNoncanonicalEndpoint(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(directory, "etc/sandbox0"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "etc/sandbox0/ctld.env"), []byte(
+		"SANDBOX0_AUTHORITY_URL=http://authority.internal:8421\n"), 0o600))
+	staged := &stagedRuntimeConfig{root: directory}
+	_, err := runtimeAuthorityHost(staged)
+	require.ErrorContains(t, err, "invalid manager authority URL")
 }
 
 func TestRuntimeConfigArchiveRejectsHostMutationOutsideContract(t *testing.T) {

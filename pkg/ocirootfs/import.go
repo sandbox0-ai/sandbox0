@@ -312,8 +312,11 @@ func (s *applyState) layerFilter() archive.Filter {
 			return false, fmt.Errorf("OCI image contains more than %d entries", s.limits.MaxFiles)
 		}
 		name := filepath.ToSlash(header.Name)
+		// This importer and the target runtime are Linux-only. A backslash is a
+		// literal Linux filename byte, not a path separator; rejecting it makes
+		// valid OCI layers from common Linux image builders unimportable.
 		if name == "" || len(name) > s.limits.MaxPathBytes || strings.ContainsRune(name, '\x00') ||
-			strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
+			strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
 			return false, fmt.Errorf("OCI layer path is unsafe or exceeds %d bytes", s.limits.MaxPathBytes)
 		}
 		if len(header.Linkname) > s.limits.MaxPathBytes || strings.ContainsRune(header.Linkname, '\x00') {

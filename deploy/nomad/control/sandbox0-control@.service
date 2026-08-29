@@ -21,4 +21,4 @@ UMask=0077
 LimitNOFILE=1048576
 
 [Install]
-WantedBy=sandbox0-control.target
+WantedBy=sandbox0-control.target multi-user.target

@@ -66,6 +66,14 @@ func (e *testNodeChannelExecutor) CommandReady(
 	return NodeControlResponse{Phase: string(StateActive)}, e.commandErr
 }
 
+func (*testNodeChannelExecutor) PlannedRetire(
+	_ context.Context,
+	_ NodeChannelTarget,
+	request NodePlannedRetireControlRequest,
+) (NodePlannedRetireControlProof, error) {
+	return NewNodePlannedRetireControlProof(request)
+}
+
 func (e *testNodeChannelExecutor) RunningFork(
 	ctx context.Context,
 	_ NodeChannelTarget,
@@ -195,6 +203,42 @@ func TestNodeChannelAgentRejectsInvalidExecutorResult(t *testing.T) {
 	}
 	if result.ErrorClass != NodeChannelErrorInternal || len(result.Error) > NodeChannelMaxError {
 		t.Fatalf("bounded result = class %q, bytes %d", result.ErrorClass, len(result.Error))
+	}
+}
+
+func TestNodeChannelAgentAcknowledgesExactDurablePlannedRetire(t *testing.T) {
+	stage := testNodeChannelClaim().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := NodePlannedRetireControlRequest{
+		OperationID: rootfshandoff.PlannedRetireOperationID(
+			stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+		),
+		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce,
+		AllocationID: stage.Identity.AllocationID, WriterGrantID: stage.Identity.WriterGrantID,
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]),
+	}
+	command, err := NewNodeChannelPlannedRetireCommand(testNodeChannelTarget(false), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &testNodeChannelExecutor{}
+	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
+		Executor: executor, PlannedRetireExecutor: executor,
+		OperationTimeout: time.Second, Capacity: testNodeChannelCapacity(),
+	}}
+	result := agent.execute(t.Context(), command)
+	if err := result.ValidateFor(command); err != nil || result.PlannedRetireProof == nil {
+		t.Fatalf("planned-retire result = %+v, %v", result, err)
+	}
+
+	mutated := command
+	mutated.PlannedRetire = &NodePlannedRetireControlRequest{}
+	if err := result.ValidateFor(mutated); err == nil {
+		t.Fatal("planned-retire proof unexpectedly validated for a mutated request")
 	}
 }
 

@@ -484,7 +484,7 @@ func applyRuntimeDefaults(cfg *ManagerConfig) {
 		cfg.NodeAuthority.Claim.WriterTokenKeyFile = NodeAuthorityWriterTokenKeyPath
 	}
 	if cfg.NodeAuthority.Claim.ClaimTTL.Duration == 0 {
-		cfg.NodeAuthority.Claim.ClaimTTL = Duration{Duration: 15 * time.Second}
+		cfg.NodeAuthority.Claim.ClaimTTL = Duration{Duration: time.Minute}
 	}
 	if cfg.NodeAuthority.Claim.SLO.Duration == 0 {
 		cfg.NodeAuthority.Claim.SLO = Duration{Duration: time.Second}

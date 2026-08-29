@@ -78,6 +78,8 @@ func configuredNomadRuntimeFactory(
 		ClusterID:                     strings.TrimSpace(ctldConfig.DefaultClusterId),
 		Address:                       source.NomadAddress,
 		NodeID:                        source.NomadNodeID,
+		Namespace:                     source.NomadNamespace,
+		JobID:                         source.NomadJobID,
 		TokenFile:                     source.NomadTokenFile,
 		CAFile:                        source.NomadCAFile,
 		CertFile:                      source.NomadCertFile,

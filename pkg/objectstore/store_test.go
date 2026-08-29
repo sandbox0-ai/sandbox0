@@ -297,6 +297,89 @@ func TestRemoteConditionalCreateStopsOnInFlightCancellation(t *testing.T) {
 	}
 }
 
+func TestOSSConditionalCreateUsesNativeAtomicHeaderAndVirtualHost(t *testing.T) {
+	type observedRequest struct {
+		host, path, forbidOverwrite, ifNoneMatch, authorization string
+	}
+	requests := make([]observedRequest, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests = append(requests, observedRequest{
+			host: request.Host, path: request.URL.Path,
+			forbidOverwrite: request.Header.Get("x-oss-forbid-overwrite"),
+			ifNoneMatch:     request.Header.Get("If-None-Match"),
+			authorization:   request.Header.Get("Authorization"),
+		})
+		if len(requests) == 1 {
+			response.WriteHeader(http.StatusOK)
+			return
+		}
+		response.Header().Set("Content-Type", "application/xml")
+		response.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(response,
+			`<Error><Code>FileAlreadyExists</Code><Message>Object already exists.</Message></Error>`)
+	}))
+	defer server.Close()
+
+	endpoint := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	createdStore, err := Create(Config{
+		Type: TypeOSS, Bucket: "rootfs", Region: "us-east-1", Endpoint: endpoint,
+		AccessKey: "test-access-key", SecretKey: "test-secret-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := createdStore.(*s3Store)
+	if store.pathStyle {
+		t.Fatal("OSS store uses path-style bucket addressing")
+	}
+	created, err := store.PutIfAbsentContext(t.Context(), "objects/one", strings.NewReader("payload"))
+	if err != nil || !created {
+		t.Fatalf("first PutIfAbsentContext() = %v, %v", created, err)
+	}
+	created, err = store.PutIfAbsentContext(t.Context(), "objects/one", strings.NewReader("payload"))
+	if err != nil || created {
+		t.Fatalf("collision PutIfAbsentContext() = %v, %v", created, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	for index, request := range requests {
+		if !strings.HasPrefix(request.host, "rootfs.localhost:") || request.path != "/objects/one" {
+			t.Fatalf("request %d address = %s%s, want virtual-hosted bucket", index, request.host, request.path)
+		}
+		if request.forbidOverwrite != "true" || request.ifNoneMatch != "" {
+			t.Fatalf("request %d conditional headers = forbid:%q if-none-match:%q",
+				index, request.forbidOverwrite, request.ifNoneMatch)
+		}
+		if !strings.Contains(strings.ToLower(request.authorization), "x-oss-forbid-overwrite") {
+			t.Fatalf("request %d did not sign the OSS conditional header", index)
+		}
+	}
+}
+
+func TestOSSCreateDoesNotManageInfrastructureBucket(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		response.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	endpoint := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	createdStore, err := Create(Config{
+		Type: TypeOSS, Bucket: "rootfs", Region: "us-east-1", Endpoint: endpoint,
+		AccessKey: "test-access-key", SecretKey: "test-secret-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createdStore.Create(); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Create() made %d OSS bucket-management requests, want 0", requests)
+	}
+}
+
 func TestPrefixedStoreListDoesNotInjectStartAfterForEmptyCursor(t *testing.T) {
 	t.Parallel()
 

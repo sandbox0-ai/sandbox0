@@ -41,6 +41,12 @@ type channelTestVerifier struct{}
 
 type channelTestCapacityStore struct{}
 
+type channelTrackingCapacityStore struct {
+	mu            sync.Mutex
+	registrations int
+	expirations   int
+}
+
 func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
 	_ context.Context,
 	request *sandboxstore.RegisterRuntimeNodeCapacityRequest,
@@ -51,6 +57,44 @@ func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
 		MemoryBytes: request.MemoryBytes, CPUSetCPUs: request.CPUSetCPUs,
 		CPUSetMems: request.CPUSetMems, HeartbeatExpiresAt: time.Now().Add(request.TTL), Revision: 1,
 	}, nil
+}
+
+func (channelTestCapacityStore) ExpireRuntimeNodeCapacity(
+	context.Context,
+	*sandboxstore.ExpireRuntimeNodeCapacityRequest,
+) error {
+	return nil
+}
+
+func (s *channelTrackingCapacityStore) RegisterRuntimeNodeCapacity(
+	_ context.Context,
+	request *sandboxstore.RegisterRuntimeNodeCapacityRequest,
+) (*sandboxstore.RuntimeNodeCapacity, error) {
+	s.mu.Lock()
+	s.registrations++
+	s.mu.Unlock()
+	return &sandboxstore.RuntimeNodeCapacity{
+		ClusterID: request.ClusterID, NodeID: request.NodeID, NodeUID: request.NodeUID,
+		NodeBootID: request.NodeBootID, CPUMillicores: request.CPUMillicores,
+		MemoryBytes: request.MemoryBytes, CPUSetCPUs: request.CPUSetCPUs,
+		CPUSetMems: request.CPUSetMems, HeartbeatExpiresAt: time.Now().Add(request.TTL), Revision: 1,
+	}, nil
+}
+
+func (s *channelTrackingCapacityStore) ExpireRuntimeNodeCapacity(
+	_ context.Context,
+	_ *sandboxstore.ExpireRuntimeNodeCapacityRequest,
+) error {
+	s.mu.Lock()
+	s.expirations++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *channelTrackingCapacityStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.registrations, s.expirations
 }
 
 func channelTestCapacity() protocol.NodeChannelCapacity {
@@ -70,20 +114,21 @@ func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Id
 }
 
 type channelTestExecutor struct {
-	mu            sync.Mutex
-	cleanupErr    error
-	calls         []protocol.NodeCleanupControlRequest
-	networks      []protocol.NodeNetworkPrepareControlRequest
-	claims        []protocol.NodeClaimControlRequest
-	commands      []protocol.CommandReadyControlRequest
-	forks         []protocol.NodeRunningForkControlRequest
-	runningFork   rootfshandoff.RunningForkCheckpointResult
-	rebases       []protocol.NodePausedRebaseControlRequest
-	rebaseRejects []protocol.NodePausedRebaseControlRequest
-	rebaseAcks    []protocol.NodePausedRebaseControlRequest
-	pausedRebase  rootfsrebase.WorkerResult
-	entered       chan<- struct{}
-	release       <-chan struct{}
+	mu             sync.Mutex
+	cleanupErr     error
+	calls          []protocol.NodeCleanupControlRequest
+	networks       []protocol.NodeNetworkPrepareControlRequest
+	claims         []protocol.NodeClaimControlRequest
+	commands       []protocol.CommandReadyControlRequest
+	plannedRetires []protocol.NodePlannedRetireControlRequest
+	forks          []protocol.NodeRunningForkControlRequest
+	runningFork    rootfshandoff.RunningForkCheckpointResult
+	rebases        []protocol.NodePausedRebaseControlRequest
+	rebaseRejects  []protocol.NodePausedRebaseControlRequest
+	rebaseAcks     []protocol.NodePausedRebaseControlRequest
+	pausedRebase   rootfsrebase.WorkerResult
+	entered        chan<- struct{}
+	release        <-chan struct{}
 }
 
 func (e *channelTestExecutor) PrepareNetwork(
@@ -122,6 +167,57 @@ func TestNodeChannelIdentityMustMatchAuthenticatedRoute(t *testing.T) {
 	}
 }
 
+func TestNodeChannelHubDoesNotAdmitClaimsWithoutPlannedRetire(t *testing.T) {
+	capacity := &channelTrackingCapacityStore{}
+	hub, err := NewChannelHub(channelTestVerifier{}, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	executor := &channelTestExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token,
+		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
+		Capacity:     channelTestCapacity(),
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		AgentInstanceID: "agent-without-planned-retire",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx) }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-1")
+	registrations, expirations := capacity.counts()
+	if registrations != 0 || expirations != 1 {
+		t.Fatalf("capacity registrations = %d, expirations = %d", registrations, expirations)
+	}
+	_, err = hub.Claim(t.Context(), runtimeslotclaim.NodeTarget{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
+	}, testChannelClaimRequest())
+	if !errdefs.IsFailedPrecondition(err) || !strings.Contains(err.Error(), "planned retirement") {
+		t.Fatalf("ineligible claim error = %v", err)
+	}
+	cleanup := testChannelCleanupRequest()
+	if _, err := hub.CleanupRuntimeSlot(t.Context(), Target{
+		ClusterID: cleanup.ClusterID, NodeID: cleanup.NodeID,
+		NodeUID: cleanup.NodeUID, NodeBootID: cleanup.NodeBootID,
+	}, cleanup); err != nil {
+		t.Fatalf("existing-workload cleanup over ineligible channel: %v", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("agent stop = %v", err)
+	}
+}
+
 func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
@@ -157,8 +253,9 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
-		Capacity:     channelTestCapacity(),
-		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		PlannedRetireExecutor: executor,
+		Capacity:              channelTestCapacity(),
+		ReconnectMin:          time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
 	if err != nil {
@@ -340,6 +437,17 @@ func (e *channelTestExecutor) CommandReady(
 	return protocol.NodeControlResponse{Phase: string(protocol.StateActive)}, nil
 }
 
+func (e *channelTestExecutor) PlannedRetire(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	e.mu.Lock()
+	e.plannedRetires = append(e.plannedRetires, request)
+	e.mu.Unlock()
+	return protocol.NewNodePlannedRetireControlProof(request)
+}
+
 func (e *channelTestExecutor) RunningFork(
 	_ context.Context,
 	_ protocol.NodeChannelTarget,
@@ -441,7 +549,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: executor, RunningForkExecutor: executor,
+		Executor: executor, PlannedRetireExecutor: executor, RunningForkExecutor: executor,
 		PausedRebaseExecutor: executor, NetworkExecutor: executor,
 		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
@@ -506,6 +614,14 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	if err != nil || commandResponse.Phase != string(protocol.StateActive) {
 		t.Fatalf("node command-ready response = %+v, %v", commandResponse, err)
 	}
+	plannedRetireRequest := testChannelPlannedRetire(t)
+	plannedRetireProof, err := hub.PlannedRetire(t.Context(), protocol.NodeChannelTarget{
+		SlotID: nodeTarget.SlotID, ClusterID: nodeTarget.ClusterID, AllocationID: nodeTarget.AllocationID,
+		NodeID: nodeTarget.NodeID, NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, plannedRetireRequest)
+	if err != nil || plannedRetireProof.ValidateFor(plannedRetireRequest) != nil {
+		t.Fatalf("node planned-retire proof = %+v, %v", plannedRetireProof, err)
+	}
 	forkResult, err := hub.RunningFork(t.Context(), protocol.NodeChannelTarget{
 		SlotID: nodeTarget.SlotID, ClusterID: nodeTarget.ClusterID, AllocationID: nodeTarget.AllocationID,
 		NodeID: nodeTarget.NodeID, NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
@@ -548,6 +664,7 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		PolicyDigest: networkRequest.PolicyDigest,
 	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
 		len(executor.commands) != 1 || executor.commands[0] != commandRequest ||
+		len(executor.plannedRetires) != 1 || executor.plannedRetires[0] != plannedRetireRequest ||
 		len(executor.forks) != 1 || executor.forks[0] != forkRequest ||
 		len(executor.rebases) != 1 || len(executor.rebaseRejects) != 1 || len(executor.rebaseAcks) != 1 {
 		t.Fatalf("node control calls = claims %d, commands %d, forks %d, rebases %d, rejects %d",
@@ -762,6 +879,24 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID, PolicyToken: token,
 		WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10), Stage: stage,
 		NetworkPolicy: networkPolicy, Runtime: assignment, Resources: resources,
+	}
+}
+
+func testChannelPlannedRetire(t *testing.T) protocol.NodePlannedRetireControlRequest {
+	t.Helper()
+	stage := testChannelClaimRequest().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.NodePlannedRetireControlRequest{
+		OperationID: rootfshandoff.PlannedRetireOperationID(
+			stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+		),
+		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce,
+		AllocationID: stage.Identity.AllocationID, WriterGrantID: stage.Identity.WriterGrantID,
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]),
 	}
 }
 

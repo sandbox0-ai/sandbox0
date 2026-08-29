@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -226,7 +228,10 @@ func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
 	}
 	require.False(t, rootFSSessionNeedsReconciliation(base, now, false))
 	base.Live = false
-	require.True(t, rootFSSessionNeedsReconciliation(base, now, false))
+	require.False(t, rootFSSessionNeedsReconciliation(base, now, false),
+		"standby process-local ownership must not override a valid durable consumer lease")
+	require.True(t, rootFSSessionNeedsReconciliation(base, now, true),
+		"an explicit lease-loss or allocation-absence trigger must still reconcile immediately")
 	base.Live = true
 	base.Consumer.LeaseExpiresAt = now.Add(-time.Second).Format(time.RFC3339Nano)
 	require.True(t, rootFSSessionNeedsReconciliation(base, now, false))
@@ -281,6 +286,27 @@ func TestNodeRuntimeThrottlesCompletedProofPruning(t *testing.T) {
 	daemon.scan(t.Context(), "")
 	_, err = journal.Get(second.SlotID)
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+type failingNomadAllocationSource struct {
+	calls int
+}
+
+func (s *failingNomadAllocationSource) ActiveAllocations(context.Context) (map[string]bool, error) {
+	s.calls++
+	return nil, errors.New("Nomad unavailable")
+}
+
+func TestNodeRuntimeHealthDoesNotDependOnNomadReclamationHint(t *testing.T) {
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	allocations := &failingNomadAllocationSource{}
+	daemon := &nodeRuntime{
+		runtime: &fakeRootFSRuntime{}, journal: journal, allocations: allocations,
+	}
+	require.NoError(t, daemon.health(t.Context()))
+	require.Zero(t, allocations.calls, "readiness must not turn an optional reclamation hint into an HA dependency")
 }
 
 func TestNodeRuntimeFencesRegisteredRunscAndStableMount(t *testing.T) {
@@ -1217,22 +1243,108 @@ func TestNodeRuntimeConvergesDurablePlannedAndCrashIntents(t *testing.T) {
 	runtime.mu.Unlock()
 }
 
+func TestNodeRuntimePersistsExactPlannedRetireBeforeAcknowledging(t *testing.T) {
+	claim := testNomadNodeClaimControlRequest(t)
+	stage := claim.Stage.WithoutWriterGrantToken()
+	blockHead := digest.FromString("planned-retire-block-head").String()
+	blockDescriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: rootfsblock.LogicalBlockSize,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/maps/planned-retire.page", Length: 1,
+				Checksum: digest.FromString("planned-retire-page").String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	stage.Generation = &rootfshandoff.GenerationDescriptor{
+		Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: stage.InitialGeneration,
+		FilesystemID: stage.Identity.RootFSID, SourceOCIDigest: digest.FromString("planned-retire-oci").String(),
+		BaseArtifactDigest: digest.FromString("planned-retire-artifact").String(),
+		BaseBlockRoot:      blockHead, CurrentBlockHead: blockHead, WriterEpoch: stage.Identity.WriterEpoch - 1,
+		FormatGeneration: 1, DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 1,
+		Descriptor: blockDescriptor,
+	}
+	require.NoError(t, stage.ValidateDurableBinding())
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	binding, err := stage.BindingDigest()
+	require.NoError(t, err)
+	target := protocol.NodeChannelTarget{
+		SlotID: stage.Identity.SlotNonce, ClusterID: "cluster-1",
+		AllocationID: stage.Identity.AllocationID, NodeID: "node-1",
+		NodeUID: stage.Identity.NodeUID, NodeBootID: stage.Identity.BootID,
+	}
+	request := protocol.NodePlannedRetireControlRequest{
+		OperationID: operationID, ClaimID: stage.Identity.ClaimID,
+		SlotID: target.SlotID, AllocationID: target.AllocationID,
+		WriterGrantID: stage.Identity.WriterGrantID, WriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+	}
+	runtime := &fakeRootFSRuntime{recoverySessions: []rootfssession.RecoverySession{{
+		Stage: stage, Kind: rootfssession.RecoveryCrashAbandon,
+	}}}
+	daemon := &nodeRuntime{
+		runtime: runtime, clusterID: target.ClusterID, nodeID: target.NodeID, nodeUID: target.NodeUID,
+	}
+
+	first, err := daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.NoError(t, err)
+	require.NoError(t, first.ValidateFor(request))
+	retry, err := daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.NoError(t, err)
+	require.Equal(t, first, retry)
+	runtime.mu.Lock()
+	require.Equal(t, 2, runtime.planRetireCalls)
+	require.Equal(t, rootfssession.RecoveryPlannedRetire, runtime.recoverySessions[0].Kind)
+	require.Equal(t, operationID, runtime.recoverySessions[0].RetireOperationID)
+	runtime.mu.Unlock()
+
+	changed := request
+	changed.WriterGrantID = "another-grant"
+	_, err = daemon.PlanRuntimeSlotRetire(t.Context(), target, changed)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	runtime.mu.Lock()
+	require.Equal(t, 2, runtime.planRetireCalls)
+	runtime.mu.Unlock()
+
+	runtime.mu.Lock()
+	runtime.recoverySessions[0] = rootfssession.RecoverySession{
+		Stage: stage, Kind: rootfssession.RecoveryCrashAbandon,
+	}
+	runtime.planRetireCrashOperation = "concurrent-crash-operation"
+	runtime.mu.Unlock()
+	_, err = daemon.PlanRuntimeSlotRetire(t.Context(), target, request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
 func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "nomad.token")
 	require.NoError(t, os.WriteFile(tokenFile, []byte("secret-token\n"), 0o600))
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		require.Equal(t, "/v1/node/node-a/allocations", request.URL.Path)
 		require.Equal(t, "secret-token", request.Header.Get("X-Nomad-Token"))
-		_, _ = writer.Write([]byte(`[
+		switch request.URL.Path {
+		case "/v1/job/sandbox0-warm-slots":
+			require.Equal(t, "default", request.URL.Query().Get("namespace"))
+			_, _ = writer.Write([]byte(`{"ID":"sandbox0-warm-slots","Namespace":"default"}`))
+		case "/v1/node/node-a/allocations":
+			_, _ = writer.Write([]byte(`[
             {"ID":"running","DesiredStatus":"run","ClientStatus":"running"},
             {"ID":"pending","DesiredStatus":"run","ClientStatus":"pending"},
             {"ID":"stopping","DesiredStatus":"stop","ClientStatus":"running"},
             {"ID":"complete","DesiredStatus":"run","ClientStatus":"complete"}
         ]`))
+		default:
+			http.NotFound(writer, request)
+		}
 	}))
 	defer server.Close()
 	source, err := newNomadAllocationSource(NomadAllocationConfig{
-		Address: server.URL, NodeID: "node-a", TokenFile: tokenFile,
+		Address: server.URL, NodeID: "node-a", Namespace: "default",
+		JobID: "sandbox0-warm-slots", TokenFile: tokenFile,
 	})
 	require.NoError(t, err)
 	active, err := source.ActiveAllocations(t.Context())
@@ -1241,4 +1353,31 @@ func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {
 		"running": true, "pending": true, "stopping": true, "complete": true,
 	}, active)
 	require.False(t, active["purged"])
+}
+
+func TestNomadAllocationSourceRejectsACLFilteredCatalog(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "nomad.token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("node-only-token\n"), 0o600))
+	nodeListCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/job/sandbox0-warm-slots":
+			http.Error(writer, "Permission denied", http.StatusForbidden)
+		case "/v1/node/node-a/allocations":
+			nodeListCalled = true
+			_, _ = writer.Write([]byte(`[]`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	source, err := newNomadAllocationSource(NomadAllocationConfig{
+		Address: server.URL, NodeID: "node-a", Namespace: "default",
+		JobID: "sandbox0-warm-slots", TokenFile: tokenFile,
+	})
+	require.NoError(t, err)
+	active, err := source.ActiveAllocations(t.Context())
+	require.ErrorContains(t, err, "verify Nomad allocation catalog visibility: HTTP 403")
+	require.Nil(t, active)
+	require.False(t, nodeListCalled, "an ACL-filterable empty list must never establish allocation absence")
 }

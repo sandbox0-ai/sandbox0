@@ -118,6 +118,34 @@ func (r *rootfsRuntime) PlanDirtyTailPressure(
 	return operationID, nil
 }
 
+// PlanRetire persists one region-authoritative planned retirement in the
+// node-local RootFS session before the allocation may be quiesced or stopped.
+// It does not fence the workload; the periodic recovery path completes sealing
+// only after the exact Nomad runtime is physically absent.
+func (r *rootfsRuntime) PlanRetire(
+	_ context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) error {
+	if r == nil || r.sessions == nil {
+		return fmt.Errorf("RootFS retirement journal is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	stage = stage.WithoutWriterGrantToken()
+	if err := stage.ValidateDurableBinding(); err != nil {
+		return fmt.Errorf("validate planned RootFS retirement binding: %w", err)
+	}
+	expected := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	if strings.TrimSpace(operationID) != expected {
+		return fmt.Errorf("planned RootFS retirement operation does not match writer binding: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := r.sessions.BeginRetire(stage.Parent, stage.Identity, operationID); err != nil {
+		return fmt.Errorf("persist planned RootFS retirement: %w", err)
+	}
+	return nil
+}
+
 // Runtime is the driver-facing RootFS attachment and retire boundary.
 type Runtime interface {
 	Ensure(context.Context, rootfshandoff.StageRequest, func(error)) (rootfssession.Mount, error)

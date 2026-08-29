@@ -84,6 +84,39 @@ func TestBlockBuilderJournalsEveryObjectBeforeReturningArtifact(t *testing.T) {
 	}
 }
 
+func TestBlockBuilderBuildsBoundMaterializedGeneration(t *testing.T) {
+	fixture := newOCIBlockBuildFixture(t)
+	mutationDigest := digest.FromString("legacy-layer-chain")
+	mutated := false
+	result, err := fixture.builder().BuildMaterializedGeneration(t.Context(), MaterializedGenerationBuildRequest{
+		BuildRequest: fixture.request, MutationDigest: mutationDigest,
+		Mutator: RootMutatorFunc(func(_ context.Context, root string) error {
+			mutated = true
+			return os.WriteFile(filepath.Join(root, "legacy-state"), []byte("state"), 0o600)
+		}),
+	})
+	require.NoError(t, err)
+	require.True(t, mutated)
+	require.Equal(t, mutationDigest, result.MutationDigest)
+	require.Equal(t, result.Descriptor.MappingRoot.RootDigest, result.CurrentBlockHead.String())
+	require.NoDirExists(t, fixture.unpacker.lastRoot)
+	require.NoFileExists(t, fixture.unpacker.lastRoot+".xfs")
+}
+
+func TestBlockBuilderRejectsFailedMaterializedGenerationMutation(t *testing.T) {
+	fixture := newOCIBlockBuildFixture(t)
+	_, err := fixture.builder().BuildMaterializedGeneration(t.Context(), MaterializedGenerationBuildRequest{
+		BuildRequest: fixture.request, MutationDigest: digest.FromString("legacy-layer-chain"),
+		Mutator: RootMutatorFunc(func(context.Context, string) error {
+			return errors.New("legacy layer rejected")
+		}),
+	})
+	require.ErrorContains(t, err, "legacy layer rejected")
+	require.Zero(t, fixture.filesystem.calls)
+	require.Empty(t, fixture.publisher.objects)
+	require.NoDirExists(t, fixture.unpacker.lastRoot)
+}
+
 func TestBlockBuilderRejectsEvidenceMismatchBeforeFilesystemBuild(t *testing.T) {
 	fixture := newOCIBlockBuildFixture(t)
 	fixture.unpacker.mutate = func(result *ocirootfs.Result) {

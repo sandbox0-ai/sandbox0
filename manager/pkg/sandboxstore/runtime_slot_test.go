@@ -35,6 +35,22 @@ func TestNormalizeRuntimeSlotRegistrationRequiresCanonicalIdentity(t *testing.T)
 	require.ErrorContains(t, err, "absolute path")
 }
 
+func TestNormalizeExpireRuntimeNodeCapacityRequiresExactIdentity(t *testing.T) {
+	normalized, err := normalizeExpireRuntimeNodeCapacityRequest(&ExpireRuntimeNodeCapacityRequest{
+		ClusterID: " cluster-a ", NodeID: " node-a ", NodeUID: " uid-a ", NodeBootID: " boot-a ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "cluster-a", normalized.ClusterID)
+	require.Equal(t, "node-a", normalized.NodeID)
+	require.Equal(t, "uid-a", normalized.NodeUID)
+	require.Equal(t, "boot-a", normalized.NodeBootID)
+
+	_, err = normalizeExpireRuntimeNodeCapacityRequest(&ExpireRuntimeNodeCapacityRequest{
+		ClusterID: "cluster-a", NodeID: "node-a", NodeUID: "uid-a",
+	})
+	require.ErrorContains(t, err, "node_boot_id")
+}
+
 func TestNormalizeRuntimeSlotProofsClonesAndBoundsInputs(t *testing.T) {
 	proof := bytes.Repeat([]byte{0x41}, 32)
 	request := &ReportRuntimeSlotReadyRequest{
@@ -72,6 +88,29 @@ func TestNormalizeAcquireRuntimeSlotRequestUsesMillisecondTTLPrecision(t *testin
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	require.NoError(t, err)
 	require.Equal(t, 1500*time.Millisecond, normalized.ClaimTTL)
+}
+
+func TestRuntimeSlotPreCommandReadyClaimExpired(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		state  string
+		expiry time.Time
+		want   bool
+	}{
+		{name: "claiming expired", state: RuntimeSlotStateClaiming, expiry: now.Add(-time.Second), want: true},
+		{name: "starting expired", state: RuntimeSlotStateStarting, expiry: now, want: true},
+		{name: "starting live", state: RuntimeSlotStateStarting, expiry: now.Add(time.Second), want: false},
+		{name: "active ignores claim lease", state: RuntimeSlotStateActive, expiry: now.Add(-time.Second), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			slot := &RuntimeSlot{
+				State: test.state, ClaimLeaseExpiresAt: test.expiry, AuthorityObservedAt: now,
+			}
+			require.Equal(t, test.want, runtimeSlotPreCommandReadyClaimExpired(slot))
+		})
+	}
 }
 
 func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(t *testing.T) {

@@ -16,6 +16,11 @@ job "sandbox0-warm-slots" {
     # wide when changing this value.
     count = 8
 
+    spread {
+      attribute = "${node.unique.id}"
+      weight    = 100
+    }
+
     # A warm allocation is consumed exactly once. The driver terminates its
     # task after revoking the sandbox, and only a fresh allocation may replace
     # it because the old network namespace and runtime-slot journal are no
@@ -54,6 +59,11 @@ job "sandbox0-warm-slots" {
 
   group "privileged" {
     count = 2
+
+    spread {
+      attribute = "${node.unique.id}"
+      weight    = 100
+    }
 
     restart {
       attempts = 0

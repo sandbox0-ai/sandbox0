@@ -708,6 +708,9 @@ func renewRootFSWriterGrant(
 	if err != nil {
 		return nil, err
 	}
+	// A consumed writer cannot outlive the bounded launch claim that created
+	// it. Rejecting renewal here makes old and new node agents fail closed even
+	// when the separate runtime-slot heartbeat has already been rejected.
 	tag, err := db.Exec(ctx, `
 		UPDATE manager.rootfs_writer_grants AS g
 		SET lease_expires_at = NOW() + ($2::bigint * INTERVAL '1 millisecond'),
@@ -723,9 +726,18 @@ func renewRootFSWriterGrant(
 			AND g.lease_expires_at > NOW() - ($8::bigint * INTERVAL '1 millisecond')
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.runtime_slots AS slot
+				WHERE slot.slot_id = g.slot_id
+					AND slot.writer_grant_id = g.grant_id
+					AND slot.state IN ($9, $10)
+					AND slot.claim_lease_expires_at <= NOW()
+			)
 	`, normalized.GrantID, policy.LeaseTTL.Milliseconds(), RootFSWriterGrantStateConsumed,
 		normalized.WriterEpoch, normalized.BindingVersion,
-		normalized.BindingDigest, normalized.ConsumerNodeUID, policy.GracePeriod.Milliseconds())
+		normalized.BindingDigest, normalized.ConsumerNodeUID, policy.GracePeriod.Milliseconds(),
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant: %w", err)
 	}
@@ -818,9 +830,18 @@ func renewRootFSWriterGrants(
 			AND g.lease_expires_at > authority_clock.observed_at - ($8::bigint * INTERVAL '1 millisecond')
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.runtime_slots AS slot
+				WHERE slot.slot_id = g.slot_id
+					AND slot.writer_grant_id = g.grant_id
+					AND slot.state IN ($9, $10)
+					AND slot.claim_lease_expires_at <= authority_clock.observed_at
+			)
 		RETURNING g.grant_id
 	`, grantIDs, epochs, versions, digests, nodeUIDs, policy.LeaseTTL.Milliseconds(),
-		RootFSWriterGrantStateConsumed, policy.GracePeriod.Milliseconds())
+		RootFSWriterGrantStateConsumed, policy.GracePeriod.Milliseconds(),
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant batch: %w", err)
 	}
@@ -976,6 +997,9 @@ func beginRootFSWriterRetire(
 	if retireKind != RootFSWriterRetireKindPlannedPublish && retireKind != RootFSWriterRetireKindPrelaunchAbort {
 		return nil, fmt.Errorf("unsupported rootfs writer retire kind %q", retireKind)
 	}
+	// A manager-authored, non-cancelable planned pause remains durable retire
+	// authority after the runtime stops renewing its writer lease. The exact
+	// lifecycle/runtime/head fence below is required for that expired-lease path.
 	tag, err := db.Exec(ctx, `
 		UPDATE manager.rootfs_writer_grants AS g
 		SET state = $2,
@@ -990,13 +1014,34 @@ func beginRootFSWriterRetire(
 			AND g.binding_version = $6
 			AND g.binding_digest = $7
 			AND g.initial_generation_id = $8
-			AND g.lease_expires_at > NOW()
+			AND (g.lease_expires_at > NOW() OR (
+				$9 = $10
+				AND EXISTS (
+					SELECT 1
+					FROM manager.sandbox_lifecycle_txns AS lifecycle
+					WHERE lifecycle.txn_id = $3
+						AND lifecycle.sandbox_id = g.sandbox_id
+						AND lifecycle.kind = $11
+						AND lifecycle.phase IN ($12, $13)
+						AND lifecycle.source IN ($14, $15)
+						AND lifecycle.cancelable = FALSE
+						AND lifecycle.cancel_requested_at IS NULL
+						AND lifecycle.from_generation::text = g.runtime_generation
+						AND lifecycle.from_runtime_namespace = g.runtime_namespace
+						AND lifecycle.from_runtime_id = g.runtime_incarnation_id
+						AND lifecycle.expected_generation_id = $8
+						AND lifecycle.prepared_generation_id = ''
+				)
+			))
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
 			AND COALESCE(filesystem.head_generation_id, '') = $8
 	`, normalized.GrantID, RootFSWriterGrantStateRetiring, normalized.OperationID,
 		RootFSWriterGrantStateConsumed, normalized.WriterEpoch, normalized.BindingVersion,
-		normalized.BindingDigest, normalized.ExpectedOldGenerationID, retireKind)
+		normalized.BindingDigest, normalized.ExpectedOldGenerationID, retireKind,
+		RootFSWriterRetireKindPlannedPublish, SandboxLifecycleKindPause,
+		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting,
+		SandboxLifecycleSourceManual, SandboxLifecycleSourceAuto)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("begin rootfs writer retire", err)
 	}

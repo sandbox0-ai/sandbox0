@@ -5,12 +5,14 @@ package nomadclaim
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/containerd/errdefs"
 	distref "github.com/distribution/reference"
@@ -56,6 +58,7 @@ type Store interface {
 	RequestNomadSandboxTTLPause(context.Context, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
 	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
 	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
+	AbortNomadSandboxResume(context.Context, string, string, string) (bool, error)
 	CompleteNomadSandboxResume(context.Context, *sandboxstore.CompleteNomadSandboxResumeRequest) (*sandboxstore.SandboxRecord, error)
 	RequestNomadSandboxRunningFork(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.NomadSandboxRunningForkCandidate, error)
 	AbortNomadSandboxRunningFork(context.Context, string, string, string, string) (bool, error)
@@ -102,6 +105,14 @@ type runningForkController interface {
 	) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
+type plannedRetireController interface {
+	PlannedRetire(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePlannedRetireControlRequest,
+	) (protocol.NodePlannedRetireControlProof, error)
+}
+
 type pausedRebaseController interface {
 	SelectPausedRebaseNode(context.Context, string, string) (protocol.NodeChannelTarget, error)
 	ResolvePausedRebaseNode(context.Context, string, string, string) (protocol.NodeChannelTarget, error)
@@ -117,6 +128,7 @@ type Config struct {
 	RuntimeClasses         *RuntimeClassCatalog
 	Planner                planner
 	Allocation             allocationStopper
+	PlannedRetire          plannedRetireController
 	RunningFork            runningForkController
 	PausedRebase           pausedRebaseController
 	QuotaLimits            QuotaLimitStore
@@ -138,6 +150,7 @@ type Service struct {
 	runtimeClasses         *RuntimeClassCatalog
 	planner                planner
 	allocation             allocationStopper
+	plannedRetire          plannedRetireController
 	runningFork            runningForkController
 	pausedRebase           pausedRebaseController
 	quotaLimits            QuotaLimitStore
@@ -156,7 +169,7 @@ type Service struct {
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.RuntimeClasses == nil ||
-		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
+		config.Planner == nil || config.Allocation == nil || config.PlannedRetire == nil || config.RunningFork == nil ||
 		config.PausedRebase == nil ||
 		config.QuotaLimits == nil || config.NetworkPolicies == nil {
 		return nil, fmt.Errorf("nomad claim store, templates, runtime classes, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
@@ -187,7 +200,8 @@ func New(config Config) (*Service, error) {
 	}
 	return &Service{
 		store: config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
-		planner: config.Planner, allocation: config.Allocation, runningFork: config.RunningFork,
+		planner: config.Planner, allocation: config.Allocation, plannedRetire: config.PlannedRetire,
+		runningFork:  config.RunningFork,
 		pausedRebase: config.PausedRebase,
 		quotaLimits:  config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
@@ -316,9 +330,10 @@ func (s *Service) RequestRootFSWriterPressurePause(
 	return candidate.OperationID, nil
 }
 
-// CompletePausingSandboxRuntime asks Nomad to cooperatively stop the exact
-// allocation, then makes the slot terminally reconcilable only after the node
-// has atomically published a planned RootFS generation.
+// CompletePausingSandboxRuntime first persists the exact planned-retire marker
+// on the source node, then quiesces the slot, and only then asks Nomad to stop
+// the allocation. Retries preserve this ordering across every response-loss
+// boundary while node recovery publishes the planned RootFS generation.
 func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID string) error {
 	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceManual)
 	if err != nil {
@@ -335,6 +350,32 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 			return fmt.Errorf("quiesce planned-paused Nomad runtime slot: %w", err)
 		}
 		return nil
+	}
+	target := protocol.NodeChannelTarget{
+		SlotID: candidate.SlotID, ClusterID: candidate.ClusterID,
+		AllocationID: candidate.AllocationID, NodeID: candidate.NodeID,
+		NodeUID: candidate.NodeUID, NodeBootID: candidate.NodeBootID,
+	}
+	request := protocol.NodePlannedRetireControlRequest{
+		OperationID: candidate.OperationID, ClaimID: candidate.ClaimID,
+		SlotID: candidate.SlotID, AllocationID: candidate.AllocationID,
+		WriterGrantID: candidate.WriterGrantID, WriterEpoch: candidate.WriterEpoch,
+		BindingVersion: candidate.BindingVersion, BindingDigest: hex.EncodeToString(candidate.BindingDigest),
+	}
+	if _, err := s.plannedRetire.PlannedRetire(ctx, target, request); err != nil {
+		return fmt.Errorf("persist node planned retirement before Nomad pause: %w", err)
+	}
+	if _, err := s.store.BeginRuntimeSlotQuiesce(ctx, &sandboxstore.BeginRuntimeSlotQuiesceRequest{
+		SlotID: candidate.SlotID, OperationID: candidate.ClaimOperationID, ClaimID: candidate.ClaimID,
+	}); err != nil {
+		// A physically absent allocation can publish and terminalize between the
+		// node acknowledgement and this CAS. Accept only a fresh authoritative
+		// observation that the exact pause has already committed.
+		refreshed, refreshErr := s.requestNomadSandboxPause(ctx, sandboxID, candidate.Source)
+		if refreshErr == nil && refreshed.AlreadyPaused && refreshed.SlotID == "" {
+			return nil
+		}
+		return fmt.Errorf("quiesce Nomad runtime slot after planning pause: %w", errors.Join(err, refreshErr))
 	}
 	if err := s.allocation.Stop(ctx, runtimeslotreconciler.AllocationPurgeRequest{
 		OperationID: candidate.OperationID,
@@ -425,12 +466,14 @@ func (s *Service) resumeNomadSandbox(
 	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
 	plan.assignment, err = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
 	if err != nil {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	if err := plan.assignment.Validate(); err != nil {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
+		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
 		OperationID: candidate.OperationID, SandboxID: candidate.SandboxID,
@@ -440,6 +483,7 @@ func (s *Service) resumeNomadSandbox(
 		NetworkPolicy: plan.policy, Runtime: plan.assignment, StartedAt: startedAt,
 	})
 	if err != nil {
+		err = s.abortFailedNomadResume(ctx, candidate, err)
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
 			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
 		}
@@ -447,8 +491,9 @@ func (s *Service) resumeNomadSandbox(
 	}
 	if result == nil || result.Slot == nil || result.Slot.ID == "" ||
 		result.Slot.AllocationID == "" || result.Slot.AllocationNamespace == "" {
-		return nil, nil, fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
+		resumeErr := fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
 			service.ErrSandboxLifecycleUnavailable)
+		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
@@ -473,6 +518,39 @@ func (s *Service) resumeNomadSandbox(
 		zap.Duration("endToEndDuration", result.Duration),
 	)
 	return completed, result, nil
+}
+
+func (s *Service) abortFailedNomadResume(
+	ctx context.Context,
+	candidate *sandboxstore.NomadSandboxResumeCandidate,
+	resumeErr error,
+) error {
+	if candidate == nil || candidate.AlreadyActive || candidate.SandboxID == "" || candidate.OperationID == "" {
+		return resumeErr
+	}
+	const abortTimeout = 5 * time.Second
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	reason := "resume runtime did not reach command-ready"
+	if resumeErr != nil {
+		reason = fmt.Sprintf("%s: %v", reason, resumeErr)
+	}
+	reason = strings.ToValidUTF8(reason, "\uFFFD")
+	for len(reason) > 2_048 {
+		_, size := utf8.DecodeLastRuneInString(reason)
+		reason = reason[:len(reason)-size]
+	}
+	_, err := s.store.AbortNomadSandboxResume(
+		abortCtx, candidate.SandboxID, candidate.OperationID, reason,
+	)
+	if err == nil {
+		return resumeErr
+	}
+	abortErr := fmt.Errorf("abort failed Nomad resume %s: %w", candidate.OperationID, err)
+	if resumeErr == nil {
+		return abortErr
+	}
+	return errors.Join(resumeErr, abortErr)
 }
 
 func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxstore.SandboxRecord) (nomadResumePlan, error) {

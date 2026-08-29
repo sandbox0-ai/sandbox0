@@ -191,6 +191,139 @@ type dirtyTailPressureRuntime interface {
 	PlanDirtyTailPressure(context.Context, rootfssession.DirtyTailPressureSession) (string, error)
 }
 
+type plannedRetireRuntime interface {
+	PlanRetire(context.Context, rootfshandoff.StageRequest, string) error
+}
+
+// PlanRuntimeSlotRetire durably marks one exact local RootFS writer for the
+// already-authoritative regional pause operation. It deliberately returns
+// before stopping runsc; the allocation stop remains a separate manager-owned
+// side effect and the node recovery loop seals only after physical absence.
+func (d *nodeRuntime) PlanRuntimeSlotRetire(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (protocol.NodePlannedRetireControlProof, error) {
+	if err := request.Validate(); err != nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("validate planned runtime-slot retirement: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil || target.ClusterID != d.clusterID || target.NodeID != d.nodeID ||
+		target.NodeUID != d.nodeUID || target.SlotID != request.SlotID ||
+		target.AllocationID != request.AllocationID || target.ControlEndpoint != "" {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned runtime-slot retirement target is invalid: %w", errdefs.ErrPermissionDenied)
+	}
+	runtime, ok := d.runtime.(plannedRetireRuntime)
+	if !ok {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	sessions, err := d.runtime.RecoverySessions()
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, fmt.Errorf("list durable RootFS sessions: %w", err)
+	}
+	matched, err := matchRuntimeSlotPlannedRetireSession(sessions, target, request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched == nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS writer session is absent: %w", errdefs.ErrNotFound)
+	}
+	if err := validateRuntimeSlotPlannedRetireSession(*matched, target, request); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if err := runtime.PlanRetire(ctx, matched.Stage, request.OperationID); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+
+	// Re-read the journal before acknowledging so a response proves the exact
+	// operation survived the durable write and still owns this incarnation.
+	sessions, err = d.runtime.RecoverySessions()
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, fmt.Errorf("verify planned RootFS retirement: %w", err)
+	}
+	matched, err = matchRuntimeSlotPlannedRetireSession(sessions, target, request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched == nil {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement disappeared after persistence: %w", errdefs.ErrUnavailable)
+	}
+	if err := validateRuntimeSlotPlannedRetireSession(*matched, target, request); err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	if matched.Kind != rootfssession.RecoveryPlannedRetire ||
+		matched.RetireOperationID != request.OperationID {
+		return protocol.NodePlannedRetireControlProof{},
+			fmt.Errorf("planned RootFS retirement was not persisted: %w", errdefs.ErrUnavailable)
+	}
+	proof, err := protocol.NewNodePlannedRetireControlProof(request)
+	if err != nil {
+		return protocol.NodePlannedRetireControlProof{}, err
+	}
+	return proof, nil
+}
+
+func matchRuntimeSlotPlannedRetireSession(
+	sessions []rootfssession.RecoverySession,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) (*rootfssession.RecoverySession, error) {
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		session := sessions[index]
+		identity := session.Stage.Identity
+		sameIncarnation := identity.SlotNonce == target.SlotID || identity.AllocationID == target.AllocationID
+		if identity.WriterGrantID != request.WriterGrantID {
+			if sameIncarnation {
+				return nil, fmt.Errorf("runtime slot incarnation is owned by another RootFS writer: %w", errdefs.ErrFailedPrecondition)
+			}
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("writer grant has multiple local sessions: %w", errdefs.ErrFailedPrecondition)
+		}
+		candidate := session
+		matched = &candidate
+	}
+	return matched, nil
+}
+
+func validateRuntimeSlotPlannedRetireSession(
+	session rootfssession.RecoverySession,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePlannedRetireControlRequest,
+) error {
+	stage := session.Stage
+	if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+		return fmt.Errorf("planned RootFS session has an invalid durable binding: %v: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		return fmt.Errorf("digest planned RootFS session binding: %w", err)
+	}
+	expectedOperationID := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	identity := stage.Identity
+	if expectedOperationID != request.OperationID || identity.ClaimID != request.ClaimID ||
+		identity.SlotNonce != target.SlotID || identity.AllocationID != target.AllocationID ||
+		identity.NodeUID != target.NodeUID || identity.BootID != target.NodeBootID ||
+		identity.WriterGrantID != request.WriterGrantID || identity.WriterEpoch != request.WriterEpoch ||
+		stage.BindingVersion != request.BindingVersion || hex.EncodeToString(binding[:]) != request.BindingDigest ||
+		identity.TaskName != protocol.NomadTaskName {
+		return fmt.Errorf("planned RootFS session belongs to another runtime slot writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if session.CrashOperationID != "" || session.ExternalCrash || session.BranchRemoved ||
+		(session.RetireOperationID != "" && session.RetireOperationID != request.OperationID) {
+		return fmt.Errorf("RootFS session is already owned by another terminal operation: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
 // RejectPausedRootFSRebase serializes termination with exact node execution.
 func (d *nodeRuntime) RejectPausedRootFSRebase(
 	ctx context.Context,
@@ -274,6 +407,8 @@ type NomadAllocationConfig struct {
 	ClusterID                     string
 	Address                       string
 	NodeID                        string
+	Namespace                     string
+	JobID                         string
 	TokenFile                     string
 	CAFile                        string
 	CertFile                      string
@@ -435,6 +570,8 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 		"cluster_id":                       config.ClusterID,
 		"nomad_address":                    config.Address,
 		"nomad_node_id":                    config.NodeID,
+		"nomad_namespace":                  config.Namespace,
+		"nomad_job_id":                     config.JobID,
 		"runtime_slot_node_uid":            config.RuntimeSlotNodeUID,
 		"runtime_slot_ctld_network_socket": config.RuntimeSlotCtldNetworkSocket,
 	} {
@@ -1236,11 +1373,10 @@ func (d *nodeRuntime) health(ctx context.Context) error {
 	if _, err := d.runtime.RecoverySessions(); err != nil {
 		return fmt.Errorf("read durable RootFS recovery journal: %w: %w", err, errdefs.ErrUnavailable)
 	}
-	if d.allocations != nil {
-		if _, err := d.allocations.ActiveAllocations(ctx); err != nil {
-			return fmt.Errorf("read Nomad allocation authority: %w: %w", err, errdefs.ErrUnavailable)
-		}
-	}
+	// The Nomad catalog is a fail-closed reclamation hint, not a serving
+	// dependency. The reconciliation scan logs catalog failures and falls back
+	// to durable lease expiry; readiness must not restart the current HA owner
+	// or promote its standby during a Nomad outage or a planned job purge.
 	if d.journal == nil {
 		return fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
 	}
@@ -1341,6 +1477,9 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 	sessions, err := d.runtime.RecoverySessions()
 	if err != nil {
 		d.logger.Error("list durable RootFS recovery sessions", "error", err)
+		return
+	}
+	if len(sessions) == 0 {
 		return
 	}
 	now = time.Now()
@@ -1485,26 +1624,38 @@ func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 }
 
 type httpNomadAllocationSource struct {
-	url       string
-	tokenFile string
-	http      *http.Client
+	allocationURL string
+	visibilityURL string
+	namespace     string
+	jobID         string
+	tokenFile     string
+	http          *http.Client
 }
 
 func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSource, error) {
 	address := strings.TrimSpace(config.Address)
 	nodeID := strings.TrimSpace(config.NodeID)
-	if address == "" && nodeID == "" {
+	namespace := strings.TrimSpace(config.Namespace)
+	jobID := strings.TrimSpace(config.JobID)
+	if address == "" && nodeID == "" && namespace == "" && jobID == "" {
 		return nil, nil
 	}
-	if address == "" || nodeID == "" {
-		return nil, fmt.Errorf("nomad address and node ID must be configured together")
+	if address == "" || nodeID == "" || namespace == "" || jobID == "" {
+		return nil, fmt.Errorf("nomad address, node ID, namespace, and job ID must be configured together")
 	}
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("nomad address must be an HTTP(S) origin")
 	}
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
+	basePath := strings.TrimSuffix(parsed.Path, "/")
+	parsed.Path = basePath + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
+	allocationURL := parsed.String()
+	parsed.Path = basePath + "/v1/job/" + url.PathEscape(jobID)
+	query := parsed.Query()
+	query.Set("namespace", namespace)
+	parsed.RawQuery = query.Encode()
+	visibilityURL := parsed.String()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	if parsed.Scheme == "https" {
@@ -1533,24 +1684,61 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		transport.TLSClientConfig = tlsConfig
 	}
 	return &httpNomadAllocationSource{
-		url: parsed.String(), tokenFile: strings.TrimSpace(config.TokenFile),
+		allocationURL: allocationURL, visibilityURL: visibilityURL,
+		namespace: namespace, jobID: jobID, tokenFile: strings.TrimSpace(config.TokenFile),
 		http: &http.Client{Timeout: 2 * time.Second, Transport: transport},
 	}, nil
 }
 
 func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[string]bool, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
-	if err != nil {
-		return nil, err
-	}
+	token := ""
 	if s.tokenFile != "" {
-		token, err := os.ReadFile(s.tokenFile)
+		payload, err := os.ReadFile(s.tokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("read Nomad token: %w", err)
 		}
-		request.Header.Set("X-Nomad-Token", strings.TrimSpace(string(token)))
+		token = strings.TrimSpace(string(payload))
+	}
+	// Nomad intentionally returns an ACL-filtered 200 response from the node
+	// allocation list. Prove read-job access to the exact workload namespace
+	// before an empty list is allowed to establish physical absence.
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.visibilityURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		request.Header.Set("X-Nomad-Token", token)
 	}
 	response, err := s.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("verify Nomad allocation catalog visibility: %w", err)
+	}
+	if response.StatusCode/100 != 2 {
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+		response.Body.Close()
+		return nil, fmt.Errorf("verify Nomad allocation catalog visibility: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var job struct {
+		ID        string `json:"ID"`
+		Namespace string `json:"Namespace"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, nomadAllocationResponseMaxBytes)).Decode(&job); err != nil {
+		response.Body.Close()
+		return nil, fmt.Errorf("decode Nomad allocation catalog visibility anchor: %w", err)
+	}
+	response.Body.Close()
+	if job.ID != s.jobID || job.Namespace != s.namespace {
+		return nil, errors.New("nomad allocation catalog visibility anchor does not match configured job")
+	}
+
+	request, err = http.NewRequestWithContext(ctx, http.MethodGet, s.allocationURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		request.Header.Set("X-Nomad-Token", token)
+	}
+	response, err = s.http.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("list Nomad node allocations: %w", err)
 	}
@@ -1592,7 +1780,13 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 	}
 	if session.Consumer != nil {
 		deadline, err := session.Consumer.Validate()
-		return err != nil || !session.Live || !now.Before(deadline)
+		// Live is process-local and cannot establish orphanhood when the A/B
+		// ctld pair shares one durable session journal. The standby observes the
+		// active owner's session as not live even while the task driver keeps its
+		// durable consumer lease renewed. Reconcile early only through a forced
+		// lease-loss/allocation-absence path; periodic scans wait for the durable
+		// consumer lease to expire.
+		return err != nil || !now.Before(deadline)
 	}
 	return now.Sub(session.CreatedAt) >= rootFSSessionAttachGrace
 }

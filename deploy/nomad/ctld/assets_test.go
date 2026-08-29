@@ -239,3 +239,74 @@ func TestShellAssetsParse(t *testing.T) {
 		}
 	}
 }
+
+func TestRolloutWaitsForBothRolesAfterEveryRestart(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "calls")
+	statePath := filepath.Join(root, "state")
+	retryPath := filepath.Join(root, "promoted-primary-retry")
+	writeExecutable := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(bin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	writeExecutable("id", `echo 0
+`)
+	writeExecutable("sleep", `exit 0
+`)
+	writeExecutable("systemctl", `
+echo "restart:$2" >>"$ROLLOUT_LOG"
+case "$2" in
+  sandbox0-ctld@b.service) echo b >"$ROLLOUT_STATE" ;;
+  sandbox0-ctld@a.service) echo a >"$ROLLOUT_STATE" ;;
+  *) exit 1 ;;
+esac
+`)
+	ctld := writeExecutable("ctld", `
+slot=""
+for argument do
+  case "$argument" in
+    -ha-probe-socket=*) slot=${argument#*/ctld-}; slot=${slot%-ha.sock} ;;
+  esac
+done
+state=$(cat "$ROLLOUT_STATE")
+echo "probe:$state:$slot" >>"$ROLLOUT_LOG"
+if [ "$state:$slot" = a:b ] && [ ! -f "$ROLLOUT_RETRY" ]; then
+  : >"$ROLLOUT_RETRY"
+  exit 1
+fi
+`)
+
+	command := exec.Command("sh", "./rollout-node.sh")
+	command.Env = append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"CTLD_BIN="+ctld,
+		"ROLLOUT_LOG="+logPath,
+		"ROLLOUT_STATE="+statePath,
+		"ROLLOUT_RETRY="+retryPath,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("rollout: %v\n%s", err, output)
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "restart:sandbox0-ctld@b.service\n" +
+		"probe:b:a\n" +
+		"probe:b:b\n" +
+		"restart:sandbox0-ctld@a.service\n" +
+		"probe:a:a\n" +
+		"probe:a:b\n" +
+		"probe:a:b\n"
+	if got := string(payload); got != want {
+		t.Fatalf("rollout calls =\n%s\nwant:\n%s", got, want)
+	}
+}

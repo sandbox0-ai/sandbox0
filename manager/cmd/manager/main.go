@@ -41,6 +41,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsobjectstore"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
@@ -634,39 +635,7 @@ func buildRootFSObjectStore(
 	if strings.TrimSpace(objectStorageCfg.Type) == "" && strings.TrimSpace(objectStorageCfg.Bucket) == "" {
 		return nil, nil
 	}
-	store, err := objectstore.Create(objectstore.Config{
-		Type:            objectStorageCfg.Type,
-		Bucket:          objectStorageCfg.Bucket,
-		Region:          objectStorageCfg.Region,
-		Endpoint:        objectStorageCfg.Endpoint,
-		AccessKey:       objectStorageCfg.AccessKey,
-		SecretKey:       objectStorageCfg.SecretKey,
-		SessionToken:    objectStorageCfg.SessionToken,
-		RequestObserver: requestObserver,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return wrapRootFSObjectStoreEncryption(store, objectStorageCfg)
-}
-
-func wrapRootFSObjectStoreEncryption(store objectstore.Store, objectStorageCfg config.RootFSObjectStorageConfig) (objectstore.Store, error) {
-	if store == nil || !objectStorageCfg.ObjectEncryptionEnabled {
-		return store, nil
-	}
-	keyPEM, err := objectstore.LoadEncryptionKey(objectStorageCfg.ObjectEncryptionKeyPath)
-	if err != nil {
-		return nil, err
-	}
-	keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, objectStorageCfg.ObjectEncryptionPassphrase)
-	if err != nil {
-		return nil, err
-	}
-	return objectstore.Encrypting(store, objectstore.EncryptionConfig{
-		Enabled:      true,
-		Algorithm:    objectStorageCfg.ObjectEncryptionAlgo,
-		KeyEncryptor: keyEncryptor,
-	}), nil
+	return rootfsobjectstore.Create(objectStorageCfg, requestObserver)
 }
 
 type rootFSObjectStoreInspector struct {

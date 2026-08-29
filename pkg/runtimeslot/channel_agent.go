@@ -56,6 +56,16 @@ type NodeChannelRunningForkExecutor interface {
 	RunningFork(context.Context, NodeChannelTarget, NodeRunningForkControlRequest) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
+// NodeChannelPlannedRetireExecutor persists the exact planned RootFS
+// retirement marker before any regional allocation stop side effect.
+type NodeChannelPlannedRetireExecutor interface {
+	PlannedRetire(
+		context.Context,
+		NodeChannelTarget,
+		NodePlannedRetireControlRequest,
+	) (NodePlannedRetireControlProof, error)
+}
+
 // NodeChannelPausedRebaseExecutor owns the three-device offline merge and
 // immutable target publication. It is advertised independently.
 type NodeChannelPausedRebaseExecutor interface {
@@ -74,20 +84,21 @@ type NodeChannelNetworkExecutor interface {
 // NodeChannelAgentConfig configures one node-initiated mTLS command stream.
 // Certificates, CA, boot ID, and bearer token are reloaded on reconnect.
 type NodeChannelAgentConfig struct {
-	BaseURL              string
-	CAFile               string
-	ClientCertFile       string
-	ClientKeyFile        string
-	TokenFile            string
-	PeerURISAN           string
-	ClusterID            string
-	NodeID               string
-	NodeUID              string
-	NodeBootIDFile       string
-	Executor             NodeChannelExecutor
-	RunningForkExecutor  NodeChannelRunningForkExecutor
-	PausedRebaseExecutor NodeChannelPausedRebaseExecutor
-	NetworkExecutor      NodeChannelNetworkExecutor
+	BaseURL               string
+	CAFile                string
+	ClientCertFile        string
+	ClientKeyFile         string
+	TokenFile             string
+	PeerURISAN            string
+	ClusterID             string
+	NodeID                string
+	NodeUID               string
+	NodeBootIDFile        string
+	Executor              NodeChannelExecutor
+	PlannedRetireExecutor NodeChannelPlannedRetireExecutor
+	RunningForkExecutor   NodeChannelRunningForkExecutor
+	PausedRebaseExecutor  NodeChannelPausedRebaseExecutor
+	NetworkExecutor       NodeChannelNetworkExecutor
 
 	OperationTimeout    time.Duration
 	RunningForkTimeout  time.Duration
@@ -294,6 +305,9 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	capabilities := []NodeChannelCommandKind{
 		NodeChannelCommandClaim, NodeChannelCommandCommandReady,
 	}
+	if a.config.PlannedRetireExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandPlannedRetire)
+	}
 	if a.config.RunningForkExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandRunningFork)
 	}
@@ -420,6 +434,18 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		if err == nil {
 			result.ControlResponse = &response
 		}
+	case NodeChannelCommandPlannedRetire:
+		if a.config.PlannedRetireExecutor == nil {
+			err = fmt.Errorf("node planned-retire executor is unavailable: %w", errdefs.ErrFailedPrecondition)
+			break
+		}
+		var proof NodePlannedRetireControlProof
+		proof, err = a.config.PlannedRetireExecutor.PlannedRetire(
+			operationCtx, command.Target, *command.PlannedRetire,
+		)
+		if err == nil {
+			result.PlannedRetireProof = &proof
+		}
 	case NodeChannelCommandRunningFork:
 		if a.config.RunningForkExecutor == nil {
 			err = fmt.Errorf("node running-fork executor is unavailable: %w", errdefs.ErrFailedPrecondition)
@@ -481,6 +507,7 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 			err = fmt.Errorf("node executor returned an invalid result: %w: %w", validationErr, errdefs.ErrUnavailable)
 			result.NetworkPolicyToken = nil
 			result.ControlResponse = nil
+			result.PlannedRetireProof = nil
 			result.RunningFork = nil
 			result.PausedRebase = nil
 			result.PausedRebaseAck = nil

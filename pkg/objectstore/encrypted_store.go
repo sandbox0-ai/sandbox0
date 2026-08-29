@@ -35,8 +35,9 @@ type EncryptionConfig struct {
 }
 
 type encryptedStore struct {
-	store Store
-	cfg   EncryptionConfig
+	store               Store
+	cfg                 EncryptionConfig
+	allowPlaintextReads bool
 }
 
 type encryptedObjectHeader struct {
@@ -55,6 +56,17 @@ func Encrypting(store Store, cfg EncryptionConfig) Store {
 		return store
 	}
 	return &encryptedStore{store: store, cfg: cfg}
+}
+
+// EncryptingLegacyReadCompatible preserves encrypted writes but also reads
+// objects created before envelope encryption was enabled. It exists only for
+// bounded migration readers that independently verify plaintext digests; new
+// runtime readers must use Encrypting and reject plaintext objects.
+func EncryptingLegacyReadCompatible(store Store, cfg EncryptionConfig) Store {
+	if store == nil || !cfg.enabled() {
+		return store
+	}
+	return &encryptedStore{store: store, cfg: cfg, allowPlaintextReads: true}
 }
 
 func (c EncryptionConfig) enabled() bool {
@@ -99,6 +111,9 @@ func (c EncryptionConfig) chunkSize() int64 {
 func (s *encryptedStore) String() string {
 	if s == nil || s.store == nil {
 		return "encrypted(<nil>)"
+	}
+	if s.allowPlaintextReads {
+		return "legacy-read-compatible-encrypted(" + s.store.String() + ")"
 	}
 	return "encrypted(" + s.store.String() + ")"
 }
@@ -305,6 +320,9 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 	buffered := bufio.NewReader(in)
 	magic, err := buffered.Peek(len(encryptedObjectMagic))
 	if err != nil || string(magic) != encryptedObjectMagic {
+		if s.allowPlaintextReads {
+			return copyPlaintextObjectRange(out, buffered, off, limit)
+		}
 		return fmt.Errorf("object %q is missing the required encrypted-object header", key)
 	}
 	if _, err := buffered.Discard(len(encryptedObjectMagic)); err != nil {
@@ -368,6 +386,27 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 			return nil
 		}
 	}
+}
+
+func copyPlaintextObjectRange(out io.Writer, in io.Reader, off, limit int64) error {
+	if off > 0 {
+		copied, err := io.CopyN(io.Discard, in, off)
+		if err != nil {
+			if (err == io.EOF || err == io.ErrUnexpectedEOF) && copied < off {
+				return nil
+			}
+			return err
+		}
+	}
+	if limit < 0 {
+		_, err := io.Copy(out, in)
+		return err
+	}
+	_, err := io.CopyN(out, in, limit)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return nil
+	}
+	return err
 }
 
 func writeEncryptedObjectHeader(out io.Writer, header encryptedObjectHeader) error {

@@ -71,6 +71,59 @@ func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.
 	require.Nil(t, active)
 }
 
+func TestRequestNomadSandboxPauseRecoversExactOrphanedSlotIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "orphaned-retry")
+	first, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	orphanProof := bytes.Repeat([]byte{0xd1}, sha256.Size)
+	orphaned, err := fixture.store.MarkRuntimeSlotAllocationMissing(
+		fixture.ctx,
+		&MarkRuntimeSlotAllocationMissingRequest{
+			SlotID: first.SlotID, AllocationID: first.AllocationID,
+			NodeUID: first.NodeUID, NodeBootID: first.NodeBootID,
+			ObservationDigest: orphanProof,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateOrphaned, orphaned.State)
+
+	retry, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceAuto,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.OperationID, retry.OperationID)
+	require.Equal(t, RuntimeSlotStateOrphaned, retry.SlotState)
+	require.Equal(t, SandboxLifecycleSourceManual, retry.Source)
+	require.Equal(t, first.WriterGrantID, retry.WriterGrantID)
+}
+
+func TestRequestNomadSandboxPauseRecoversExactQuiescingSlotIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "quiescing-retry")
+	first, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	quiescing, err := fixture.store.BeginRuntimeSlotQuiesce(
+		fixture.ctx,
+		&BeginRuntimeSlotQuiesceRequest{
+			SlotID: first.SlotID, OperationID: first.ClaimOperationID, ClaimID: first.ClaimID,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+
+	retry, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceAuto,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.OperationID, retry.OperationID)
+	require.Equal(t, RuntimeSlotStateQuiescing, retry.SlotState)
+	require.Equal(t, SandboxLifecycleSourceManual, retry.Source)
+	require.Equal(t, first.WriterGrantID, retry.WriterGrantID)
+}
+
 func TestRequestNomadSandboxTTLPauseRechecksDeadlinesUnderLockIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "ttl-recheck")
 	_, err := fixture.pool.Exec(fixture.ctx, `
@@ -163,6 +216,64 @@ func TestRequestNomadSandboxPauseReturnsExactSlotAfterCommittedPublishIntegratio
 	require.NoError(t, err)
 	require.True(t, retry.AlreadyPaused)
 	require.Equal(t, RuntimeSlotStateQuiescing, retry.SlotState)
+}
+
+func TestBeginRootFSWriterRetireAllowsExpiredLeaseForExactPlannedPauseIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "expired-exact-retire")
+	candidate, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE grant_id = $1
+	`, fixture.issue.GrantID)
+	require.NoError(t, err)
+
+	fixture.publishPlannedPause(t, candidate.OperationID)
+	retired, err := fixture.store.GetRootFSWriterGrant(fixture.ctx, fixture.issue.GrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
+	require.Equal(t, candidate.OperationID, retired.RetireOperationID)
+	require.Equal(t, RootFSWriterRetireKindPlannedPublish, retired.RetireKind)
+	paused, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStatePaused, paused.DesiredState)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+}
+
+func TestBeginRootFSWriterRetireRejectsExpiredLeaseForAnotherRuntimeIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "expired-mismatched-retire")
+	candidate, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE grant_id = $1
+	`, fixture.issue.GrantID)
+	require.NoError(t, err)
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = 'publishing', from_runtime_id = 'another-allocation'
+		WHERE txn_id = $1
+	`, candidate.OperationID)
+	require.NoError(t, err)
+
+	_, err = fixture.store.BeginRootFSWriterRetire(
+		fixture.ctx,
+		&BeginRootFSWriterRetireRequest{
+			GrantID: fixture.issue.GrantID, WriterEpoch: fixture.writerEpoch,
+			OperationID: candidate.OperationID, BindingVersion: RootFSWriterBindingVersion,
+			BindingDigest:           fixture.issue.BindingDigest,
+			ExpectedOldGenerationID: fixture.initial.ID,
+		},
+	)
+	require.ErrorIs(t, err, ErrRootFSWriterLeaseExpired)
 }
 
 type nomadPauseStoreFixture struct {

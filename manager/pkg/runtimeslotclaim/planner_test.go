@@ -270,13 +270,13 @@ func TestPlannerRetriesProcdListenRaceInsideTrustedSLOBudget(t *testing.T) {
 	}
 }
 
-func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
+func TestPlannerBoundsPersistentProcdProbeFailureByClaimLease(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.prober.error = errors.New("connect: connection refused")
 	planner, err := New(Config{
 		Store: fixture.store, Network: fixture.network, Node: fixture.node,
 		Prober: fixture.prober, TokenGenerator: fixture.tokens, Observer: fixture.observer,
-		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: 20 * time.Second,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: time.Second,
 		SLO: 30 * time.Millisecond,
 	})
 	if err != nil {
@@ -284,10 +284,10 @@ func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
 	}
 	started := time.Now()
 	_, err = planner.Claim(context.Background(), fixture.request)
-	if err == nil || !strings.Contains(err.Error(), "command-ready probe deadline exceeded") {
+	if err == nil || !strings.Contains(err.Error(), "command-ready probe lease deadline exceeded") {
 		t.Fatalf("Claim() error = %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("persistent probe failure took %s", elapsed)
 	}
 	fixture.prober.mu.Lock()
@@ -295,6 +295,31 @@ func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
 	fixture.prober.mu.Unlock()
 	if attempts < 2 || len(fixture.observer.observations) != 1 || fixture.observer.observations[0].Succeeded {
 		t.Fatalf("attempts = %d, observations = %+v", attempts, fixture.observer.observations)
+	}
+}
+
+func TestPlannerCommitsLateProcdReadinessAsSLOMiss(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.prober.errors = []error{errors.New("connect: connection refused")}
+	planner, err := New(Config{
+		Store: fixture.store, Network: fixture.network, Node: fixture.node,
+		Prober: fixture.prober, TokenGenerator: fixture.tokens, Observer: fixture.observer,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: time.Second,
+		SLO: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.prober.mu.Lock()
+	attempts := len(fixture.prober.addresses)
+	fixture.prober.mu.Unlock()
+	if attempts != 2 || result.WithinSLO || len(fixture.observer.observations) != 1 ||
+		!fixture.observer.observations[0].Succeeded || fixture.observer.observations[0].WithinSLO {
+		t.Fatalf("attempts = %d, result = %+v, observations = %+v", attempts, result, fixture.observer.observations)
 	}
 }
 
@@ -476,6 +501,40 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 		if phase.Phase != wantPhases[index] || !phase.Succeeded || phase.Duration < 0 {
 			t.Fatalf("phase %d = %+v, want successful %s", index, phase, wantPhases[index])
 		}
+	}
+}
+
+func TestPlannerAdvancesPastTerminalWriterEpoch(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.filesystem.WriterEpoch = fixture.store.generation.WriterEpoch + 1
+
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	issues := append([]*sandboxstore.IssueRootFSWriterGrantRequest(nil), fixture.store.issues...)
+	fixture.store.mu.Unlock()
+	if len(issues) != 1 || issues[0].ExpectedWriterEpoch != 8 {
+		t.Fatalf("writer issue requests = %+v", issues)
+	}
+	if result.Stage.Identity.WriterEpoch != 9 {
+		t.Fatalf("writer epoch = %d, want 9", result.Stage.Identity.WriterEpoch)
+	}
+}
+
+func TestPlannerRejectsGenerationWriterEpochAheadOfFilesystem(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.filesystem.WriterEpoch = fixture.store.generation.WriterEpoch - 1
+
+	_, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err == nil || !strings.Contains(err.Error(), "generation writer epoch exceeds filesystem writer epoch") {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	defer fixture.store.mu.Unlock()
+	if len(fixture.store.acquires) != 0 || len(fixture.store.issues) != 0 {
+		t.Fatalf("store calls = acquire %d issue %d", len(fixture.store.acquires), len(fixture.store.issues))
 	}
 }
 

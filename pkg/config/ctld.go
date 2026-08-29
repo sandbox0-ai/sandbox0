@@ -73,6 +73,8 @@ type CtldNomadRuntimeConfig struct {
 
 	NomadAddress   string `yaml:"nomad_address" json:"-"`
 	NomadNodeID    string `yaml:"nomad_node_id" json:"-"`
+	NomadNamespace string `yaml:"nomad_namespace" json:"-"`
+	NomadJobID     string `yaml:"nomad_job_id" json:"-"`
 	NomadTokenFile string `yaml:"nomad_token_file" json:"-"`
 	NomadCAFile    string `yaml:"nomad_ca_file" json:"-"`
 	NomadCertFile  string `yaml:"nomad_cert_file" json:"-"`

@@ -61,9 +61,16 @@ type CompleteNomadSandboxResumeRequest struct {
 }
 
 // NomadSandboxResumeOperationID derives the stable lifecycle and slot-claim
-// identity for one paused runtime generation and RootFS head.
-func NomadSandboxResumeOperationID(sandboxID string, fromGeneration int64, sourceGenerationID string) string {
-	payload := fmt.Sprintf("%s\x00%d\x00%s", sandboxID, fromGeneration, sourceGenerationID)
+// identity for one paused runtime generation, RootFS head, and lifecycle
+// attempt. Including the epoch lets a failed attempt be terminally aborted
+// without colliding with a later resume of the unchanged paused head.
+func NomadSandboxResumeOperationID(
+	sandboxID string,
+	fromGeneration int64,
+	sourceGenerationID string,
+	lifecycleEpoch int64,
+) string {
+	payload := fmt.Sprintf("%s\x00%d\x00%s\x00%d", sandboxID, fromGeneration, sourceGenerationID, lifecycleEpoch)
 	digest := sha256.Sum256([]byte(payload))
 	return "nomad-resume-" + hex.EncodeToString(digest[:16])
 }
@@ -147,7 +154,9 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if err != nil {
 		return nil, false, err
 	}
-	operationID := NomadSandboxResumeOperationID(record.ID, record.RuntimeGeneration, sourceGenerationID)
+	operationID := NomadSandboxResumeOperationID(
+		record.ID, record.RuntimeGeneration, sourceGenerationID, activeLifecycle.Epoch,
+	)
 	if !nomadResumeLifecycleMatches(activeLifecycle, record, operationID, sourceGenerationID, false) {
 		return nil, false, fmt.Errorf("%w: lifecycle %s owns the paused sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
 	}
@@ -234,8 +243,10 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 	if err != nil {
 		return nil, err
 	}
-	operationID := NomadSandboxResumeOperationID(record.ID, record.RuntimeGeneration, sourceGenerationID)
 	if activeLifecycle != nil {
+		operationID := NomadSandboxResumeOperationID(
+			record.ID, record.RuntimeGeneration, sourceGenerationID, activeLifecycle.Epoch,
+		)
 		if !nomadResumeLifecycleMatches(activeLifecycle, record, operationID, sourceGenerationID, false) {
 			return nil, fmt.Errorf("%w: lifecycle %s owns the paused sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
 		}
@@ -250,6 +261,9 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 	if err := reserveNomadResumeQuota(ctx, tx, record.TeamID, normalized.ActiveSandboxLimit); err != nil {
 		return nil, err
 	}
+	operationID := NomadSandboxResumeOperationID(
+		record.ID, record.RuntimeGeneration, sourceGenerationID, record.LifecycleEpoch+1,
+	)
 	lifecycle := &SandboxLifecycleTxn{
 		ID: operationID, SandboxID: record.ID, Kind: SandboxLifecycleKindResume,
 		Phase: SandboxLifecyclePhasePreparing, Source: SandboxLifecycleSourceManual, Cancelable: false,
@@ -263,6 +277,89 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		return nil, fmt.Errorf("commit Nomad sandbox resume request: %w", err)
 	}
 	return nomadSandboxResumeCandidate(record, lifecycle, filesystemID, sourceGenerationID), nil
+}
+
+// AbortNomadSandboxResume terminally closes only the exact uncommitted resume
+// attempt. It deliberately leaves physical slot and writer cleanup to the
+// terminal reconciler, which must prove node and cgroup absence before it can
+// release the resource lease. A concurrent successful commit always wins.
+func (s *PGSandboxStore) AbortNomadSandboxResume(
+	ctx context.Context,
+	sandboxID string,
+	operationID string,
+	reason string,
+) (bool, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	operationID = strings.TrimSpace(operationID)
+	reason = strings.TrimSpace(reason)
+	if sandboxID == "" || operationID == "" || len(sandboxID) > 512 || len(operationID) > 512 {
+		return false, fmt.Errorf("canonical sandbox and resume operation identities are required")
+	}
+	if reason == "" {
+		return false, fmt.Errorf("resume abort reason is required")
+	}
+	if len(reason) > 2_048 {
+		return false, fmt.Errorf("resume abort reason exceeds 2048 bytes")
+	}
+	if s == nil || s.pool == nil {
+		return false, fmt.Errorf("sandbox store is not configured")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin Nomad sandbox resume abort tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
+	if err != nil {
+		return false, err
+	}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2
+		FOR UPDATE
+	`, operationID, sandboxID))
+	if err == nil && lifecycle == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit absent Nomad resume abort retry: %w", err)
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock Nomad resume lifecycle for abort: %w", err)
+	}
+	if lifecycle.Phase == SandboxLifecyclePhaseCommitted || lifecycle.Phase == SandboxLifecyclePhaseAborted {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit terminal Nomad resume abort retry: %w", err)
+		}
+		return false, nil
+	}
+	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	if err != nil {
+		return false, err
+	}
+	if filesystemID == "" || !nomadResumeLifecycleMatches(
+		lifecycle, record, operationID, sourceGenerationID, false,
+	) {
+		return false, fmt.Errorf("%w: resume lifecycle changed before abort", ErrNomadSandboxResumeConflict)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
+		WHERE txn_id = $1
+			AND sandbox_id = $4
+			AND phase IN ($5, $6, $7, $8)
+	`, operationID, SandboxLifecyclePhaseAborted, reason, sandboxID,
+		SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
+		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting)
+	if err != nil {
+		return false, fmt.Errorf("abort Nomad sandbox resume: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, fmt.Errorf("%w: resume lifecycle changed during abort", ErrNomadSandboxResumeConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit Nomad sandbox resume abort: %w", err)
+	}
+	return true, nil
 }
 
 // CompleteNomadSandboxResume atomically makes an exact command-ready slot the
@@ -588,7 +685,11 @@ func nomadResumeLifecycleMatches(
 	if lifecycle == nil || record == nil || lifecycle.ID != operationID || lifecycle.SandboxID != record.ID ||
 		lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedGenerationID != sourceGenerationID ||
-		lifecycle.PreparedGenerationID != "" || lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
+		lifecycle.PreparedGenerationID != "" || lifecycle.ToGeneration != lifecycle.FromGeneration+1 ||
+		lifecycle.Epoch <= 0 || lifecycle.Epoch != record.LifecycleEpoch ||
+		operationID != NomadSandboxResumeOperationID(
+			record.ID, lifecycle.FromGeneration, sourceGenerationID, lifecycle.Epoch,
+		) {
 		return false
 	}
 	if committed {

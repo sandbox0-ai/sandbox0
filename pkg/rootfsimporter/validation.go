@@ -108,6 +108,72 @@ func (result BuildResult) Validate() error {
 	return nil
 }
 
+// Validate verifies complete, canonical user-state generation output without
+// granting it the Base-artifact attestation shape.
+func (result MaterializedGenerationBuildResult) Validate() error {
+	if err := result.Descriptor.Validate(); err != nil {
+		return fmt.Errorf("generated RootFS descriptor: %w", err)
+	}
+	encoded, err := rootfsblock.EncodeDescriptor(result.Descriptor)
+	if err != nil || !bytes.Equal(encoded, result.DescriptorBytes) {
+		return fmt.Errorf("generated RootFS descriptor bytes do not match the generation result")
+	}
+	if result.Descriptor.CompositeTail != nil ||
+		result.DescriptorDigest != digest.FromBytes(result.DescriptorBytes) ||
+		result.CurrentBlockHead.String() != result.Descriptor.MappingRoot.RootDigest ||
+		result.LogicalSizeBytes != result.Descriptor.LogicalSizeBytes {
+		return fmt.Errorf("generated RootFS generation digests do not match the materialized descriptor")
+	}
+	for name, value := range map[string]digest.Digest{
+		"source": result.SourceOCIDigest, "procd": result.ProcdDigest,
+		"mutation": result.MutationDigest, "descriptor": result.DescriptorDigest,
+		"current block head": result.CurrentBlockHead,
+	} {
+		if err := validateArtifactSHA256Digest(value); err != nil {
+			return fmt.Errorf("generated RootFS %s digest: %w", name, err)
+		}
+	}
+	refDigest, err := pinnedSourceDigest(result.SourceOCIRef)
+	if err != nil || refDigest != result.SourceOCIDigest {
+		return fmt.Errorf("generated RootFS source reference does not bind its OCI digest")
+	}
+	if result.Platform.OS != "linux" || !validPlatformPart(result.Platform.Architecture) ||
+		(result.Platform.Variant != "" && !validPlatformPart(result.Platform.Variant)) ||
+		result.Platform.OSVersion != "" || len(result.Platform.OSFeatures) != 0 {
+		return fmt.Errorf("generated RootFS platform must be canonical Linux")
+	}
+	if result.Objects <= 0 || result.Bytes <= 0 || len(result.References) == 0 {
+		return fmt.Errorf("generated RootFS generation has invalid counters or no immutable object inventory")
+	}
+	previous := ""
+	var referencedBytes int64
+	for _, reference := range result.References {
+		if reference.Key <= previous {
+			return fmt.Errorf("generated RootFS object inventory is not canonical")
+		}
+		if err := rootfsblock.ValidateObjectReference(reference); err != nil {
+			return err
+		}
+		checksum, _ := digest.Parse(reference.Checksum)
+		pathKind := "maps"
+		if reference.Kind == rootfsblock.ObjectKindDataPack {
+			pathKind = "packs"
+		}
+		if !strings.HasSuffix(reference.Key, "/"+pathKind+"/sha256/"+checksum.Encoded()) {
+			return fmt.Errorf("generated RootFS object %q does not bind its kind and checksum", reference.Key)
+		}
+		if referencedBytes > result.Bytes-reference.Size {
+			return fmt.Errorf("generated RootFS object inventory exceeds published bytes")
+		}
+		referencedBytes += reference.Size
+		previous = reference.Key
+	}
+	if result.Objects < len(result.References) {
+		return fmt.Errorf("generated RootFS object inventory exceeds publication count")
+	}
+	return nil
+}
+
 func pinnedSourceDigest(reference string) (digest.Digest, error) {
 	if reference == "" || reference != strings.TrimSpace(reference) {
 		return "", fmt.Errorf("OCI image reference must be canonical")

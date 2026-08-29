@@ -11,10 +11,56 @@ import (
 )
 
 func TestNomadSandboxResumeOperationIDIsDeterministic(t *testing.T) {
-	first := NomadSandboxResumeOperationID("sandbox-1", 7, "generation-1")
-	require.Equal(t, first, NomadSandboxResumeOperationID("sandbox-1", 7, "generation-1"))
-	require.NotEqual(t, first, NomadSandboxResumeOperationID("sandbox-1", 8, "generation-1"))
-	require.NotEqual(t, first, NomadSandboxResumeOperationID("sandbox-1", 7, "generation-2"))
+	first := NomadSandboxResumeOperationID("sandbox-1", 7, "generation-1", 4)
+	require.Equal(t, first, NomadSandboxResumeOperationID("sandbox-1", 7, "generation-1", 4))
+	require.NotEqual(t, first, NomadSandboxResumeOperationID("sandbox-1", 8, "generation-1", 4))
+	require.NotEqual(t, first, NomadSandboxResumeOperationID("sandbox-1", 7, "generation-2", 4))
+	require.NotEqual(t, first, NomadSandboxResumeOperationID("sandbox-1", 7, "generation-1", 5))
+}
+
+func TestNomadSandboxResumeAbortIsExactAndAllowsNewAttemptIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "resume-abort")
+	terminalizeNomadPauseFixture(t, fixture)
+	limit := int64(10)
+	first, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot", ActiveSandboxLimit: &limit,
+	})
+	require.NoError(t, err)
+
+	aborted, err := fixture.store.AbortNomadSandboxResume(
+		fixture.ctx, fixture.sandboxID, "nomad-resume-not-the-owner", "wrong operation",
+	)
+	require.NoError(t, err)
+	require.False(t, aborted)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.Equal(t, first.OperationID, active.ID)
+
+	aborted, err = fixture.store.AbortNomadSandboxResume(
+		fixture.ctx, fixture.sandboxID, first.OperationID, "planner did not reach command-ready",
+	)
+	require.NoError(t, err)
+	require.True(t, aborted)
+	aborted, err = fixture.store.AbortNomadSandboxResume(
+		fixture.ctx, fixture.sandboxID, first.OperationID, "idempotent retry",
+	)
+	require.NoError(t, err)
+	require.False(t, aborted)
+	active, err = fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+	closed, err := fixture.store.GetLifecycleTxn(fixture.ctx, first.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxLifecyclePhaseAborted, closed.Phase)
+	require.Equal(t, "planner did not reach command-ready", closed.Error)
+
+	second, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot", ActiveSandboxLimit: &limit,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first.OperationID, second.OperationID)
+	require.Greater(t, second.Record.LifecycleEpoch+1, first.Record.LifecycleEpoch+1)
 }
 
 func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *testing.T) {
@@ -166,6 +212,23 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, alreadyActiveRetry.AlreadyActive)
+	pendingRecovery, err := fixture.store.IsRuntimeRecoveryPending(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.False(t, pendingRecovery)
+
+	resumedPause, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	require.Equal(t, claimed.ID, resumedPause.SlotID)
+	require.Equal(t, requested.OperationID, resumedPause.ClaimOperationID,
+		"pause must fence the current resumed slot operation")
+	var admissionOperationID string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT operation_id FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
+	`, fixture.sandboxID).Scan(&admissionOperationID))
+	require.NotEqual(t, admissionOperationID, resumedPause.ClaimOperationID,
+		"the logical admission workflow remains separate from runtime incarnations")
 	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
 		fixture.ctx, fixture.sandboxID, "delete resumed sandbox",
 	)

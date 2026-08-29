@@ -125,6 +125,20 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateActive, active.State)
 	require.Equal(t, "http://192.0.2.2:49983", active.ProcdAddress)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE slot_id = $1
+	`, claimed.ID)
+	require.NoError(t, err)
+	renewedActiveWriter, err := store.RenewRootFSWriterGrant(ctx, &RenewRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID,
+	}, RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second})
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, renewedActiveWriter.State,
+		"claim availability no longer fences a writer after command readiness")
 	projected, err := store.GetRuntimeSlotBySandboxID(ctx, acquire.SandboxID)
 	require.NoError(t, err)
 	require.Equal(t, active.ID, projected.ID)
@@ -394,6 +408,42 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 	require.Equal(t, int64(2<<30), activeMemory)
 }
 
+func TestRuntimeNodeCapacityExpiryPreservesExactBootRowIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	registration := runtimeSlotTestRegistration("unused-expiry", "unused-expiry")
+	request := &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: registration.ClusterID, NodeID: registration.NodeID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		CPUMillicores: 2_000, MemoryBytes: 2 << 30,
+		CPUSetCPUs: "0-1", CPUSetMems: "0", TTL: time.Minute,
+	}
+	registered, err := store.RegisterRuntimeNodeCapacity(ctx, request)
+	require.NoError(t, err)
+	require.True(t, registered.HeartbeatExpiresAt.After(registered.AuthorityObservedAt))
+
+	err = store.ExpireRuntimeNodeCapacity(ctx, &ExpireRuntimeNodeCapacityRequest{
+		ClusterID: request.ClusterID, NodeID: request.NodeID,
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+	})
+	require.NoError(t, err)
+	expired, err := store.GetRuntimeNodeCapacity(
+		ctx, request.ClusterID, request.NodeID, request.NodeUID, request.NodeBootID,
+	)
+	require.NoError(t, err)
+	require.False(t, expired.HeartbeatExpiresAt.After(expired.AuthorityObservedAt))
+	require.Equal(t, registered.Revision+1, expired.Revision)
+	require.Equal(t, registered.CPUMillicores, expired.CPUMillicores)
+	require.Equal(t, registered.MemoryBytes, expired.MemoryBytes)
+
+	err = store.ExpireRuntimeNodeCapacity(ctx, &ExpireRuntimeNodeCapacityRequest{
+		ClusterID: request.ClusterID, NodeID: "missing-node",
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+	})
+	require.NoError(t, err)
+}
+
 func TestRuntimeSlotUnclaimedPurgeBecomesTerminalIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
@@ -511,12 +561,58 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
+	started, err := store.StartRuntimeSlot(ctx, &StartRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		LaunchAttempt: "launch-reconcile-writer", RunscContainerID: "runsc-reconcile-writer",
+		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x7e}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
+	})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateStarting, started.State)
+	renewRequest := &RenewRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID,
+	}
+	renewPolicy := RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second}
+	renewedBeforeClaimExpiry, err := store.RenewRootFSWriterGrant(ctx, renewRequest, renewPolicy)
+	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		UPDATE manager.runtime_slots
 		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
 		WHERE slot_id = $1
 	`, claimed.ID)
 	require.NoError(t, err)
+	_, err = store.HeartbeatRuntimeSlot(ctx, &HeartbeatRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID, TTL: time.Minute,
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	_, err = store.RenewRootFSWriterGrant(ctx, renewRequest, renewPolicy)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantInvalidState)
+	batchRenewal, err := store.RenewRootFSWriterGrants(ctx, []*RenewRootFSWriterGrantRequest{renewRequest}, renewPolicy)
+	require.NoError(t, err)
+	require.Len(t, batchRenewal, 1)
+	require.ErrorIs(t, batchRenewal[0].Err, ErrRootFSWriterGrantInvalidState)
+	require.Nil(t, batchRenewal[0].Grant)
+	writerAfterRejectedRenewal, err := store.GetRootFSWriterGrant(ctx, issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, renewedBeforeClaimExpiry.LeaseExpiresAt, writerAfterRejectedRenewal.LeaseExpiresAt,
+		"an abandoned pre-command-ready claim must not extend writer authority")
+	_, err = store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		ProcdInstanceID: "late-procd", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: bytes.Repeat([]byte{0x7f}, 32),
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, claimed.ID, candidates[0].ID)
 
 	current, err := store.GetRuntimeSlot(ctx, claimed.ID)
 	require.NoError(t, err)
@@ -525,7 +621,7 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	require.ErrorIs(t, err, ErrRuntimeSlotNotDue)
 	stillClaimed, err := store.GetRuntimeSlot(ctx, claimed.ID)
 	require.NoError(t, err)
-	require.Equal(t, RuntimeSlotStateClaiming, stillClaimed.State)
+	require.Equal(t, RuntimeSlotStateStarting, stillClaimed.State)
 	require.Equal(t, current.Revision, stillClaimed.Revision)
 
 	_, err = pool.Exec(ctx, `

@@ -5,7 +5,7 @@ wait_ready() {
   slot=$1
   deadline=$(( $(date +%s) + 120 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if /usr/local/bin/ctld \
+    if "${CTLD_BIN:-/usr/local/bin/ctld}" \
       -ha-probe=ready \
       -ha-probe-socket="/run/sandbox0/ctld-${slot}-ha.sock" \
       -http-addr="${SANDBOX0_CTLD_HTTP_ADDR:-:8095}" >/dev/null 2>&1; then
@@ -18,7 +18,12 @@ wait_ready() {
 }
 
 [ "$(id -u)" -eq 0 ] || { echo "rollout must run as root" >&2; exit 1; }
-for slot in b a; do
-  systemctl restart "sandbox0-ctld@${slot}.service"
-  wait_ready "$slot"
+for restarted_slot in b a; do
+  systemctl restart "sandbox0-ctld@${restarted_slot}.service"
+  # Restarting the old primary promotes its peer. The restarted standby may
+  # synchronize before that promoted primary has reopened the privileged
+  # runtime, so readiness is complete only after both slots are role-ready.
+  for observed_slot in a b; do
+    wait_ready "$observed_slot"
+  done
 done

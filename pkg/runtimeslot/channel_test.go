@@ -186,6 +186,47 @@ func TestNodeChannelRunningForkBindsExactWriterAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestNodeChannelPlannedRetireBindsExactSlotAndWriter(t *testing.T) {
+	stage := testNodeChannelClaim().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := NodePlannedRetireControlRequest{
+		OperationID: rootfshandoff.PlannedRetireOperationID(
+			stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+		),
+		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce,
+		AllocationID: stage.Identity.AllocationID, WriterGrantID: stage.Identity.WriterGrantID,
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]),
+	}
+	command, err := NewNodeChannelPlannedRetireCommand(testNodeChannelTarget(false), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := NewNodePlannedRetireControlProof(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := NodeChannelResult{
+		Version: NodeChannelVersion, RequestID: command.RequestID,
+		Kind: command.Kind, PlannedRetireProof: &proof,
+	}
+	if err := result.ValidateFor(command); err != nil {
+		t.Fatal(err)
+	}
+
+	result.PlannedRetireProof.WriterGrantID = "another-grant"
+	if err := result.ValidateFor(command); err == nil {
+		t.Fatal("planned-retire proof for another writer was accepted")
+	}
+	request.AllocationID = "another-allocation"
+	if _, err := NewNodeChannelPlannedRetireCommand(testNodeChannelTarget(false), request); err == nil {
+		t.Fatal("cross-allocation planned retirement was accepted")
+	}
+}
+
 func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	hello := testNodeChannelHello()
 	if err := hello.Validate(); err != nil {
@@ -222,6 +263,17 @@ func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	}
 	if err := hello.Validate(); err != nil || !hello.Supports(NodeChannelCommandRunningFork) {
 		t.Fatalf("running-fork-capable hello error = %v", err)
+	}
+	hello.Capabilities = []NodeChannelCommandKind{
+		NodeChannelCommandClaim, NodeChannelCommandCommandReady,
+		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandCleanup,
+	}
+	if err := hello.Validate(); err != nil || !hello.Supports(NodeChannelCommandPlannedRetire) {
+		t.Fatalf("planned-retire-capable hello error = %v", err)
+	}
+	hello.Capabilities[2], hello.Capabilities[3] = hello.Capabilities[3], hello.Capabilities[2]
+	if err := hello.Validate(); err == nil {
+		t.Fatal("misordered planned-retire capability was accepted")
 	}
 }
 

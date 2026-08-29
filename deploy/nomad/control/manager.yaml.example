@@ -47,7 +47,7 @@ node_authority:
   claim:
     class_catalog_file: /etc/sandbox0/node-authority/claim/runtime-classes.json
     writer_token_key_file: /etc/sandbox0/node-authority/claim/writer-token.key
-    claim_ttl: 15s
+    claim_ttl: 60s
     slo: 1s
   terminal:
     enabled: true

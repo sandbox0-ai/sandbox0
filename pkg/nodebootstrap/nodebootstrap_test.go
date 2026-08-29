@@ -62,6 +62,7 @@ func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {
 		"SANDBOX0_NODE_NAME=s0-i-123",
 		"SANDBOX0_NOMAD_NODE_ID=11111111-1111-1111-1111-111111111111",
 		"SANDBOX0_NODE_UID=ecs/us-east-1/i-123",
+		"SANDBOX0_NOMAD_ADDRESS=https://10.0.1.9:4646",
 		"SANDBOX0_REGION_ID=ali-ue1",
 		"SANDBOX0_CLUSTER_ID=nomad",
 		"SANDBOX0_AUTHORITY_URL=https://authority.ali-ue1.internal:8421",
@@ -77,7 +78,11 @@ func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {
 	defer staged.close()
 	require.NoError(t, validateRuntimeConfigIdentity(staged,
 		"s0-i-123", "11111111-1111-1111-1111-111111111111", "ecs/us-east-1/i-123",
+		"10.0.1.9",
 		"ali-ue1", "nomad", "172.27.0.0/26"))
+	require.ErrorContains(t, validateRuntimeConfigIdentity(staged,
+		"s0-i-123", "11111111-1111-1111-1111-111111111111", "ecs/us-east-1/i-123",
+		"10.0.1.10", "ali-ue1", "nomad", "172.27.0.0/26"), "SANDBOX0_NOMAD_ADDRESS")
 }
 
 func TestRemoveRuntimeAuthorityHostAliasesKeepsDNSAuthoritative(t *testing.T) {

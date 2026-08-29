@@ -170,7 +170,7 @@ func (s *stagedRuntimeConfig) install() error {
 // staging and installation path as part of Bootstrapper.Initial.
 func InstallRenderedRuntimeConfig(
 	payload []byte,
-	nodeName, nodeID, nodeUID, regionID, clusterID, allocationCIDR string,
+	nodeName, nodeID, nodeUID, privateIP, regionID, clusterID, allocationCIDR string,
 ) error {
 	if os.Geteuid() != 0 {
 		return errors.New("rendered node runtime config installation requires root")
@@ -180,7 +180,7 @@ func InstallRenderedRuntimeConfig(
 		return err
 	}
 	defer staged.close()
-	if err := validateRuntimeConfigIdentity(staged, nodeName, nodeID, nodeUID,
+	if err := validateRuntimeConfigIdentity(staged, nodeName, nodeID, nodeUID, privateIP,
 		regionID, clusterID, allocationCIDR); err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func InstallRenderedRuntimeConfig(
 
 func validateRuntimeConfigIdentity(
 	staged *stagedRuntimeConfig,
-	nodeName, nodeID, nodeUID, regionID, clusterID, allocationCIDR string,
+	nodeName, nodeID, nodeUID, privateIP, regionID, clusterID, allocationCIDR string,
 ) error {
 	values, err := parseEnvironmentFile(staged.path("etc/sandbox0/ctld.env"))
 	if err != nil {
@@ -199,6 +199,7 @@ func validateRuntimeConfigIdentity(
 		"SANDBOX0_NODE_NAME":     nodeName,
 		"SANDBOX0_NOMAD_NODE_ID": nodeID,
 		"SANDBOX0_NODE_UID":      nodeUID,
+		"SANDBOX0_NOMAD_ADDRESS": "https://" + privateIP + ":4646",
 		"SANDBOX0_REGION_ID":     regionID,
 		"SANDBOX0_CLUSTER_ID":    clusterID,
 	}

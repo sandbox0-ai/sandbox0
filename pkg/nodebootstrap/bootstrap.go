@@ -204,6 +204,7 @@ func (b *Bootstrapper) Initial(ctx context.Context, responseFile string) error {
 	}
 	defer staged.close()
 	if err := validateRuntimeConfigIdentity(staged, response.NodeName, nodeID, finalized.NodeUID,
+		identity.privateIP,
 		b.config.RegionID, b.config.ClusterID, response.AllocationCIDR); err != nil {
 		return err
 	}

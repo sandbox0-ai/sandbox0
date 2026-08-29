@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,13 @@ func (s *stagedRuntimeConfig) path(relative string) string {
 }
 
 func (s *stagedRuntimeConfig) install() error {
+	authorityHost, err := runtimeAuthorityHost(s)
+	if err != nil {
+		return err
+	}
+	if err := removeRuntimeAuthorityHostAliases("/etc/hosts", authorityHost); err != nil {
+		return err
+	}
 	for _, file := range s.files {
 		destination := "/" + filepath.FromSlash(file.relative)
 		payload, err := os.ReadFile(s.path(file.relative))
@@ -198,6 +206,9 @@ func validateRuntimeConfigIdentity(
 			return fmt.Errorf("rendered ctld environment does not bind exact %s", key)
 		}
 	}
+	if _, err := runtimeAuthorityHost(staged); err != nil {
+		return err
+	}
 	conflist, err := os.ReadFile(staged.path("opt/cni/config/10-sandbox0.conflist"))
 	if err != nil {
 		return err
@@ -206,6 +217,81 @@ func validateRuntimeConfigIdentity(
 		return errors.New("rendered CNI configuration does not bind the allocated node CIDR")
 	}
 	return nil
+}
+
+func runtimeAuthorityHost(staged *stagedRuntimeConfig) (string, error) {
+	values, err := parseEnvironmentFile(staged.path("etc/sandbox0/ctld.env"))
+	if err != nil {
+		return "", err
+	}
+	authority, err := url.Parse(strings.TrimSpace(values["SANDBOX0_AUTHORITY_URL"]))
+	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" ||
+		authority.Port() != "8421" || authority.User != nil ||
+		authority.RawQuery != "" || authority.Fragment != "" ||
+		(authority.Path != "" && authority.Path != "/") {
+		return "", errors.New("rendered ctld environment has an invalid manager authority URL")
+	}
+	return authority.Hostname(), nil
+}
+
+// removeRuntimeAuthorityHostAliases prevents a replaced private load
+// balancer's addresses from surviving in a reusable worker image. The manager
+// authority hostname must follow DNS so node enrollment and fixed-node
+// rotation use the current regional endpoint.
+func removeRuntimeAuthorityHostAliases(hostsFile, authorityHost string) error {
+	info, err := os.Lstat(hostsFile)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Size() < 0 || info.Size() > 1<<20 || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("system hosts file is unsafe")
+	}
+	payload, err := os.ReadFile(hostsFile)
+	if err != nil {
+		return err
+	}
+	endedWithNewline := len(payload) > 0 && payload[len(payload)-1] == '\n'
+	lines := strings.Split(strings.TrimSuffix(string(payload), "\n"), "\n")
+	changed := false
+	output := make([]string, 0, len(lines))
+	for _, line := range lines {
+		body, comment, hasComment := strings.Cut(line, "#")
+		fields := strings.Fields(body)
+		if len(fields) < 2 {
+			output = append(output, line)
+			continue
+		}
+		aliases := make([]string, 0, len(fields)-1)
+		for _, alias := range fields[1:] {
+			if strings.EqualFold(alias, authorityHost) {
+				changed = true
+				continue
+			}
+			aliases = append(aliases, alias)
+		}
+		if len(aliases) == len(fields)-1 {
+			output = append(output, line)
+			continue
+		}
+		if len(aliases) > 0 {
+			rewritten := fields[0] + "\t" + strings.Join(aliases, " ")
+			if hasComment {
+				rewritten += " #" + comment
+			}
+			output = append(output, rewritten)
+		} else if hasComment && strings.TrimSpace(comment) != "" {
+			output = append(output, "#"+comment)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	rewritten := []byte(strings.Join(output, "\n"))
+	if endedWithNewline {
+		rewritten = append(rewritten, '\n')
+	}
+	return atomicWriteFile(hostsFile, rewritten, info.Mode().Perm())
 }
 
 func parseEnvironmentFile(file string) (map[string]string, error) {

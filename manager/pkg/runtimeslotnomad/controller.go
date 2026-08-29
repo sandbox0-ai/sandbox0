@@ -23,6 +23,7 @@ type Allocation struct {
 	Namespace     string `json:"Namespace"`
 	NodeID        string `json:"NodeID"`
 	DesiredStatus string `json:"DesiredStatus"`
+	ClientStatus  string `json:"ClientStatus"`
 }
 
 // API separates Nomad protocol details from reconciliation ordering. The
@@ -70,7 +71,8 @@ func (c *Controller) Observe(
 		if err := validateAllocation(*allocation, target); err != nil {
 			return runtimeslotreconciler.AllocationObservation{}, err
 		}
-		serverOwnsAllocation = allocation.DesiredStatus == "run"
+		serverOwnsAllocation = allocation.DesiredStatus == "run" &&
+			!allocationClientTerminal(allocation.ClientStatus)
 	}
 	clientPresent, err := c.api.ClientAllocationPresent(ctx, target)
 	if err != nil {
@@ -173,9 +175,24 @@ func validateAllocation(allocation Allocation, target runtimeslotreconciler.Allo
 	}
 	switch allocation.DesiredStatus {
 	case "run", "stop", "evict":
-		return nil
 	default:
 		return fmt.Errorf("nomad server allocation has invalid desired status %q: %w", allocation.DesiredStatus, errdefs.ErrFailedPrecondition)
+	}
+	switch allocation.ClientStatus {
+	case "pending", "running", "complete", "failed", "lost", "unknown":
+		return nil
+	default:
+		return fmt.Errorf("nomad server allocation has invalid client status %q: %w", allocation.ClientStatus, errdefs.ErrFailedPrecondition)
+	}
+}
+
+// allocationClientTerminal mirrors Nomad's terminal client-state boundary.
+func allocationClientTerminal(status string) bool {
+	switch status {
+	case "complete", "failed", "lost":
+		return true
+	default:
+		return false
 	}
 }
 

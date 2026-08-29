@@ -228,7 +228,7 @@ func newNomadMTLSTestServer(
 			}
 			_ = json.NewEncoder(writer).Encode(Allocation{
 				ID: "allocation-1", Namespace: "default", NodeID: "node-1",
-				DesiredStatus: state.desiredStatus,
+				DesiredStatus: state.desiredStatus, ClientStatus: "running",
 			})
 		case "/v1/allocation/allocation-1/stop":
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodPost, "method") ||

@@ -50,6 +50,7 @@ func TestRenderUsesExactSharedRuntimeTemplate(t *testing.T) {
 		"SANDBOX0_NODE_NAME=sandbox-1",
 		"SANDBOX0_NOMAD_NODE_ID=node-1",
 		"SANDBOX0_NODE_UID=ecs/us-east-1/i-fixed",
+		"SANDBOX0_NOMAD_ADDRESS=https://10.0.1.2:4646",
 		"SANDBOX0_REGION_ID=ali-ue1",
 		"SANDBOX0_CLUSTER_ID=nomad",
 	} {
@@ -86,6 +87,7 @@ func writeTemplate(t *testing.T, destination string) {
 			"SANDBOX0_NODE_UID={{.NodeUID}}",
 			"SANDBOX0_AGENT_UID={{.AgentUID}}",
 			"SANDBOX0_PRIVATE_IP={{.PrivateIP}}",
+			"SANDBOX0_NOMAD_ADDRESS=https://{{.PrivateIP}}:4646",
 			"SANDBOX0_REGION_ID={{.RegionID}}",
 			"SANDBOX0_CLUSTER_ID={{.ClusterID}}",
 			"SANDBOX0_AUTHORITY_URL={{.ManagerAuthorityURL}}",

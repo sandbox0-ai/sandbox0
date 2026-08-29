@@ -15,7 +15,7 @@ func TestRuntimeConfigTemplateRendersExactNodeWithoutLivePeerState(t *testing.T)
 	required := map[string]string{
 		"etc/sandbox0/ctld.yaml.tmpl":                "node_uid: {{.NodeUID}}\nnode_id: {{.NodeID}}\n",
 		"etc/sandbox0/ctld-networking.yaml.tmpl":     "node_name: {{.NodeName}}\n",
-		"etc/sandbox0/ctld.env.tmpl":                 "SANDBOX0_NODE_UID={{.NodeUID}}\nSANDBOX0_PRIVATE_IP={{.PrivateIP}}\n",
+		"etc/sandbox0/ctld.env.tmpl":                 "SANDBOX0_NODE_UID={{.NodeUID}}\nSANDBOX0_PRIVATE_IP={{.PrivateIP}}\nSANDBOX0_NOMAD_ADDRESS=https://{{.PrivateIP}}:4646\n",
 		"etc/sandbox0/ctld-a.env":                    "SANDBOX0_CTLD_HA_METRICS_ADDR=:9192\n",
 		"etc/sandbox0/ctld-b.env":                    "SANDBOX0_CTLD_HA_METRICS_ADDR=:9193\n",
 		"etc/sandbox0/internal-auth/data-public.pem": "public-key\n",
@@ -38,6 +38,8 @@ func TestRuntimeConfigTemplateRendersExactNodeWithoutLivePeerState(t *testing.T)
 	require.NoError(t, err)
 	files := readRuntimeConfigArchive(t, payload)
 	require.Contains(t, files["node-runtime/etc/sandbox0/ctld.yaml"], "ecs/us-east-1/i-123")
+	require.Contains(t, files["node-runtime/etc/sandbox0/ctld.env"],
+		"SANDBOX0_NOMAD_ADDRESS=https://10.0.0.10:4646")
 	require.Contains(t, files["node-runtime/opt/cni/config/10-sandbox0.conflist"], "172.27.0.0/26")
 	for name, contents := range files {
 		require.NotContains(t, contents, "{{", name)

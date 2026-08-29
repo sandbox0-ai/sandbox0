@@ -115,7 +115,7 @@ func install(arguments []string) error {
 		return err
 	}
 	return nodebootstrap.InstallRenderedRuntimeConfig(payload, identity.nodeName,
-		identity.nodeID, identity.nodeUID, identity.regionID, identity.clusterID,
+		identity.nodeID, identity.nodeUID, identity.privateIP, identity.regionID, identity.clusterID,
 		identity.allocationCIDR)
 }
 

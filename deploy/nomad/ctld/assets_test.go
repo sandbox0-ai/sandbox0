@@ -71,7 +71,7 @@ func TestExampleConfigsDecodeAfterEnvironmentExpansion(t *testing.T) {
 		"SANDBOX0_ROOTFS_NBD_DEVICES":        "/dev/nbd0,/dev/nbd1",
 		"SANDBOX0_MANAGER_AUTHORITY_URL":     "https://manager.internal:9444",
 		"SANDBOX0_MANAGER_AUTHORITY_URI_SAN": "spiffe://sandbox0.internal/region/runtime-slot-channel",
-		"SANDBOX0_NOMAD_ADDRESS":             "https://127.0.0.1:4646",
+		"SANDBOX0_NOMAD_ADDRESS":             "https://10.0.0.10:4646",
 		"SANDBOX0_NOMAD_NODE_ID":             "node-1",
 		"SANDBOX0_NODE_UID":                  "node-uid-1",
 		"SANDBOX0_NODE_NAME":                 "node-1",

@@ -24,6 +24,9 @@ write permission. Set the four `SANDBOX0_RESOURCE_*` values to the allocatable
 capacity of the dedicated cpuset after reserving host/ctld/Nomad overhead; do
 not copy carrier-job resources into these values. Start from
 `nomad-plugin.hcl.example` for the Nomad client plugin configuration. Register
+`SANDBOX0_NOMAD_ADDRESS` with the node's private IP, and issue the Nomad client
+certificate with that exact IP SAN; a loopback URL is not valid for an
+IP-scoped certificate. Register
 the Nomad client with `client.node_pool = "sandbox0"` and set node metadata
 `sandbox0_dedicated=true`; do not target that pool from general jobs. Then
 install:

@@ -67,6 +67,11 @@ func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {
 		"SANDBOX0_AUTHORITY_URL=https://authority.ali-ue1.internal:8421",
 	}, "\n") + "\n"
 	files["opt/cni/config/10-sandbox0.conflist"] = `{"subnet":"172.27.0.0/26"}`
+	files["etc/nomad.d/30-sandbox0-gvisor.hcl"] = `plugin "sandbox0-gvisor" {
+  config {
+    rootfs_authority_url = "https://authority.ali-ue1.internal:8421"
+  }
+}`
 	staged, err := stageRuntimeConfigAt(runtimeConfigArchive(t, files), t.TempDir())
 	require.NoError(t, err)
 	defer staged.close()
@@ -98,8 +103,11 @@ func TestRemoveRuntimeAuthorityHostAliasesKeepsDNSAuthoritative(t *testing.T) {
 func TestRuntimeAuthorityHostRejectsNoncanonicalEndpoint(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(directory, "etc/sandbox0"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(directory, "etc/nomad.d"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "etc/sandbox0/ctld.env"), []byte(
 		"SANDBOX0_AUTHORITY_URL=http://authority.internal:8421\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "etc/nomad.d/30-sandbox0-gvisor.hcl"), []byte(
+		"rootfs_authority_url = \"https://authority.internal:8421\"\n"), 0o600))
 	staged := &stagedRuntimeConfig{root: directory}
 	_, err := runtimeAuthorityHost(staged)
 	require.ErrorContains(t, err, "invalid manager authority URL")

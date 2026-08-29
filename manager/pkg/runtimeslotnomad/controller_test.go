@@ -103,6 +103,59 @@ func TestControllerObservesServerAndDirectClientOwnership(t *testing.T) {
 	}
 }
 
+func TestControllerObservesTerminalClientAllocationAsPhysicallyAbsent(t *testing.T) {
+	target := testTarget()
+	for _, status := range []string{"complete", "failed", "lost"} {
+		t.Run(status, func(t *testing.T) {
+			api := &fakeAPI{allocation: testAllocation()}
+			api.allocation.ClientStatus = status
+			controller, err := New(api)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			observation, err := controller.Observe(t.Context(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.PhysicalPresent {
+				t.Fatalf("terminal allocation observation = %+v", observation)
+			}
+
+			api.client = true
+			clientOwned, err := controller.Observe(t.Context(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !clientOwned.PhysicalPresent {
+				t.Fatal("direct client state was ignored for a terminal server allocation")
+			}
+		})
+	}
+}
+
+func TestControllerRetainsNonterminalServerOwnership(t *testing.T) {
+	target := testTarget()
+	for _, status := range []string{"pending", "running", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			api := &fakeAPI{allocation: testAllocation()}
+			api.allocation.ClientStatus = status
+			controller, err := New(api)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			observation, err := controller.Observe(t.Context(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !observation.PhysicalPresent {
+				t.Fatalf("nonterminal allocation observation = %+v", observation)
+			}
+		})
+	}
+}
+
 func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	target := testTarget()
 	api := &fakeAPI{allocation: testAllocation(), client: true}
@@ -182,6 +235,22 @@ func TestControllerRejectsMismatchedServerIdentityBeforeNodeAccess(t *testing.T)
 	}
 }
 
+func TestControllerRejectsInvalidServerStatusBeforeNodeAccess(t *testing.T) {
+	api := &fakeAPI{allocation: testAllocation()}
+	api.allocation.ClientStatus = "dead"
+	controller, err := New(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = controller.Observe(t.Context(), testTarget())
+	if !errors.Is(err, errdefs.ErrFailedPrecondition) {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if api.clientCalls != 0 {
+		t.Fatalf("direct client calls = %d", api.clientCalls)
+	}
+}
+
 func TestControllerPropagatesClientGCNotReady(t *testing.T) {
 	api := &fakeAPI{
 		allocation: testAllocation(), client: true,
@@ -225,6 +294,7 @@ func testTarget() runtimeslotreconciler.AllocationTarget {
 
 func testAllocation() *Allocation {
 	return &Allocation{
-		ID: "allocation-1", Namespace: "default", NodeID: "node-1", DesiredStatus: "run",
+		ID: "allocation-1", Namespace: "default", NodeID: "node-1",
+		DesiredStatus: "run", ClientStatus: "running",
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -224,14 +225,64 @@ func runtimeAuthorityHost(staged *stagedRuntimeConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	authority, err := url.Parse(strings.TrimSpace(values["SANDBOX0_AUTHORITY_URL"]))
-	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" ||
-		authority.Port() != "8421" || authority.User != nil ||
-		authority.RawQuery != "" || authority.Fragment != "" ||
-		(authority.Path != "" && authority.Path != "/") {
-		return "", errors.New("rendered ctld environment has an invalid manager authority URL")
+	candidates := make([]string, 0, 2)
+	if configured := strings.TrimSpace(values["SANDBOX0_AUTHORITY_URL"]); configured != "" {
+		candidates = append(candidates, configured)
 	}
-	return authority.Hostname(), nil
+	pluginURL, err := runtimeAuthorityURLFromPlugin(
+		staged.path("etc/nomad.d/30-sandbox0-gvisor.hcl"),
+	)
+	if err != nil {
+		return "", err
+	}
+	candidates = append(candidates, pluginURL)
+
+	var authorityHost string
+	for _, candidate := range candidates {
+		authority, err := url.Parse(candidate)
+		if err != nil || authority.Scheme != "https" || authority.Hostname() == "" ||
+			authority.Port() != "8421" || authority.User != nil ||
+			authority.RawQuery != "" || authority.Fragment != "" ||
+			(authority.Path != "" && authority.Path != "/") {
+			return "", errors.New("rendered runtime config has an invalid manager authority URL")
+		}
+		if authorityHost != "" && !strings.EqualFold(authorityHost, authority.Hostname()) {
+			return "", errors.New("rendered runtime config has inconsistent manager authority hosts")
+		}
+		authorityHost = authority.Hostname()
+	}
+	return authorityHost, nil
+}
+
+func runtimeAuthorityURLFromPlugin(file string) (string, error) {
+	handle, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer handle.Close()
+	var authorityURL string
+	scanner := bufio.NewScanner(io.LimitReader(handle, 1<<20))
+	for scanner.Scan() {
+		line, _, _ := strings.Cut(scanner.Text(), "#")
+		key, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(key) != "rootfs_authority_url" {
+			continue
+		}
+		if authorityURL != "" {
+			return "", errors.New("rendered Nomad plugin repeats the manager authority URL")
+		}
+		authorityURL, err = strconv.Unquote(strings.TrimSpace(value))
+		if err != nil {
+			return "", errors.New("rendered Nomad plugin has an invalid manager authority URL")
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if authorityURL == "" {
+		return "", errors.New("rendered Nomad plugin is missing the manager authority URL")
+	}
+	return authorityURL, nil
 }
 
 // removeRuntimeAuthorityHostAliases prevents a replaced private load

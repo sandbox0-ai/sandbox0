@@ -1231,22 +1231,23 @@ func TestServicePressurePauseReturnsDurableOperationBeforeNomadStop(t *testing.T
 	}
 }
 
-func TestServiceQuiescesSlotOnlyAfterPlannedPauseCommitted(t *testing.T) {
+func TestServiceKeepsCommittedPausePendingUntilSlotIsTerminal(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
 		SandboxID: "sandbox-1", AlreadyPaused: true,
 		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
 	}
 
-	if err := fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"); err != nil {
-		t.Fatal(err)
-	}
+	require.ErrorIs(t, fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"), errNomadSandboxPausePending)
 	if len(fixture.store.quiesceCalls) != 1 || fixture.store.quiesceCalls[0].SlotID != "slot-1" {
 		t.Fatalf("quiesce calls = %+v", fixture.store.quiesceCalls)
 	}
 	if len(fixture.allocation.requests) != 0 {
 		t.Fatalf("committed pause stopped allocation again: %+v", fixture.allocation.requests)
 	}
+
+	fixture.store.pauseCandidate.SlotID = ""
+	require.NoError(t, fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 }
 
 func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {

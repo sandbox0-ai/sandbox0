@@ -61,6 +61,53 @@ func TestNomadSandboxReaderProjectsRuntimeSlotAndLifecycleFence(t *testing.T) {
 	}
 }
 
+func TestNomadSandboxReaderProjectsPausedOnlyAfterRuntimeSlotIsTerminal(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 3, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-a": {
+				ID: "sandbox-a", TeamID: "team-a", TemplateID: "default",
+				DesiredState: sandboxstore.SandboxDesiredStatePaused,
+				CreatedAt:    now,
+			},
+		},
+		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
+			"sandbox-a": {
+				ID: "slot-a", SandboxID: "sandbox-a", AllocationID: "allocation-a",
+				State: sandboxstore.RuntimeSlotStateQuiescing,
+			},
+		},
+	}
+	reader, err := NewNomadSandboxReader(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pausing, err := reader.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if pausing.Paused || pausing.Status != managerapi.SandboxStatusStarting || pausing.RuntimeID != "allocation-a" {
+		t.Fatalf("non-terminal pause projection = %+v", pausing)
+	}
+	listed, err := reader.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"})
+	if err != nil {
+		t.Fatalf("ListSandboxes() error = %v", err)
+	}
+	if listed.Count != 1 || listed.Sandboxes[0].Paused || listed.Sandboxes[0].Status != managerapi.SandboxStatusStarting {
+		t.Fatalf("non-terminal pause list projection = %+v", listed)
+	}
+
+	delete(store.runtimeSlots, "sandbox-a")
+	paused, err := reader.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() after terminalization error = %v", err)
+	}
+	if !paused.Paused || paused.Status != managerapi.SandboxStatusPaused || paused.RuntimeID != "" {
+		t.Fatalf("terminal pause projection = %+v", paused)
+	}
+}
+
 func TestNomadSandboxReaderFailsClosedForInvalidRequests(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	reader, err := NewNomadSandboxReader(store)

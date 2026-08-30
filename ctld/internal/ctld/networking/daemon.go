@@ -632,6 +632,7 @@ func (d *Daemon) syncRedirect(
 	stats := runtimeSlots.Stats()
 	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_warm", stats.Warm)
 	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_claimed", stats.Claimed)
+	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_orphaned", stats.Orphaned)
 	daemonMetrics.SetRedirectSyncObjectCount("runtime_slot_terminal", stats.Terminal)
 	pendingRevisions := uint64(0)
 	if stats.Revision > stats.AppliedRevision {

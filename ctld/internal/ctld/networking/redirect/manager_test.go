@@ -11,7 +11,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) {
+func TestBuildIPTablesRestoreInputUsesTCPRedirectAndUDPTPROXY(t *testing.T) {
 	cfg := Config{
 		ProxyHTTPPort:  18080,
 		ProxyHTTPSPort: 18443,
@@ -23,12 +23,12 @@ func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) 
 	mustContain(t, restore, "-A "+chainName+" -d 10.0.0.0/8 -j RETURN")
 	mustContain(t, restore, "-A "+chainName+" -d 192.168.0.0/16 -j RETURN")
 
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-m set --match-set "+ipsetName+" src -p tcp -m socket --transparent -j TPROXY --on-port 18080")
+	mustNotContain(t, restore, "-p tcp --dport 443 -m conntrack")
+	mustNotContain(t, restore, "-p tcp --dport 443 -m connmark")
+	mustNotContain(t, restore, "-p tcp --dport 853 -m socket")
+	mustNotContain(t, restore, "-p tcp -m conntrack")
+	mustNotContain(t, restore, "-p tcp -m connmark")
+	mustNotContain(t, restore, "-p tcp -m socket")
 	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
 	mustContain(t, restore, "-p udp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
 	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
@@ -231,6 +231,13 @@ func mustContain(t *testing.T, got string, want string) {
 	t.Helper()
 	if !strings.Contains(got, want) {
 		t.Fatalf("expected output to contain %q, got:\n%s", want, got)
+	}
+}
+
+func mustNotContain(t *testing.T, got string, unwanted string) {
+	t.Helper()
+	if strings.Contains(got, unwanted) {
+		t.Fatalf("expected output not to contain %q, got:\n%s", unwanted, got)
 	}
 }
 

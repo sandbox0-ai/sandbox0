@@ -15,11 +15,15 @@
 package driver
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/nomad/plugins/drivers"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 func TestRuntimeLeaseCgroupsPathIsRelativeToUnifiedMount(t *testing.T) {
@@ -39,6 +43,7 @@ func TestRuntimeLeaseCgroupsPathIsRelativeToUnifiedMount(t *testing.T) {
 func TestBuildSpecAppliesExactRuntimeResourceLease(t *testing.T) {
 	spec := buildSpec(specOptions{
 		Command: "/procd", ProcdInternalJWTPublicKeyFile: "/etc/sandbox0/internal-auth/data-public.pem",
+		ResolvConfPath: "/alloc/sandbox0/resolv.conf",
 		Resources: &driversResources{
 			CPUPeriod: 100000, CPUQuota: 150000, CPUShares: 1536,
 			CPUSetCpus: "0-1", MemoryLimitBytes: 768 * 1024 * 1024,
@@ -66,6 +71,12 @@ func TestBuildSpecAppliesExactRuntimeResourceLease(t *testing.T) {
 	if keyMount == nil || keyMount.Source != "/etc/sandbox0/internal-auth/data-public.pem" ||
 		!strings.Contains(strings.Join(keyMount.Options, ","), "ro") {
 		t.Fatalf("OCI procd internal JWT public-key mount = %+v", spec.Mounts)
+	}
+	resolvMount := findOCIMount(spec.Mounts, "/etc/resolv.conf")
+	if resolvMount == nil || resolvMount.Type != "bind" ||
+		resolvMount.Source != "/alloc/sandbox0/resolv.conf" ||
+		!containsString(resolvMount.Options, "ro") {
+		t.Fatalf("OCI resolver mount = %+v", spec.Mounts)
 	}
 }
 
@@ -104,6 +115,58 @@ func TestBuildSpecAppliesSecurityClassAndEphemeralMounts(t *testing.T) {
 	}
 	if shmCount != 1 {
 		t.Fatalf("shm mount count = %d", shmCount)
+	}
+}
+
+func TestWriteClaimBundleGeneratesNomadDNSConfiguration(t *testing.T) {
+	bundleDir := t.TempDir()
+	handle := newTaskHandle(taskHandleOptions{
+		taskConfig: &drivers.TaskConfig{
+			ID: "slot-1", NodeID: "node-1", AllocID: "alloc-1",
+			DNS: &drivers.DNSConfig{
+				Servers:  []string{"192.0.2.53", "198.51.100.53"},
+				Searches: []string{"sandbox.internal"},
+				Options:  []string{"timeout:2", "attempts:2"},
+			},
+		},
+		driverConfig:       TaskConfig{Command: "/procd"},
+		bundleDir:          bundleDir,
+		resourceCgroupRoot: "/sys/fs/cgroup/sandbox0",
+	})
+	lease, err := protocol.NewRuntimeResourceLease(
+		"operation-1", "claim-1", "slot-1", "cluster-1", "node-1", "node-1", "boot-1",
+		protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 500,
+			MemoryBytes: 256 << 20, PIDsLimit: protocol.DefaultRuntimePIDsLimit,
+		},
+		"0-1", "0",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.writeClaimBundle(nil, lease); err != nil {
+		t.Fatal(err)
+	}
+	resolverPath := filepath.Join(bundleDir, "resolv.conf")
+	resolver, err := os.ReadFile(resolverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"nameserver 192.0.2.53", "nameserver 198.51.100.53",
+		"search sandbox.internal", "options timeout:2 attempts:2",
+	} {
+		if !strings.Contains(string(resolver), expected) {
+			t.Fatalf("resolver configuration %q does not contain %q", resolver, expected)
+		}
+	}
+	config, err := os.ReadFile(filepath.Join(bundleDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), `"source": "`+resolverPath+`"`) ||
+		!strings.Contains(string(config), `"destination": "/etc/resolv.conf"`) {
+		t.Fatalf("OCI bundle does not mount generated resolver configuration: %s", config)
 	}
 }
 

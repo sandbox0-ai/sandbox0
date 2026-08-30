@@ -32,6 +32,7 @@ type specOptions struct {
 	AllocID                       string
 	TaskID                        string
 	NetNSPath                     string
+	ResolvConfPath                string
 	ProcdInternalJWTPublicKeyFile string
 	Resources                     *driversResources
 	SecurityClass                 string
@@ -123,6 +124,14 @@ func buildSpec(options specOptions) specs.Spec {
 		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=67108864"}},
 		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+	}
+	if options.ResolvConfPath != "" {
+		mounts = append(mounts, specs.Mount{
+			Destination: "/etc/resolv.conf",
+			Type:        "bind",
+			Source:      options.ResolvConfPath,
+			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
 	}
 	for _, mount := range options.EphemeralMounts {
 		ephemeral := specs.Mount{

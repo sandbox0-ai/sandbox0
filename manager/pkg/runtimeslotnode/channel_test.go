@@ -734,6 +734,51 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	executor.entered = nil
 	executor.release = nil
 	executor.mu.Unlock()
+	coalescedEntered := make(chan struct{}, 1)
+	coalescedRelease := make(chan struct{})
+	executor.mu.Lock()
+	executor.entered = coalescedEntered
+	executor.release = coalescedRelease
+	executor.mu.Unlock()
+	coalescedRequest := request
+	coalescedRequest.OperationID = "cleanup-coalesced"
+	coalescedRequest.SlotID = "slot-coalesced"
+	coalescedRequest.AllocationID = "allocation-coalesced"
+	coalescedRequest.RunscContainerID = protocol.NomadRunscContainerID(coalescedRequest.SlotID)
+	coalescedResults := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, requestErr := hub.CleanupRuntimeSlot(t.Context(), Target{
+				ClusterID: "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+			}, coalescedRequest)
+			coalescedResults <- requestErr
+		}()
+	}
+	select {
+	case <-coalescedEntered:
+	case <-time.After(time.Second):
+		t.Fatal("coalesced cleanup did not reach the node")
+	}
+	time.Sleep(10 * time.Millisecond)
+	close(coalescedRelease)
+	for range 2 {
+		if err := <-coalescedResults; err != nil {
+			t.Fatalf("coalesced cleanup error = %v", err)
+		}
+	}
+	executor.mu.Lock()
+	coalescedCalls := 0
+	for _, call := range executor.calls {
+		if call.OperationID == coalescedRequest.OperationID {
+			coalescedCalls++
+		}
+	}
+	executor.entered = nil
+	executor.release = nil
+	executor.mu.Unlock()
+	if coalescedCalls != 1 {
+		t.Fatalf("coalesced cleanup calls = %d, want 1", coalescedCalls)
+	}
 	timeoutEntered := make(chan struct{}, 1)
 	timeoutRelease := make(chan struct{})
 	executor.mu.Lock()

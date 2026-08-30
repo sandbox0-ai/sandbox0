@@ -47,7 +47,11 @@ func (r *NomadSandboxReader) GetSandbox(ctx context.Context, sandboxID string) (
 		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	projected := sandboxRecordToSandbox(record)
-	if record.DesiredState != sandboxstore.SandboxDesiredStateActive {
+	switch record.DesiredState {
+	case sandboxstore.SandboxDesiredStatePaused:
+		return r.projectPaused(ctx, record, projected)
+	case sandboxstore.SandboxDesiredStateActive:
+	default:
 		return projected, nil
 	}
 	activeTxn, err := r.store.GetActiveLifecycleTxn(ctx, sandboxID)
@@ -83,11 +87,14 @@ func (r *NomadSandboxReader) ListSandboxes(ctx context.Context, request *sandbox
 			continue
 		}
 		projected := sandboxRecordToSandbox(record)
-		if record.DesiredState == sandboxstore.SandboxDesiredStateActive {
+		switch record.DesiredState {
+		case sandboxstore.SandboxDesiredStatePaused:
+			projected, err = r.projectPaused(ctx, record, projected)
+		case sandboxstore.SandboxDesiredStateActive:
 			projected, err = r.projectActive(ctx, record, nil, projected)
-			if err != nil {
-				return nil, err
-			}
+		}
+		if err != nil {
+			return nil, err
 		}
 		if normalized.Status != "" && projected.Status != normalized.Status {
 			continue
@@ -130,6 +137,28 @@ func (r *NomadSandboxReader) GetSandboxStatus(ctx context.Context, sandboxID str
 		return nil, err
 	}
 	return sandboxStatusResponse(sandbox), nil
+}
+
+func (r *NomadSandboxReader) projectPaused(
+	ctx context.Context,
+	record *sandboxstore.SandboxRecord,
+	projected *managerapi.Sandbox,
+) (*managerapi.Sandbox, error) {
+	slot, err := r.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
+	if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+		return projected, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get paused Nomad runtime slot projection: %w", err)
+	}
+	if slot == nil || slot.SandboxID != record.ID {
+		return nil, fmt.Errorf("paused Nomad runtime slot projection does not match sandbox %s", record.ID)
+	}
+	projected.Status = managerapi.SandboxStatusStarting
+	projected.Paused = false
+	projected.RuntimeID = slot.AllocationID
+	projected.InternalAddr = ""
+	return projected, nil
 }
 
 func (r *NomadSandboxReader) projectActive(

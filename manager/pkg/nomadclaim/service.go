@@ -349,7 +349,7 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 		if err != nil {
 			return fmt.Errorf("quiesce planned-paused Nomad runtime slot: %w", err)
 		}
-		return nil
+		return errNomadSandboxPausePending
 	}
 	target := protocol.NodeChannelTarget{
 		SlotID: candidate.SlotID, ClusterID: candidate.ClusterID,

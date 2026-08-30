@@ -109,3 +109,6 @@ one at a time for changes that alter the runsc compatibility digest, RootFS
 format, NBD pool, or network policy format. Roll back with the previous pinned
 binary/config set using the same B-then-A sequence; never downgrade across an
 on-disk journal version that the previous binary cannot read.
+The primary-ready wait includes the bounded 15-minute crash-recovery window
+needed to rebuild and verify a maximum-size durable dirty tail. Healthy
+startups still become ready immediately; this bound is not a claim-path SLO.

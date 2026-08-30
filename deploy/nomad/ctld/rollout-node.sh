@@ -3,7 +3,10 @@ set -eu
 
 wait_ready() {
   slot=$1
-  deadline=$(( $(date +%s) + 120 ))
+  # A promoted primary must finish fail-closed durable RootFS recovery before
+  # it can report ready. The Go runtime bounds that recovery at 15 minutes;
+  # this host rollout adds one minute for election and probe propagation.
+  deadline=$(( $(date +%s) + 960 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if "${CTLD_BIN:-/usr/local/bin/ctld}" \
       -ha-probe=ready \
@@ -13,7 +16,7 @@ wait_ready() {
     fi
     sleep 1
   done
-  echo "ctld slot $slot did not become role-ready within 120 seconds" >&2
+  echo "ctld slot $slot did not become role-ready within 960 seconds" >&2
   return 1
 }
 

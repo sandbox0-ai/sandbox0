@@ -29,7 +29,9 @@ import (
 
 func TestNodeRuntimeStartupCoversDurableSessionReconciliation(t *testing.T) {
 	require.Equal(t, 3*time.Minute, rootFSSessionReconcileTimeout)
-	require.Greater(t, nodeRuntimeStartupTimeout, rootFSSessionReconcileTimeout)
+	require.Equal(t, 15*time.Minute, rootFSSessionStartupReconcileTimeout)
+	require.Greater(t, rootFSSessionStartupReconcileTimeout, rootFSSessionReconcileTimeout)
+	require.Greater(t, nodeRuntimeStartupTimeout, rootFSSessionStartupReconcileTimeout)
 }
 
 func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {

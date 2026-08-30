@@ -5,6 +5,7 @@ package slotnetwork
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,6 +27,9 @@ func newNamespaceInspector(root string) NamespaceInspector {
 func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("resolve network namespace: %w: %w: %w", err, errExactNamespaceAbsent, errdefs.ErrFailedPrecondition)
+		}
 		return "", fmt.Errorf("resolve network namespace: %w: %w", err, errdefs.ErrFailedPrecondition)
 	}
 	relative, err := filepath.Rel(i.root, resolved)
@@ -35,6 +39,9 @@ func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, err
 	}
 	handle, err := netns.GetFromPath(resolved)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("open network namespace: %w: %w: %w", err, errExactNamespaceAbsent, errdefs.ErrFailedPrecondition)
+		}
 		return "", fmt.Errorf("open network namespace: %w: %w", err, errdefs.ErrFailedPrecondition)
 	}
 	defer handle.Close()
@@ -44,7 +51,7 @@ func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, err
 	}
 	identity := fmt.Sprintf("netns-v1:%x:%x", uint64(stat.Dev), stat.Ino)
 	if identity != expectedIdentity {
-		return "", fmt.Errorf("network namespace incarnation changed: %w", errdefs.ErrFailedPrecondition)
+		return "", fmt.Errorf("network namespace incarnation changed: %w: %w", errExactNamespaceAbsent, errdefs.ErrFailedPrecondition)
 	}
 	netlinkHandle, err := netlink.NewHandleAt(handle)
 	if err != nil {

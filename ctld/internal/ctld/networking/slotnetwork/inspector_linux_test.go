@@ -3,10 +3,20 @@
 package slotnetwork
 
 import (
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/containerd/errdefs"
 )
+
+func TestNamespaceInspectorClassifiesMissingExactIncarnation(t *testing.T) {
+	root := t.TempDir()
+	_, err := newNamespaceInspector(root).Inspect(filepath.Join(root, "missing"), "netns-v1:1:2")
+	if !errors.Is(err, errExactNamespaceAbsent) || !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("missing namespace error = %v", err)
+	}
+}
 
 func TestSelectRoutableIPv4ClassifiesNetworkReadiness(t *testing.T) {
 	if _, err := selectRoutableIPv4(nil); !errdefs.IsUnavailable(err) {

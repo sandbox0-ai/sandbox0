@@ -217,6 +217,50 @@ func TestRegistryRequiresWarmRegistrationAndUniqueClaimOperation(t *testing.T) {
 	}
 }
 
+func TestRegistryFencesAbsentNamespaceBeforeSourceIPReuse(t *testing.T) {
+	directory := t.TempDir()
+	netnsRoot := filepath.Join(directory, "netns")
+	if err := ensureDirectory(netnsRoot); err != nil {
+		t.Fatal(err)
+	}
+	inspector := &fakeNamespaceInspector{podIP: "192.0.2.8"}
+	registry := newTestRegistry(t, filepath.Join(directory, "network.db"), netnsRoot, inspector, time.Hour)
+	defer registry.Close()
+	autoAcknowledge(registry)
+	first := testRegistrationRequest()
+	if err := registry.Register(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.SlotID = "slot-2"
+	second.AllocationID = "allocation-2"
+	second.NetNSRelativePath = "allocation-2"
+	second.NetNSIdentity = "netns-v1:1:3"
+	if err := registry.Register(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	before := registry.Stats().Revision
+	inspector.mu.Lock()
+	inspector.errors = []error{fmt.Errorf("namespace removed: %w", errExactNamespaceAbsent), nil}
+	inspector.mu.Unlock()
+	sandboxes, revision, err := registry.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sandboxes) != 1 || sandboxes[0].Name != second.SlotID || sandboxes[0].SourceIP != "192.0.2.8" {
+		t.Fatalf("snapshot after source IP reuse = %+v", sandboxes)
+	}
+	stats := registry.Stats()
+	if revision <= before || stats.Revision != revision || stats.Orphaned != 1 || stats.Warm != 1 {
+		t.Fatalf("registry stats after fencing = %+v, revision %d", stats, revision)
+	}
+	registry.Acknowledge(revision)
+	cleanup := testCleanupRequest()
+	if err := registry.Cleanup(t.Context(), cleanup); err != nil {
+		t.Fatalf("cleanup of fenced record = %v", err)
+	}
+}
+
 func TestRegistryRejectsChangedAndLegacyPolicyRequests(t *testing.T) {
 	directory := t.TempDir()
 	netnsRoot := filepath.Join(directory, "netns")

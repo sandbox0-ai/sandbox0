@@ -43,16 +43,21 @@ import (
 )
 
 const (
-	rootFSSessionReconcileInterval  = time.Second
-	rootFSSessionAttachGrace        = 2 * time.Minute
-	rootFSSessionReconcileTimeout   = 3 * time.Minute
-	runtimeSlotJournalPruneInterval = time.Minute
-	nomadAllocationResponseMaxBytes = 64 << 20
+	rootFSSessionReconcileInterval = time.Second
+	rootFSSessionAttachGrace       = 2 * time.Minute
+	rootFSSessionReconcileTimeout  = 3 * time.Minute
+	// Startup recovery may have to rebuild and idempotently verify the full
+	// configured 10 GiB dirty-tail bound. Keep this separate from the shorter
+	// steady-state reconciliation budget so a normal node does not retain
+	// stalled background operations for the full crash-recovery window.
+	rootFSSessionStartupReconcileTimeout = 15 * time.Minute
+	runtimeSlotJournalPruneInterval      = time.Minute
+	nomadAllocationResponseMaxBytes      = 64 << 20
 	// Startup must allow the durable RootFS journal to finish its bounded
 	// recovery before the private runtime socket can become healthy. A release
 	// retry can verify a 64 MiB immutable object and legitimately exceed the
 	// ordinary 30-second health window.
-	nodeRuntimeStartupTimeout = rootFSSessionReconcileTimeout + 30*time.Second
+	nodeRuntimeStartupTimeout = rootFSSessionStartupReconcileTimeout + 30*time.Second
 	nodeRuntimeHealthInterval = time.Second
 )
 

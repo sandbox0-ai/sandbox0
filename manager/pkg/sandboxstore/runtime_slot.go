@@ -379,8 +379,12 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 		if slot.Revision != normalized.ExpectedRevision {
 			return nil, fmt.Errorf("%w: runtime slot revision changed", ErrRuntimeSlotConflict)
 		}
+		resumeAuthorityAborted, err := runtimeSlotResumeAuthorityAborted(ctx, tx, slot)
+		if err != nil {
+			return nil, err
+		}
 		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) ||
-			runtimeSlotPreCommandReadyClaimExpired(slot)
+			runtimeSlotPreCommandReadyClaimExpired(slot) || resumeAuthorityAborted
 		if !due {
 			return nil, ErrRuntimeSlotNotDue
 		}
@@ -404,14 +408,15 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring,
 				RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
 			case RootFSWriterGrantStateConsumed:
-				if leaseExpiresAt == nil || leaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(authorityObservedAt) {
+				if !resumeAuthorityAborted &&
+					(leaseExpiresAt == nil || leaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(authorityObservedAt)) {
 					return nil, ErrRuntimeSlotNotDue
 				}
 			default:
 				return nil, fmt.Errorf("%w: runtime slot writer grant is in invalid state %s", ErrRuntimeSlotInvalid, grantState)
 			}
 		}
-		_, err := tx.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
 			SET state = $2, revision = revision + 1,
 				heartbeat_expires_at = LEAST(heartbeat_expires_at, NOW()),
@@ -875,21 +880,62 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 	if err != nil {
 		return nil, err
 	}
-	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
-		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
-			return nil, fmt.Errorf("%w: command-ready caller does not match slot incarnation", ErrRuntimeSlotConflict)
-		}
-		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
-			return nil, fmt.Errorf("%w: command-ready caller does not match slot claim", ErrRuntimeSlotConflict)
-		}
-		if slot.State == RuntimeSlotStateActive {
-			if slot.ProcdInstanceID == normalized.ProcdInstanceID &&
-				slot.ProcdAddress == normalized.ProcdAddress &&
-				bytes.Equal(slot.CommandReadyDigest, normalized.CommandReadyDigest) {
-				return nil, nil
-			}
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("sandbox store is not configured")
+	}
+
+	// Read the immutable claim identity before opening the transaction so the
+	// transaction can follow the canonical sandbox -> claim/lifecycle -> slot
+	// lock order. Completion and abort use the same order, which makes a late
+	// node proof serialize with the logical operation that authorizes it.
+	preliminary, err := s.GetRuntimeSlot(ctx, normalized.SlotID)
+	if err != nil {
+		return nil, err
+	}
+	if !runtimeSlotCallerMatches(preliminary, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
+		return nil, fmt.Errorf("%w: command-ready caller does not match slot incarnation", ErrRuntimeSlotConflict)
+	}
+	if !runtimeSlotClaimIdentityMatches(preliminary, normalized.OperationID, normalized.ClaimID) {
+		return nil, fmt.Errorf("%w: command-ready caller does not match slot claim", ErrRuntimeSlotConflict)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockRuntimeSlotClaimAdmission(ctx, tx, &AcquireRuntimeSlotRequest{
+		OperationID: normalized.OperationID, SandboxID: preliminary.SandboxID,
+		SourceGenerationID: preliminary.SourceGenerationID,
+	}); err != nil {
+		return nil, err
+	}
+	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+		WHERE slot_id = $1
+		FOR UPDATE OF runtime_slots
+	`, normalized.SlotID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRuntimeSlotNotFound, normalized.SlotID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if slot.SandboxID != preliminary.SandboxID || slot.SourceGenerationID != preliminary.SourceGenerationID {
+		return nil, fmt.Errorf("%w: command-ready slot authority changed", ErrRuntimeSlotConflict)
+	}
+	if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
+		return nil, fmt.Errorf("%w: command-ready caller does not match slot incarnation", ErrRuntimeSlotConflict)
+	}
+	if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
+		return nil, fmt.Errorf("%w: command-ready caller does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if slot.State == RuntimeSlotStateActive {
+		if slot.ProcdInstanceID != normalized.ProcdInstanceID ||
+			slot.ProcdAddress != normalized.ProcdAddress ||
+			!bytes.Equal(slot.CommandReadyDigest, normalized.CommandReadyDigest) {
 			return nil, fmt.Errorf("%w: command-ready proof changed", ErrRuntimeSlotConflict)
 		}
+	} else {
 		if slot.State != RuntimeSlotStateStarting {
 			return nil, fmt.Errorf("%w: slot is not starting", ErrRuntimeSlotInvalid)
 		}
@@ -899,16 +945,25 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 		if runtimeSlotPreCommandReadyClaimExpired(slot) {
 			return nil, fmt.Errorf("%w: slot claim lease expired before command readiness", ErrRuntimeSlotInvalid)
 		}
-		_, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
 			SET state = $2, revision = revision + 1,
 				procd_instance_id = $3, procd_address = $4, command_ready_digest = $5,
 				command_ready_at = NOW(), updated_at = NOW()
 			WHERE slot_id = $1
 		`, slot.ID, RuntimeSlotStateActive, normalized.ProcdInstanceID, normalized.ProcdAddress,
-			normalized.CommandReadyDigest)
+			normalized.CommandReadyDigest); err != nil {
+			return nil, mapRuntimeSlotConflict("mark runtime slot command ready", err)
+		}
+	}
+	result, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slot.ID))
+	if err != nil {
 		return nil, err
-	})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapRuntimeSlotConflict("commit runtime slot command ready", err)
+	}
+	return result, nil
 }
 
 // BeginRuntimeSlotQuiesce durably removes a claimed slot from the active path
@@ -1064,8 +1119,8 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 }
 
 // ListRuntimeSlotsForReconcile prioritizes orphaned and explicitly quiescing
-// physical incarnations before lease-expired candidates without deleting their
-// durable claim and writer identities.
+// physical incarnations before lease-expired or authority-revoked candidates
+// without deleting their durable claim and writer identities.
 func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit int) ([]RuntimeSlot, error) {
 	if limit <= 0 || limit > MaxRuntimeSlotReconcileLimit {
 		return nil, fmt.Errorf("runtime slot reconcile limit must be between 1 and %d", MaxRuntimeSlotReconcileLimit)
@@ -1074,12 +1129,21 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 		WHERE state IN ($1, $2)
 			OR (state <> $3 AND heartbeat_expires_at <= NOW())
 			OR (state IN ($4, $5) AND claim_lease_expires_at <= NOW())
+			OR (state <> $3 AND EXISTS (
+				SELECT 1
+				FROM manager.sandbox_lifecycle_txns AS lifecycle
+				WHERE lifecycle.txn_id = runtime_slots.claim_operation_id
+					AND lifecycle.sandbox_id = runtime_slots.sandbox_id
+					AND lifecycle.kind = $6 AND lifecycle.source = $7
+					AND lifecycle.phase = $8
+			))
 		ORDER BY
 			CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
 			heartbeat_expires_at, slot_id
-		LIMIT $6
+		LIMIT $9
 	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
-		RuntimeSlotStateClaiming, RuntimeSlotStateStarting, limit)
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
+		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1093,6 +1157,25 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 		result = append(result, *slot)
 	}
 	return result, rows.Err()
+}
+
+func runtimeSlotResumeAuthorityAborted(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot) (bool, error) {
+	if slot == nil || slot.ClaimOperationID == "" || slot.SandboxID == "" {
+		return false, nil
+	}
+	var aborted bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM manager.sandbox_lifecycle_txns
+			WHERE txn_id = $1 AND sandbox_id = $2
+				AND kind = $3 AND source = $4 AND phase = $5
+		)
+	`, slot.ClaimOperationID, slot.SandboxID, SandboxLifecycleKindResume,
+		SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted).Scan(&aborted); err != nil {
+		return false, fmt.Errorf("check runtime slot resume authority: %w", err)
+	}
+	return aborted, nil
 }
 
 // runtimeSlotPreCommandReadyClaimExpired keeps the bounded claim lease

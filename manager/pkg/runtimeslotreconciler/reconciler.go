@@ -238,9 +238,6 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	if slot.State == sandboxstore.RuntimeSlotStateTerminal {
 		return false, nil
 	}
-	if !runtimeSlotDue(slot) {
-		return false, nil
-	}
 	if slot.ClaimID != "" && slot.State != sandboxstore.RuntimeSlotStateQuiescing &&
 		slot.State != sandboxstore.RuntimeSlotStateOrphaned {
 		slot, err = r.store.FenceRuntimeSlotForReconcile(ctx, &sandboxstore.FenceRuntimeSlotForReconcileRequest{
@@ -250,8 +247,10 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 			return false, nil
 		}
 		if err != nil {
-			return false, fmt.Errorf("fence expired claim: %w", err)
+			return false, fmt.Errorf("fence runtime slot claim: %w", err)
 		}
+	} else if !runtimeSlotDue(slot) {
+		return false, nil
 	}
 	if err := validateSlotIdentity(slot); err != nil {
 		return false, err

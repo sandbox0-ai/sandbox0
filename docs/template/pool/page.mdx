@@ -67,7 +67,8 @@ inventory in the `system` job at
 `nomad-driver-sandbox0/example/warm-slot.nomad`. The current job creates eight
 single-use carriers on every admitted dedicated node. A terminal sandbox
 consumes its allocation, and Nomad creates a fresh allocation with a fresh
-network namespace. Task restart in the old allocation is disabled.
+network namespace on the identity-bound `cni/sandbox0` network. Task restart
+in the old allocation is disabled.
 
 A ready carrier alone is insufficient. A claim also requires all of the
 following:

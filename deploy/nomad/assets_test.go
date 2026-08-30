@@ -54,6 +54,12 @@ func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T)
 	if cpu, memory := strings.Count(warmJob, "cpu    = 50"), strings.Count(warmJob, "memory = 64"); cpu != minimumAcceptanceWidth || memory != minimumAcceptanceWidth {
 		t.Fatalf("warm carrier overhead records = cpu %d memory %d, want %d each", cpu, memory, minimumAcceptanceWidth)
 	}
+	if networks := strings.Count(warmJob, `mode = "cni/sandbox0"`); networks != minimumAcceptanceWidth {
+		t.Fatalf("warm carrier Sandbox0 CNI networks = %d, want %d", networks, minimumAcceptanceWidth)
+	}
+	if regexp.MustCompile(`(?m)^\s*mode\s*=\s*"bridge"\s*$`).MatchString(warmJob) {
+		t.Fatal("warm carriers must not use Nomad's built-in shared bridge network")
+	}
 	if !strings.Contains(warmJob, `attribute = "${meta.sandbox0_dedicated}"`) ||
 		!strings.Contains(warmJob, `attribute = "${meta.sandbox0_admitted}"`) ||
 		!strings.Contains(warmJob, `value     = "true"`) {

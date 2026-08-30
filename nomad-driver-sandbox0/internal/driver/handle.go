@@ -31,6 +31,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/drivers/shared/resolvconf"
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -334,6 +335,10 @@ func (h *taskHandle) writeClaimBundle(
 	if resourceLease.SlotID != h.taskConfig.ID || resourceLease.NodeID != h.taskConfig.NodeID {
 		return fmt.Errorf("runtime resource lease does not match the Nomad carrier")
 	}
+	resolvMount, err := resolvconf.GenerateDNSMount(h.bundleDir, h.taskConfig.DNS)
+	if err != nil {
+		return fmt.Errorf("generate sandbox resolver configuration: %w", err)
+	}
 	cgroupPath, err := runtimeLeaseCgroupsPath(h.resourceCgroupRoot, resourceLease.CgroupName)
 	if err != nil {
 		return err
@@ -374,6 +379,7 @@ func (h *taskHandle) writeClaimBundle(
 		AllocID:                       h.taskConfig.AllocID,
 		TaskID:                        h.taskConfig.ID,
 		NetNSPath:                     netnsPath,
+		ResolvConfPath:                resolvMount.HostPath,
 		ProcdInternalJWTPublicKeyFile: h.procdInternalJWTPublicKeyFile,
 		Resources:                     resources,
 		SecurityClass:                 h.driverConfig.SecurityClass,

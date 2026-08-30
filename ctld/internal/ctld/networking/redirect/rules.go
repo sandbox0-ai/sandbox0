@@ -31,9 +31,6 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 
 	// Source-IP membership scopes these rules to registered Nomad network
 	// namespaces, so they do not depend on a particular bridge interface name.
-	appendTPROXYRules(&buf, "", "tcp", 443, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "", "tcp", 853, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "", "tcp", 0, cfg.ProxyHTTPPort)
 	appendTPROXYRules(&buf, "", "udp", 443, cfg.ProxyHTTPSPort)
 	appendTPROXYRules(&buf, "", "udp", 853, cfg.ProxyHTTPSPort)
 	appendTPROXYRules(&buf, "", "udp", 0, cfg.ProxyHTTPPort)

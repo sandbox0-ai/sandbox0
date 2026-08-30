@@ -166,8 +166,8 @@ type BeginRootFSWriterRetireRequest struct {
 
 // BeginRootFSWriterCrashAbandonRequest establishes the regional fencing point
 // before the node produces a terminal proof. An unexpected loss must wait for
-// lease maturity; durable explicit termination may revoke renewal immediately.
-// In both cases the exact runtime and durable generation are locked first.
+// lease maturity; durable termination or an exact quiesced runtime slot may
+// revoke renewal immediately. The exact runtime and generation are locked first.
 type BeginRootFSWriterCrashAbandonRequest struct {
 	GrantID                 string
 	WriterEpoch             int64
@@ -731,13 +731,16 @@ func renewRootFSWriterGrant(
 				FROM manager.runtime_slots AS slot
 				WHERE slot.slot_id = g.slot_id
 					AND slot.writer_grant_id = g.grant_id
-					AND slot.state IN ($9, $10)
-					AND slot.claim_lease_expires_at <= NOW()
+					AND (
+						(slot.state IN ($9, $10) AND slot.claim_lease_expires_at <= NOW())
+						OR slot.state IN ($11, $12, $13)
+					)
 			)
 	`, normalized.GrantID, policy.LeaseTTL.Milliseconds(), RootFSWriterGrantStateConsumed,
 		normalized.WriterEpoch, normalized.BindingVersion,
 		normalized.BindingDigest, normalized.ConsumerNodeUID, policy.GracePeriod.Milliseconds(),
-		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
+		RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant: %w", err)
 	}
@@ -835,13 +838,16 @@ func renewRootFSWriterGrants(
 				FROM manager.runtime_slots AS slot
 				WHERE slot.slot_id = g.slot_id
 					AND slot.writer_grant_id = g.grant_id
-					AND slot.state IN ($9, $10)
-					AND slot.claim_lease_expires_at <= authority_clock.observed_at
+					AND (
+						(slot.state IN ($9, $10) AND slot.claim_lease_expires_at <= authority_clock.observed_at)
+						OR slot.state IN ($11, $12, $13)
+					)
 			)
 		RETURNING g.grant_id
 	`, grantIDs, epochs, versions, digests, nodeUIDs, policy.LeaseTTL.Milliseconds(),
 		RootFSWriterGrantStateConsumed, policy.GracePeriod.Milliseconds(),
-		RuntimeSlotStateClaiming, RuntimeSlotStateStarting)
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
+		RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal)
 	if err != nil {
 		return nil, fmt.Errorf("renew rootfs writer grant batch: %w", err)
 	}
@@ -1147,7 +1153,7 @@ func beginRootFSWriterCrashAbandon(
 	}
 	leaseMature := !record.LeaseExpiresAt.IsZero() &&
 		!record.LeaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(record.databaseNow)
-	explicitFence := runtimeMatch.terminating || runtimeMatch.failedClaimCleanup
+	explicitFence := runtimeMatch.terminating || runtimeMatch.failedClaimCleanup || runtimeMatch.renewalRevoked
 	if !leaseMature && !explicitFence {
 		return nil, fmt.Errorf("%w: grant %s remains renewable", ErrRootFSWriterFenceNotMature, normalized.GrantID)
 	}
@@ -1626,6 +1632,7 @@ type rootFSWriterCrashRuntimeMatch struct {
 	terminating         bool
 	failedClaimCleanup  bool
 	failedClaimDeletion bool
+	renewalRevoked      bool
 }
 
 func lockRootFSWriterCrashRuntime(
@@ -1659,6 +1666,20 @@ func lockRootFSWriterCrashRuntime(
 	precommitResume := !deletedAt.Valid && desiredState == SandboxDesiredStatePaused &&
 		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration >= 0 &&
 		runtimeGeneration+1 == lifecycle.FromGeneration
+	if err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM manager.runtime_slots
+			WHERE slot_id = $1 AND writer_grant_id = $2
+				AND sandbox_id = $3 AND claim_id = $4 AND filesystem_id = $5
+				AND node_uid = $6 AND node_boot_id = $7
+				AND state IN ($8, $9)
+		)
+	`, record.SlotID, record.ID, record.SandboxID, record.ClaimID, record.FilesystemID,
+		record.NodeUID, record.NodeBootID, RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned,
+	).Scan(&match.renewalRevoked); err != nil {
+		return match, fmt.Errorf("verify runtime slot writer renewal fence: %w", err)
+	}
 	match.failedClaimDeletion = desiredState == SandboxDesiredStateDeleted && deletedAt.Valid &&
 		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration
 	failedClaimCandidate := !deletedAt.Valid &&

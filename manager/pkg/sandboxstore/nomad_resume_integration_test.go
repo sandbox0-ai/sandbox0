@@ -2,6 +2,7 @@ package sandboxstore
 
 import (
 	"bytes"
+	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -108,66 +109,10 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.Equal(t, requested.OperationID, durableRetry.OperationID)
 	require.Equal(t, requested.SourceGenerationID, durableRetry.SourceGenerationID)
 
-	registration := runtimeSlotTestRegistration("slot-nomad-resume-new", "allocation-nomad-resume-new")
-	registration.AllocationNamespace = "nomad"
-	_, err = registerRuntimeSlotWithTestCapacity(t, fixture.ctx, fixture.store, registration)
-	require.NoError(t, err)
-	readyProof := bytes.Repeat([]byte{0xa1}, 32)
-	_, err = fixture.store.ReportRuntimeSlotReady(fixture.ctx, &ReportRuntimeSlotReadyRequest{
-		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
-		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
-		RuntimeReadyDigest: readyProof, NetworkReadyDigest: readyProof,
-		StorageReadyDigest: readyProof, HeartbeatTTL: time.Minute,
-	})
-	require.NoError(t, err)
-	claimID := "claim-nomad-resume-new"
-	acquire := &AcquireRuntimeSlotRequest{
-		OperationID: requested.OperationID, ClaimID: claimID, SandboxID: requested.SandboxID,
-		FilesystemID: requested.FilesystemID, SourceGenerationID: requested.SourceGenerationID,
-		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
-		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
-		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
-		Resources: runtimeSlotTestResources(),
-	}
-	claimed, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
-	require.NoError(t, err)
-	require.Equal(t, registration.SlotID, claimed.ID)
-
-	binding := bytes.Repeat([]byte{0xa2}, 32)
-	issue := rootFSWriterGrantTestIssueRequest(
-		fixture.sandboxID, "grant-nomad-resume-new", claimID, registration.SlotID, binding,
-	)
-	issue.ExpectedFilesystemID = requested.FilesystemID
-	issue.InitialGenerationID = requested.SourceGenerationID
-	issue.ExpectedWriterEpoch = fixture.writerEpoch
-	issue.RuntimeNamespace = registration.AllocationNamespace
-	issue.RuntimeID = "slot"
-	issue.RuntimeIncarnationID = registration.AllocationID
-	issue.NodeName = registration.NodeID
-	issue.NodeUID = registration.NodeUID
-	issue.NodeBootID = registration.NodeBootID
-	issue.RuntimeGeneration = strconv.FormatInt(requested.RuntimeGeneration, 10)
-	issued, err := fixture.store.IssueRootFSWriterGrant(fixture.ctx, issue)
-	require.NoError(t, err)
-	_, err = fixture.store.BindRuntimeSlotWriterGrant(fixture.ctx, &BindRuntimeSlotWriterGrantRequest{
-		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: claimID, GrantID: issue.GrantID,
-	})
-	require.NoError(t, err)
-	_, err = fixture.store.ConsumeRootFSWriterGrant(fixture.ctx, &ConsumeRootFSWriterGrantRequest{
-		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
-		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
-		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-resume", LeaseTTL: time.Minute,
-	})
-	require.NoError(t, err)
-	_, err = fixture.store.StartRuntimeSlot(fixture.ctx, &StartRuntimeSlotRequest{
-		SlotID: claimed.ID, AllocationID: registration.AllocationID,
-		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
-		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
-		LaunchAttempt: "launch-nomad-resume", RunscContainerID: "runsc-nomad-resume",
-		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0xa3}, 32),
-		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
-	})
-	require.NoError(t, err)
+	runtime := prepareNomadResumeRuntime(t, fixture, requested, "new")
+	registration := runtime.registration
+	acquire := runtime.acquire
+	claimed := runtime.claimed
 	_, err = fixture.store.MarkRuntimeSlotCommandReady(fixture.ctx, &MarkRuntimeSlotCommandReadyRequest{
 		SlotID: claimed.ID, AllocationID: registration.AllocationID,
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
@@ -239,6 +184,104 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.Equal(t, RuntimeSlotStateQuiescing, cleanup.SlotState)
 }
 
+func TestNomadSandboxResumeFencesLateCommandReadyAfterAbortIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "resume-late-ready")
+	terminalizeNomadPauseFixture(t, fixture)
+	requested, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot",
+	})
+	require.NoError(t, err)
+	runtime := prepareNomadResumeRuntime(t, fixture, requested, "late-ready")
+
+	aborted, err := fixture.store.AbortNomadSandboxResume(
+		fixture.ctx, fixture.sandboxID, requested.OperationID, "planner command-ready deadline elapsed",
+	)
+	require.NoError(t, err)
+	require.True(t, aborted)
+	quiescing, err := fixture.store.GetRuntimeSlot(fixture.ctx, runtime.claimed.ID)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+	require.False(t, quiescing.HeartbeatExpiresAt.After(quiescing.AuthorityObservedAt))
+
+	commandReady := &MarkRuntimeSlotCommandReadyRequest{
+		SlotID: runtime.claimed.ID, AllocationID: runtime.registration.AllocationID,
+		NodeUID: runtime.registration.NodeUID, NodeBootID: runtime.registration.NodeBootID,
+		OperationID: runtime.acquire.OperationID, ClaimID: runtime.acquire.ClaimID,
+		ProcdInstanceID: "late-procd", ProcdAddress: "http://192.0.2.11:49983",
+		CommandReadyDigest: bytes.Repeat([]byte{0xb4}, 32),
+	}
+	_, err = fixture.store.MarkRuntimeSlotCommandReady(fixture.ctx, commandReady)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
+
+	// Recreate the state written by managers that predated the abort fence. A
+	// live heartbeat and writer lease must not hide this durable contradiction.
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.runtime_slots
+		SET state = $2, revision = revision + 1,
+			heartbeat_expires_at = NOW() + INTERVAL '1 minute', quiescing_at = NULL,
+			procd_instance_id = $3, procd_address = $4, command_ready_digest = $5,
+			command_ready_at = NOW(), updated_at = NOW()
+		WHERE slot_id = $1
+	`, runtime.claimed.ID, RuntimeSlotStateActive, commandReady.ProcdInstanceID,
+		commandReady.ProcdAddress, commandReady.CommandReadyDigest)
+	require.NoError(t, err)
+	candidates, err := fixture.store.ListRuntimeSlotsForReconcile(fixture.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, runtime.claimed.ID, candidates[0].ID)
+
+	legacyActive, err := fixture.store.GetRuntimeSlot(fixture.ctx, runtime.claimed.ID)
+	require.NoError(t, err)
+	fenced, err := fixture.store.FenceRuntimeSlotForReconcile(fixture.ctx, &FenceRuntimeSlotForReconcileRequest{
+		SlotID: legacyActive.ID, ExpectedRevision: legacyActive.Revision,
+	})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, fenced.State)
+
+	renewRequest := &RenewRootFSWriterGrantRequest{
+		GrantID: runtime.issue.GrantID, WriterEpoch: runtime.issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: runtime.binding,
+		ConsumerNodeUID: runtime.registration.NodeUID,
+	}
+	policy := RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second}
+	_, err = fixture.store.RenewRootFSWriterGrant(fixture.ctx, renewRequest, policy)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantInvalidState)
+	batch, err := fixture.store.RenewRootFSWriterGrants(
+		fixture.ctx, []*RenewRootFSWriterGrantRequest{renewRequest}, policy,
+	)
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	require.ErrorIs(t, batch[0].Err, ErrRootFSWriterGrantInvalidState)
+
+	crashOperationID := "reconcile-writer-late-ready"
+	err = fixture.store.WithSandboxLock(fixture.ctx, fixture.sandboxID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: crashOperationID, SandboxID: fixture.sandboxID,
+			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
+			Source: SandboxLifecycleSourceCrash, Cancelable: false,
+			FromGeneration:       requested.RuntimeGeneration,
+			FromRuntimeNamespace: runtime.registration.AllocationNamespace,
+			FromRuntimeID:        runtime.registration.AllocationID,
+			ExpectedGenerationID: requested.SourceGenerationID,
+		})
+	})
+	require.NoError(t, err)
+	begun, err := fixture.store.BeginRootFSWriterCrashAbandon(fixture.ctx, &BeginRootFSWriterCrashAbandonRequest{
+		GrantID: runtime.issue.GrantID, WriterEpoch: runtime.issued.Grant.WriterEpoch,
+		OperationID: crashOperationID, BindingVersion: RootFSWriterBindingVersion,
+		BindingDigest: runtime.binding, NodeUID: runtime.registration.NodeUID,
+		NodeBootID:              runtime.registration.NodeBootID,
+		ExpectedOldGenerationID: requested.SourceGenerationID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetiring, begun.State,
+		"the durable slot fence must revoke a live writer lease without waiting for wall-clock expiry")
+}
+
 func TestNomadSandboxResumeWaitsForTerminalRuntimeAndReservesQuotaIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "resume-gates")
 	pause, err := fixture.store.RequestNomadSandboxPause(
@@ -261,6 +304,88 @@ func TestNomadSandboxResumeWaitsForTerminalRuntimeAndReservesQuotaIntegration(t 
 	active, getErr := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
 	require.NoError(t, getErr)
 	require.Nil(t, active)
+}
+
+type preparedNomadResumeRuntime struct {
+	registration *RegisterRuntimeSlotRequest
+	acquire      *AcquireRuntimeSlotRequest
+	claimed      *RuntimeSlot
+	issue        *IssueRootFSWriterGrantRequest
+	issued       *IssuedRootFSWriterGrant
+	binding      []byte
+}
+
+func prepareNomadResumeRuntime(
+	t *testing.T,
+	fixture *nomadPauseStoreFixture,
+	requested *NomadSandboxResumeCandidate,
+	suffix string,
+) *preparedNomadResumeRuntime {
+	t.Helper()
+	registration := runtimeSlotTestRegistration("slot-nomad-resume-"+suffix, "allocation-nomad-resume-"+suffix)
+	registration.AllocationNamespace = "nomad"
+	_, err := registerRuntimeSlotWithTestCapacity(t, fixture.ctx, fixture.store, registration)
+	require.NoError(t, err)
+	readyProof := bytes.Repeat([]byte{0xa1}, 32)
+	_, err = fixture.store.ReportRuntimeSlotReady(fixture.ctx, &ReportRuntimeSlotReadyRequest{
+		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		RuntimeReadyDigest: readyProof, NetworkReadyDigest: readyProof,
+		StorageReadyDigest: readyProof, HeartbeatTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	claimID := "claim-nomad-resume-" + suffix
+	acquire := &AcquireRuntimeSlotRequest{
+		OperationID: requested.OperationID, ClaimID: claimID, SandboxID: requested.SandboxID,
+		FilesystemID: requested.FilesystemID, SourceGenerationID: requested.SourceGenerationID,
+		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
+	}
+	claimed, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
+	require.NoError(t, err)
+	require.Equal(t, registration.SlotID, claimed.ID)
+
+	binding := bytes.Repeat([]byte{0xa2}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(
+		fixture.sandboxID, "grant-nomad-resume-"+suffix, claimID, registration.SlotID, binding,
+	)
+	issue.ExpectedFilesystemID = requested.FilesystemID
+	issue.InitialGenerationID = requested.SourceGenerationID
+	issue.ExpectedWriterEpoch = fixture.writerEpoch
+	issue.RuntimeNamespace = registration.AllocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = registration.AllocationID
+	issue.NodeName = registration.NodeID
+	issue.NodeUID = registration.NodeUID
+	issue.NodeBootID = registration.NodeBootID
+	issue.RuntimeGeneration = strconv.FormatInt(requested.RuntimeGeneration, 10)
+	issued, err := fixture.store.IssueRootFSWriterGrant(fixture.ctx, issue)
+	require.NoError(t, err)
+	_, err = fixture.store.BindRuntimeSlotWriterGrant(fixture.ctx, &BindRuntimeSlotWriterGrantRequest{
+		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: claimID, GrantID: issue.GrantID,
+	})
+	require.NoError(t, err)
+	_, err = fixture.store.ConsumeRootFSWriterGrant(fixture.ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-resume", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = fixture.store.StartRuntimeSlot(fixture.ctx, &StartRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		LaunchAttempt: "launch-nomad-resume-" + suffix, RunscContainerID: "runsc-nomad-resume-" + suffix,
+		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0xa3}, 32),
+		ResourceLeaseID: claimed.ResourceLease.LeaseID, ResourceLeaseDigest: claimed.ResourceLeaseDigest,
+	})
+	require.NoError(t, err)
+	return &preparedNomadResumeRuntime{
+		registration: registration, acquire: acquire, claimed: claimed,
+		issue: issue, issued: issued, binding: binding,
+	}
 }
 
 func terminalizeNomadPauseFixture(t *testing.T, fixture *nomadPauseStoreFixture) *NomadSandboxPauseCandidate {

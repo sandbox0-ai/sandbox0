@@ -696,15 +696,16 @@ func TestReconcilerRejectsChangedWriterFenceProofBeforeNodeCleanup(t *testing.T)
 	}
 }
 
-func TestReconcilerSkipsCandidateWhoseLivenessRecovered(t *testing.T) {
+func TestReconcilerRechecksClaimedCandidateWhoseLivenessRecovered(t *testing.T) {
 	fixture := newReconcileFixture(t, true)
 	fixture.store.slot.HeartbeatExpiresAt = fixture.store.slot.AuthorityObservedAt.Add(time.Minute)
 	result, err := fixture.reconciler.RunOnce(context.Background())
 	if err != nil || result.Skipped != 1 {
 		t.Fatalf("RunOnce() = %+v, %v", result, err)
 	}
-	if fixture.store.fenceCalls != 0 || len(fixture.node.requests) != 0 {
-		t.Fatalf("recovered slot was fenced or cleaned")
+	if fixture.store.fenceCalls != 1 || len(fixture.node.requests) != 0 {
+		t.Fatalf("recovered slot fence recheck = %d, node cleanup = %d",
+			fixture.store.fenceCalls, len(fixture.node.requests))
 	}
 }
 

@@ -280,9 +280,9 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 }
 
 // AbortNomadSandboxResume terminally closes only the exact uncommitted resume
-// attempt. It deliberately leaves physical slot and writer cleanup to the
-// terminal reconciler, which must prove node and cgroup absence before it can
-// release the resource lease. A concurrent successful commit always wins.
+// attempt and quiesces any physical slot owned by it. The terminal reconciler
+// still proves node and cgroup absence before releasing the resource lease. A
+// concurrent successful commit always wins.
 func (s *PGSandboxStore) AbortNomadSandboxResume(
 	ctx context.Context,
 	sandboxID string,
@@ -327,6 +327,11 @@ func (s *PGSandboxStore) AbortNomadSandboxResume(
 		return false, fmt.Errorf("lock Nomad resume lifecycle for abort: %w", err)
 	}
 	if lifecycle.Phase == SandboxLifecyclePhaseCommitted || lifecycle.Phase == SandboxLifecyclePhaseAborted {
+		if lifecycle.Phase == SandboxLifecyclePhaseAborted {
+			if err := quiesceAbortedNomadResumeSlots(ctx, tx, sandboxID, operationID); err != nil {
+				return false, err
+			}
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, fmt.Errorf("commit terminal Nomad resume abort retry: %w", err)
 		}
@@ -356,10 +361,28 @@ func (s *PGSandboxStore) AbortNomadSandboxResume(
 	if tag.RowsAffected() != 1 {
 		return false, fmt.Errorf("%w: resume lifecycle changed during abort", ErrNomadSandboxResumeConflict)
 	}
+	if err := quiesceAbortedNomadResumeSlots(ctx, tx, sandboxID, operationID); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit Nomad sandbox resume abort: %w", err)
 	}
 	return true, nil
+}
+
+func quiesceAbortedNomadResumeSlots(ctx context.Context, tx pgx.Tx, sandboxID, operationID string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET state = $3, revision = revision + 1,
+			heartbeat_expires_at = LEAST(heartbeat_expires_at, NOW()),
+			quiescing_at = COALESCE(quiescing_at, NOW()), updated_at = NOW()
+		WHERE sandbox_id = $1 AND claim_operation_id = $2
+			AND state IN ($4, $5, $6)
+	`, sandboxID, operationID, RuntimeSlotStateQuiescing,
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting, RuntimeSlotStateActive); err != nil {
+		return fmt.Errorf("quiesce aborted Nomad resume slots: %w", err)
+	}
+	return nil
 }
 
 // CompleteNomadSandboxResume atomically makes an exact command-ready slot the

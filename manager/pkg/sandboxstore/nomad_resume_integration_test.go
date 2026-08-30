@@ -64,6 +64,78 @@ func TestNomadSandboxResumeAbortIsExactAndAllowsNewAttemptIntegration(t *testing
 	require.Greater(t, second.Record.LifecycleEpoch+1, first.Record.LifecycleEpoch+1)
 }
 
+func TestNomadSandboxResumeAbortCannotLeaveIssuedWriterUnboundIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "resume-atomic-writer")
+	terminalizeNomadPauseFixture(t, fixture)
+	requested, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot",
+	})
+	require.NoError(t, err)
+
+	registration := runtimeSlotTestRegistration("slot-resume-atomic-writer", "allocation-resume-atomic-writer")
+	_, err = registerRuntimeSlotWithTestCapacity(t, fixture.ctx, fixture.store, registration)
+	require.NoError(t, err)
+	readyProof := bytes.Repeat([]byte{0xa1}, 32)
+	_, err = fixture.store.ReportRuntimeSlotReady(fixture.ctx, &ReportRuntimeSlotReadyRequest{
+		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		RuntimeReadyDigest: readyProof, NetworkReadyDigest: readyProof,
+		StorageReadyDigest: readyProof, HeartbeatTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	claimID := "claim-resume-atomic-writer"
+	acquire := &AcquireRuntimeSlotRequest{
+		OperationID: requested.OperationID, ClaimID: claimID, SandboxID: requested.SandboxID,
+		FilesystemID: requested.FilesystemID, SourceGenerationID: requested.SourceGenerationID,
+		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+		Resources: runtimeSlotTestResources(),
+	}
+	claimed, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
+	require.NoError(t, err)
+
+	binding := bytes.Repeat([]byte{0xa2}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(
+		fixture.sandboxID, "grant-resume-atomic-writer", claimID, registration.SlotID, binding,
+	)
+	issue.ExpectedFilesystemID = requested.FilesystemID
+	issue.InitialGenerationID = requested.SourceGenerationID
+	issue.ExpectedWriterEpoch = fixture.writerEpoch
+	issue.RuntimeNamespace = registration.AllocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = registration.AllocationID
+	issue.NodeName = registration.NodeID
+	issue.NodeUID = registration.NodeUID
+	issue.NodeBootID = registration.NodeBootID
+	issue.RuntimeGeneration = strconv.FormatInt(requested.RuntimeGeneration, 10)
+
+	aborted, err := fixture.store.AbortNomadSandboxResume(
+		fixture.ctx, fixture.sandboxID, requested.OperationID, "concurrent planner lost authority",
+	)
+	require.NoError(t, err)
+	require.True(t, aborted)
+	_, err = fixture.store.IssueAndBindRuntimeSlotWriterGrant(
+		fixture.ctx,
+		issue,
+		&BindRuntimeSlotWriterGrantRequest{
+			SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: claimID, GrantID: issue.GrantID,
+		},
+	)
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	_, err = fixture.store.GetRootFSWriterGrant(fixture.ctx, issue.GrantID)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantNotFound)
+
+	quiescing, err := fixture.store.GetRuntimeSlot(fixture.ctx, claimed.ID)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+	require.Empty(t, quiescing.WriterGrantID)
+	filesystem, err := fixture.store.GetRootFSFilesystem(fixture.ctx, requested.FilesystemID)
+	require.NoError(t, err)
+	require.Equal(t, fixture.writerEpoch, filesystem.WriterEpoch,
+		"failed atomic bind must roll back the writer epoch and grant")
+}
+
 func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "resume")
 	pause := terminalizeNomadPauseFixture(t, fixture)

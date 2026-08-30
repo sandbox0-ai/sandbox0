@@ -104,12 +104,18 @@ func (f *fakeStore) AcquireRuntimeSlot(_ context.Context, request *sandboxstore.
 	return &clone, nil
 }
 
-func (f *fakeStore) IssueRootFSWriterGrant(_ context.Context, request *sandboxstore.IssueRootFSWriterGrantRequest) (*sandboxstore.IssuedRootFSWriterGrant, error) {
+func (f *fakeStore) IssueAndBindRuntimeSlotWriterGrant(
+	_ context.Context,
+	request *sandboxstore.IssueRootFSWriterGrantRequest,
+	bind *sandboxstore.BindRuntimeSlotWriterGrantRequest,
+) (*sandboxstore.IssueAndBindRuntimeSlotWriterGrantResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cloneRequest := *request
 	cloneRequest.BindingDigest = append([]byte(nil), request.BindingDigest...)
 	f.issues = append(f.issues, &cloneRequest)
+	cloneBind := *bind
+	f.binds = append(f.binds, &cloneBind)
 	if f.grant == nil {
 		f.grant = &sandboxstore.RootFSWriterGrant{
 			ID: request.GrantID, FilesystemID: request.ExpectedFilesystemID,
@@ -129,18 +135,13 @@ func (f *fakeStore) IssueRootFSWriterGrant(_ context.Context, request *sandboxst
 		f.issueLost = false
 		return nil, errors.New("writer issue response lost")
 	}
-	return &sandboxstore.IssuedRootFSWriterGrant{Grant: cloneGrant(f.grant), RawToken: request.RawToken}, nil
-}
-
-func (f *fakeStore) BindRuntimeSlotWriterGrant(_ context.Context, request *sandboxstore.BindRuntimeSlotWriterGrantRequest) (*sandboxstore.RuntimeSlot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cloneRequest := *request
-	f.binds = append(f.binds, &cloneRequest)
-	f.slot.WriterGrantID = request.GrantID
+	f.slot.WriterGrantID = bind.GrantID
 	f.slot.AuthorityObservedAt = time.Now().UTC()
-	clone := *f.slot
-	return &clone, nil
+	cloneSlot := *f.slot
+	return &sandboxstore.IssueAndBindRuntimeSlotWriterGrantResult{
+		Issued: &sandboxstore.IssuedRootFSWriterGrant{Grant: cloneGrant(f.grant), RawToken: request.RawToken},
+		Slot:   &cloneSlot,
+	}, nil
 }
 
 func cloneGrant(source *sandboxstore.RootFSWriterGrant) *sandboxstore.RootFSWriterGrant {

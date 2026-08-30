@@ -41,8 +41,11 @@ type Store interface {
 	GetRootFSFilesystem(context.Context, string) (*sandboxstore.RootFSFilesystem, error)
 	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
 	GetRootFSWriterGrant(context.Context, string) (*sandboxstore.RootFSWriterGrant, error)
-	IssueRootFSWriterGrant(context.Context, *sandboxstore.IssueRootFSWriterGrantRequest) (*sandboxstore.IssuedRootFSWriterGrant, error)
-	BindRuntimeSlotWriterGrant(context.Context, *sandboxstore.BindRuntimeSlotWriterGrantRequest) (*sandboxstore.RuntimeSlot, error)
+	IssueAndBindRuntimeSlotWriterGrant(
+		context.Context,
+		*sandboxstore.IssueRootFSWriterGrantRequest,
+		*sandboxstore.BindRuntimeSlotWriterGrantRequest,
+	) (*sandboxstore.IssueAndBindRuntimeSlotWriterGrantResult, error)
 }
 
 // CapacityDemandRecorder persists a short-lived, idempotent pressure signal
@@ -489,7 +492,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		return nil, errors.New("runtime slot claim lease expired before writer issue")
 	}
 
-	issued, err := p.store.IssueRootFSWriterGrant(ctx, &sandboxstore.IssueRootFSWriterGrantRequest{
+	issueAndBind, err := p.store.IssueAndBindRuntimeSlotWriterGrant(ctx, &sandboxstore.IssueRootFSWriterGrantRequest{
 		GrantID: ids.grantID, SandboxID: normalized.SandboxID,
 		ExpectedFilesystemID: filesystem.ID, ClaimID: ids.claimID, SlotID: slot.ID,
 		OperationID: ids.issueOperationID, RawToken: ids.rawToken,
@@ -500,23 +503,24 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		RuntimeGeneration:   strconv.FormatInt(normalized.Runtime.RuntimeGeneration, 10),
 		InitialGenerationID: generation.ID, ExpectedWriterEpoch: expectedWriterEpoch,
 		ConsumeExpiresAt: slot.ClaimLeaseExpiresAt,
+	}, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
+		SlotID: slot.ID, OperationID: normalized.OperationID, ClaimID: ids.claimID, GrantID: ids.grantID,
 	})
 	if err != nil {
 		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
-		return nil, fmt.Errorf("issue RootFS writer grant: %w", err)
+		return nil, fmt.Errorf("issue and bind RootFS writer grant: %w", err)
 	}
+	if issueAndBind == nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
+		return nil, errors.New("writer authority returned no issue and bind result")
+	}
+	issued := issueAndBind.Issued
 	if issued == nil || issued.Grant == nil || issued.RawToken != ids.rawToken ||
 		!grantMatchesStage(issued.Grant, stage, slot, ids, normalized, bindingDigest[:]) {
 		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, errors.New("writer authority returned another grant binding")
 	}
-	bound, err := p.store.BindRuntimeSlotWriterGrant(ctx, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
-		SlotID: slot.ID, OperationID: normalized.OperationID, ClaimID: ids.claimID, GrantID: ids.grantID,
-	})
-	if err != nil {
-		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
-		return nil, fmt.Errorf("bind runtime slot writer grant: %w", err)
-	}
+	bound := issueAndBind.Slot
 	if err := validateClaimedSlot(bound, normalized, ids, filesystem, generation, p.claimTTL); err != nil {
 		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, err

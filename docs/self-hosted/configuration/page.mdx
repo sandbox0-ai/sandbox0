@@ -227,6 +227,11 @@ restart {
 }
 ```
 
+Each task group must also keep `network { mode = "cni/sandbox0" }`. That name
+selects the rendered per-node CNI configuration and its leased allocation
+CIDR. Nomad `bridge` mode selects a different built-in network and must not be
+used for these carriers.
+
 Each carrier is one-shot. Nomad replaces the allocation after consumption.
 Pool width, node capacity, and NBD count are independent constraints and should
 be monitored together.

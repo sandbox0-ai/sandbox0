@@ -32,7 +32,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -64,7 +64,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -96,7 +96,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -128,7 +128,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -160,7 +160,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -192,7 +192,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -224,7 +224,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983
@@ -256,7 +256,7 @@ job "sandbox0-warm-slots" {
     }
 
     network {
-      mode = "bridge"
+      mode = "cni/sandbox0"
 
       port "procd" {
         to = 49983

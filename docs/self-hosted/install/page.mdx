@@ -172,6 +172,10 @@ nomad job run \
 Keep `restart { attempts = 0 }`. A carrier is one-shot and must be replaced by a
 fresh allocation and network namespace after consumption.
 
+Keep every carrier on `mode = "cni/sandbox0"`. The control-plane-rendered
+`sandbox0` CNI network binds the node's allocated CIDR; Nomad's built-in
+`bridge` mode uses its separate default network and is not interchangeable.
+
 Confirm manager sees:
 
 - live node capacity and current boot IDs;

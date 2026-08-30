@@ -138,7 +138,9 @@ mutually authenticated.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad` with
    `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. Keep
    `restart { attempts = 0 }`: a consumed slot gets a fresh allocation and
-   network namespace, never a task restart in the same allocation.
+   network namespace, never a task restart in the same allocation. Keep the
+   task groups on `cni/sandbox0`; Nomad's built-in `bridge` network does not
+   use the node's rendered allocation-CIDR configuration.
 5. Confirm PostgreSQL has live node capacity, resource-neutral ready slots,
    connected node channels, default-deny networking, and replacement slots.
 6. Run `tools/runtime-slot-slo` through the public regional endpoint as

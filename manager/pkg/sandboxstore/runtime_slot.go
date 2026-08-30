@@ -150,6 +150,13 @@ type BindRuntimeSlotWriterGrantRequest struct {
 	GrantID     string
 }
 
+// IssueAndBindRuntimeSlotWriterGrantResult is the atomic writer-authority and
+// runtime-slot binding returned to the regional claim planner.
+type IssueAndBindRuntimeSlotWriterGrantResult struct {
+	Issued *IssuedRootFSWriterGrant
+	Slot   *RuntimeSlot
+}
+
 type StartRuntimeSlotRequest struct {
 	SlotID              string
 	AllocationID        string
@@ -772,44 +779,105 @@ func (s *PGSandboxStore) BindRuntimeSlotWriterGrant(ctx context.Context, request
 		return nil, err
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
-		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
-			return nil, fmt.Errorf("%w: writer grant caller does not match slot claim", ErrRuntimeSlotConflict)
-		}
-		if slot.WriterGrantID != "" {
-			if slot.WriterGrantID == normalized.GrantID {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("%w: slot is already bound to another writer grant", ErrRuntimeSlotConflict)
-		}
-		if slot.State != RuntimeSlotStateClaiming {
-			return nil, fmt.Errorf("%w: writer grant can only bind a claiming slot", ErrRuntimeSlotInvalid)
-		}
-		var claimID, grantSlotID, sandboxID, filesystemID, nodeUID, nodeBootID, state string
-		if err := tx.QueryRow(ctx, `
-			SELECT claim_id, slot_id, sandbox_id, filesystem_id, node_uid, node_boot_id, state
-			FROM manager.rootfs_writer_grants
-			WHERE grant_id = $1
-			FOR UPDATE
-		`, normalized.GrantID).Scan(
-			&claimID, &grantSlotID, &sandboxID, &filesystemID, &nodeUID, &nodeBootID, &state,
-		); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, fmt.Errorf("%w: writer grant is absent", ErrRuntimeSlotConflict)
-			}
-			return nil, err
-		}
-		if claimID != slot.ClaimID || grantSlotID != slot.ID || sandboxID != slot.SandboxID ||
-			filesystemID != slot.FilesystemID || nodeUID != slot.NodeUID || nodeBootID != slot.NodeBootID ||
-			(state != RootFSWriterGrantStateIssued && state != RootFSWriterGrantStateConsumed) {
-			return nil, fmt.Errorf("%w: writer grant identity does not match slot claim", ErrRuntimeSlotConflict)
-		}
-		_, err := tx.Exec(ctx, `
-			UPDATE manager.runtime_slots
-			SET writer_grant_id = $2, revision = revision + 1, updated_at = NOW()
-			WHERE slot_id = $1
-		`, slot.ID, normalized.GrantID)
-		return nil, err
+		return bindRuntimeSlotWriterGrant(ctx, tx, slot, normalized)
 	})
+}
+
+// IssueAndBindRuntimeSlotWriterGrant advances writer authority and binds the
+// exact claiming slot in one transaction. Resume aborts lock the same sandbox
+// row, so they can never leave an issued but unbound grant behind.
+func (s *PGSandboxStore) IssueAndBindRuntimeSlotWriterGrant(
+	ctx context.Context,
+	issue *IssueRootFSWriterGrantRequest,
+	bind *BindRuntimeSlotWriterGrantRequest,
+) (*IssueAndBindRuntimeSlotWriterGrantResult, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("sandbox store is not configured")
+	}
+	normalizedBind, err := normalizeBindRuntimeSlotWriterGrantRequest(bind)
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil || strings.TrimSpace(issue.GrantID) != normalizedBind.GrantID ||
+		strings.TrimSpace(issue.ClaimID) != normalizedBind.ClaimID ||
+		strings.TrimSpace(issue.SlotID) != normalizedBind.SlotID {
+		return nil, fmt.Errorf("writer issue and runtime slot binding identities must match")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin writer issue and slot bind tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	issued, err := issueRootFSWriterGrant(ctx, tx, issue)
+	if err != nil {
+		return nil, err
+	}
+	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+		WHERE slot_id = $1
+		FOR UPDATE OF runtime_slots
+	`, normalizedBind.SlotID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRuntimeSlotNotFound, normalizedBind.SlotID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	bound, err := bindRuntimeSlotWriterGrant(ctx, tx, slot, normalizedBind)
+	if err != nil {
+		return nil, mapRuntimeSlotConflict("bind issued writer to runtime slot", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapRuntimeSlotConflict("commit writer issue and slot bind", err)
+	}
+	return &IssueAndBindRuntimeSlotWriterGrantResult{Issued: issued, Slot: bound}, nil
+}
+
+func bindRuntimeSlotWriterGrant(
+	ctx context.Context,
+	tx pgx.Tx,
+	slot *RuntimeSlot,
+	request *BindRuntimeSlotWriterGrantRequest,
+) (*RuntimeSlot, error) {
+	if !runtimeSlotClaimIdentityMatches(slot, request.OperationID, request.ClaimID) {
+		return nil, fmt.Errorf("%w: writer grant caller does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if slot.WriterGrantID != "" {
+		if slot.WriterGrantID == request.GrantID {
+			return slot, nil
+		}
+		return nil, fmt.Errorf("%w: slot is already bound to another writer grant", ErrRuntimeSlotConflict)
+	}
+	if slot.State != RuntimeSlotStateClaiming {
+		return nil, fmt.Errorf("%w: writer grant can only bind a claiming slot", ErrRuntimeSlotInvalid)
+	}
+	var claimID, grantSlotID, sandboxID, filesystemID, nodeUID, nodeBootID, state string
+	if err := tx.QueryRow(ctx, `
+		SELECT claim_id, slot_id, sandbox_id, filesystem_id, node_uid, node_boot_id, state
+		FROM manager.rootfs_writer_grants
+		WHERE grant_id = $1
+		FOR UPDATE
+	`, request.GrantID).Scan(
+		&claimID, &grantSlotID, &sandboxID, &filesystemID, &nodeUID, &nodeBootID, &state,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: writer grant is absent", ErrRuntimeSlotConflict)
+		}
+		return nil, err
+	}
+	if claimID != slot.ClaimID || grantSlotID != slot.ID || sandboxID != slot.SandboxID ||
+		filesystemID != slot.FilesystemID || nodeUID != slot.NodeUID || nodeBootID != slot.NodeBootID ||
+		(state != RootFSWriterGrantStateIssued && state != RootFSWriterGrantStateConsumed) {
+		return nil, fmt.Errorf("%w: writer grant identity does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET writer_grant_id = $2, revision = revision + 1, updated_at = NOW()
+		WHERE slot_id = $1
+	`, slot.ID, request.GrantID); err != nil {
+		return nil, err
+	}
+	return scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slot.ID))
 }
 
 // StartRuntimeSlot records the exact post-bind, post-policy launch attempt. It

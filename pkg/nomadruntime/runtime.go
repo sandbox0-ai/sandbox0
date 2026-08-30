@@ -342,7 +342,12 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
 	}
-	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 30*time.Second)
+	// Recovery is fail-closed: do not expose the node runtime socket until all
+	// crash-surviving journal intents have completed. Immutable object
+	// verification may need to transfer a full pack, so use the same bounded
+	// timeout as steady-state session reconciliation instead of the shorter
+	// health-probe window.
+	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
 	err = sessions.ReconcileFreezes(reconcileCtx)
 	if err == nil {
 		err = sessions.ReconcileRunningForkCaptures(reconcileCtx)

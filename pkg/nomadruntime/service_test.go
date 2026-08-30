@@ -27,6 +27,11 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+func TestNodeRuntimeStartupCoversDurableSessionReconciliation(t *testing.T) {
+	require.Equal(t, 3*time.Minute, rootFSSessionReconcileTimeout)
+	require.Greater(t, nodeRuntimeStartupTimeout, rootFSSessionReconcileTimeout)
+}
+
 func TestNodeRuntimeRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "ctld Nomad runtime.sock")
 	runtime := &fakeRootFSRuntime{source: t.TempDir()}

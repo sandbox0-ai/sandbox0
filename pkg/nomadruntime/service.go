@@ -48,8 +48,12 @@ const (
 	rootFSSessionReconcileTimeout   = 3 * time.Minute
 	runtimeSlotJournalPruneInterval = time.Minute
 	nomadAllocationResponseMaxBytes = 64 << 20
-	nodeRuntimeStartupTimeout       = 30 * time.Second
-	nodeRuntimeHealthInterval       = time.Second
+	// Startup must allow the durable RootFS journal to finish its bounded
+	// recovery before the private runtime socket can become healthy. A release
+	// retry can verify a 64 MiB immutable object and legitimately exceed the
+	// ordinary 30-second health window.
+	nodeRuntimeStartupTimeout = rootFSSessionReconcileTimeout + 30*time.Second
+	nodeRuntimeHealthInterval = time.Second
 )
 
 // Service is the HA-primary-scoped Nomad node runtime owned by ctld.

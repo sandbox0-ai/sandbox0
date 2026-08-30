@@ -76,15 +76,20 @@ type nodeChannelConnection struct {
 
 	writePermit chan struct{}
 	mu          sync.Mutex
-	pending     map[string]nodeChannelPending
+	pending     map[string]*nodeChannelPending
 	done        chan struct{}
 	err         error
 	once        sync.Once
 }
 
+// nodeChannelPending multicasts one deterministic command result to concurrent
+// callers while retaining an abandoned result for an exact retry.
 type nodeChannelPending struct {
 	command   protocol.NodeChannelCommand
-	result    chan nodeChannelOutcome
+	payload   []byte
+	done      chan struct{}
+	outcome   nodeChannelOutcome
+	waiters   int
 	abandoned bool
 	completed bool
 }
@@ -223,7 +228,7 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	registered := &nodeChannelConnection{
 		websocket: connection, hello: hello,
 		writePermit: make(chan struct{}, 1),
-		pending:     make(map[string]nodeChannelPending), done: make(chan struct{}),
+		pending:     make(map[string]*nodeChannelPending), done: make(chan struct{}),
 	}
 	go registered.readLoop()
 	if err := h.register(registered); err != nil {
@@ -751,19 +756,33 @@ func (c *nodeChannelConnection) request(
 	ctx context.Context,
 	command protocol.NodeChannelCommand,
 ) (protocol.NodeChannelResult, error) {
-	pending := nodeChannelPending{command: command, result: make(chan nodeChannelOutcome, 1)}
+	payload, err := json.Marshal(command)
+	if err != nil {
+		return protocol.NodeChannelResult{}, fmt.Errorf("encode node channel command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if len(payload) > protocol.NodeChannelMaxBytes {
+		return protocol.NodeChannelResult{}, fmt.Errorf(
+			"encoded node channel command exceeds %d bytes: %w",
+			protocol.NodeChannelMaxBytes, errdefs.ErrInvalidArgument,
+		)
+	}
+	pending := &nodeChannelPending{command: command, payload: payload, done: make(chan struct{}), waiters: 1}
 	reuseInFlight := false
 	c.mu.Lock()
 	if c.err != nil {
-		err := c.err
+		err = c.err
 		c.mu.Unlock()
 		return protocol.NodeChannelResult{}, err
 	}
 	if existing, exists := c.pending[command.RequestID]; exists {
-		if !existing.abandoned {
+		if !bytes.Equal(existing.payload, payload) {
 			c.mu.Unlock()
-			return protocol.NodeChannelResult{}, fmt.Errorf("node command is already in flight: %w", errdefs.ErrAlreadyExists)
+			return protocol.NodeChannelResult{}, fmt.Errorf(
+				"node command request ID is already bound to another payload: %w",
+				errdefs.ErrFailedPrecondition,
+			)
 		}
+		existing.waiters++
 		existing.abandoned = false
 		pending = existing
 		reuseInFlight = true
@@ -775,49 +794,56 @@ func (c *nodeChannelConnection) request(
 	c.mu.Unlock()
 
 	if !reuseInFlight {
-		payload, err := json.Marshal(command)
-		if err != nil || len(payload) > protocol.NodeChannelMaxBytes {
-			c.removePending(command.RequestID, pending.result)
-			return protocol.NodeChannelResult{}, fmt.Errorf("encode node channel command: %w: %w", err, errdefs.ErrInvalidArgument)
-		}
 		select {
 		case c.writePermit <- struct{}{}:
 		case <-ctx.Done():
-			c.removePending(command.RequestID, pending.result)
-			return protocol.NodeChannelResult{}, ctx.Err()
+			c.completePending(command.RequestID, pending, nodeChannelOutcome{err: ctx.Err()})
+			return c.waitForPending(ctx, command.RequestID, pending)
 		case <-c.done:
-			c.removePending(command.RequestID, pending.result)
-			return protocol.NodeChannelResult{}, c.connectionError()
+			c.completePending(command.RequestID, pending, nodeChannelOutcome{err: c.connectionError()})
+			return c.waitForPending(ctx, command.RequestID, pending)
 		}
 		if err := ctx.Err(); err != nil {
 			<-c.writePermit
-			c.removePending(command.RequestID, pending.result)
-			return protocol.NodeChannelResult{}, err
+			c.completePending(command.RequestID, pending, nodeChannelOutcome{err: err})
+			return c.waitForPending(ctx, command.RequestID, pending)
 		}
 		_ = c.websocket.SetWriteDeadline(time.Now().Add(nodeChannelHelloTimeout))
-		err = c.websocket.WriteMessage(websocket.TextMessage, payload)
+		err := c.websocket.WriteMessage(websocket.TextMessage, payload)
 		_ = c.websocket.SetWriteDeadline(time.Time{})
 		<-c.writePermit
 		if err != nil {
-			c.removePending(command.RequestID, pending.result)
-			c.close(fmt.Errorf("write runtime slot node command: %w: %w", err, errdefs.ErrUnavailable))
-			return protocol.NodeChannelResult{}, fmt.Errorf("write runtime slot node command: %w: %w", err, errdefs.ErrUnavailable)
+			commandErr := fmt.Errorf("write runtime slot node command: %w: %w", err, errdefs.ErrUnavailable)
+			c.completePending(command.RequestID, pending, nodeChannelOutcome{err: commandErr})
+			c.close(commandErr)
+			return c.waitForPending(ctx, command.RequestID, pending)
 		}
 	}
+	return c.waitForPending(ctx, command.RequestID, pending)
+}
+
+func (c *nodeChannelConnection) waitForPending(
+	ctx context.Context,
+	requestID string,
+	pending *nodeChannelPending,
+) (protocol.NodeChannelResult, error) {
 	select {
-	case outcome := <-pending.result:
-		c.removePending(command.RequestID, pending.result)
+	case <-pending.done:
+		outcome := pending.outcome
+		c.releasePending(requestID, pending)
 		return outcome.result, outcome.err
 	case <-ctx.Done():
-		c.abandonPending(command.RequestID, pending.result)
+		c.releasePending(requestID, pending)
 		return protocol.NodeChannelResult{}, ctx.Err()
 	case <-c.done:
 		select {
-		case outcome := <-pending.result:
-			c.removePending(command.RequestID, pending.result)
+		case <-pending.done:
+			outcome := pending.outcome
+			c.releasePending(requestID, pending)
 			return outcome.result, outcome.err
 		default:
 		}
+		c.releasePending(requestID, pending)
 		return protocol.NodeChannelResult{}, c.connectionError()
 	}
 }
@@ -851,44 +877,55 @@ func (c *nodeChannelConnection) readLoop() {
 			return
 		}
 		if err := result.ValidateFor(pending.command); err != nil {
-			delete(c.pending, result.RequestID)
+			pending.outcome = nodeChannelOutcome{err: fmt.Errorf(
+				"validate runtime slot node result: %w: %w", err, errdefs.ErrUnavailable,
+			)}
+			pending.completed = true
+			close(pending.done)
 			c.mu.Unlock()
 			if pending.abandoned {
 				c.close(fmt.Errorf("runtime slot node returned an invalid abandoned result: %w", errdefs.ErrUnavailable))
 				return
 			}
-			pending.result <- nodeChannelOutcome{err: fmt.Errorf("validate runtime slot node result: %w: %w", err, errdefs.ErrUnavailable)}
 			c.close(fmt.Errorf("runtime slot node returned an invalid result: %w", errdefs.ErrUnavailable))
 			return
 		}
+		pending.outcome = nodeChannelOutcome{result: result}
 		pending.completed = true
-		c.pending[result.RequestID] = pending
-		select {
-		case pending.result <- nodeChannelOutcome{result: result}:
-			c.mu.Unlock()
-		default:
-			c.mu.Unlock()
-			c.close(fmt.Errorf("runtime slot node result buffer is full: %w", errdefs.ErrUnavailable))
-			return
-		}
+		close(pending.done)
+		c.mu.Unlock()
 	}
 }
 
-func (c *nodeChannelConnection) removePending(requestID string, result chan nodeChannelOutcome) {
+func (c *nodeChannelConnection) completePending(
+	requestID string,
+	pending *nodeChannelPending,
+	outcome nodeChannelOutcome,
+) {
 	c.mu.Lock()
-	pending, ok := c.pending[requestID]
-	if ok && pending.result == result {
-		delete(c.pending, requestID)
+	current, ok := c.pending[requestID]
+	if ok && current == pending && !pending.completed {
+		pending.outcome = outcome
+		pending.completed = true
+		close(pending.done)
 	}
 	c.mu.Unlock()
 }
 
-func (c *nodeChannelConnection) abandonPending(requestID string, result chan nodeChannelOutcome) {
+func (c *nodeChannelConnection) releasePending(requestID string, pending *nodeChannelPending) {
 	c.mu.Lock()
-	pending, ok := c.pending[requestID]
-	if ok && pending.result == result {
-		pending.abandoned = true
-		c.pending[requestID] = pending
+	current, ok := c.pending[requestID]
+	if ok && current == pending {
+		if pending.waiters > 0 {
+			pending.waiters--
+		}
+		if pending.waiters == 0 {
+			if pending.completed {
+				delete(c.pending, requestID)
+			} else {
+				pending.abandoned = true
+			}
+		}
 	}
 	c.mu.Unlock()
 }
@@ -916,14 +953,16 @@ func (c *nodeChannelConnection) close(err error) {
 		c.mu.Lock()
 		c.err = err
 		pending := c.pending
-		c.pending = make(map[string]nodeChannelPending)
-		c.mu.Unlock()
-		_ = c.websocket.Close()
 		for _, request := range pending {
-			if !request.abandoned && !request.completed {
-				request.result <- nodeChannelOutcome{err: err}
+			if !request.completed {
+				request.outcome = nodeChannelOutcome{err: err}
+				request.completed = true
+				close(request.done)
 			}
 		}
+		c.pending = make(map[string]*nodeChannelPending)
+		c.mu.Unlock()
+		_ = c.websocket.Close()
 		close(c.done)
 	})
 }

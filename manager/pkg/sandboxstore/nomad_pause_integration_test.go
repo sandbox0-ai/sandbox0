@@ -54,6 +54,27 @@ func TestRequestNomadSandboxPausePersistsDeterministicIntentIntegration(t *testi
 	require.Equal(t, 1, lifecycleCount)
 }
 
+func TestContinueNomadSandboxPauseDoesNotStartNewLifecycleIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "stale-completion")
+
+	_, err := fixture.store.ContinueNomadSandboxPause(fixture.ctx, fixture.sandboxID)
+	require.ErrorIs(t, err, ErrNomadSandboxPauseNotPending)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+	record, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateActive, record.DesiredState)
+
+	requested, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	continued, err := fixture.store.ContinueNomadSandboxPause(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, requested, continued)
+}
+
 func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "mismatch")
 	_, err := fixture.pool.Exec(fixture.ctx, `

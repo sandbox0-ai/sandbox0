@@ -21,6 +21,7 @@ const (
 	SandboxRuntimeClaimPhaseReady          = "ready"
 	SandboxRuntimeClaimPhaseCleanupPending = "cleanup_pending"
 	SandboxRuntimeClaimPhaseCleaned        = "cleaned"
+	legacyACKRuntimeClaimOperationPrefix   = "legacy-ack-claim-"
 
 	MaxSandboxRuntimeClaimCleanupLimit = 1_000
 )
@@ -794,6 +795,9 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("lock sandbox cleanup runtime slot: %w", err)
 	}
+	if errors.Is(err, pgx.ErrNoRows) && isNeverRunLegacyACKRuntimeClaim(record, claim) {
+		candidate.PhysicalStateRequired = false
+	}
 	if err == nil {
 		if slot.SandboxID != record.ID ||
 			(record.ClusterID != "" && slot.ClusterID != record.ClusterID) {
@@ -827,6 +831,26 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 		}
 	}
 	return candidate, nil
+}
+
+// isNeverRunLegacyACKRuntimeClaim recognizes the deterministic ready claims
+// emitted for paused sandboxes by the retired ACK-to-Nomad catalog importer.
+// Those claims deliberately had no runtime slot until their first resume.
+func isNeverRunLegacyACKRuntimeClaim(record *SandboxRecord, claim *SandboxRuntimeClaim) bool {
+	if record == nil || claim == nil || claim.CompletedAt.IsZero() ||
+		record.RuntimeID != "" || record.RuntimeNamespace != "" {
+		return false
+	}
+	suffix, found := strings.CutPrefix(claim.OperationID, legacyACKRuntimeClaimOperationPrefix)
+	if !found || len(suffix) != 64 {
+		return false
+	}
+	for _, character := range suffix {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // MarkSandboxRuntimeClaimCleaned closes the durable cleanup workflow only

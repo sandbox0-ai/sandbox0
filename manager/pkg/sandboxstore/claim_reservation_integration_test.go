@@ -291,6 +291,44 @@ func TestFenceExpiredSandboxClaimWithoutSlotCanBeCleaned(t *testing.T) {
 	require.Equal(t, SandboxRuntimeClaimPhaseCleaned, phase)
 }
 
+func TestRequestSandboxRuntimeClaimCleanupCleansNeverRunLegacyACKClaim(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record := rootFSTestSandboxRecord("sandbox-never-run-legacy-ack", "team-1")
+	operationID := legacyACKRuntimeClaimOperationPrefix + strings.Repeat("a", 64)
+	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
+		Record: record, OperationID: operationID, LeaseTTL: 15 * time.Second,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET desired_state = $2
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxDesiredStatePaused)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET phase = $2, lease_expires_at = NULL, completed_at = NOW()
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxRuntimeClaimPhaseReady)
+	require.NoError(t, err)
+
+	candidate, err := store.RequestSandboxRuntimeClaimCleanup(
+		ctx, record.ID, "sandbox deletion requested",
+	)
+	require.NoError(t, err)
+	require.Empty(t, candidate.SlotID)
+	require.False(t, candidate.PhysicalStateRequired)
+	require.NoError(t, store.MarkSandboxDeleted(ctx, record.ID, time.Now().UTC()))
+	require.NoError(t, store.MarkSandboxRuntimeClaimCleaned(ctx, record.ID, operationID))
+	var phase string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT phase FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
+	`, record.ID).Scan(&phase))
+	require.Equal(t, SandboxRuntimeClaimPhaseCleaned, phase)
+}
+
 func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

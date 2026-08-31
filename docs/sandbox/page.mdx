@@ -101,10 +101,12 @@ Set `config.resources.memory` at claim time when one sandbox needs a different m
 The request only accepts memory. Manager derives CPU from
 `team_template_memory_per_cpu` and applies the platform minimum. PostgreSQL
 records the exact resource lease and ctld enforces it in the sandbox cgroup;
-Nomad carrier resources are overhead only. Existing running sandboxes can
-update memory with the Update Sandbox API.
+Nomad carrier resources are overhead only. To change memory, claim another
+sandbox with the required resource override; the Update Sandbox API does not
+change an existing sandbox's resource lease.
 
-SDK helpers expose this as `WithSandboxMemory` / `UpdateSandboxMemory` in Go, `memory` / `updateMemory` in TypeScript, `memory` / `update_memory` in Python, and `--memory` in the `s0` CLI.
+Claim-time helpers expose this as `WithSandboxMemory` in Go, `memory` in Python,
+`memory` in TypeScript, and `--memory` in the `s0` CLI.
 
 ### TTL vs Hard TTL
 

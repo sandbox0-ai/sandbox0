@@ -59,7 +59,7 @@ spec:
 
 CPU is platform-derived from memory and is intentionally absent from the
 public API. Claim-time `config.resources.memory` can override the template
-default, and the runtime update API can change memory for the active resource
+default. The runtime update API does not change an existing sandbox's resource
 lease. Every value remains subject to the platform maximum.
 
 Carrier allocation resources do not define these limits. Manager leases exact

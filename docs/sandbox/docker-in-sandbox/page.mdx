@@ -283,7 +283,7 @@ main().catch((err) => {
     {
       label: "CLI",
       language: "bash",
-      code: `SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 1800 | jq -r '.ID')"
+      code: `SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 1800 | jq -r '.id')"
 trap 's0 sandbox delete "$SANDBOX_ID" >/dev/null 2>&1 || true' EXIT
 
 s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready

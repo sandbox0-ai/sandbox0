@@ -55,6 +55,7 @@ type Store interface {
 	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestHardExpiredSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestNomadSandboxPause(context.Context, string, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
+	ContinueNomadSandboxPause(context.Context, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
 	RequestNomadSandboxTTLPause(context.Context, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
 	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
 	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
@@ -335,9 +336,13 @@ func (s *Service) RequestRootFSWriterPressurePause(
 // the allocation. Retries preserve this ordering across every response-loss
 // boundary while node recovery publishes the planned RootFS generation.
 func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID string) error {
-	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceManual)
+	candidate, err := s.store.ContinueNomadSandboxPause(ctx, sandboxID)
+	if errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotPending) ||
+		errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
+		return nil
+	}
 	if err != nil {
-		return err
+		return mapNomadSandboxPauseError(sandboxID, err)
 	}
 	if candidate.AlreadyPaused {
 		if candidate.SlotID == "" {
@@ -371,7 +376,11 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 		// A physically absent allocation can publish and terminalize between the
 		// node acknowledgement and this CAS. Accept only a fresh authoritative
 		// observation that the exact pause has already committed.
-		refreshed, refreshErr := s.requestNomadSandboxPause(ctx, sandboxID, candidate.Source)
+		refreshed, refreshErr := s.store.ContinueNomadSandboxPause(ctx, sandboxID)
+		if errors.Is(refreshErr, sandboxstore.ErrNomadSandboxPauseNotPending) ||
+			errors.Is(refreshErr, sandboxstore.ErrSandboxRecordNotFound) {
+			return nil
+		}
 		if refreshErr == nil && refreshed.AlreadyPaused && refreshed.SlotID == "" {
 			return nil
 		}
@@ -386,9 +395,13 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 	}); err != nil {
 		return fmt.Errorf("stop Nomad allocation for planned pause: %w", err)
 	}
-	refreshed, err := s.requestNomadSandboxPause(ctx, sandboxID, candidate.Source)
+	refreshed, err := s.store.ContinueNomadSandboxPause(ctx, sandboxID)
+	if errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotPending) ||
+		errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
+		return nil
+	}
 	if err != nil {
-		return err
+		return mapNomadSandboxPauseError(sandboxID, err)
 	}
 	if refreshed.AlreadyPaused {
 		return s.CompletePausingSandboxRuntime(ctx, sandboxID)

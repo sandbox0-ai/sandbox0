@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	ErrNomadSandboxPauseConflict  = errors.New("nomad sandbox pause conflict")
-	ErrNomadSandboxPauseNotReady  = errors.New("nomad sandbox pause is not ready")
-	ErrNomadSandboxTTLNotExpired  = errors.New("nomad sandbox TTL is not expired")
-	ErrNomadSandboxHardTTLExpired = errors.New("nomad sandbox hard TTL is expired")
+	ErrNomadSandboxPauseConflict   = errors.New("nomad sandbox pause conflict")
+	ErrNomadSandboxPauseNotReady   = errors.New("nomad sandbox pause is not ready")
+	ErrNomadSandboxPauseNotPending = errors.New("nomad sandbox pause is not pending")
+	ErrNomadSandboxTTLNotExpired   = errors.New("nomad sandbox TTL is not expired")
+	ErrNomadSandboxHardTTLExpired  = errors.New("nomad sandbox hard TTL is expired")
 )
 
 // NomadSandboxPauseCandidate is the exact active allocation and writer
@@ -65,7 +66,19 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	sandboxID string,
 	source string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false)
+	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false, false)
+}
+
+// ContinueNomadSandboxPause returns the exact active planned-pause operation
+// without creating one. It is the retry boundary for asynchronous completion,
+// so a stale queue item cannot pause a sandbox that has already resumed.
+func (s *PGSandboxStore) ContinueNomadSandboxPause(
+	ctx context.Context,
+	sandboxID string,
+) (*NomadSandboxPauseCandidate, error) {
+	return s.requestNomadSandboxPause(
+		ctx, sandboxID, SandboxLifecycleSourceManual, nil, false, true,
+	)
 }
 
 // RequestNomadSandboxTTLPause starts an automatic pause only if the soft TTL
@@ -75,7 +88,7 @@ func (s *PGSandboxStore) RequestNomadSandboxTTLPause(
 	ctx context.Context,
 	sandboxID string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true)
+	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true, false)
 }
 
 // RequestNomadSandboxPressurePause persists the same planned pause while
@@ -92,7 +105,7 @@ func (s *PGSandboxStore) RequestNomadSandboxPressurePause(
 	}
 	copy := *request
 	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
-	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false)
+	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false, false)
 }
 
 func (s *PGSandboxStore) requestNomadSandboxPause(
@@ -101,6 +114,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	source string,
 	pressure *RootFSWriterPressurePauseRequest,
 	requireExpiredTTL bool,
+	continueOnly bool,
 ) (*NomadSandboxPauseCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
@@ -123,6 +137,18 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	var continuedLifecycle *SandboxLifecycleTxn
+	if continueOnly {
+		continuedLifecycle, err = getActiveLifecycleTxn(ctx, tx, sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
+		}
+		if continuedLifecycle == nil || continuedLifecycle.Kind != SandboxLifecycleKindPause ||
+			(continuedLifecycle.Source != SandboxLifecycleSourceManual &&
+				continuedLifecycle.Source != SandboxLifecycleSourceAuto) {
+			return nil, ErrNomadSandboxPauseNotPending
+		}
 	}
 	alreadyPaused := false
 	switch record.DesiredState {
@@ -254,9 +280,12 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		default:
 			return nil, fmt.Errorf("%w: writer grant is %s", ErrNomadSandboxPauseNotReady, grant.State)
 		}
-		lifecycle, err = getActiveLifecycleTxn(ctx, tx, sandboxID)
-		if err != nil {
-			return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
+		lifecycle = continuedLifecycle
+		if lifecycle == nil {
+			lifecycle, err = getActiveLifecycleTxn(ctx, tx, sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
+			}
 		}
 		if lifecycle == nil {
 			if slot.State != RuntimeSlotStateActive {

@@ -89,6 +89,8 @@ type fakeClaimStore struct {
 	pauseCandidate           *sandboxstore.NomadSandboxPauseCandidate
 	pauseErr                 error
 	pauseSources             []string
+	pauseContinueErr         error
+	pauseContinueCalls       []string
 	pressurePause            *sandboxstore.NomadSandboxPauseCandidate
 	pressurePauseErr         error
 	pressureRequests         []*sandboxstore.RootFSWriterPressurePauseRequest
@@ -509,6 +511,22 @@ func (f *fakeClaimStore) RequestNomadSandboxPause(
 	}
 	if f.pauseCandidate == nil {
 		return nil, sandboxstore.ErrNomadSandboxPauseNotReady
+	}
+	copy := *f.pauseCandidate
+	copy.BindingDigest = append([]byte(nil), f.pauseCandidate.BindingDigest...)
+	return &copy, nil
+}
+
+func (f *fakeClaimStore) ContinueNomadSandboxPause(
+	_ context.Context,
+	sandboxID string,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	f.pauseContinueCalls = append(f.pauseContinueCalls, sandboxID)
+	if f.pauseContinueErr != nil {
+		return nil, f.pauseContinueErr
+	}
+	if f.pauseCandidate == nil {
+		return nil, sandboxstore.ErrNomadSandboxPauseNotPending
 	}
 	copy := *f.pauseCandidate
 	copy.BindingDigest = append([]byte(nil), f.pauseCandidate.BindingDigest...)
@@ -1070,6 +1088,7 @@ func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 	if len(enqueuer.sandboxIDs) != 1 || enqueuer.sandboxIDs[0] != "sandbox-1" {
 		t.Fatalf("pause enqueues = %v", enqueuer.sandboxIDs)
 	}
+	require.Equal(t, []string{"sandbox-1", "sandbox-1"}, fixture.store.pauseContinueCalls)
 	if len(fixture.allocation.requests) != 1 {
 		t.Fatalf("allocation stops = %+v", fixture.allocation.requests)
 	}
@@ -1083,6 +1102,25 @@ func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 	if stop.OperationID != "retire-1" || stop.Target.AllocationID != "allocation-1" ||
 		stop.Target.AllocationNamespace != "nomad" || stop.Target.NodeID != "node-1" {
 		t.Fatalf("allocation stop = %+v", stop)
+	}
+}
+
+func TestServiceDropsStalePauseCompletionAfterResume(t *testing.T) {
+	for name, staleErr := range map[string]error{
+		"resumed": sandboxstore.ErrNomadSandboxPauseNotPending,
+		"deleted": sandboxstore.ErrSandboxRecordNotFound,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newClaimServiceFixture(t)
+			fixture.store.pauseContinueErr = staleErr
+
+			require.NoError(t, fixture.service.CompletePausingSandboxRuntime(t.Context(), "sandbox-1"))
+			require.Equal(t, []string{"sandbox-1"}, fixture.store.pauseContinueCalls)
+			require.Empty(t, fixture.store.pauseSources)
+			require.Empty(t, fixture.plannedRetire.requests)
+			require.Empty(t, fixture.store.quiesceCalls)
+			require.Empty(t, fixture.allocation.requests)
+		})
 	}
 }
 
@@ -1158,7 +1196,7 @@ func TestServiceAutomaticPausePersistsAutoSourceBeforeStop(t *testing.T) {
 	if err := fixture.service.PauseSandboxByID(context.Background(), "sandbox-1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(fixture.store.pauseSources) < 2 || fixture.store.pauseSources[0] != "sandbox-1:auto" {
+	if !reflect.DeepEqual(fixture.store.pauseSources, []string{"sandbox-1:auto"}) {
 		t.Fatalf("pause sources = %v", fixture.store.pauseSources)
 	}
 	if len(enqueuer.sandboxIDs) != 1 || len(fixture.allocation.requests) != 1 {

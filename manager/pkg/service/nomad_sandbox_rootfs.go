@@ -21,18 +21,18 @@ type NomadSandboxRootFSStore interface {
 	WithSandboxLock(context.Context, string, func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error
 }
 
-// NomadSandboxRootFSService exposes snapshots only for stable paused
-// block-COW heads. Running checkpoints remain owned by explicit lifecycle
-// orchestration.
+// NomadSandboxRootFSService pins stable paused heads directly and delegates
+// active writers to the exact-writer checkpoint authority.
 type NomadSandboxRootFSService struct {
-	store NomadSandboxRootFSStore
-	now   func() time.Time
+	store              NomadSandboxRootFSStore
+	runningSnapshotter SandboxRunningRootFSSnapshotter
+	now                func() time.Time
 }
 
-// NewNomadSandboxRootFSService creates a PostgreSQL-only RootFS product
-// service.
+// NewNomadSandboxRootFSService creates the public RootFS product service.
 func NewNomadSandboxRootFSService(
 	store NomadSandboxRootFSStore,
+	runningSnapshotter SandboxRunningRootFSSnapshotter,
 	now func() time.Time,
 ) (*NomadSandboxRootFSService, error) {
 	if store == nil {
@@ -41,10 +41,13 @@ func NewNomadSandboxRootFSService(
 	if now == nil {
 		now = time.Now
 	}
-	return &NomadSandboxRootFSService{store: store, now: now}, nil
+	return &NomadSandboxRootFSService{
+		store: store, runningSnapshotter: runningSnapshotter, now: now,
+	}, nil
 }
 
-// CreateSandboxRootFSSnapshot pins the current paused durable generation.
+// CreateSandboxRootFSSnapshot pins a paused durable head or checkpoints the
+// exact active writer while leaving the source runtime running.
 func (s *NomadSandboxRootFSService) CreateSandboxRootFSSnapshot(
 	ctx context.Context,
 	sandboxID, teamID string,
@@ -64,13 +67,35 @@ func (s *NomadSandboxRootFSService) CreateSandboxRootFSSnapshot(
 	if !request.ExpiresAt.IsZero() && !request.ExpiresAt.After(s.now().UTC()) {
 		return nil, ErrRootFSSnapshotExpired
 	}
+	record, err := s.store.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRootFSSourceSandboxRecord(record, sandboxID, teamID, s.now().UTC()); err != nil {
+		return nil, err
+	}
+	if record.DesiredState == sandboxstore.SandboxDesiredStateActive {
+		if s.runningSnapshotter == nil {
+			return nil, ErrSandboxCheckpointRequiresCtld
+		}
+		if strings.TrimSpace(request.OperationID) == "" {
+			return nil, fmt.Errorf("%w: signed operation identity is required", ErrSandboxLifecycleUnavailable)
+		}
+		snapshot, err := s.runningSnapshotter.CreateRunningSandboxRootFSSnapshot(
+			ctx, sandboxID, teamID, request,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxRootFSSnapshotFromStore(snapshot), nil
+	}
 	if err := s.requirePausedBlockSandbox(ctx, sandboxID, teamID); err != nil {
 		return nil, err
 	}
 
 	var snapshot *sandboxstore.RootFSSnapshot
 	snapshotID := generateRootFSSnapshotID()
-	err := s.store.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
+	err = s.store.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if err := validateNomadRootFSSandboxRecord(record, sandboxID, teamID, true); err != nil {
 			return err
 		}

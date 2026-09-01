@@ -11,7 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
-func captureRunningRootFSTemplate(
+func captureRunningRootFS(
 	ctx context.Context,
 	tx pgx.Tx,
 	sourceSandbox *SandboxRecord,
@@ -26,22 +26,22 @@ func captureRunningRootFSTemplate(
 		intent.TargetFilesystemID != req.TargetSandboxID ||
 		intent.CheckpointGeneration != req.Generation.ID || req.Generation.FilesystemID != intent.TargetFilesystemID ||
 		intent.BindingVersion != req.BindingVersion || !bytes.Equal(intent.BindingDigest, req.BindingDigest) {
-		return nil, fmt.Errorf("%w: running template checkpoint identity changed", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running checkpoint identity changed", ErrRootFSFilesystemConflict)
 	}
 	if intent.State == nomadTemplateCaptureStatePublished {
 		return loadRunningRootFSTemplateCaptureRetry(ctx, tx, sourceSandbox, intent, req)
 	}
 	if intent.State != nomadTemplateCaptureStatePending || sourceSandbox.TeamID != intent.TeamID {
-		return nil, fmt.Errorf("%w: template capture intent is not pending", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running capture intent is not pending", ErrRootFSFilesystemConflict)
 	}
 	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
 		WHERE txn_id = $1 AND sandbox_id = $2 FOR UPDATE
 	`, intent.OperationID, sourceSandbox.ID))
 	if err != nil {
-		return nil, fmt.Errorf("lock running template capture lifecycle: %w", err)
+		return nil, fmt.Errorf("lock running capture lifecycle: %w", err)
 	}
 	if !nomadTemplateCaptureLifecycleMatches(lifecycle, sourceSandbox, intent, false) {
-		return nil, fmt.Errorf("%w: running template capture lifecycle changed", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running capture lifecycle changed", ErrRootFSFilesystemConflict)
 	}
 	writer, err := lockExactNomadLiveWriter(ctx, tx, sourceSandbox)
 	if err != nil {
@@ -51,7 +51,7 @@ func captureRunningRootFSTemplate(
 		writer.grant.ID != intent.SourceGrantID || writer.grant.WriterEpoch != intent.SourceWriterEpoch ||
 		writer.grant.BindingVersion != intent.BindingVersion ||
 		!bytes.Equal(writer.grant.BindingDigest, intent.BindingDigest) {
-		return nil, fmt.Errorf("%w: source writer changed before template publication", ErrRootFSWriterGrantConflict)
+		return nil, fmt.Errorf("%w: source writer changed before capture publication", ErrRootFSWriterGrantConflict)
 	}
 	checkpoint := req.Generation
 	if req.CheckpointProof.SourceFilesystemID != writer.filesystem.ID ||
@@ -63,11 +63,11 @@ func captureRunningRootFSTemplate(
 	}
 	sourceDescriptor, err := rootfsblock.DecodeDescriptor(writer.generation.Descriptor)
 	if err != nil {
-		return nil, fmt.Errorf("decode template capture source generation: %w", err)
+		return nil, fmt.Errorf("decode running capture source generation: %w", err)
 	}
 	checkpointDescriptor, err := rootfsblock.DecodeDescriptor(checkpoint.Descriptor)
 	if err != nil {
-		return nil, fmt.Errorf("decode template capture checkpoint generation: %w", err)
+		return nil, fmt.Errorf("decode running capture checkpoint generation: %w", err)
 	}
 	if checkpointDescriptor.LogicalSizeBytes != sourceDescriptor.LogicalSizeBytes ||
 		checkpointDescriptor.BlockSizeBytes != sourceDescriptor.BlockSizeBytes {
@@ -84,10 +84,10 @@ func captureRunningRootFSTemplate(
 	`, intent.TargetFilesystemID, intent.TeamID, writer.filesystem.ID, intent.SourceWriterEpoch,
 		writer.filesystem.BaseArtifactDigest, writer.filesystem.FormatGeneration)
 	if err != nil {
-		return nil, fmt.Errorf("create template capture filesystem: %w", err)
+		return nil, fmt.Errorf("create running capture filesystem: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: template capture filesystem already exists", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running capture filesystem already exists", ErrRootFSFilesystemConflict)
 	}
 	if err := insertPreparedRootFSGeneration(ctx, tx, checkpoint); err != nil {
 		return nil, err
@@ -98,22 +98,20 @@ func captureRunningRootFSTemplate(
 		WHERE filesystem_id = $1 AND head_generation_id IS NULL AND writer_epoch = $3
 	`, intent.TargetFilesystemID, intent.CheckpointGeneration, intent.SourceWriterEpoch)
 	if err != nil {
-		return nil, fmt.Errorf("install template capture checkpoint: %w", err)
+		return nil, fmt.Errorf("install running capture checkpoint: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: template capture filesystem changed", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running capture filesystem changed", ErrRootFSFilesystemConflict)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_snapshots (
 			snapshot_id, filesystem_id, team_id, source_sandbox_id,
 			head_generation_id, name, description, created_at, expires_at
-		) VALUES ($1, $2, $3, $4, $5,
-			'Template RootFS capture',
-			'Internal immutable live-writer checkpoint retained by a template.',
-			NOW(), NULL)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
 	`, intent.SnapshotID, intent.TargetFilesystemID, intent.TeamID,
-		intent.SourceSandboxID, intent.CheckpointGeneration); err != nil {
-		return nil, fmt.Errorf("create running template snapshot: %w", err)
+		intent.SourceSandboxID, intent.CheckpointGeneration,
+		intent.Name, intent.Description, nullableTime(intent.ExpiresAt)); err != nil {
+		return nil, fmt.Errorf("create running snapshot: %w", err)
 	}
 	proofDigest := append([]byte(nil), req.CheckpointProofDigest...)
 	tag, err = tx.Exec(ctx, `
@@ -129,10 +127,10 @@ func captureRunningRootFSTemplate(
 		int64(req.CheckpointProof.CheckpointSequence), req.CheckpointProof.CheckpointDescriptorDigest,
 		proofDigest, nomadTemplateCaptureStatePending)
 	if err != nil {
-		return nil, fmt.Errorf("publish running template capture intent: %w", err)
+		return nil, fmt.Errorf("publish running capture intent: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: template capture intent changed", ErrRootFSFilesystemConflict)
+		return nil, fmt.Errorf("%w: running capture intent changed", ErrRootFSFilesystemConflict)
 	}
 	if err := (sandboxStoreTx{tx: tx}).CommitLifecycleTxn(
 		ctx, intent.OperationID, intent.CheckpointGeneration,

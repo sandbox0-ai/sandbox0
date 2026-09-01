@@ -259,6 +259,10 @@ func assertFinalNomadBlockCOWSchema(t *testing.T, ctx context.Context, pool *pgx
 		"sandbox_lifecycle_txns.recovery_claim_token",
 		"sandbox_lifecycle_txns.recovery_claimed_until",
 		"sandbox_lifecycle_txns.recovery_last_error",
+		"rootfs_running_template_captures.capture_kind",
+		"rootfs_running_template_captures.snapshot_name",
+		"rootfs_running_template_captures.snapshot_description",
+		"rootfs_running_template_captures.snapshot_expires_at",
 	} {
 		parts := strings.Split(identity, ".")
 		var exists bool
@@ -282,6 +286,21 @@ func assertFinalNomadBlockCOWSchema(t *testing.T, ctx context.Context, pool *pgx
 		`, table).Scan(&exists))
 		require.True(t, exists, "required table manager.%s is missing", table)
 	}
+
+	var runningCaptureMetadataTrigger bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_trigger trigger
+			JOIN pg_class relation ON relation.oid = trigger.tgrelid
+			JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'manager'
+			  AND relation.relname = 'rootfs_snapshots'
+			  AND trigger.tgname = 'apply_running_rootfs_capture_snapshot_metadata'
+			  AND NOT trigger.tgisinternal
+		)
+	`).Scan(&runningCaptureMetadataTrigger))
+	require.True(t, runningCaptureMetadataTrigger, "running capture snapshot metadata trigger is missing")
 
 	var artifactIndex string
 	require.NoError(t, pool.QueryRow(ctx, `

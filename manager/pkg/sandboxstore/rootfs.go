@@ -340,7 +340,12 @@ func (s *PGSandboxStore) DeleteRootFSSnapshot(ctx context.Context, snapshotID, t
 	if s == nil || s.pool == nil {
 		return nil
 	}
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin rootfs snapshot deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
 		DELETE FROM manager.rootfs_snapshots
 		WHERE snapshot_id = $1 AND ($2 = '' OR team_id = $2)
 	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
@@ -349,6 +354,17 @@ func (s *PGSandboxStore) DeleteRootFSSnapshot(ctx context.Context, snapshotID, t
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", ErrRootFSSnapshotNotFound, snapshotID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.rootfs_running_template_captures
+		SET cancel_reason = 'snapshot deleted', updated_at = NOW()
+		WHERE snapshot_id = $1 AND ($2 = '' OR team_id = $2)
+			AND state = 'published' AND cancel_reason = ''
+	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID)); err != nil {
+		return fmt.Errorf("release running rootfs snapshot capture: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit rootfs snapshot deletion: %w", err)
 	}
 	return nil
 }
@@ -728,7 +744,7 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	if _, err := s.deleteTerminalRootFSHeadRollbacks(ctx, teamID, limit); err != nil {
 		return nil, err
 	}
-	deletedTemplateCaptures, err := s.DeleteReleasedNomadTemplateCaptures(ctx, teamID, limit)
+	deletedRunningCaptures, err := s.DeleteReleasedNomadRunningRootFSCaptures(ctx, teamID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -741,7 +757,7 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	result := &RootFSGarbageCollectionResult{
 		DeletedObjectKeys:  deletedObjectKeys,
 		ExpiredSnapshots:   expiredSnapshots,
-		DeletedFilesystems: deletedTemplateCaptures + deletedFilesystems,
+		DeletedFilesystems: deletedRunningCaptures + deletedFilesystems,
 	}
 	return result, deleteErr
 }
@@ -751,22 +767,33 @@ func (s *PGSandboxStore) DeleteExpiredRootFSSnapshots(ctx context.Context, teamI
 		return 0, nil
 	}
 	limit = normalizeRootFSObjectLimit(limit)
-	tag, err := s.pool.Exec(ctx, `
+	var deleted int
+	err := s.pool.QueryRow(ctx, `
 		WITH expired AS (
 			SELECT snapshot_id FROM manager.rootfs_snapshots
 			WHERE expires_at IS NOT NULL AND expires_at <= NOW()
 				AND ($1 = '' OR team_id = $1)
 			ORDER BY expires_at, snapshot_id
 			LIMIT $2 FOR UPDATE SKIP LOCKED
+		), deleted AS (
+			DELETE FROM manager.rootfs_snapshots snapshot
+			USING expired
+			WHERE snapshot.snapshot_id = expired.snapshot_id
+			RETURNING snapshot.snapshot_id
+		), released AS (
+			UPDATE manager.rootfs_running_template_captures capture
+			SET cancel_reason = 'snapshot expired', updated_at = NOW()
+			FROM deleted
+			WHERE capture.snapshot_id = deleted.snapshot_id
+				AND capture.state = 'published' AND capture.cancel_reason = ''
+			RETURNING capture.operation_id
 		)
-		DELETE FROM manager.rootfs_snapshots snapshot
-		USING expired
-		WHERE snapshot.snapshot_id = expired.snapshot_id
-	`, strings.TrimSpace(teamID), limit)
+		SELECT COUNT(*) FROM deleted
+	`, strings.TrimSpace(teamID), limit).Scan(&deleted)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired rootfs snapshots: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return deleted, nil
 }
 
 func (s *PGSandboxStore) deleteTerminalRootFSHeadRollbacks(ctx context.Context, teamID string, limit int) (int, error) {

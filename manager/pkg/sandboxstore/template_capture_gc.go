@@ -8,11 +8,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// DeleteReleasedNomadTemplateCaptures removes unbound capture filesystems only
-// after their template snapshot and every derived sandbox filesystem are gone.
-// This keeps template deletion asynchronous without leaking generation or
-// materialization metadata.
+// DeleteReleasedNomadTemplateCaptures is the compatibility name for running
+// capture GC introduced with template builds.
 func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
+	ctx context.Context,
+	teamID string,
+	limit int,
+) (int, error) {
+	return s.DeleteReleasedNomadRunningRootFSCaptures(ctx, teamID, limit)
+}
+
+// DeleteReleasedNomadRunningRootFSCaptures removes an unbound checkpoint
+// filesystem only after its snapshot and every derived filesystem are gone.
+func (s *PGSandboxStore) DeleteReleasedNomadRunningRootFSCaptures(
 	ctx context.Context,
 	teamID string,
 	limit int,
@@ -28,7 +36,7 @@ func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return 0, fmt.Errorf("begin released template capture GC tx: %w", err)
+		return 0, fmt.Errorf("begin released running rootfs capture GC tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
@@ -89,7 +97,7 @@ func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
 		FOR UPDATE OF c, f, generation SKIP LOCKED
 	`, strings.TrimSpace(teamID), limit)
 	if err != nil {
-		return 0, fmt.Errorf("list released template captures: %w", err)
+		return 0, fmt.Errorf("list released running rootfs captures: %w", err)
 	}
 	type candidate struct{ operationID, filesystemID, teamID string }
 	var candidates []candidate
@@ -116,7 +124,7 @@ func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
 			ORDER BY object_key
 		`, item.filesystemID)
 		if err != nil {
-			return 0, fmt.Errorf("list released template capture objects: %w", err)
+			return 0, fmt.Errorf("list released running rootfs capture objects: %w", err)
 		}
 		var objectKeys []string
 		for objectRows.Next() {
@@ -136,12 +144,12 @@ func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
 			UPDATE manager.rootfs_filesystems SET head_generation_id = NULL, updated_at = NOW()
 			WHERE filesystem_id = $1
 		`, item.filesystemID); err != nil {
-			return 0, fmt.Errorf("clear released template capture head: %w", err)
+			return 0, fmt.Errorf("clear released running rootfs capture head: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM manager.rootfs_generations WHERE filesystem_id = $1
 		`, item.filesystemID); err != nil {
-			return 0, fmt.Errorf("delete released template capture generations: %w", err)
+			return 0, fmt.Errorf("delete released running rootfs capture generations: %w", err)
 		}
 		for _, objectKey := range objectKeys {
 			if _, err := releaseUnreferencedRootFSMaterializationObject(ctx, tx, objectKey, item.teamID); err != nil {
@@ -151,16 +159,16 @@ func (s *PGSandboxStore) DeleteReleasedNomadTemplateCaptures(
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM manager.rootfs_running_template_captures WHERE operation_id = $1
 		`, item.operationID); err != nil {
-			return 0, fmt.Errorf("delete released template capture audit: %w", err)
+			return 0, fmt.Errorf("delete released running rootfs capture audit: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM manager.rootfs_filesystems WHERE filesystem_id = $1
 		`, item.filesystemID); err != nil {
-			return 0, fmt.Errorf("delete released template capture filesystem: %w", err)
+			return 0, fmt.Errorf("delete released running rootfs capture filesystem: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit released template capture GC: %w", err)
+		return 0, fmt.Errorf("commit released running rootfs capture GC: %w", err)
 	}
 	return len(candidates), nil
 }

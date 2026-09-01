@@ -94,6 +94,10 @@ type SandboxForkReconciler interface {
 	CompleteSandboxFork(context.Context, string) error
 }
 
+type SandboxRootFSSnapshotReconciler interface {
+	CompleteSandboxRootFSSnapshot(context.Context, string) error
+}
+
 type SandboxRootFSRebaser interface {
 	RebaseSandboxRootFS(context.Context, string, string, *RebaseSandboxRootFSRequest) (*RebaseSandboxRootFSResponse, error)
 }

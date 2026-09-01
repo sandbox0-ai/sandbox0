@@ -100,6 +100,56 @@ func TestSandboxClaimOperationIDUsesSignedClaimsOnly(t *testing.T) {
 	}
 }
 
+type recordingSandboxRootFSService struct {
+	SandboxRootFSService
+	sandboxID string
+	teamID    string
+	request   *service.CreateSandboxRootFSSnapshotRequest
+}
+
+func (r *recordingSandboxRootFSService) CreateSandboxRootFSSnapshot(
+	_ context.Context,
+	sandboxID, teamID string,
+	request *service.CreateSandboxRootFSSnapshotRequest,
+) (*service.SandboxRootFSSnapshot, error) {
+	r.sandboxID, r.teamID = sandboxID, teamID
+	copy := *request
+	r.request = &copy
+	return &service.SandboxRootFSSnapshot{ID: "snapshot-1", SandboxID: sandboxID}, nil
+}
+
+func TestCreateSandboxRootFSSnapshotUsesSignedOperationIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	startedAt := time.Date(2026, 8, 21, 7, 8, 9, 123456000, time.FixedZone("offset", 8*60*60))
+	rootFS := &recordingSandboxRootFSService{}
+	server := &Server{sandboxRootFS: rootFS, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "id", Value: "sandbox-source"}}
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sandboxes/sandbox-source/snapshots?operation_id=spoofed",
+		strings.NewReader(`{"name":"checkpoint","operation_id":"spoofed","started_at":"2000-01-01T00:00:00Z"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		TeamID: "team-1", UserID: "user-1",
+		Audit: &internalauth.AuditContext{OperationID: "operation-signed", IngressStartedAt: &startedAt},
+	}))
+	ginContext.Request = request
+
+	server.createSandboxRootFSSnapshot(ginContext)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if rootFS.sandboxID != "sandbox-source" || rootFS.teamID != "team-1" || rootFS.request == nil ||
+		rootFS.request.Name != "checkpoint" || rootFS.request.OperationID != "operation-signed" ||
+		!rootFS.request.StartedAt.Equal(startedAt.UTC()) {
+		t.Fatalf("rootfs snapshot request = sandbox=%q team=%q request=%+v",
+			rootFS.sandboxID, rootFS.teamID, rootFS.request)
+	}
+}
+
 type recordingSandboxForker struct {
 	sourceID string
 	teamID   string

@@ -24,10 +24,11 @@ type sandboxRootFSWorkItem struct {
 	sandboxID string
 }
 
-// SandboxRootFSController retries durable fork, rebase publication, and
-// rebase acknowledgement independently of API requests and Nomad plugins.
+// SandboxRootFSController retries durable snapshot, fork, rebase publication,
+// and rebase acknowledgement independently of API requests and Nomad plugins.
 type SandboxRootFSController struct {
 	store          sandboxRootFSLifecycleStore
+	snapshot       SandboxRootFSSnapshotReconciler
 	fork           SandboxForkReconciler
 	rebase         SandboxRootFSRebaseReconciler
 	logger         *zap.Logger
@@ -38,6 +39,7 @@ type SandboxRootFSController struct {
 
 func NewSandboxRootFSController(
 	store sandboxRootFSLifecycleStore,
+	snapshot SandboxRootFSSnapshotReconciler,
 	fork SandboxForkReconciler,
 	rebase SandboxRootFSRebaseReconciler,
 	logger *zap.Logger,
@@ -46,10 +48,14 @@ func NewSandboxRootFSController(
 		logger = zap.NewNop()
 	}
 	return &SandboxRootFSController{
-		store: store, fork: fork, rebase: rebase, logger: logger,
+		store: store, snapshot: snapshot, fork: fork, rebase: rebase, logger: logger,
 		queue:          newRetryQueue[sandboxRootFSWorkItem](),
 		resyncInterval: defaultSandboxRootFSResyncPeriod, scanLimit: defaultSandboxRootFSScanLimit,
 	}
+}
+
+func (c *SandboxRootFSController) EnqueueSandboxSnapshot(sandboxID string) {
+	c.enqueue(sandboxstore.SandboxLifecycleKindSnapshot, sandboxID)
 }
 
 func (c *SandboxRootFSController) EnqueueSandboxFork(sandboxID string) {
@@ -107,6 +113,20 @@ func (c *SandboxRootFSController) enqueuePending(ctx context.Context) {
 	if c == nil || c.store == nil {
 		return
 	}
+	if c.snapshot != nil {
+		txns, err := c.store.ListActiveLifecycleTxns(
+			ctx, sandboxstore.SandboxLifecycleKindSnapshot, c.scanLimit,
+		)
+		if err != nil {
+			c.logger.Warn("Failed to list active snapshot lifecycle transactions", zap.Error(err))
+		} else {
+			for _, txn := range txns {
+				if txn != nil {
+					c.EnqueueSandboxSnapshot(txn.SandboxID)
+				}
+			}
+		}
+	}
 	if c.fork != nil {
 		txns, err := c.store.ListActiveLifecycleTxns(
 			ctx, sandboxstore.SandboxLifecycleKindFork, c.scanLimit,
@@ -148,6 +168,10 @@ func (c *SandboxRootFSController) processNextWorkItem(ctx context.Context) bool 
 	defer c.queue.Done(item)
 	var err error
 	switch item.kind {
+	case sandboxstore.SandboxLifecycleKindSnapshot:
+		if c.snapshot != nil {
+			err = c.snapshot.CompleteSandboxRootFSSnapshot(ctx, item.sandboxID)
+		}
 	case sandboxstore.SandboxLifecycleKindFork:
 		if c.fork != nil {
 			err = c.fork.CompleteSandboxFork(ctx, item.sandboxID)

@@ -122,7 +122,7 @@ type fakeClaimStore struct {
 	createdSnapshots         []*sandboxstore.CreateRootFSSnapshotRequest
 	deletedSnapshots         []string
 	templateCaptureCandidate *sandboxstore.NomadTemplateCaptureCandidate
-	templateCaptureRequests  []*sandboxstore.NomadTemplateCaptureRequest
+	templateCaptureRequests  []*sandboxstore.NomadRunningRootFSCaptureRequest
 	rebaseCandidate          *sandboxstore.NomadPausedRebaseCandidate
 	rebaseErr                error
 	rebaseRequests           []*sandboxstore.NomadPausedRebaseRequest
@@ -818,9 +818,9 @@ func (f *fakeClaimStore) DeleteTemplateBuildRootFSCapture(ctx context.Context, s
 	return f.DeleteRootFSSnapshot(ctx, snapshotID, teamID)
 }
 
-func (f *fakeClaimStore) RequestNomadRunningTemplateCapture(
+func (f *fakeClaimStore) RequestNomadRunningRootFSCapture(
 	_ context.Context,
-	request *sandboxstore.NomadTemplateCaptureRequest,
+	request *sandboxstore.NomadRunningRootFSCaptureRequest,
 ) (*sandboxstore.NomadTemplateCaptureCandidate, error) {
 	copyRequest := *request
 	f.templateCaptureRequests = append(f.templateCaptureRequests, &copyRequest)
@@ -828,6 +828,15 @@ func (f *fakeClaimStore) RequestNomadRunningTemplateCapture(
 		return nil, sandboxstore.ErrNomadTemplateCaptureNotReady
 	}
 	copy := *f.templateCaptureCandidate
+	copy.TeamID = request.TeamID
+	copy.CaptureKind = request.CaptureKind
+	copy.Name = request.Name
+	copy.Description = request.Description
+	copy.ExpiresAt = request.ExpiresAt
+	if copy.Source == nil && f.records[request.SourceSandboxID] != nil {
+		source := *f.records[request.SourceSandboxID]
+		copy.Source = &source
+	}
 	copy.BindingDigest = append([]byte(nil), f.templateCaptureCandidate.BindingDigest...)
 	if f.templateCaptureCandidate.Slot != nil {
 		slot := *f.templateCaptureCandidate.Slot
@@ -838,6 +847,20 @@ func (f *fakeClaimStore) RequestNomadRunningTemplateCapture(
 		copy.Snapshot = &snapshot
 	}
 	return &copy, nil
+}
+
+func (f *fakeClaimStore) ContinueNomadRunningRootFSCapture(
+	ctx context.Context,
+	sourceSandboxID string,
+) (*sandboxstore.NomadTemplateCaptureCandidate, error) {
+	if len(f.templateCaptureRequests) == 0 {
+		return nil, nil
+	}
+	request := f.templateCaptureRequests[len(f.templateCaptureRequests)-1]
+	if request.SourceSandboxID != sourceSandboxID {
+		return nil, nil
+	}
+	return f.RequestNomadRunningRootFSCapture(ctx, request)
 }
 
 func (f *fakeClaimStore) RestoreRootFSFromSnapshot(_ context.Context, request *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error) {
@@ -1819,6 +1842,148 @@ func TestServiceCapturesActiveNomadTemplateThroughExactWriter(t *testing.T) {
 		nodeRequest.SourceWriterGrantID != "writer-grant" {
 		t.Fatalf("node capture request = %#v", nodeRequest)
 	}
+}
+
+func TestServiceSnapshotsActiveSandboxAndRecoversLostResponse(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sourceID := "source-running-snapshot"
+	operationID := "operation-running-snapshot"
+	snapshotID := runningRootFSSnapshotID(sourceID, operationID)
+	expiresAt := fixture.now.Add(24 * time.Hour)
+	fixture.store.records[sourceID] = &sandboxstore.SandboxRecord{
+		ID: sourceID, TeamID: "team-1", ClusterID: "cluster-1",
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		RuntimeGeneration: 4, RuntimeNamespace: "nomad", RuntimeID: "allocation-snapshot",
+		TemplateSpec: fixture.service.templates.(*fakeTemplateStore).template.Spec,
+	}
+	targetFilesystemID, targetGenerationID := prepareRunningRootFSCaptureCheckpoint(
+		t, &fixture, sourceID, operationID, snapshotID, "release checkpoint", "before migration", expiresAt,
+	)
+	request := &service.CreateSandboxRootFSSnapshotRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		Name: "release checkpoint", Description: "before migration", ExpiresAt: expiresAt,
+	}
+
+	// The node committed no callback before the response was lost. PostgreSQL
+	// retains the exact writer intent for controller recovery.
+	fixture.runningFork.err = errdefs.ErrUnavailable
+	publish := fixture.runningFork.onCall
+	fixture.runningFork.onCall = nil
+	_, err := fixture.service.CreateRunningSandboxRootFSSnapshot(
+		t.Context(), sourceID, "team-1", request,
+	)
+	if !errors.Is(err, service.ErrSandboxCheckpointRequiresCtld) {
+		t.Fatalf("initial snapshot error = %v, want checkpoint backend unavailable", err)
+	}
+	if fixture.store.templateCaptureCandidate.Completed {
+		t.Fatal("snapshot published before checkpoint callback")
+	}
+
+	fixture.runningFork.err = nil
+	fixture.runningFork.onCall = publish
+	if err := fixture.service.CompleteSandboxRootFSSnapshot(t.Context(), sourceID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := fixture.store.templateCaptureCandidate.Snapshot
+	if snapshot == nil || snapshot.ID != snapshotID || snapshot.FilesystemID != targetFilesystemID ||
+		snapshot.HeadGenerationID != targetGenerationID || snapshot.SourceSandboxID != sourceID ||
+		snapshot.Name != request.Name || snapshot.Description != request.Description ||
+		!snapshot.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("recovered snapshot = %#v", snapshot)
+	}
+	if fixture.store.records[sourceID].DesiredState != sandboxstore.SandboxDesiredStateActive ||
+		fixture.store.records[sourceID].RuntimeID != "allocation-snapshot" {
+		t.Fatalf("source runtime changed during snapshot: %#v", fixture.store.records[sourceID])
+	}
+	if len(fixture.runningFork.requests) != 2 {
+		t.Fatalf("node checkpoint requests = %d, want initial dispatch and recovery", len(fixture.runningFork.requests))
+	}
+
+	// An exact ingress retry returns the durable snapshot and never dispatches
+	// another writer checkpoint.
+	retry, err := fixture.service.CreateRunningSandboxRootFSSnapshot(
+		t.Context(), sourceID, "team-1", request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry == nil || retry.ID != snapshotID || len(fixture.runningFork.requests) != 2 {
+		t.Fatalf("snapshot retry = %#v, node requests = %d", retry, len(fixture.runningFork.requests))
+	}
+}
+
+func prepareRunningRootFSCaptureCheckpoint(
+	t *testing.T,
+	fixture *claimServiceFixture,
+	sourceID, operationID, snapshotID, name, description string,
+	expiresAt time.Time,
+) (string, string) {
+	t.Helper()
+	targetFilesystemID := sandboxstore.NomadTemplateCaptureFilesystemID(operationID, snapshotID)
+	targetGenerationID := sandboxstore.NomadTemplateCaptureGenerationID(operationID, snapshotID)
+	binding := sha256.Sum256([]byte("running-snapshot-binding-" + operationID))
+	fixture.store.templateCaptureCandidate = &sandboxstore.NomadTemplateCaptureCandidate{
+		OperationID: operationID, SnapshotID: snapshotID,
+		TargetFilesystemID: targetFilesystemID, TargetGenerationID: targetGenerationID,
+		Slot: &sandboxstore.RuntimeSlot{
+			ID: "slot-snapshot", ClusterID: "cluster-1", AllocationID: "allocation-snapshot",
+			NodeID: "node-snapshot", NodeUID: "node-uid-snapshot", NodeBootID: "boot-snapshot",
+		},
+		SourceFilesystemID: "source-filesystem", SourceGenerationID: "source-generation",
+		SourceWriterGrantID: "writer-grant", SourceWriterEpoch: 8,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: binding[:],
+	}
+	currentHead := digest.FromString("running-snapshot-head-" + operationID).String()
+	baseRoot := digest.FromString("running-snapshot-base-" + operationID).String()
+	descriptor := testNomadRebaseDescriptor(t, "running-snapshot", currentHead)
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version:     rootfshandoff.RunningForkCheckpointVersion,
+		OperationID: operationID, SourceSandboxID: sourceID,
+		SourceFilesystemID: "source-filesystem", TargetSandboxID: targetFilesystemID,
+		SourceWriterGrantID: "writer-grant", SourceWriterEpoch: 8,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: "source-generation", CheckpointGenerationID: targetGenerationID,
+		CheckpointSequence: 1, CheckpointDescriptorDigest: digest.FromBytes(descriptor).String(),
+	}
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.runningFork.result = rootfshandoff.RunningForkCheckpointResult{
+		Generation: rootfshandoff.GenerationDescriptor{
+			Version:      rootfshandoff.GenerationDescriptorVersion,
+			GenerationID: targetGenerationID, FilesystemID: targetFilesystemID,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			BaseBlockRoot:      baseRoot, CurrentBlockHead: currentHead,
+			WriterEpoch: 8, FormatGeneration: fixture.store.artifact.FormatGeneration,
+			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
+			LocatorVersion:  2, Descriptor: descriptor,
+		},
+		Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
+	}
+	fixture.runningFork.onCall = func() {
+		fixture.store.generation = &sandboxstore.RootFSGeneration{
+			ID: targetGenerationID, FilesystemID: targetFilesystemID,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			BaseBlockRoot:      baseRoot, CurrentBlockHead: currentHead,
+			WriterEpoch: 8, FormatGeneration: fixture.store.artifact.FormatGeneration,
+			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
+			LocatorVersion:  2, Descriptor: descriptor,
+		}
+		fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
+			ID: snapshotID, FilesystemID: targetFilesystemID, TeamID: "team-1",
+			SourceSandboxID: sourceID, HeadGenerationID: targetGenerationID,
+			BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+			SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+			FormatGeneration:   fixture.store.artifact.FormatGeneration,
+			Name:               name, Description: description, CreatedAt: fixture.now, ExpiresAt: expiresAt,
+		}
+		fixture.store.templateCaptureCandidate.Completed = true
+		fixture.store.templateCaptureCandidate.Snapshot = fixture.store.snapshot
+	}
+	return targetFilesystemID, targetGenerationID
 }
 
 func TestServiceMapsUnavailableWarmPoolToRetryableError(t *testing.T) {

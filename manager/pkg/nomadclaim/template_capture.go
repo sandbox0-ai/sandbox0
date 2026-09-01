@@ -23,7 +23,8 @@ type nomadTemplateCaptureStore interface {
 	DeleteTemplateBuildRootFSCapture(context.Context, string, string) error
 	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform, sandboxstore.ReadyRootFSArtifactRequirements) (*sandboxstore.RootFSBaseArtifact, error)
-	RequestNomadRunningTemplateCapture(context.Context, *sandboxstore.NomadTemplateCaptureRequest) (*sandboxstore.NomadTemplateCaptureCandidate, error)
+	RequestNomadRunningRootFSCapture(context.Context, *sandboxstore.NomadRunningRootFSCaptureRequest) (*sandboxstore.NomadTemplateCaptureCandidate, error)
+	ContinueNomadRunningRootFSCapture(context.Context, string) (*sandboxstore.NomadTemplateCaptureCandidate, error)
 }
 
 // EnsureTemplateBuildCapture creates or recovers a deterministic block-COW
@@ -103,31 +104,66 @@ func (s *Service) ensureRunningTemplateCapture(
 	snapshotID string,
 ) (*sandboxstore.RootFSSnapshot, error) {
 	operationID := "nomad-template-capture-" + strings.TrimPrefix(snapshotID, "template-build-")
-	request := &sandboxstore.NomadTemplateCaptureRequest{
+	request := &sandboxstore.NomadRunningRootFSCaptureRequest{
 		OperationID: operationID, SourceSandboxID: source.ID,
 		TeamID: source.TeamID, SnapshotID: snapshotID,
+		CaptureKind: sandboxstore.NomadRunningRootFSCaptureKindTemplate,
+		Name:        "Template RootFS capture",
+		Description: "Internal immutable live-writer checkpoint retained by a template.",
 	}
-	candidate, err := store.RequestNomadRunningTemplateCapture(ctx, request)
+	snapshot, err := s.ensureRunningRootFSCapture(ctx, store, request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", templatepkg.ErrTemplateSourceUnavailable, err)
+	}
+	return snapshot, nil
+}
+
+func (s *Service) ensureRunningRootFSCapture(
+	ctx context.Context,
+	store nomadTemplateCaptureStore,
+	request *sandboxstore.NomadRunningRootFSCaptureRequest,
+) (*sandboxstore.RootFSSnapshot, error) {
+	candidate, err := store.RequestNomadRunningRootFSCapture(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 	if candidate == nil {
-		return nil, fmt.Errorf("%w: capture authority returned no candidate", templatepkg.ErrTemplateSourceUnavailable)
+		return nil, fmt.Errorf("capture authority returned no candidate")
 	}
 	if candidate.Completed {
 		return candidate.Snapshot, nil
 	}
-	if candidate.Slot == nil || candidate.OperationID != operationID ||
-		candidate.SnapshotID != snapshotID || candidate.SourceFilesystemID == "" ||
+	if candidate.Source == nil || candidate.Source.ID != request.SourceSandboxID ||
+		candidate.Slot == nil || candidate.OperationID != request.OperationID ||
+		candidate.SnapshotID != request.SnapshotID || candidate.SourceFilesystemID == "" ||
 		candidate.SourceGenerationID == "" || candidate.SourceWriterGrantID == "" ||
 		candidate.SourceWriterEpoch <= 0 || candidate.BindingVersion != rootfshandoff.WriterBindingVersion ||
 		len(candidate.BindingDigest) != 32 || candidate.TargetFilesystemID == "" ||
 		candidate.TargetGenerationID == "" {
-		return nil, fmt.Errorf("%w: capture authority returned an incomplete candidate",
-			templatepkg.ErrTemplateSourceUnavailable)
+		return nil, fmt.Errorf("capture authority returned an incomplete candidate")
 	}
+	dispatchErr := s.dispatchRunningRootFSCapture(ctx, candidate)
+	// PostgreSQL remains authoritative after every dispatch, including a lost
+	// node-channel response after the writer callback committed.
+	completed, completionErr := store.RequestNomadRunningRootFSCapture(ctx, request)
+	if completionErr == nil && completed != nil && completed.Completed && completed.Snapshot != nil {
+		return completed.Snapshot, nil
+	}
+	if dispatchErr != nil {
+		return nil, fmt.Errorf("dispatch running rootfs capture: %w", dispatchErr)
+	}
+	if completionErr != nil {
+		return nil, completionErr
+	}
+	return nil, fmt.Errorf("writer checkpoint was not committed")
+}
+
+func (s *Service) dispatchRunningRootFSCapture(
+	ctx context.Context,
+	candidate *sandboxstore.NomadTemplateCaptureCandidate,
+) error {
 	fork := rootfshandoff.RunningForkCheckpointRequest{
-		OperationID: operationID, SourceSandboxID: source.ID,
+		OperationID: candidate.OperationID, SourceSandboxID: candidate.Source.ID,
 		TargetSandboxID:    candidate.TargetFilesystemID,
 		TargetGenerationID: candidate.TargetGenerationID,
 	}
@@ -146,21 +182,7 @@ func (s *Service) ensureRunningTemplateCapture(
 	if dispatchErr == nil {
 		dispatchErr = validateNomadTemplateCaptureCheckpoint(candidate, fork, checkpoint)
 	}
-	// PostgreSQL remains authoritative after every dispatch, including a lost
-	// node-channel response after the writer callback committed.
-	completed, completionErr := store.RequestNomadRunningTemplateCapture(ctx, request)
-	if completionErr == nil && completed != nil && completed.Completed && completed.Snapshot != nil {
-		return completed.Snapshot, nil
-	}
-	if dispatchErr != nil {
-		return nil, fmt.Errorf("%w: dispatch running template capture: %v",
-			templatepkg.ErrTemplateSourceUnavailable, dispatchErr)
-	}
-	if completionErr != nil {
-		return nil, completionErr
-	}
-	return nil, fmt.Errorf("%w: writer checkpoint was not committed",
-		templatepkg.ErrTemplateSourceUnavailable)
+	return dispatchErr
 }
 
 func validateNomadTemplateCaptureCheckpoint(
@@ -181,7 +203,7 @@ func validateNomadTemplateCaptureCheckpoint(
 		proof.BindingVersion != candidate.BindingVersion ||
 		proof.BindingDigest != hex.EncodeToString(candidate.BindingDigest) ||
 		proof.ExpectedSourceGenerationID != candidate.SourceGenerationID {
-		return fmt.Errorf("node checkpoint belongs to another template capture")
+		return fmt.Errorf("node checkpoint belongs to another running rootfs capture")
 	}
 	return nil
 }

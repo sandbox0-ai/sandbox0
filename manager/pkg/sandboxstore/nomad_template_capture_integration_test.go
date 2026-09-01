@@ -144,6 +144,166 @@ func TestNomadRunningTemplateCaptureCancellationWinsPublicationRaceIntegration(t
 	require.Nil(t, filesystem)
 }
 
+func TestNomadRunningRootFSSnapshotPublishesMetadataAndReleasesIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-snapshot")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	expiresAt := time.Now().UTC().Add(24*time.Hour + 789*time.Nanosecond)
+	request := &NomadRunningRootFSCaptureRequest{
+		OperationID: "running-snapshot-operation", SourceSandboxID: source.ID,
+		TeamID: source.TeamID, SnapshotID: "rootfs-snapshot-running-operation",
+		CaptureKind: NomadRunningRootFSCaptureKindSnapshot,
+		Name:        "release checkpoint", Description: "before migration", ExpiresAt: expiresAt,
+	}
+	candidate, err := fixture.store.RequestNomadRunningRootFSCapture(fixture.ctx, request)
+	require.NoError(t, err)
+	require.False(t, candidate.Completed)
+	require.Equal(t, request.Name, candidate.Name)
+	require.Equal(t, request.Description, candidate.Description)
+	require.True(t, candidate.ExpiresAt.Equal(expiresAt.UTC().Truncate(time.Microsecond)))
+
+	continued, err := fixture.store.ContinueNomadRunningRootFSCapture(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	require.Equal(t, candidate.OperationID, continued.OperationID)
+	require.Equal(t, candidate.SourceWriterGrantID, continued.SourceWriterGrantID)
+
+	changed := *request
+	changed.Name = "changed metadata"
+	_, err = fixture.store.RequestNomadRunningRootFSCapture(fixture.ctx, &changed)
+	require.ErrorIs(t, err, ErrNomadTemplateCaptureConflict)
+
+	publication := nomadTemplateCaptureCheckpointRequest(t, fixture, source, candidate)
+	_, err = fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, publication)
+	require.NoError(t, err)
+	completed, err := fixture.store.RequestNomadRunningRootFSCapture(fixture.ctx, request)
+	require.NoError(t, err)
+	require.True(t, completed.Completed)
+	require.NotNil(t, completed.Snapshot)
+	require.Equal(t, request.Name, completed.Snapshot.Name)
+	require.Equal(t, request.Description, completed.Snapshot.Description)
+	require.True(t, completed.Snapshot.ExpiresAt.Equal(candidate.ExpiresAt))
+
+	// An old manager replica can receive the callback during a rolling
+	// upgrade. Its legacy INSERT supplies template metadata; the migration
+	// trigger must still publish the authoritative public snapshot metadata.
+	_, err = fixture.store.pool.Exec(fixture.ctx, `
+		DELETE FROM manager.rootfs_snapshots WHERE snapshot_id = $1
+	`, request.SnapshotID)
+	require.NoError(t, err)
+	_, err = fixture.store.pool.Exec(fixture.ctx, `
+		INSERT INTO manager.rootfs_snapshots (
+			snapshot_id, filesystem_id, team_id, source_sandbox_id,
+			head_generation_id, name, description, created_at, expires_at
+		) VALUES ($1, $2, $3, $4, $5,
+			'Template RootFS capture',
+			'Internal immutable live-writer checkpoint retained by a template.',
+			NOW(), NULL)
+	`, request.SnapshotID, candidate.TargetFilesystemID, request.TeamID,
+		source.ID, candidate.TargetGenerationID)
+	require.NoError(t, err)
+	rollingSnapshot, err := fixture.store.GetRootFSSnapshot(
+		fixture.ctx, request.SnapshotID, request.TeamID,
+	)
+	require.NoError(t, err)
+	require.Equal(t, request.Name, rollingSnapshot.Name)
+	require.Equal(t, request.Description, rollingSnapshot.Description)
+	require.True(t, rollingSnapshot.ExpiresAt.Equal(candidate.ExpiresAt))
+
+	loadedSource, err := fixture.store.GetSandbox(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateActive, loadedSource.DesiredState)
+	require.Equal(t, source.RuntimeID, loadedSource.RuntimeID)
+
+	require.NoError(t, fixture.store.DeleteRootFSSnapshot(
+		fixture.ctx, request.SnapshotID, request.TeamID,
+	))
+	var cancelReason string
+	require.NoError(t, fixture.store.pool.QueryRow(fixture.ctx, `
+		SELECT cancel_reason FROM manager.rootfs_running_template_captures
+		WHERE operation_id = $1
+	`, request.OperationID).Scan(&cancelReason))
+	require.Equal(t, "snapshot deleted", cancelReason)
+	deleted, err := fixture.store.DeleteReleasedNomadRunningRootFSCaptures(
+		fixture.ctx, request.TeamID, 10,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+}
+
+func TestNomadRunningRootFSSnapshotExpirationReleasesCaptureIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-snapshot-expiry")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	request := &NomadRunningRootFSCaptureRequest{
+		OperationID: "running-snapshot-expiry-operation", SourceSandboxID: source.ID,
+		TeamID: source.TeamID, SnapshotID: "rootfs-snapshot-expiry-operation",
+		CaptureKind: NomadRunningRootFSCaptureKindSnapshot,
+		Name:        "short checkpoint", ExpiresAt: time.Now().UTC().Add(-time.Minute),
+	}
+	candidate, err := fixture.store.RequestNomadRunningRootFSCapture(fixture.ctx, request)
+	require.NoError(t, err)
+	publication := nomadTemplateCaptureCheckpointRequest(t, fixture, source, candidate)
+	_, err = fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, publication)
+	require.NoError(t, err)
+
+	deleted, err := fixture.store.DeleteExpiredRootFSSnapshots(fixture.ctx, request.TeamID, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	var cancelReason string
+	require.NoError(t, fixture.store.pool.QueryRow(fixture.ctx, `
+		SELECT cancel_reason FROM manager.rootfs_running_template_captures
+		WHERE operation_id = $1
+	`, request.OperationID).Scan(&cancelReason))
+	require.Equal(t, "snapshot expired", cancelReason)
+	deleted, err = fixture.store.DeleteReleasedNomadRunningRootFSCaptures(
+		fixture.ctx, request.TeamID, 10,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+}
+
+func TestAbortStaleNomadRunningRootFSCaptureRequiresLostWriterIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-snapshot-abort")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	request := &NomadRunningRootFSCaptureRequest{
+		OperationID: "running-snapshot-abort-operation", SourceSandboxID: source.ID,
+		TeamID: source.TeamID, SnapshotID: "rootfs-snapshot-abort-operation",
+		CaptureKind: NomadRunningRootFSCaptureKindSnapshot, Name: "checkpoint",
+	}
+	candidate, err := fixture.store.RequestNomadRunningRootFSCapture(fixture.ctx, request)
+	require.NoError(t, err)
+	publication := nomadTemplateCaptureCheckpointRequest(t, fixture, source, candidate)
+
+	aborted, err := fixture.store.AbortStaleNomadRunningRootFSCapture(
+		fixture.ctx, request.OperationID, source.ID, "lost exact writer",
+	)
+	require.NoError(t, err)
+	require.False(t, aborted, "a still-bound exact writer remains recoverable")
+
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandboxes SET runtime_id = 'replacement-allocation'
+		WHERE sandbox_id = $1
+	`, source.ID)
+	require.NoError(t, err)
+	aborted, err = fixture.store.AbortStaleNomadRunningRootFSCapture(
+		fixture.ctx, request.OperationID, source.ID, "lost exact writer",
+	)
+	require.NoError(t, err)
+	require.True(t, aborted)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+	var phase string
+	require.NoError(t, fixture.store.pool.QueryRow(fixture.ctx, `
+		SELECT phase FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
+	`, request.OperationID).Scan(&phase))
+	require.Equal(t, SandboxLifecyclePhaseAborted, phase)
+
+	_, err = fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, publication)
+	require.Error(t, err, "a late writer callback must lose after the abort commit")
+}
+
 func nomadTemplateCaptureCheckpointRequest(
 	t *testing.T,
 	fixture *nomadPauseStoreFixture,

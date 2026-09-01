@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,6 +22,9 @@ var (
 const (
 	nomadTemplateCaptureStatePending   = "pending"
 	nomadTemplateCaptureStatePublished = "published"
+
+	NomadRunningRootFSCaptureKindTemplate = "template"
+	NomadRunningRootFSCaptureKindSnapshot = "snapshot"
 )
 
 // NomadTemplateCaptureRequest identifies one deterministic internal snapshot
@@ -30,6 +34,19 @@ type NomadTemplateCaptureRequest struct {
 	SourceSandboxID string
 	TeamID          string
 	SnapshotID      string
+}
+
+// NomadRunningRootFSCaptureRequest identifies one deterministic immutable
+// checkpoint and the public or internal snapshot metadata published with it.
+type NomadRunningRootFSCaptureRequest struct {
+	OperationID     string
+	SourceSandboxID string
+	TeamID          string
+	SnapshotID      string
+	CaptureKind     string
+	Name            string
+	Description     string
+	ExpiresAt       time.Time
 }
 
 // NomadTemplateCaptureCandidate authorizes a node checkpoint or returns its
@@ -49,6 +66,11 @@ type NomadTemplateCaptureCandidate struct {
 	SourceWriterEpoch   int64
 	BindingVersion      int
 	BindingDigest       []byte
+	TeamID              string
+	CaptureKind         string
+	Name                string
+	Description         string
+	ExpiresAt           time.Time
 }
 
 type nomadTemplateCaptureIntent struct {
@@ -69,6 +91,10 @@ type nomadTemplateCaptureIntent struct {
 	CheckpointSequence   *int64
 	DescriptorDigest     *string
 	ProofDigest          []byte
+	CaptureKind          string
+	Name                 string
+	Description          string
+	ExpiresAt            time.Time
 }
 
 // NomadTemplateCaptureFilesystemID derives the immutable unbound filesystem
@@ -90,6 +116,24 @@ func NomadTemplateCaptureGenerationID(operationID, snapshotID string) string {
 func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 	ctx context.Context,
 	request *NomadTemplateCaptureRequest,
+) (*NomadTemplateCaptureCandidate, error) {
+	if request == nil {
+		return nil, fmt.Errorf("nomad template capture request is required")
+	}
+	return s.RequestNomadRunningRootFSCapture(ctx, &NomadRunningRootFSCaptureRequest{
+		OperationID: request.OperationID, SourceSandboxID: request.SourceSandboxID,
+		TeamID: request.TeamID, SnapshotID: request.SnapshotID,
+		CaptureKind: NomadRunningRootFSCaptureKindTemplate,
+		Name:        "Template RootFS capture",
+		Description: "Internal immutable live-writer checkpoint retained by a template.",
+	})
+}
+
+// RequestNomadRunningRootFSCapture reserves one exact source lifecycle and
+// returns the authoritative writer/node identity for checkpoint dispatch.
+func (s *PGSandboxStore) RequestNomadRunningRootFSCapture(
+	ctx context.Context,
+	request *NomadRunningRootFSCaptureRequest,
 ) (*NomadTemplateCaptureCandidate, error) {
 	normalized, requestDigest, targetFilesystemID, targetGenerationID, err :=
 		normalizeNomadTemplateCaptureRequest(request)
@@ -172,12 +216,15 @@ func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 			source_filesystem_id, source_grant_id, source_writer_epoch,
 			source_generation_id, target_filesystem_id, checkpoint_generation_id,
 			request_digest, binding_version, binding_digest, state,
+			capture_kind, snapshot_name, snapshot_description, snapshot_expires_at,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+			$15, $16, $17, $18, NOW(), NOW())
 	`, normalized.OperationID, normalized.SnapshotID, normalized.TeamID, source.ID,
 		writer.filesystem.ID, writer.grant.ID, writer.grant.WriterEpoch, writer.generation.ID,
 		targetFilesystemID, targetGenerationID, requestDigest,
-		writer.grant.BindingVersion, writer.grant.BindingDigest, nomadTemplateCaptureStatePending); err != nil {
+		writer.grant.BindingVersion, writer.grant.BindingDigest, nomadTemplateCaptureStatePending,
+		normalized.CaptureKind, normalized.Name, normalized.Description, nullableTime(normalized.ExpiresAt)); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return nil, fmt.Errorf("%w: capture identity is already reserved", ErrNomadTemplateCaptureConflict)
@@ -192,6 +239,8 @@ func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 		CheckpointGeneration: targetGenerationID, RequestDigest: append([]byte(nil), requestDigest...),
 		BindingVersion: writer.grant.BindingVersion,
 		BindingDigest:  append([]byte(nil), writer.grant.BindingDigest...), State: nomadTemplateCaptureStatePending,
+		CaptureKind: normalized.CaptureKind, Name: normalized.Name,
+		Description: normalized.Description, ExpiresAt: normalized.ExpiresAt,
 	}
 	candidate := nomadTemplateCaptureCandidate(source, writer, intent)
 	if err := tx.Commit(ctx); err != nil {
@@ -200,9 +249,152 @@ func (s *PGSandboxStore) RequestNomadRunningTemplateCapture(
 	return candidate, nil
 }
 
+// ContinueNomadRunningRootFSCapture reconstructs a pending checkpoint from
+// PostgreSQL so the controller can finish it after an API response or manager
+// process is lost.
+func (s *PGSandboxStore) ContinueNomadRunningRootFSCapture(
+	ctx context.Context,
+	sourceSandboxID string,
+) (*NomadTemplateCaptureCandidate, error) {
+	sourceSandboxID = strings.TrimSpace(sourceSandboxID)
+	if sourceSandboxID == "" {
+		return nil, fmt.Errorf("source_sandbox_id is required")
+	}
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("sandbox store is not configured")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin Nomad running capture continuation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	source, err := lockNomadSandboxClaimRecord(ctx, tx, sourceSandboxID)
+	if err != nil {
+		if errors.Is(err, ErrSandboxRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	lifecycle, err := getActiveLifecycleTxn(ctx, tx, sourceSandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("load active Nomad running capture lifecycle: %w", err)
+	}
+	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindSnapshot {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit absent Nomad running capture continuation: %w", err)
+		}
+		return nil, nil
+	}
+	intent, err := getNomadTemplateCaptureIntentForUpdate(ctx, tx, lifecycle.ID)
+	if err != nil {
+		return nil, err
+	}
+	if intent == nil {
+		return nil, fmt.Errorf("%w: running capture intent is missing", ErrNomadTemplateCaptureConflict)
+	}
+	candidate, err := lockPendingNomadTemplateCapture(ctx, tx, source, intent)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit Nomad running capture continuation: %w", err)
+	}
+	return candidate, nil
+}
+
+// AbortStaleNomadRunningRootFSCapture releases a pending capture only after
+// its exact live writer identity has changed. Publication and abort serialize
+// on the source row, so a committed checkpoint always wins the race.
+func (s *PGSandboxStore) AbortStaleNomadRunningRootFSCapture(
+	ctx context.Context,
+	operationID, sourceSandboxID, reason string,
+) (bool, error) {
+	operationID = strings.TrimSpace(operationID)
+	sourceSandboxID = strings.TrimSpace(sourceSandboxID)
+	reason = strings.TrimSpace(reason)
+	if operationID == "" || sourceSandboxID == "" || reason == "" {
+		return false, fmt.Errorf("operation, source sandbox, and abort reason are required")
+	}
+	if s == nil || s.pool == nil {
+		return false, fmt.Errorf("sandbox store is not configured")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin stale Nomad running capture abort tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	source, err := lockNomadSandboxClaimRecord(ctx, tx, sourceSandboxID)
+	if err != nil {
+		return false, err
+	}
+	intent, err := getNomadTemplateCaptureIntentForUpdate(ctx, tx, operationID)
+	if err != nil {
+		return false, err
+	}
+	if intent == nil || intent.State == nomadTemplateCaptureStatePublished {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit terminal Nomad running capture abort: %w", err)
+		}
+		return false, nil
+	}
+	if intent.SourceSandboxID != sourceSandboxID {
+		return false, fmt.Errorf("%w: capture source identity changed", ErrNomadTemplateCaptureConflict)
+	}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2 FOR UPDATE
+	`, operationID, sourceSandboxID))
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("lock stale Nomad running capture lifecycle: %w", err)
+	}
+	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindSnapshot ||
+		lifecycle.Phase != SandboxLifecyclePhasePublishing ||
+		lifecycle.TargetSandboxID != intent.TargetFilesystemID ||
+		lifecycle.TargetGenerationID != intent.CheckpointGeneration ||
+		!bytes.Equal(lifecycle.TargetRecordDigest, intent.RequestDigest) {
+		return false, fmt.Errorf("%w: pending capture lifecycle changed", ErrNomadTemplateCaptureConflict)
+	}
+	writer, writerErr := lockExactNomadLiveWriter(ctx, tx, source)
+	if writerErr == nil && lifecycle.FromGeneration == source.RuntimeGeneration &&
+		lifecycle.FromRuntimeNamespace == source.RuntimeNamespace && lifecycle.FromRuntimeID == source.RuntimeID &&
+		writer.filesystem.ID == intent.SourceFilesystemID && writer.generation.ID == intent.SourceGenerationID &&
+		writer.grant.ID == intent.SourceGrantID && writer.grant.WriterEpoch == intent.SourceWriterEpoch &&
+		writer.grant.BindingVersion == intent.BindingVersion && bytes.Equal(writer.grant.BindingDigest, intent.BindingDigest) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit recoverable Nomad running capture check: %w", err)
+		}
+		return false, nil
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
+		WHERE txn_id = $1 AND sandbox_id = $4 AND phase = $5
+	`, operationID, SandboxLifecyclePhaseAborted, reason, sourceSandboxID,
+		SandboxLifecyclePhasePublishing)
+	if err != nil {
+		return false, fmt.Errorf("abort stale Nomad running capture lifecycle: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, fmt.Errorf("%w: stale capture lifecycle changed", ErrNomadTemplateCaptureConflict)
+	}
+	tag, err = tx.Exec(ctx, `
+		DELETE FROM manager.rootfs_running_template_captures
+		WHERE operation_id = $1 AND state = $2
+	`, operationID, nomadTemplateCaptureStatePending)
+	if err != nil {
+		return false, fmt.Errorf("delete stale Nomad running capture intent: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, fmt.Errorf("%w: stale capture intent changed", ErrNomadTemplateCaptureConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit stale Nomad running capture abort: %w", err)
+	}
+	return true, nil
+}
+
 func normalizeNomadTemplateCaptureRequest(
-	request *NomadTemplateCaptureRequest,
-) (*NomadTemplateCaptureRequest, []byte, string, string, error) {
+	request *NomadRunningRootFSCaptureRequest,
+) (*NomadRunningRootFSCaptureRequest, []byte, string, string, error) {
 	if request == nil {
 		return nil, nil, "", "", fmt.Errorf("nomad template capture request is required")
 	}
@@ -211,6 +403,15 @@ func normalizeNomadTemplateCaptureRequest(
 	normalized.SourceSandboxID = strings.TrimSpace(request.SourceSandboxID)
 	normalized.TeamID = strings.TrimSpace(request.TeamID)
 	normalized.SnapshotID = strings.TrimSpace(request.SnapshotID)
+	normalized.CaptureKind = strings.TrimSpace(request.CaptureKind)
+	normalized.Name = strings.TrimSpace(request.Name)
+	normalized.Description = strings.TrimSpace(request.Description)
+	if !normalized.ExpiresAt.IsZero() {
+		// PostgreSQL timestamps have microsecond precision. Normalize before the
+		// intent comparison so an idempotent retry cannot conflict only because
+		// the original HTTP timestamp carried nanoseconds.
+		normalized.ExpiresAt = normalized.ExpiresAt.UTC().Truncate(time.Microsecond)
+	}
 	for name, value := range map[string]string{
 		"operation_id": normalized.OperationID, "source_sandbox_id": normalized.SourceSandboxID,
 		"team_id": normalized.TeamID, "snapshot_id": normalized.SnapshotID,
@@ -218,6 +419,10 @@ func normalizeNomadTemplateCaptureRequest(
 		if value == "" || strings.TrimSpace(value) != value || len(value) > 512 {
 			return nil, nil, "", "", fmt.Errorf("%s must be canonical and at most 512 bytes", name)
 		}
+	}
+	if normalized.CaptureKind != NomadRunningRootFSCaptureKindTemplate &&
+		normalized.CaptureKind != NomadRunningRootFSCaptureKindSnapshot {
+		return nil, nil, "", "", fmt.Errorf("capture_kind must be template or snapshot")
 	}
 	targetFilesystemID := NomadTemplateCaptureFilesystemID(normalized.OperationID, normalized.SnapshotID)
 	targetGenerationID := NomadTemplateCaptureGenerationID(normalized.OperationID, normalized.SnapshotID)
@@ -235,12 +440,14 @@ func getNomadTemplateCaptureIntentForUpdate(
 	operationID string,
 ) (*nomadTemplateCaptureIntent, error) {
 	var intent nomadTemplateCaptureIntent
+	var expiresAt *time.Time
 	err := tx.QueryRow(ctx, `
 		SELECT operation_id, snapshot_id, team_id, source_sandbox_id,
 			source_filesystem_id, source_grant_id, source_writer_epoch,
 			source_generation_id, target_filesystem_id, checkpoint_generation_id,
 			request_digest, binding_version, binding_digest, state,
-			checkpoint_sequence, checkpoint_descriptor_digest, checkpoint_proof_digest
+			checkpoint_sequence, checkpoint_descriptor_digest, checkpoint_proof_digest,
+			capture_kind, snapshot_name, snapshot_description, snapshot_expires_at
 		FROM manager.rootfs_running_template_captures
 		WHERE operation_id = $1
 		FOR UPDATE
@@ -250,6 +457,7 @@ func getNomadTemplateCaptureIntentForUpdate(
 		&intent.SourceGenerationID, &intent.TargetFilesystemID, &intent.CheckpointGeneration,
 		&intent.RequestDigest, &intent.BindingVersion, &intent.BindingDigest, &intent.State,
 		&intent.CheckpointSequence, &intent.DescriptorDigest, &intent.ProofDigest,
+		&intent.CaptureKind, &intent.Name, &intent.Description, &expiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -257,12 +465,13 @@ func getNomadTemplateCaptureIntentForUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("load Nomad template capture intent: %w", err)
 	}
+	intent.ExpiresAt = derefTime(expiresAt)
 	return &intent, nil
 }
 
 func nomadTemplateCaptureIntentMatches(
 	intent *nomadTemplateCaptureIntent,
-	request *NomadTemplateCaptureRequest,
+	request *NomadRunningRootFSCaptureRequest,
 	requestDigest []byte,
 	targetFilesystemID, targetGenerationID string,
 ) bool {
@@ -270,7 +479,9 @@ func nomadTemplateCaptureIntentMatches(
 		intent.SnapshotID == request.SnapshotID && intent.TeamID == request.TeamID &&
 		intent.SourceSandboxID == request.SourceSandboxID &&
 		intent.TargetFilesystemID == targetFilesystemID &&
-		intent.CheckpointGeneration == targetGenerationID && bytes.Equal(intent.RequestDigest, requestDigest)
+		intent.CheckpointGeneration == targetGenerationID && bytes.Equal(intent.RequestDigest, requestDigest) &&
+		intent.CaptureKind == request.CaptureKind && intent.Name == request.Name &&
+		intent.Description == request.Description && intent.ExpiresAt.Equal(request.ExpiresAt)
 }
 
 func lockPendingNomadTemplateCapture(
@@ -311,6 +522,8 @@ func nomadTemplateCaptureCandidate(
 		SourceGenerationID: writer.generation.ID, SourceWriterGrantID: writer.grant.ID,
 		SourceWriterEpoch: writer.grant.WriterEpoch, BindingVersion: writer.grant.BindingVersion,
 		BindingDigest: append([]byte(nil), writer.grant.BindingDigest...),
+		TeamID:        intent.TeamID, CaptureKind: intent.CaptureKind, Name: intent.Name,
+		Description: intent.Description, ExpiresAt: intent.ExpiresAt,
 	}
 }
 
@@ -344,13 +557,16 @@ func loadCompletedNomadTemplateCapture(
 	}
 	if snapshot.FilesystemID != intent.TargetFilesystemID ||
 		snapshot.HeadGenerationID != intent.CheckpointGeneration ||
-		snapshot.SourceSandboxID != intent.SourceSandboxID {
+		snapshot.SourceSandboxID != intent.SourceSandboxID || snapshot.Name != intent.Name ||
+		snapshot.Description != intent.Description || !snapshot.ExpiresAt.Equal(intent.ExpiresAt) {
 		return nil, fmt.Errorf("%w: published snapshot identity changed", ErrNomadTemplateCaptureConflict)
 	}
 	return &NomadTemplateCaptureCandidate{
 		OperationID: intent.OperationID, SnapshotID: intent.SnapshotID,
 		TargetFilesystemID: intent.TargetFilesystemID, TargetGenerationID: intent.CheckpointGeneration,
 		Completed: true, Snapshot: snapshot, Source: source,
+		TeamID: intent.TeamID, CaptureKind: intent.CaptureKind, Name: intent.Name,
+		Description: intent.Description, ExpiresAt: intent.ExpiresAt,
 	}, nil
 }
 

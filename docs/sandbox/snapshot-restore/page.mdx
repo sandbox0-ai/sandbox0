@@ -128,47 +128,23 @@ Create a snapshot from a running or paused sandbox. Pause the sandbox and wait u
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
+      code: `paused, err := client.PauseSandboxAndWait(ctx, sandbox.ID, nil)
 if err != nil {
     log.Fatal(err)
 }
-
-for {
-    sb, err := client.GetSandbox(ctx, sandbox.ID)
-    if err != nil {
-        log.Fatal(err)
-    }
-    if sb.Status == apispec.SandboxLifecycleStatusPaused {
-        break
-    }
-    time.Sleep(time.Second)
-}`
+fmt.Printf("Sandbox status: %s\\n", paused.Status)`
     },
     {
       label: "Python",
       language: "python",
-      code: `import time
-
-client.sandboxes.pause(sandbox.id)
-
-while True:
-    sb = client.sandboxes.get(sandbox.id)
-    if sb.status == "paused":
-        break
-    time.sleep(1)`
+      code: `paused = client.sandboxes.pause_and_wait(sandbox.id)
+print(f"Sandbox status: {paused.status}")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `await client.sandboxes.pause(sandbox.id);
-
-while (true) {
-    const sb = await client.sandboxes.get(sandbox.id);
-    if (sb.status === "paused") {
-        break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-}`
+      code: `const paused = await client.sandboxes.pauseAndWait(sandbox.id);
+console.log("Sandbox status:", paused.status);`
     },
     {
       label: "CLI",
@@ -393,7 +369,7 @@ if err != nil {
 }
 fmt.Printf("Restored snapshot %s, status=%s\\n", restored.SnapshotID, restored.Status)
 
-_, err = client.ResumeSandbox(ctx, sandbox.ID)
+_, err = client.ResumeSandboxAndWait(ctx, sandbox.ID, nil)
 if err != nil {
     log.Fatal(err)
 }`
@@ -409,7 +385,7 @@ restored = client.sandboxes.restore_rootfs(
 )
 print(f"Restored snapshot {restored.snapshot_id}, status={restored.status}")
 
-client.sandboxes.resume(sandbox.id)`
+client.sandboxes.resume_and_wait(sandbox.id)`
     },
     {
       label: "TypeScript",
@@ -419,7 +395,7 @@ client.sandboxes.resume(sandbox.id)`
 });
 console.log("Restored snapshot:", restored.snapshotId, "status:", restored.status);
 
-await client.sandboxes.resume(sandbox.id);`
+await client.sandboxes.resumeAndWait(sandbox.id);`
     },
     {
       label: "CLI",
@@ -462,7 +438,7 @@ if err != nil {
 }
 fmt.Printf("Forked sandbox: %s\\n", forked.Sandbox.ID)
 
-_, err = client.ResumeSandbox(ctx, forked.Sandbox.ID)
+_, err = client.ResumeSandboxAndWait(ctx, forked.Sandbox.ID, nil)
 if err != nil {
     log.Fatal(err)
 }`
@@ -473,7 +449,7 @@ if err != nil {
       code: `forked = client.sandboxes.fork(sandbox.id)
 print(f"Forked sandbox: {forked.sandbox.id}")
 
-client.sandboxes.resume(forked.sandbox.id)`
+client.sandboxes.resume_and_wait(forked.sandbox.id)`
     },
     {
       label: "TypeScript",
@@ -481,7 +457,7 @@ client.sandboxes.resume(forked.sandbox.id)`
       code: `const forked = await client.sandboxes.fork(sandbox.id);
 console.log("Forked sandbox:", forked.sandbox.id);
 
-await client.sandboxes.resume(forked.sandbox.id);`
+await client.sandboxes.resumeAndWait(forked.sandbox.id);`
     },
     {
       label: "CLI",
@@ -512,13 +488,52 @@ not accept an image tag or build an image implicitly.
 | `target_base_artifact_digest` | string | Required canonical SHA-256 digest of the target attested Base artifact |
 | `rollback_ttl` | integer | Optional rollback retention in seconds; defaults to 86400 and cannot exceed 604800 |
 
-    curl -X PUT "https://api.sandbox0.ai/api/v1/sandboxes/$SANDBOX_ID/rootfs/rebase" \
-        -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "target_base_artifact_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "rollback_ttl": 86400
-        }'
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `rebased, err := client.RebaseSandboxRootFS(ctx, sandbox.ID, apispec.RebaseSandboxRootFSRequest{
+    TargetBaseArtifactDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    RollbackTTL:              apispec.NewOptInt32(86400),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Rebased generation: %s\\n", rebased.GenerationID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.rebase_sandbox_root_fs_request import RebaseSandboxRootFSRequest
+
+rebased = client.sandboxes.rebase_rootfs(
+    sandbox.id,
+    RebaseSandboxRootFSRequest(
+        target_base_artifact_digest="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        rollback_ttl=86400,
+    ),
+)
+print(f"Rebased generation: {rebased.generation_id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const rebased = await client.sandboxes.rebaseRootFS(sandbox.id, {
+    targetBaseArtifactDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    rollbackTtl: 86400,
+});
+console.log("Rebased generation:", rebased.generationId);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox rebase sb_abc123 \
+    --target-base-artifact-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+    --rollback-ttl 86400`
+    }
+  ]}
+/>
 
 The sandbox must already be paused, have no live runtime slot or writer grant,
 and use the block-COW storage format. An exact retry returns the same target
@@ -583,16 +598,15 @@ For coding-agent and test-generation workflows, a common pattern is:
 
 1. claim a sandbox and initialize the repository or dependency cache
 2. write a marker, lockfile, or workspace state that future tasks should inherit
-3. pause the sandbox and wait for `status` to become `paused`
-4. create a rootfs snapshot for that initialized state
-5. claim each task sandbox with the same template and `snapshot_id`
-6. run task-specific work in the newly claimed sandbox
+3. create a rootfs snapshot for that initialized state; a running source remains running
+4. claim each task sandbox with the same template and `snapshot_id`
+5. run task-specific work in the newly claimed sandbox
 
 ## Next Steps
 
 <CardGroup>
   <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
-    Control the lifecycle state required before snapshot, restore, and fork operations.
+    Release compute and reach the paused state required before restore and rebase operations.
   </Card>
 
   <Card title="Files" href="/docs/sandbox/files" cta="Continue">

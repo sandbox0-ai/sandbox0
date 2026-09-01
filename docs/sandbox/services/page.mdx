@@ -202,19 +202,19 @@ for _, service := range resp.Services {
 }`
     },
     {
+      label: "Python",
+      language: "python",
+      code: `resp = sandbox.get_services()
+for service in resp.services:
+    print(f"{service.id} url={service.public_url} port={service.port}")`
+    },
+    {
       label: "TypeScript",
       language: "typescript",
       code: `const resp = await sandbox.getServices();
 for (const service of resp.services ?? []) {
     console.log(\`\${service.id} url=\${service.publicUrl ?? ''} port=\${service.port ?? ''}\`);
 }`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `resp = sandbox.get_services()
-for service in resp.services:
-    print(f"{service.id} url={service.public_url} port={service.port}")`
     },
     {
       label: "CLI",
@@ -272,44 +272,6 @@ if err != nil {
 fmt.Printf("services: %d\\n", len(resp.Services))`
     },
     {
-      label: "TypeScript",
-      language: "typescript",
-      code: `import { createHash } from 'node:crypto';
-
-const tokenHash = createHash('sha256')
-    .update(process.env.PUBLIC_API_TOKEN!)
-    .digest('hex');
-
-const resp = await sandbox.updateServices([
-    {
-        id: 'api',
-        port: 8080,
-        runtime: {
-            type: 'cmd',
-            command: ['python3', '-m', 'http.server', '8080'],
-            cwd: '/workspace',
-        },
-        ingress: {
-            _public: true,
-            routes: [
-                {
-                    id: 'api',
-                    pathPrefix: '/api',
-                    methods: ['GET', 'POST'],
-                    auth: {
-                        mode: 'bearer',
-                        bearerTokenSha256: tokenHash,
-                    },
-                    timeoutSeconds: 30,
-                    resume: true,
-                },
-            ],
-        },
-    },
-]);
-console.log('services:', resp.services?.length ?? 0);`
-    },
-    {
       label: "Python",
       language: "python",
       code: `import hashlib
@@ -354,6 +316,44 @@ resp = sandbox.update_services([
 print(f"services: {len(resp.services)}")`
     },
     {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { createHash } from 'node:crypto';
+
+const tokenHash = createHash('sha256')
+    .update(process.env.PUBLIC_API_TOKEN!)
+    .digest('hex');
+
+const resp = await sandbox.updateServices([
+    {
+        id: 'api',
+        port: 8080,
+        runtime: {
+            type: 'cmd',
+            command: ['python3', '-m', 'http.server', '8080'],
+            cwd: '/workspace',
+        },
+        ingress: {
+            _public: true,
+            routes: [
+                {
+                    id: 'api',
+                    pathPrefix: '/api',
+                    methods: ['GET', 'POST'],
+                    auth: {
+                        mode: 'bearer',
+                        bearerTokenSha256: tokenHash,
+                    },
+                    timeoutSeconds: 30,
+                    resume: true,
+                },
+            ],
+        },
+    },
+]);
+console.log('services:', resp.services?.length ?? 0);`
+    },
+    {
       label: "CLI",
       language: "bash",
       code: `s0 sandbox service update --services-file services.yaml -s sb_abc123`
@@ -390,14 +390,14 @@ if err != nil {
 }`
     },
     {
-      label: "TypeScript",
-      language: "typescript",
-      code: `await sandbox.clearServices();`
-    },
-    {
       label: "Python",
       language: "python",
       code: `sandbox.clear_services()`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await sandbox.clearServices();`
     },
     {
       label: "CLI",
@@ -472,36 +472,6 @@ if err != nil {
 }`
     },
     {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const sandbox = await client.sandboxes.claim('default', {
-    autoResume: true,
-    services: [
-        {
-            id: 'api',
-            port: 8080,
-            runtime: {
-                type: 'cmd',
-                command: ['python3', '-m', 'http.server', '8080'],
-                cwd: '/workspace',
-            },
-            ingress: {
-                _public: true,
-                routes: [
-                    {
-                        id: 'api',
-                        pathPrefix: '/api',
-                        rewritePrefix: '/',
-                        methods: ['GET', 'POST'],
-                        resume: true,
-                    },
-                ],
-            },
-        },
-    ],
-});`
-    },
-    {
       label: "Python",
       language: "python",
       code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
@@ -535,6 +505,36 @@ sandbox = client.sandboxes.claim(
         ],
     }),
 )`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim('default', {
+    autoResume: true,
+    services: [
+        {
+            id: 'api',
+            port: 8080,
+            runtime: {
+                type: 'cmd',
+                command: ['python3', '-m', 'http.server', '8080'],
+                cwd: '/workspace',
+            },
+            ingress: {
+                _public: true,
+                routes: [
+                    {
+                        id: 'api',
+                        pathPrefix: '/api',
+                        rewritePrefix: '/',
+                        methods: ['GET', 'POST'],
+                        resume: true,
+                    },
+                ],
+            },
+        },
+    ],
+});`
     },
     {
       label: "CLI",

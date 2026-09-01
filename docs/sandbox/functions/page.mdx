@@ -287,41 +287,6 @@ if err != nil {
 }`
     },
     {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const sandbox = await client.sandboxes.claim('default', {
-    autoResume: true,
-    services: [
-        {
-            id: 'webhook',
-            runtime: {
-                type: 'function',
-                _function: {
-                    runtime: 'python',
-                    handler: 'handler',
-                    maxConcurrency: 1,
-                    source: {
-                        type: 'inline',
-                        code: 'def handler(request):\\n    return {"status": 200, "body": "ok"}\\n',
-                    },
-                },
-            },
-            ingress: {
-                _public: true,
-                routes: [
-                    {
-                        id: 'webhook',
-                        pathPrefix: '/webhook',
-                        methods: ['POST'],
-                        resume: true,
-                    },
-                ],
-            },
-        },
-    ],
-});`
-    },
-    {
       label: "Python",
       language: "python",
       code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
@@ -360,6 +325,41 @@ sandbox = client.sandboxes.claim(
         ],
     }),
 )`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim('default', {
+    autoResume: true,
+    services: [
+        {
+            id: 'webhook',
+            runtime: {
+                type: 'function',
+                _function: {
+                    runtime: 'python',
+                    handler: 'handler',
+                    maxConcurrency: 1,
+                    source: {
+                        type: 'inline',
+                        code: 'def handler(request):\\n    return {"status": 200, "body": "ok"}\\n',
+                    },
+                },
+            },
+            ingress: {
+                _public: true,
+                routes: [
+                    {
+                        id: 'webhook',
+                        pathPrefix: '/webhook',
+                        methods: ['POST'],
+                        resume: true,
+                    },
+                ],
+            },
+        },
+    ],
+});`
     },
     {
       label: "CLI",

@@ -72,11 +72,12 @@ type ForkRootFSFilesystemRequest struct {
 }
 
 type RestoreRootFSFromSnapshotRequest struct {
-	SandboxID         string
-	SnapshotID        string
-	TeamID            string
-	OperationID       string
-	RollbackExpiresAt time.Time
+	SandboxID               string
+	SnapshotID              string
+	TeamID                  string
+	OperationID             string
+	InitialClaimOperationID string
+	RollbackExpiresAt       time.Time
 }
 
 // RootFSHeadRollback retains the old immutable generation for a bounded
@@ -509,8 +510,8 @@ func (t sandboxStoreTx) RestoreRootFSFromSnapshot(ctx context.Context, req *Rest
 	return filesystem, err
 }
 
-func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
-	if db == nil || req == nil {
+func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
+	if tx == nil || req == nil {
 		return nil, nil
 	}
 	sandboxID := strings.TrimSpace(req.SandboxID)
@@ -518,11 +519,23 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 	if sandboxID == "" || snapshotID == "" {
 		return nil, fmt.Errorf("sandbox_id and snapshot_id are required")
 	}
-	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
+	teamID := strings.TrimSpace(req.TeamID)
+	initialClaimOperationID := strings.TrimSpace(req.InitialClaimOperationID)
+	var targetFilesystemID, targetTeamID, snapshotFilesystemID, previousGenerationID string
+	var targetWriterEpoch int64
+	var targetExists bool
+	var snapshotGeneration RootFSGeneration
+	var snapshotParentGenerationID *string
+	err := tx.QueryRow(ctx, `
 		WITH snapshot AS (
-			SELECT snapshot.snapshot_id, snapshot.filesystem_id, snapshot.team_id,
-				snapshot.head_generation_id, generation.base_artifact_digest,
-				generation.format_generation, generation.writer_epoch
+			SELECT snapshot.filesystem_id AS snapshot_filesystem_id,
+				snapshot.team_id AS snapshot_team_id,
+				generation.generation_id, generation.filesystem_id,
+				generation.parent_generation_id, generation.source_oci_digest,
+				generation.base_artifact_digest, generation.base_block_root,
+				generation.current_block_head, generation.writer_epoch,
+				generation.format_generation, generation.durability_state,
+				generation.locator_version, generation.descriptor, generation.created_at
 			FROM manager.rootfs_snapshots snapshot
 			JOIN manager.rootfs_generations generation
 				ON generation.generation_id = snapshot.head_generation_id
@@ -534,8 +547,22 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 		target AS (
 			SELECT sandbox_id, team_id
 			FROM manager.sandboxes
-			WHERE sandbox_id = $1 AND desired_state = 'paused' AND deleted_at IS NULL
+			WHERE sandbox_id = $1 AND deleted_at IS NULL
 				AND ($3 = '' OR team_id = $3)
+				AND (
+					desired_state = 'paused'
+					OR (
+						$4 <> '' AND desired_state = 'active' AND runtime_id = ''
+						AND EXISTS (
+							SELECT 1
+							FROM manager.sandbox_runtime_claims claim
+							WHERE claim.sandbox_id = $1
+								AND claim.operation_id = $4
+								AND claim.phase = 'claiming'
+								AND claim.lease_expires_at > NOW()
+						)
+					)
+				)
 		),
 		binding AS (
 			SELECT filesystem_id FROM manager.sandbox_rootfs_bindings WHERE sandbox_id = $1
@@ -544,53 +571,162 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				SELECT 1 FROM manager.sandbox_rootfs_bindings WHERE sandbox_id = $1
 			)
 			LIMIT 1
-		),
-		previous AS (
-			SELECT filesystem.filesystem_id, filesystem.head_generation_id
-			FROM binding
-			JOIN manager.rootfs_filesystems filesystem
-				ON filesystem.filesystem_id = binding.filesystem_id
-		),
-		restored AS (
-			INSERT INTO manager.rootfs_filesystems (
-				filesystem_id, team_id, source_filesystem_id, head_generation_id,
-				writer_epoch, base_artifact_digest, format_generation,
-				created_at, updated_at
+		)
+		SELECT snapshot.generation_id, snapshot.filesystem_id,
+			snapshot.parent_generation_id, snapshot.source_oci_digest,
+			snapshot.base_artifact_digest, snapshot.base_block_root,
+			snapshot.current_block_head, snapshot.writer_epoch,
+			snapshot.format_generation, snapshot.durability_state,
+			snapshot.locator_version, snapshot.descriptor, snapshot.created_at,
+			binding.filesystem_id, target.team_id, snapshot.snapshot_filesystem_id,
+			COALESCE(filesystem.writer_epoch, snapshot.writer_epoch),
+			COALESCE(filesystem.head_generation_id, ''),
+			filesystem.filesystem_id IS NOT NULL
+		FROM snapshot CROSS JOIN target CROSS JOIN binding
+		LEFT JOIN manager.rootfs_filesystems filesystem
+			ON filesystem.filesystem_id = binding.filesystem_id
+		WHERE snapshot.snapshot_team_id = target.team_id
+			AND (filesystem.filesystem_id IS NULL OR filesystem.team_id = target.team_id)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_writer_grants writer
+				WHERE writer.filesystem_id = binding.filesystem_id
+					AND writer.state IN ('issued', 'consumed', 'retiring')
 			)
-			SELECT binding.filesystem_id, target.team_id, snapshot.filesystem_id,
-				snapshot.head_generation_id, snapshot.writer_epoch,
-				snapshot.base_artifact_digest, snapshot.format_generation,
-				NOW(), NOW()
-			FROM snapshot CROSS JOIN target CROSS JOIN binding
-			WHERE snapshot.team_id = target.team_id
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.sandbox_lifecycle_txns lifecycle
+				WHERE lifecycle.sandbox_id = target.sandbox_id
+					AND lifecycle.phase NOT IN ('committed', 'aborted')
+			)
+	`, sandboxID, snapshotID, teamID, initialClaimOperationID).Scan(
+		&snapshotGeneration.ID, &snapshotGeneration.FilesystemID,
+		&snapshotParentGenerationID, &snapshotGeneration.SourceOCIDigest,
+		&snapshotGeneration.BaseArtifactDigest, &snapshotGeneration.BaseBlockRoot,
+		&snapshotGeneration.CurrentBlockHead, &snapshotGeneration.WriterEpoch,
+		&snapshotGeneration.FormatGeneration, &snapshotGeneration.DurabilityState,
+		&snapshotGeneration.LocatorVersion, &snapshotGeneration.Descriptor,
+		&snapshotGeneration.CreatedAt,
+		&targetFilesystemID, &targetTeamID, &snapshotFilesystemID,
+		&targetWriterEpoch, &previousGenerationID, &targetExists,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("restore rootfs filesystem from snapshot: %w", err)
+	}
+	if snapshotParentGenerationID != nil {
+		snapshotGeneration.ParentGenerationID = *snapshotParentGenerationID
+	}
+	snapshotGeneration.Descriptor = append([]byte(nil), snapshotGeneration.Descriptor...)
+
+	selectedGeneration := &snapshotGeneration
+	cloneGeneration := targetFilesystemID != snapshotFilesystemID
+	if cloneGeneration && previousGenerationID != "" {
+		previousGeneration, loadErr := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
+			WHERE generation_id = $1
+		`, previousGenerationID))
+		if loadErr != nil {
+			return nil, fmt.Errorf("load restore target rootfs generation: %w", loadErr)
+		}
+		if previousGeneration.FilesystemID == targetFilesystemID &&
+			rootFSGenerationRestoreContentEqual(previousGeneration, &snapshotGeneration) {
+			selectedGeneration = previousGeneration
+			cloneGeneration = false
+		}
+	}
+
+	newWriterEpoch := targetWriterEpoch
+	if cloneGeneration {
+		if targetExists && previousGenerationID != "" {
+			if targetWriterEpoch == int64(^uint64(0)>>1) {
+				return nil, fmt.Errorf("%w: target writer epoch is exhausted", ErrRootFSFilesystemConflict)
+			}
+			newWriterEpoch++
+		}
+		selectedGeneration = &RootFSGeneration{
+			ID:           restoredRootFSGenerationID(targetFilesystemID, snapshotGeneration.ID, newWriterEpoch),
+			FilesystemID: targetFilesystemID, ParentGenerationID: snapshotGeneration.ID,
+			SourceOCIDigest:    snapshotGeneration.SourceOCIDigest,
+			BaseArtifactDigest: snapshotGeneration.BaseArtifactDigest,
+			BaseBlockRoot:      snapshotGeneration.BaseBlockRoot, CurrentBlockHead: snapshotGeneration.CurrentBlockHead,
+			WriterEpoch: newWriterEpoch, FormatGeneration: snapshotGeneration.FormatGeneration,
+			DurabilityState: snapshotGeneration.DurabilityState, LocatorVersion: snapshotGeneration.LocatorVersion,
+			Descriptor: append([]byte(nil), snapshotGeneration.Descriptor...),
+		}
+	}
+
+	sourceFilesystemID := snapshotFilesystemID
+	if sourceFilesystemID == targetFilesystemID {
+		sourceFilesystemID = ""
+	}
+	var ensuredFilesystemID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO manager.rootfs_filesystems (
+			filesystem_id, team_id, source_filesystem_id, head_generation_id,
+			writer_epoch, base_artifact_digest, format_generation, created_at, updated_at
+		) VALUES ($1, $2, NULLIF($3, ''), NULL, $4, $5, $6, NOW(), NOW())
+		ON CONFLICT (filesystem_id) DO UPDATE SET
+			source_filesystem_id = COALESCE(
+				manager.rootfs_filesystems.source_filesystem_id,
+				EXCLUDED.source_filesystem_id
+			),
+			writer_epoch = EXCLUDED.writer_epoch,
+			base_artifact_digest = EXCLUDED.base_artifact_digest,
+			format_generation = EXCLUDED.format_generation,
+			updated_at = NOW()
+		WHERE manager.rootfs_filesystems.team_id = EXCLUDED.team_id
+			AND manager.rootfs_filesystems.writer_epoch = $7
+			AND COALESCE(manager.rootfs_filesystems.head_generation_id, '') = $8
+		RETURNING filesystem_id
+	`, targetFilesystemID, targetTeamID, sourceFilesystemID, newWriterEpoch,
+		snapshotGeneration.BaseArtifactDigest, snapshotGeneration.FormatGeneration,
+		targetWriterEpoch, previousGenerationID).Scan(&ensuredFilesystemID)
+	if err != nil {
+		return nil, fmt.Errorf("prepare rootfs snapshot restore target: %w", err)
+	}
+	if ensuredFilesystemID != targetFilesystemID {
+		return nil, fmt.Errorf("%w: restore target filesystem changed", ErrRootFSFilesystemConflict)
+	}
+
+	if cloneGeneration {
+		if err := insertPreparedRootFSGeneration(ctx, tx, selectedGeneration); err != nil {
+			return nil, fmt.Errorf("clone rootfs snapshot generation: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO manager.rootfs_generation_materialization_objects (
+				generation_id, locator_version, object_key, created_at
+			)
+			SELECT $1, locator_version, object_key, NOW()
+			FROM manager.rootfs_generation_materialization_objects
+			WHERE generation_id = $2
+			ON CONFLICT (generation_id, locator_version, object_key) DO NOTHING
+		`, selectedGeneration.ID, snapshotGeneration.ID); err != nil {
+			return nil, fmt.Errorf("clone rootfs snapshot materialization objects: %w", err)
+		}
+	}
+
+	operationID := strings.TrimSpace(req.OperationID)
+	filesystem, err := scanRootFSFilesystem(tx.QueryRow(ctx, `
+		WITH restored AS (
+			UPDATE manager.rootfs_filesystems filesystem
+			SET head_generation_id = $2, updated_at = NOW()
+			WHERE filesystem.filesystem_id = $1 AND filesystem.team_id = $3
+				AND filesystem.writer_epoch = $4
+				AND COALESCE(filesystem.head_generation_id, '') = $5
 				AND NOT EXISTS (
 					SELECT 1 FROM manager.rootfs_writer_grants writer
-					WHERE writer.filesystem_id = binding.filesystem_id
+					WHERE writer.filesystem_id = filesystem.filesystem_id
 						AND writer.state IN ('issued', 'consumed', 'retiring')
 				)
 				AND NOT EXISTS (
 					SELECT 1 FROM manager.sandbox_lifecycle_txns lifecycle
-					WHERE lifecycle.sandbox_id = target.sandbox_id
+					WHERE lifecycle.sandbox_id = $6
 						AND lifecycle.phase NOT IN ('committed', 'aborted')
 				)
-			ON CONFLICT (filesystem_id) DO UPDATE SET
-				team_id = EXCLUDED.team_id,
-				source_filesystem_id = COALESCE(
-					manager.rootfs_filesystems.source_filesystem_id,
-					EXCLUDED.source_filesystem_id
-				),
-				head_generation_id = EXCLUDED.head_generation_id,
-				base_artifact_digest = EXCLUDED.base_artifact_digest,
-				format_generation = EXCLUDED.format_generation,
-				updated_at = NOW()
-			WHERE manager.rootfs_filesystems.team_id = EXCLUDED.team_id
 			RETURNING *
 		),
 		bound AS (
 			INSERT INTO manager.sandbox_rootfs_bindings (
 				sandbox_id, filesystem_id, team_id, created_at, updated_at
 			)
-			SELECT $1, filesystem_id, team_id, NOW(), NOW() FROM restored
+			SELECT $6, filesystem_id, team_id, NOW(), NOW() FROM restored
 			ON CONFLICT (sandbox_id) DO UPDATE SET team_id = EXCLUDED.team_id
 			WHERE manager.sandbox_rootfs_bindings.filesystem_id = EXCLUDED.filesystem_id
 			RETURNING filesystem_id
@@ -600,12 +736,10 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				operation_id, filesystem_id, sandbox_id, team_id, operation_kind,
 				old_generation_id, new_generation_id, state, created_at, expires_at
 			)
-			SELECT $4, restored.filesystem_id, $1, restored.team_id, 'restore',
-				previous.head_generation_id, restored.head_generation_id,
-				'available', NOW(), $5
-			FROM restored JOIN previous USING (filesystem_id)
-			WHERE $4 <> '' AND previous.head_generation_id IS NOT NULL
-				AND previous.head_generation_id <> restored.head_generation_id
+			SELECT $7, restored.filesystem_id, $6, restored.team_id, 'restore',
+				$5, restored.head_generation_id, 'available', NOW(), $8
+			FROM restored
+			WHERE $7 <> '' AND $5 <> '' AND $5 <> restored.head_generation_id
 			ON CONFLICT (operation_id) DO UPDATE SET operation_id = EXCLUDED.operation_id
 			WHERE manager.rootfs_head_rollbacks.filesystem_id = EXCLUDED.filesystem_id
 				AND manager.rootfs_head_rollbacks.sandbox_id = EXCLUDED.sandbox_id
@@ -627,16 +761,23 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 			ON generation.generation_id = restored.head_generation_id
 		JOIN manager.rootfs_base_artifacts artifact
 			ON artifact.artifact_digest = restored.base_artifact_digest
-		LEFT JOIN previous ON previous.filesystem_id = restored.filesystem_id
-		LEFT JOIN rollback_pin ON rollback_pin.operation_id = $4
-		WHERE $4 = '' OR previous.head_generation_id IS NULL
-			OR previous.head_generation_id = restored.head_generation_id
-			OR rollback_pin.operation_id = $4
-	`, sandboxID, snapshotID, strings.TrimSpace(req.TeamID), strings.TrimSpace(req.OperationID), nullableTime(req.RollbackExpiresAt)))
+		LEFT JOIN rollback_pin ON rollback_pin.operation_id = $7
+		WHERE $7 = '' OR $5 = '' OR $5 = restored.head_generation_id
+			OR rollback_pin.operation_id = $7
+	`, targetFilesystemID, selectedGeneration.ID, targetTeamID, newWriterEpoch,
+		previousGenerationID, sandboxID, operationID, nullableTime(req.RollbackExpiresAt)))
 	if err != nil {
-		return nil, fmt.Errorf("restore rootfs filesystem from snapshot: %w", err)
+		return nil, fmt.Errorf("publish rootfs snapshot restore: %w", err)
 	}
 	return filesystem, nil
+}
+
+func rootFSGenerationRestoreContentEqual(left, right *RootFSGeneration) bool {
+	return left != nil && right != nil && left.SourceOCIDigest == right.SourceOCIDigest &&
+		left.BaseArtifactDigest == right.BaseArtifactDigest && left.BaseBlockRoot == right.BaseBlockRoot &&
+		left.CurrentBlockHead == right.CurrentBlockHead && left.FormatGeneration == right.FormatGeneration &&
+		left.DurabilityState == right.DurabilityState && left.LocatorVersion == right.LocatorVersion &&
+		reflect.DeepEqual(left.Descriptor, right.Descriptor)
 }
 
 // RollbackRootFSHead atomically restores a retained generation. The sandbox

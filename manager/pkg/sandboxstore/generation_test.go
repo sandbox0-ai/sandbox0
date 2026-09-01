@@ -156,6 +156,14 @@ func TestInitialRootFSGenerationIDSeparatesFilesystems(t *testing.T) {
 	require.Equal(t, first, initialRootFSGenerationID("filesystem-a", artifact, 1))
 }
 
+func TestRestoredRootFSGenerationIDSeparatesFilesystemGenerationAndEpoch(t *testing.T) {
+	first := restoredRootFSGenerationID("filesystem-a", "generation-a", 1)
+	require.Equal(t, first, restoredRootFSGenerationID("filesystem-a", "generation-a", 1))
+	require.NotEqual(t, first, restoredRootFSGenerationID("filesystem-b", "generation-a", 1))
+	require.NotEqual(t, first, restoredRootFSGenerationID("filesystem-a", "generation-b", 1))
+	require.NotEqual(t, first, restoredRootFSGenerationID("filesystem-a", "generation-a", 2))
+}
+
 func readyRootFSBaseArtifactTestRequest() *PutReadyRootFSBaseArtifactRequest {
 	rootDigest := digest.FromString("base-block-root").String()
 	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{

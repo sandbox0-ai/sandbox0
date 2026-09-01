@@ -927,15 +927,16 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
-	if err := assignment.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
-	}
 	rootFS, err := s.prepareRootFS(ctx, tpl, &req, runtimeClass.ArtifactPlatform)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRootFSBaseArtifactNotFound) {
 			return nil, fmt.Errorf("%w: %v", service.ErrDataPlaneNotReady, err)
 		}
 		return nil, err
+	}
+	assignment.ResetCopiedSessionState = rootFS.snapshotID != ""
+	if err := assignment.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
 
 	now := s.now().UTC()
@@ -1227,7 +1228,7 @@ func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimReques
 	if plan.snapshotID != "" {
 		_, err := s.store.RestoreRootFSFromSnapshot(ctx, &sandboxstore.RestoreRootFSFromSnapshotRequest{
 			SandboxID: req.SandboxID, SnapshotID: plan.snapshotID, TeamID: req.TeamID,
-			OperationID: req.OperationID + "/initial-restore",
+			OperationID: req.OperationID + "/initial-restore", InitialClaimOperationID: req.OperationID,
 		})
 		return err
 	}

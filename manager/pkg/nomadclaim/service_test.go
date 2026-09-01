@@ -1597,8 +1597,12 @@ func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 	if response.SandboxID == "" || len(fixture.store.restoreCalls) != 1 ||
 		fixture.store.restoreCalls[0].SandboxID != response.SandboxID ||
 		fixture.store.restoreCalls[0].OperationID != "operation-snapshot/initial-restore" ||
+		fixture.store.restoreCalls[0].InitialClaimOperationID != "operation-snapshot" ||
 		len(fixture.store.ensureCalls) != 0 {
 		t.Fatalf("restore calls = %+v ensure calls = %+v", fixture.store.restoreCalls, fixture.store.ensureCalls)
+	}
+	if len(fixture.planner.requests) != 1 || !fixture.planner.requests[0].Runtime.ResetCopiedSessionState {
+		t.Fatalf("snapshot runtime assignment = %+v", fixture.planner.requests)
 	}
 }
 
@@ -1640,6 +1644,9 @@ func TestServiceRestoresAttestedTemplateRootFSBeforeClaim(t *testing.T) {
 		fixture.store.restoreCalls[0].SnapshotID != tpl.RootFS.SnapshotID ||
 		len(fixture.store.ensureCalls) != 0 {
 		t.Fatalf("restore calls = %+v ensure calls = %+v", fixture.store.restoreCalls, fixture.store.ensureCalls)
+	}
+	if len(fixture.planner.requests) != 1 || !fixture.planner.requests[0].Runtime.ResetCopiedSessionState {
+		t.Fatalf("template RootFS runtime assignment = %+v", fixture.planner.requests)
 	}
 }
 

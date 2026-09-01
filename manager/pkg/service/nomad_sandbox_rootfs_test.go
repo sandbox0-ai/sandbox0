@@ -14,7 +14,7 @@ import (
 func TestNomadSandboxRootFSServiceManagesPausedBlockSnapshots(t *testing.T) {
 	now := time.Date(2026, time.August, 21, 5, 0, 0, 0, time.UTC)
 	store := newNomadRootFSTestStore(now)
-	service, err := NewNomadSandboxRootFSService(store, func() time.Time { return now })
+	service, err := NewNomadSandboxRootFSService(store, nil, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +60,11 @@ func TestNomadSandboxRootFSServiceManagesPausedBlockSnapshots(t *testing.T) {
 
 func TestNomadSandboxRootFSServiceFailsClosed(t *testing.T) {
 	now := time.Date(2026, time.August, 21, 5, 0, 0, 0, time.UTC)
-	if _, err := NewNomadSandboxRootFSService(nil, nil); err == nil {
+	if _, err := NewNomadSandboxRootFSService(nil, nil, nil); err == nil {
 		t.Fatal("nil rootfs store was accepted")
 	}
 	store := newNomadRootFSTestStore(now)
-	service, err := NewNomadSandboxRootFSService(store, func() time.Time { return now })
+	service, err := NewNomadSandboxRootFSService(store, nil, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestNomadSandboxRootFSServiceFailsClosed(t *testing.T) {
 		t.Fatalf("expired snapshot error = %v", err)
 	}
 	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStateActive
-	if _, err := service.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-a", "team-a", nil); !errors.Is(err, ErrSandboxRootFSRequiresPausedSandbox) {
+	if _, err := service.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-a", "team-a", nil); !errors.Is(err, ErrSandboxCheckpointRequiresCtld) {
 		t.Fatalf("active snapshot error = %v", err)
 	}
 	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStatePaused
@@ -99,6 +99,48 @@ func TestNomadSandboxRootFSServiceFailsClosed(t *testing.T) {
 	if _, err := service.RestoreSandboxRootFS(context.Background(), "sandbox-b", "team-a", &RestoreSandboxRootFSRequest{SnapshotID: "snapshot-a"}); !errors.Is(err, ErrSandboxRootFSRequiresPausedSandbox) {
 		t.Fatalf("active restore error = %v", err)
 	}
+}
+
+func TestNomadSandboxRootFSServiceDelegatesActiveSnapshotToExactWriter(t *testing.T) {
+	now := time.Date(2026, time.August, 21, 5, 0, 0, 0, time.UTC)
+	store := newNomadRootFSTestStore(now)
+	store.records["sandbox-a"].DesiredState = sandboxstore.SandboxDesiredStateActive
+	snapshotter := &recordingRunningRootFSSnapshotter{snapshot: &sandboxstore.RootFSSnapshot{
+		ID: "rootfs-snapshot-running", FilesystemID: "capture-filesystem", TeamID: "team-a",
+		SourceSandboxID: "sandbox-a", HeadGenerationID: "capture-generation",
+		Name: "checkpoint", Description: "while active", CreatedAt: now,
+	}}
+	rootFS, err := NewNomadSandboxRootFSService(store, snapshotter, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &CreateSandboxRootFSSnapshotRequest{
+		Name: "checkpoint", Description: "while active", OperationID: "operation-signed",
+	}
+	snapshot, err := rootFS.CreateSandboxRootFSSnapshot(t.Context(), "sandbox-a", "team-a", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ID != snapshotter.snapshot.ID || len(snapshotter.requests) != 1 ||
+		snapshotter.requests[0].OperationID != "operation-signed" {
+		t.Fatalf("snapshot=%+v requests=%+v", snapshot, snapshotter.requests)
+	}
+}
+
+type recordingRunningRootFSSnapshotter struct {
+	snapshot *sandboxstore.RootFSSnapshot
+	requests []*CreateSandboxRootFSSnapshotRequest
+}
+
+func (r *recordingRunningRootFSSnapshotter) CreateRunningSandboxRootFSSnapshot(
+	_ context.Context,
+	_, _ string,
+	request *CreateSandboxRootFSSnapshotRequest,
+) (*sandboxstore.RootFSSnapshot, error) {
+	copyRequest := *request
+	r.requests = append(r.requests, &copyRequest)
+	copySnapshot := *r.snapshot
+	return &copySnapshot, nil
 }
 
 type nomadRootFSTestStore struct {

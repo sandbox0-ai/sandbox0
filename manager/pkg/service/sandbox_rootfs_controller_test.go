@@ -11,16 +11,20 @@ import (
 )
 
 type staticRootFSLifecycleStore struct {
-	forks   []*sandboxstore.SandboxLifecycleTxn
-	rebases []*sandboxstore.SandboxLifecycleTxn
-	err     error
+	snapshots []*sandboxstore.SandboxLifecycleTxn
+	forks     []*sandboxstore.SandboxLifecycleTxn
+	rebases   []*sandboxstore.SandboxLifecycleTxn
+	err       error
 }
 
 func (s staticRootFSLifecycleStore) ListActiveLifecycleTxns(
-	context.Context,
-	string,
-	int,
+	_ context.Context,
+	kind string,
+	_ int,
 ) ([]*sandboxstore.SandboxLifecycleTxn, error) {
+	if kind == sandboxstore.SandboxLifecycleKindSnapshot {
+		return s.snapshots, s.err
+	}
 	return s.forks, s.err
 }
 
@@ -34,6 +38,16 @@ func (s staticRootFSLifecycleStore) ListPendingNomadPausedRebases(
 type recordingForkReconciler struct {
 	completed []string
 	err       error
+}
+
+type recordingSnapshotReconciler struct {
+	completed []string
+	err       error
+}
+
+func (r *recordingSnapshotReconciler) CompleteSandboxRootFSSnapshot(_ context.Context, sandboxID string) error {
+	r.completed = append(r.completed, sandboxID)
+	return r.err
 }
 
 func (r *recordingForkReconciler) CompleteSandboxFork(_ context.Context, sandboxID string) error {
@@ -54,21 +68,26 @@ func (r *recordingRebaseReconciler) CompleteSandboxRootFSRebase(
 	return r.err
 }
 
-func TestSandboxRootFSControllerRecoversForksAndRebasesThroughSelectedBackend(t *testing.T) {
-	store := staticRootFSLifecycleStore{forks: []*sandboxstore.SandboxLifecycleTxn{
+func TestSandboxRootFSControllerRecoversSnapshotsForksAndRebasesThroughSelectedBackend(t *testing.T) {
+	store := staticRootFSLifecycleStore{snapshots: []*sandboxstore.SandboxLifecycleTxn{
+		{SandboxID: "snapshot-source", Kind: sandboxstore.SandboxLifecycleKindSnapshot},
+	}, forks: []*sandboxstore.SandboxLifecycleTxn{
 		{SandboxID: "fork-source-a", Kind: sandboxstore.SandboxLifecycleKindFork},
 		{SandboxID: "fork-source-b", Kind: sandboxstore.SandboxLifecycleKindFork},
 	}, rebases: []*sandboxstore.SandboxLifecycleTxn{
 		{SandboxID: "rebase-source", Kind: sandboxstore.SandboxLifecycleKindRebase},
 	}}
+	snapshot := &recordingSnapshotReconciler{}
 	fork := &recordingForkReconciler{}
 	rebase := &recordingRebaseReconciler{}
-	controller := NewSandboxRootFSController(store, fork, rebase, zap.NewNop())
+	controller := NewSandboxRootFSController(store, snapshot, fork, rebase, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 
 	controller.enqueuePending(t.Context())
 	require.True(t, controller.processNextWorkItem(t.Context()))
 	require.True(t, controller.processNextWorkItem(t.Context()))
+	require.True(t, controller.processNextWorkItem(t.Context()))
+	require.Equal(t, []string{"snapshot-source"}, snapshot.completed)
 	require.True(t, controller.processNextWorkItem(t.Context()))
 	require.ElementsMatch(t, []string{"fork-source-a", "fork-source-b"}, fork.completed)
 	require.Equal(t, []string{"rebase-source"}, rebase.completed)
@@ -76,7 +95,7 @@ func TestSandboxRootFSControllerRecoversForksAndRebasesThroughSelectedBackend(t 
 
 func TestSandboxRootFSControllerRateLimitsFailedRecovery(t *testing.T) {
 	backend := &recordingForkReconciler{err: errors.New("node channel unavailable")}
-	controller := NewSandboxRootFSController(staticRootFSLifecycleStore{}, backend, nil, zap.NewNop())
+	controller := NewSandboxRootFSController(staticRootFSLifecycleStore{}, nil, backend, nil, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 	controller.EnqueueSandboxFork("fork-source")
 

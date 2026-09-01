@@ -1131,6 +1131,37 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.Equal(t, artifact.ArtifactDigest, snapshot.BaseArtifactDigest)
 	require.Equal(t, artifact.SourceOCIDigest, snapshot.SourceOCIDigest)
 
+	claimRecord := rootFSTestSandboxRecord("sandbox-snapshot-initial-claim", sourceRecord.TeamID)
+	_, err = store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
+		Record: claimRecord, OperationID: "operation-snapshot-initial-claim", LeaseTTL: 15 * time.Second,
+	})
+	require.NoError(t, err)
+	_, err = store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: claimRecord.ID, SnapshotID: snapshot.ID, TeamID: claimRecord.TeamID,
+		OperationID: "operation-snapshot-initial-claim/initial-restore",
+	})
+	require.ErrorIs(t, err, ErrRootFSFilesystemConflict)
+	claimedCopy, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: claimRecord.ID, SnapshotID: snapshot.ID, TeamID: claimRecord.TeamID,
+		OperationID:             "operation-snapshot-initial-claim/initial-restore",
+		InitialClaimOperationID: "operation-snapshot-initial-claim",
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, initial.ID, claimedCopy.HeadGenerationID)
+	require.Equal(t, filesystem.ID, claimedCopy.SourceFilesystemID)
+	claimedGeneration, err := store.GetRootFSGeneration(ctx, claimedCopy.HeadGenerationID)
+	require.NoError(t, err)
+	require.Equal(t, claimedCopy.ID, claimedGeneration.FilesystemID)
+	require.Equal(t, initial.ID, claimedGeneration.ParentGenerationID)
+	require.True(t, rootFSGenerationRestoreContentEqual(initial, claimedGeneration))
+	retriedClaimedCopy, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: claimRecord.ID, SnapshotID: snapshot.ID, TeamID: claimRecord.TeamID,
+		OperationID:             "operation-snapshot-initial-claim/initial-restore",
+		InitialClaimOperationID: "operation-snapshot-initial-claim",
+	})
+	require.NoError(t, err)
+	require.Equal(t, claimedCopy.HeadGenerationID, retriedClaimedCopy.HeadGenerationID)
+
 	second := putTestDurableRootFSGeneration(t, ctx, pool, filesystem, initial, "snapshot-second", 1)
 	secondSnapshot, err := store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
 		SandboxID: sourceRecord.ID, SnapshotID: "snapshot-block-second",
@@ -1141,9 +1172,14 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 		SandboxID: lateCopyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: lateCopyRecord.TeamID,
 	})
 	require.NoError(t, err)
-	require.Equal(t, second.ID, lateCopy.HeadGenerationID)
+	require.NotEqual(t, second.ID, lateCopy.HeadGenerationID)
 	require.Equal(t, second.WriterEpoch, lateCopy.WriterEpoch,
-		"a copied filesystem must issue epochs newer than its shared generation")
+		"a new copied filesystem preserves the captured epoch")
+	lateGeneration, err := store.GetRootFSGeneration(ctx, lateCopy.HeadGenerationID)
+	require.NoError(t, err)
+	require.Equal(t, lateCopy.ID, lateGeneration.FilesystemID)
+	require.Equal(t, second.ID, lateGeneration.ParentGenerationID)
+	require.True(t, rootFSGenerationRestoreContentEqual(second, lateGeneration))
 	restored, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
 		SandboxID: sourceRecord.ID, SnapshotID: snapshot.ID, TeamID: sourceRecord.TeamID,
 		OperationID: "restore-block-initial", RollbackExpiresAt: time.Now().Add(time.Hour),
@@ -1167,8 +1203,39 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 		SandboxID: copyRecord.ID, SnapshotID: snapshot.ID, TeamID: copyRecord.TeamID,
 	})
 	require.NoError(t, err)
-	require.Equal(t, initial.ID, copied.HeadGenerationID)
+	require.NotEqual(t, initial.ID, copied.HeadGenerationID)
 	require.Equal(t, filesystem.ID, copied.SourceFilesystemID)
+	copiedGeneration, err := store.GetRootFSGeneration(ctx, copied.HeadGenerationID)
+	require.NoError(t, err)
+	require.Equal(t, copied.ID, copiedGeneration.FilesystemID)
+	require.Equal(t, initial.ID, copiedGeneration.ParentGenerationID)
+	require.True(t, rootFSGenerationRestoreContentEqual(initial, copiedGeneration))
+	replacedCopy, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: copyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: copyRecord.TeamID,
+		OperationID: "restore-copy-to-second", RollbackExpiresAt: time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Equal(t, copied.WriterEpoch+1, replacedCopy.WriterEpoch)
+	require.NotEqual(t, copied.HeadGenerationID, replacedCopy.HeadGenerationID)
+	replacedGeneration, err := store.GetRootFSGeneration(ctx, replacedCopy.HeadGenerationID)
+	require.NoError(t, err)
+	require.Equal(t, replacedCopy.ID, replacedGeneration.FilesystemID)
+	require.Equal(t, second.ID, replacedGeneration.ParentGenerationID)
+	require.True(t, rootFSGenerationRestoreContentEqual(second, replacedGeneration))
+	retriedReplacement, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: copyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: copyRecord.TeamID,
+		OperationID: "restore-copy-to-second", RollbackExpiresAt: time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Equal(t, replacedCopy.HeadGenerationID, retriedReplacement.HeadGenerationID)
+	require.Equal(t, replacedCopy.WriterEpoch, retriedReplacement.WriterEpoch)
+	rolledBackCopy, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
+		SandboxID: copyRecord.ID, OperationID: "restore-copy-to-second", TeamID: copyRecord.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, copied.HeadGenerationID, rolledBackCopy.HeadGenerationID)
+	require.Equal(t, replacedCopy.WriterEpoch, rolledBackCopy.WriterEpoch,
+		"rollback must not rewind the target writer epoch")
 
 	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, snapshot.ID, sourceRecord.TeamID)
 	require.NoError(t, err)

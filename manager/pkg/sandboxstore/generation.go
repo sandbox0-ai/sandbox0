@@ -919,6 +919,12 @@ func initialRootFSGenerationID(filesystemID, artifactDigest string, formatGenera
 	return "rootfs-generation-" + hex.EncodeToString(sum[:])
 }
 
+func restoredRootFSGenerationID(filesystemID, snapshotGenerationID string, writerEpoch int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("sandbox0-rootfs-restore-v1\x00%s\x00%s\x00%d",
+		filesystemID, snapshotGenerationID, writerEpoch)))
+	return "rootfs-generation-" + hex.EncodeToString(sum[:])
+}
+
 func initialRootFSGenerationMatches(
 	filesystem *RootFSFilesystem,
 	generation *RootFSGeneration,

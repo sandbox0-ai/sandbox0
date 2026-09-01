@@ -330,7 +330,11 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure Nomad sandbox mutation service", zap.Error(err))
 	}
-	sandboxRootFS, err := service.NewNomadSandboxRootFSService(sandboxStore, clk.Now)
+	runningSnapshotter, ok := sandboxRuntime.(service.SandboxRunningRootFSSnapshotter)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime lacks exact running RootFS snapshot authority")
+	}
+	sandboxRootFS, err := service.NewNomadSandboxRootFSService(sandboxStore, runningSnapshotter, clk.Now)
 	if err != nil {
 		logger.Fatal("Failed to configure Nomad sandbox RootFS service", zap.Error(err))
 	}
@@ -368,12 +372,14 @@ func main() {
 	}
 
 	forkReconciler, _ := sandboxRuntime.(service.SandboxForkReconciler)
+	snapshotReconciler, _ := sandboxRuntime.(service.SandboxRootFSSnapshotReconciler)
 	rebaseReconciler, _ := sandboxRuntime.(service.SandboxRootFSRebaseReconciler)
 	rootFSRebaser, _ := sandboxRuntime.(service.SandboxRootFSRebaser)
 	var sandboxRootFSController *service.SandboxRootFSController
-	if forkReconciler != nil || rebaseReconciler != nil {
+	if snapshotReconciler != nil || forkReconciler != nil || rebaseReconciler != nil {
 		sandboxRootFSController = service.NewSandboxRootFSController(
 			sandboxStore,
+			snapshotReconciler,
 			forkReconciler,
 			rebaseReconciler,
 			logger,

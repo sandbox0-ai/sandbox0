@@ -137,7 +137,7 @@ func forkRunningRootFSFilesystem(
 		return nil, err
 	}
 	if intent != nil {
-		return captureRunningRootFSTemplate(ctx, tx, sourceSandbox, intent, req)
+		return captureRunningRootFS(ctx, tx, sourceSandbox, intent, req)
 	}
 	if retry, err := loadRunningRootFSForkRetry(ctx, tx, req); err != nil || retry != nil {
 		return retry, err

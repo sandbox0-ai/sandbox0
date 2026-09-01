@@ -32,6 +32,14 @@ type CreateSandboxRootFSSnapshotRequest struct {
 	Name        string    `json:"name,omitempty"`
 	Description string    `json:"description,omitempty"`
 	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	OperationID string    `json:"-"`
+	StartedAt   time.Time `json:"-"`
+}
+
+// SandboxRunningRootFSSnapshotter publishes an immutable checkpoint from the
+// exact live writer without replacing or pausing the source runtime.
+type SandboxRunningRootFSSnapshotter interface {
+	CreateRunningSandboxRootFSSnapshot(context.Context, string, string, *CreateSandboxRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error)
 }
 
 type SandboxRootFSSnapshot struct {

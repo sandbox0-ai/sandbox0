@@ -28,6 +28,8 @@ func (s *Server) createSandboxRootFSSnapshot(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
+	req.OperationID = sandboxClaimOperationID(claims)
+	req.StartedAt = sandboxClaimIngressStartedAt(claims)
 	rootFS, ok := s.requireSandboxRootFS(c)
 	if !ok {
 		return

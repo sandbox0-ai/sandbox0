@@ -220,6 +220,14 @@ console.log("Snapshot ID:", snapshot.id);`
   ]}
 />
 
+On the Nomad/gVisor runtime, a running-source snapshot is bound to the exact
+live allocation, node incarnation, rootfs writer grant, writer epoch, and
+source generation observed when the operation starts. The checkpoint is
+published as a separate immutable filesystem, so the source writer and source
+rootfs head are unchanged. If the API connection or manager restarts, Sandbox0
+recovers the same pending operation from PostgreSQL; it never substitutes a
+checkpoint from a newer source runtime.
+
 ## List And Get Snapshots
 
 List snapshots created from a sandbox, or fetch a snapshot directly by snapshot ID.

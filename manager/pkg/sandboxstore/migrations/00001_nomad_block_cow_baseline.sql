@@ -176,6 +176,7 @@ CREATE TABLE manager.rootfs_generations (
     durability_state text NOT NULL,
     locator_version bigint NOT NULL,
     descriptor bytea NOT NULL,
+    reset_copied_session_state boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT rootfs_generations_check CHECK (((parent_generation_id IS NULL) OR (parent_generation_id <> generation_id))),
     CONSTRAINT rootfs_generations_descriptor_check CHECK ((octet_length(descriptor) <= 65536)),

@@ -82,7 +82,8 @@ func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, lim
 			generation.base_artifact_digest, generation.base_block_root,
 			generation.current_block_head, generation.writer_epoch,
 			generation.format_generation, generation.durability_state,
-			generation.locator_version, generation.descriptor, generation.created_at,
+			generation.locator_version, generation.descriptor,
+			generation.reset_copied_session_state, generation.created_at,
 			filesystem.team_id
 		FROM manager.rootfs_generations generation
 		JOIN manager.rootfs_filesystems filesystem
@@ -115,7 +116,8 @@ func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, lim
 			&generation.BaseBlockRoot, &generation.CurrentBlockHead,
 			&generation.WriterEpoch, &generation.FormatGeneration,
 			&generation.DurabilityState, &generation.LocatorVersion,
-			&generation.Descriptor, &generation.CreatedAt,
+			&generation.Descriptor, &generation.ResetCopiedSessionState,
+			&generation.CreatedAt,
 			&generation.MaterializationTeamID,
 		); err != nil {
 			return nil, fmt.Errorf("scan composite rootfs generation: %w", err)

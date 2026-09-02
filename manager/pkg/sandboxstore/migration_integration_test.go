@@ -129,6 +129,8 @@ func prepareMixedRuntimeSchemaForCutover(t *testing.T, ctx context.Context, pool
 		ALTER TABLE manager.runtime_slots
 			DROP CONSTRAINT runtime_slots_resource_lease_claim,
 			DROP COLUMN resource_lease_id;
+		ALTER TABLE manager.rootfs_generations
+			DROP COLUMN reset_copied_session_state;
 		DROP TABLE manager.runtime_resource_leases;
 		DROP TABLE manager.runtime_node_capacities;
 
@@ -263,6 +265,7 @@ func assertFinalNomadBlockCOWSchema(t *testing.T, ctx context.Context, pool *pgx
 		"rootfs_running_template_captures.snapshot_name",
 		"rootfs_running_template_captures.snapshot_description",
 		"rootfs_running_template_captures.snapshot_expires_at",
+		"rootfs_generations.reset_copied_session_state",
 	} {
 		parts := strings.Split(identity, ".")
 		var exists bool

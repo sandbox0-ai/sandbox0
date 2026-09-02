@@ -535,7 +535,8 @@ func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootF
 				generation.base_artifact_digest, generation.base_block_root,
 				generation.current_block_head, generation.writer_epoch,
 				generation.format_generation, generation.durability_state,
-				generation.locator_version, generation.descriptor, generation.created_at
+				generation.locator_version, generation.descriptor,
+				generation.reset_copied_session_state, generation.created_at
 			FROM manager.rootfs_snapshots snapshot
 			JOIN manager.rootfs_generations generation
 				ON generation.generation_id = snapshot.head_generation_id
@@ -577,7 +578,8 @@ func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootF
 			snapshot.base_artifact_digest, snapshot.base_block_root,
 			snapshot.current_block_head, snapshot.writer_epoch,
 			snapshot.format_generation, snapshot.durability_state,
-			snapshot.locator_version, snapshot.descriptor, snapshot.created_at,
+			snapshot.locator_version, snapshot.descriptor,
+			snapshot.reset_copied_session_state, snapshot.created_at,
 			binding.filesystem_id, target.team_id, snapshot.snapshot_filesystem_id,
 			COALESCE(filesystem.writer_epoch, snapshot.writer_epoch),
 			COALESCE(filesystem.head_generation_id, ''),
@@ -604,7 +606,7 @@ func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootF
 		&snapshotGeneration.CurrentBlockHead, &snapshotGeneration.WriterEpoch,
 		&snapshotGeneration.FormatGeneration, &snapshotGeneration.DurabilityState,
 		&snapshotGeneration.LocatorVersion, &snapshotGeneration.Descriptor,
-		&snapshotGeneration.CreatedAt,
+		&snapshotGeneration.ResetCopiedSessionState, &snapshotGeneration.CreatedAt,
 		&targetFilesystemID, &targetTeamID, &snapshotFilesystemID,
 		&targetWriterEpoch, &previousGenerationID, &targetExists,
 	)
@@ -626,6 +628,7 @@ func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootF
 			return nil, fmt.Errorf("load restore target rootfs generation: %w", loadErr)
 		}
 		if previousGeneration.FilesystemID == targetFilesystemID &&
+			previousGeneration.ResetCopiedSessionState &&
 			rootFSGenerationRestoreContentEqual(previousGeneration, &snapshotGeneration) {
 			selectedGeneration = previousGeneration
 			cloneGeneration = false
@@ -648,7 +651,7 @@ func restoreRootFSFromSnapshot(ctx context.Context, tx pgx.Tx, req *RestoreRootF
 			BaseBlockRoot:      snapshotGeneration.BaseBlockRoot, CurrentBlockHead: snapshotGeneration.CurrentBlockHead,
 			WriterEpoch: newWriterEpoch, FormatGeneration: snapshotGeneration.FormatGeneration,
 			DurabilityState: snapshotGeneration.DurabilityState, LocatorVersion: snapshotGeneration.LocatorVersion,
-			Descriptor: append([]byte(nil), snapshotGeneration.Descriptor...),
+			Descriptor: append([]byte(nil), snapshotGeneration.Descriptor...), ResetCopiedSessionState: true,
 		}
 	}
 

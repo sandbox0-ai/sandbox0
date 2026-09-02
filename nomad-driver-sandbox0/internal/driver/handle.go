@@ -168,6 +168,27 @@ type claimTimings struct {
 	activeStatePersist time.Duration
 }
 
+func (h *taskHandle) logClaimTimings(success bool, elapsed time.Duration, timings claimTimings) {
+	args := []any{
+		"success", success,
+		"claim_duration_us", elapsed.Microseconds(),
+		"bundle_write_us", timings.bundleWrite.Microseconds(),
+		"claim_state_persist_us", timings.claimStatePersist.Microseconds(),
+		"rootfs_ensure_us", timings.rootFSEnsure.Microseconds(),
+		"consumer_register_us", timings.consumerRegister.Microseconds(),
+		"rootfs_bind_us", timings.rootFSBind.Microseconds(),
+		"starting_report_us", timings.startingReport.Microseconds(),
+		"runsc_create_us", timings.runscCreate.Microseconds(),
+		"runsc_start_us", timings.runscStart.Microseconds(),
+		"active_state_persist_us", timings.activeStatePersist.Microseconds(),
+	}
+	if !success || elapsed >= time.Second {
+		h.logger.Warn("Runtime slot claim timing", args...)
+		return
+	}
+	h.logger.Info("Runtime slot claim timing", args...)
+}
+
 func (h *taskHandle) statePath() string {
 	return filepath.Join(h.bundleDir, ".sandbox0-driver-state.json")
 }
@@ -470,19 +491,7 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 	claimStarted := time.Now()
 	timings := claimTimings{}
 	defer func() {
-		h.logger.Info("Runtime slot claim timing",
-			"success", resultErr == nil,
-			"claim_duration_us", time.Since(claimStarted).Microseconds(),
-			"bundle_write_us", timings.bundleWrite.Microseconds(),
-			"claim_state_persist_us", timings.claimStatePersist.Microseconds(),
-			"rootfs_ensure_us", timings.rootFSEnsure.Microseconds(),
-			"consumer_register_us", timings.consumerRegister.Microseconds(),
-			"rootfs_bind_us", timings.rootFSBind.Microseconds(),
-			"starting_report_us", timings.startingReport.Microseconds(),
-			"runsc_create_us", timings.runscCreate.Microseconds(),
-			"runsc_start_us", timings.runscStart.Microseconds(),
-			"active_state_persist_us", timings.activeStatePersist.Microseconds(),
-		)
+		h.logClaimTimings(resultErr == nil, time.Since(claimStarted), timings)
 	}()
 
 	if request.PolicyToken == "" || request.WriterEpoch == "" {

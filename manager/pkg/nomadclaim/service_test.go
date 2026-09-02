@@ -1339,7 +1339,8 @@ func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {
 		planned.TeamID != "team-1" || planned.UserID != "user-1" ||
 		planned.ClusterID != fixture.runtimeClass.ClusterID ||
 		planned.CompatibilityDigest != fixture.runtimeClass.CompatibilityDigest ||
-		planned.Runtime.RuntimeGeneration != 2 || !planned.StartedAt.Equal(fixture.now) {
+		planned.Runtime.RuntimeGeneration != 2 || planned.Runtime.ResetCopiedSessionState ||
+		!planned.StartedAt.Equal(fixture.now) {
 		t.Fatalf("resume planner request = %+v", planned)
 	}
 	if planned.Runtime.EnvVars["TEMPLATE"] != "yes" || planned.Runtime.EnvVars["MAIN"] != "yes" ||
@@ -1362,6 +1363,29 @@ func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {
 	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeGeneration != 2 ||
 		record.RuntimeID != "allocation-1" || record.RuntimeNamespace != "default" {
 		t.Fatalf("resumed record = %+v", record)
+	}
+}
+
+func TestServiceResetsCopiedSessionStateOnFirstForkResume(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.store.records[sandboxID].RuntimeGeneration = 0
+	fixture.store.resumeCandidate.Record.RuntimeGeneration = 0
+	fixture.store.resumeCandidate.RuntimeGeneration = 1
+
+	response, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.SandboxID != sandboxID || len(fixture.planner.requests) != 1 {
+		t.Fatalf("resume response=%+v planner=%+v", response, fixture.planner.requests)
+	}
+	planned := fixture.planner.requests[0]
+	if planned.Runtime.RuntimeGeneration != 1 || !planned.Runtime.ResetCopiedSessionState {
+		t.Fatalf("first fork resume assignment = %+v", planned.Runtime)
+	}
+	if fixture.store.records[sandboxID].RuntimeGeneration != 1 {
+		t.Fatalf("fork runtime generation = %d", fixture.store.records[sandboxID].RuntimeGeneration)
 	}
 }
 

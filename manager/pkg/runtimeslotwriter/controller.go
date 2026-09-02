@@ -266,18 +266,14 @@ func (c *Controller) ensureCrashLifecycle(
 		regularRuntime := record != nil && record.DeletedAt.IsZero() && record.RuntimeGeneration == runtimeGeneration &&
 			(record.DesiredState == sandboxstore.SandboxDesiredStateActive ||
 				record.DesiredState == sandboxstore.SandboxDesiredStateTerminating)
-		if !regularRuntime && !precommitResume {
-			return errors.New("sandbox runtime does not match the runtime slot writer")
-		}
-		fromRuntimeNamespace, fromRuntimeID := grant.RuntimeNamespace, grant.RuntimeIncarnationID
-		if regularRuntime {
-			fromRuntimeNamespace = record.RuntimeNamespace
-			fromRuntimeID = record.RuntimeID
-		}
-		if fromRuntimeNamespace != grant.RuntimeNamespace || fromRuntimeID != grant.RuntimeIncarnationID {
-			if fromRuntimeNamespace != "" || fromRuntimeID != "" {
-				return errors.New("sandbox runtime does not match the runtime slot writer")
-			}
+		failedInitialClaim := false
+		failedInitialClaimCandidate := record != nil && record.DeletedAt.IsZero() &&
+			(record.DesiredState == sandboxstore.SandboxDesiredStateActive ||
+				record.DesiredState == sandboxstore.SandboxDesiredStateTerminating) &&
+			record.RuntimeNamespace == "" && record.RuntimeID == "" &&
+			(record.RuntimeGeneration == runtimeGeneration ||
+				record.RuntimeGeneration == 0 && runtimeGeneration == 1)
+		if failedInitialClaimCandidate {
 			claimReader, ok := tx.(sandboxRuntimeClaimReader)
 			if !ok {
 				return errors.New("sandbox transaction cannot inspect Nomad claim cleanup")
@@ -286,11 +282,20 @@ func (c *Controller) ensureCrashLifecycle(
 			if err != nil {
 				return err
 			}
-			if claim == nil || claim.Phase != sandboxstore.SandboxRuntimeClaimPhaseCleanupPending {
-				return errors.New("sandbox runtime does not match the runtime slot writer")
-			}
-			fromRuntimeNamespace = grant.RuntimeNamespace
-			fromRuntimeID = grant.RuntimeIncarnationID
+			failedInitialClaim = claim != nil && claim.Phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
+		}
+		fromRuntimeNamespace, fromRuntimeID := grant.RuntimeNamespace, grant.RuntimeIncarnationID
+		switch {
+		case regularRuntime && record.RuntimeNamespace == grant.RuntimeNamespace &&
+			record.RuntimeID == grant.RuntimeIncarnationID:
+			fromRuntimeNamespace = record.RuntimeNamespace
+			fromRuntimeID = record.RuntimeID
+		case failedInitialClaim, precommitResume:
+			// A first claim publishes generation 1 only after command readiness.
+			// Cleanup must therefore accept the durable generation-0 identity
+			// while fencing the exact generation-1 writer bound to its slot.
+		default:
+			return errors.New("sandbox runtime does not match the runtime slot writer")
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: request.OperationID, SandboxID: grant.SandboxID,

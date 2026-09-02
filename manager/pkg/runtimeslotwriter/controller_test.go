@@ -368,6 +368,45 @@ func TestControllerFencesConsumedWriterForAbandonedInitialClaim(t *testing.T) {
 	}
 }
 
+func TestControllerFencesConsumedWriterBeforeInitialGenerationPublishes(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.grant.RuntimeGeneration = "1"
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	store.record.RuntimeGeneration = 0
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "claim-operation-1",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
+	}
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fence() error = %v", err)
+	}
+	if len(fence.ProofDigest) != 32 || store.lifecycle == nil ||
+		store.lifecycle.FromGeneration != 1 ||
+		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
+		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
+		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
+	}
+}
+
+func TestControllerRejectsGenerationGapForFailedInitialClaim(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	store.record.RuntimeGeneration = 0
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "claim-operation-1",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
+	}
+	_, err := controller.Fence(context.Background(), request)
+	if err == nil || store.lifecycle != nil || store.beginCalls != 0 {
+		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)
+	}
+}
+
 func TestControllerRejectsUnfencedInitialClaimWithoutRuntimeBinding(t *testing.T) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
 	store.record.RuntimeNamespace = ""

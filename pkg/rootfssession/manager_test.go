@@ -1418,6 +1418,8 @@ func TestManagerPlannedRetireRecoversBranchAfterProcessRestart(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, second.Close()) })
 	require.NoError(t, second.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	require.Equal(t, []bool{false, false}, runtime.unmountSyncSnapshot(),
+		"restart recovery must not sync mounts whose NBD userspace owner disappeared")
 	result, err := second.RetireResult(request.Parent, request.Identity, "retire-restart")
 	require.NoError(t, err)
 	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)

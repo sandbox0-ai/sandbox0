@@ -146,6 +146,26 @@ type Mount struct {
 	Options []string
 }
 
+// EnsureTiming records the physical stages of one successful or partially
+// completed RootFS session attachment. It is diagnostic only and never changes
+// the durable ordering enforced by Ensure.
+type EnsureTiming struct {
+	LockWait                 time.Duration
+	SessionLoad              time.Duration
+	ReservedStatePersist     time.Duration
+	ReaderOpen               time.Duration
+	BranchOpen               time.Duration
+	DeviceReserve            time.Duration
+	DeviceReservationPersist time.Duration
+	DeviceAttach             time.Duration
+	DeviceReadyPersist       time.Duration
+	XFSMount                 time.Duration
+	XFSMountedPersist        time.Duration
+	OverlayMount             time.Duration
+	ReadyPersist             time.Duration
+	Total                    time.Duration
+}
+
 type record struct {
 	Version                   int                                         `json:"version"`
 	Parent                    string                                      `json:"parent"`
@@ -1246,18 +1266,44 @@ func (m *Manager) Reserve(request rootfshandoff.StageRequest) error {
 // Ensure creates the exact branch/device/XFS/Overlay session once. It returns
 // only after the merged root is mounted and all physical states are journaled.
 func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest) (Mount, error) {
+	mount, _, err := m.EnsureWithTiming(ctx, request)
+	return mount, err
+}
+
+// EnsureWithTiming preserves Ensure semantics and also returns diagnostic
+// stage durations. Timing values are observational and are not persisted.
+func (m *Manager) EnsureWithTiming(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+) (Mount, EnsureTiming, error) {
+	totalStarted := time.Now()
+	timing := EnsureTiming{}
+	mount, err := m.ensure(ctx, request, &timing)
+	timing.Total = time.Since(totalStarted)
+	return mount, timing, err
+}
+
+func (m *Manager) ensure(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+	timing *EnsureTiming,
+) (Mount, error) {
 	durable := request.WithoutWriterGrantToken()
 	if err := durable.ValidateDurableBinding(); err != nil || durable.Generation == nil {
 		return Mount{}, fmt.Errorf("invalid durable generation binding: %v: %w", err, errdefs.ErrInvalidArgument)
 	}
+	stepStarted := time.Now()
 	unlock := m.lock(durable.Parent)
+	timing.LockWait = time.Since(stepStarted)
 	defer unlock()
 	binding, err := durable.BindingDigest()
 	if err != nil {
 		return Mount{}, err
 	}
 	bindingText := hex.EncodeToString(binding[:])
+	stepStarted = time.Now()
 	current, err := m.load(durable.Parent)
+	timing.SessionLoad = time.Since(stepStarted)
 	if err == nil {
 		if !sameBinding(current, durable, bindingText) {
 			return Mount{}, fmt.Errorf("RootFS session parent is bound to another generation: %w", errdefs.ErrAlreadyExists)
@@ -1281,9 +1327,12 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 			stage := cloneDurableStage(durable)
 			current.Stage = &stage
 			current.Version = sessionSchemaVersion
+			stepStarted = time.Now()
 			if err := m.save(current); err != nil {
+				timing.ReservedStatePersist += time.Since(stepStarted)
 				return Mount{}, err
 			}
+			timing.ReservedStatePersist += time.Since(stepStarted)
 		}
 	}
 	if err != nil && !errdefs.IsNotFound(err) {
@@ -1294,40 +1343,55 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		if err != nil {
 			return Mount{}, err
 		}
+		stepStarted = time.Now()
 		if err := m.saveNew(current); err != nil {
+			timing.ReservedStatePersist += time.Since(stepStarted)
 			return Mount{}, err
 		}
+		timing.ReservedStatePersist += time.Since(stepStarted)
 	}
 
+	stepStarted = time.Now()
 	descriptor, err := rootfsblock.DecodeDescriptor(durable.Generation.Descriptor)
 	if err != nil {
+		timing.ReaderOpen = time.Since(stepStarted)
 		return Mount{}, m.fail(current, fmt.Errorf("decode immutable generation: %w", err))
 	}
 	reader, err := rootfsblock.NewReaderWithCache(m.source, descriptor, m.readCache)
+	timing.ReaderOpen = time.Since(stepStarted)
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open immutable generation: %w", err))
 	}
+	stepStarted = time.Now()
 	branch, err := rootfsblock.OpenBranchWithOptions(current.BranchPath, rootfsblock.BranchIdentity{
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: durable.Generation.CurrentBlockHead,
 	}, reader, m.sessionBranchOptions(current.Parent))
+	timing.BranchOpen = time.Since(stepStarted)
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open writable branch: %w", err))
 	}
+	stepStarted = time.Now()
 	devicePath, err := m.runtime.ReserveDevice(current.DeviceAllocationID)
+	timing.DeviceReserve = time.Since(stepStarted)
 	if err != nil {
 		_ = branch.Close()
 		return Mount{}, m.fail(current, fmt.Errorf("reserve block device: %w", err))
 	}
 	current.DevicePath = devicePath
 	current.State = stateDeviceReserved
+	stepStarted = time.Now()
 	if err := m.save(current); err != nil {
+		timing.DeviceReservationPersist = time.Since(stepStarted)
 		m.runtime.ReleaseDeviceReservation(current.DevicePath, current.DeviceAllocationID)
 		_ = branch.Close()
 		return Mount{}, err
 	}
+	timing.DeviceReservationPersist = time.Since(stepStarted)
+	stepStarted = time.Now()
 	device, err := m.runtime.AttachDevice(m.lifetime, ctx, current.DevicePath, current.DeviceAllocationID, branch)
+	timing.DeviceAttach = time.Since(stepStarted)
 	if err != nil {
 		_ = branch.Close()
 		return Mount{}, m.fail(current, fmt.Errorf("attach block device: %w", err))
@@ -1340,12 +1404,17 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		return Mount{}, m.fail(current, failure)
 	}
 	current.State = stateDeviceReady
+	stepStarted = time.Now()
 	if err := m.save(current); err != nil {
+		timing.DeviceReadyPersist = time.Since(stepStarted)
 		_ = device.Close()
 		_ = branch.Close()
 		return Mount{}, err
 	}
+	timing.DeviceReadyPersist = time.Since(stepStarted)
+	stepStarted = time.Now()
 	if err := m.runtime.MountXFS(current.DevicePath, current.XFSRoot); err != nil {
+		timing.XFSMount = time.Since(stepStarted)
 		failure := errors.Join(
 			fmt.Errorf("mount XFS: %w", err),
 			device.Close(),
@@ -1353,27 +1422,37 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		)
 		return Mount{}, m.fail(current, failure)
 	}
+	timing.XFSMount = time.Since(stepStarted)
 	current.State = stateXFSMounted
+	stepStarted = time.Now()
 	if err := m.save(current); err != nil {
+		timing.XFSMountedPersist = time.Since(stepStarted)
 		_ = m.runtime.UnmountXFS(current.XFSRoot, false)
 		_ = device.Close()
 		_ = branch.Close()
 		return Mount{}, err
 	}
+	timing.XFSMountedPersist = time.Since(stepStarted)
+	stepStarted = time.Now()
 	if err := m.runtime.MountOverlay(current.XFSRoot, current.MergedRoot); err != nil {
+		timing.OverlayMount = time.Since(stepStarted)
 		_ = m.runtime.UnmountXFS(current.XFSRoot, false)
 		_ = device.Close()
 		_ = branch.Close()
 		return Mount{}, m.fail(current, fmt.Errorf("mount OverlayFS: %w", err))
 	}
+	timing.OverlayMount = time.Since(stepStarted)
 	current.State = stateReady
+	stepStarted = time.Now()
 	if err := m.save(current); err != nil {
+		timing.ReadyPersist = time.Since(stepStarted)
 		_ = m.runtime.UnmountOverlay(current.MergedRoot, false)
 		_ = m.runtime.UnmountXFS(current.XFSRoot, false)
 		_ = device.Close()
 		_ = branch.Close()
 		return Mount{}, err
 	}
+	timing.ReadyPersist = time.Since(stepStarted)
 	m.mu.Lock()
 	m.live[durable.Parent] = &liveSession{branch: branch, device: device}
 	m.mu.Unlock()

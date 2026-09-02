@@ -49,6 +49,21 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	require.Equal(t, stateTombstoned, stored.State)
 }
 
+func TestManagerEnsureWithTimingReportsPhysicalStages(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "ensure-timing")
+	runtime.beforeAttach = func(_, _ string) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mount, timing, err := manager.EnsureWithTiming(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "bind", mount.Type)
+	require.GreaterOrEqual(t, timing.DeviceAttach, 5*time.Millisecond)
+	require.GreaterOrEqual(t, timing.Total, timing.DeviceAttach)
+	require.Positive(t, timing.ReaderOpen)
+	require.Positive(t, timing.XFSMount)
+}
+
 func TestManagerReleaseRecoversAfterTerminalDeviceCloseError(t *testing.T) {
 	manager, runtime, first := newTestManager(t, "terminal-close-error")
 	runtime.deviceCloseErr = syscall.EBUSY

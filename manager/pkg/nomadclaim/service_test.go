@@ -1450,6 +1450,24 @@ func TestServiceResetsCopiedSessionStateOnFirstForkResume(t *testing.T) {
 	}
 }
 
+func TestServiceResetsCopiedSessionStateAfterRestoreIntoUsedSandbox(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.store.resumeCandidate.ResetCopiedSessionState = true
+
+	response, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.SandboxID != sandboxID || len(fixture.planner.requests) != 1 {
+		t.Fatalf("resume response=%+v planner=%+v", response, fixture.planner.requests)
+	}
+	planned := fixture.planner.requests[0]
+	if planned.Runtime.RuntimeGeneration != 2 || !planned.Runtime.ResetCopiedSessionState {
+		t.Fatalf("restored sandbox resume assignment = %+v", planned.Runtime)
+	}
+}
+
 func TestServiceProjectsResumedAndAlreadyActiveNomadRuntime(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	sandboxID := preparePausedNomadResume(t, fixture)

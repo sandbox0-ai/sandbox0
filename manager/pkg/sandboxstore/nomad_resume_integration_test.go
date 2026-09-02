@@ -281,6 +281,7 @@ func TestNomadSandboxResumeStartsNeverRunPausedForkIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), requested.RuntimeGeneration)
 	require.Equal(t, targetFilesystem.HeadGenerationID, requested.SourceGenerationID)
+	require.True(t, requested.ResetCopiedSessionState)
 
 	runtime := prepareNomadResumeRuntime(t, &childFixture, requested, "fork-child")
 	_, err = fixture.store.MarkRuntimeSlotCommandReady(fixture.ctx, &MarkRuntimeSlotCommandReadyRequest{
@@ -301,6 +302,53 @@ func TestNomadSandboxResumeStartsNeverRunPausedForkIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateActive, completed.DesiredState)
 	require.Equal(t, int64(1), completed.RuntimeGeneration)
+}
+
+func TestNomadSandboxResumeResetsSessionStateAfterCrossSandboxRestoreIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "resume-restored-child")
+	terminalizeNomadPauseFixture(t, fixture)
+
+	source := rootFSTestSandboxRecord("sandbox-nomad-resume-restore-source", "team-slot")
+	source.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, fixture.store.UpsertSandbox(fixture.ctx, source))
+	artifact, err := fixture.store.PutReadyRootFSBaseArtifact(fixture.ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	_, sourceGeneration, err := fixture.store.EnsureInitialRootFSGeneration(
+		fixture.ctx,
+		&EnsureInitialRootFSGenerationRequest{
+			SandboxID: source.ID, TeamID: source.TeamID,
+			SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest,
+			BaseArtifactDigest: artifact.ArtifactDigest,
+		},
+	)
+	require.NoError(t, err)
+	snapshot, err := fixture.store.CreateRootFSSnapshot(fixture.ctx, &CreateRootFSSnapshotRequest{
+		SandboxID: source.ID, SnapshotID: "snapshot-nomad-resume-restore-source",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sourceGeneration.ID, snapshot.HeadGenerationID)
+
+	restored, err := fixture.store.RestoreRootFSFromSnapshot(fixture.ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: fixture.sandboxID, SnapshotID: snapshot.ID, TeamID: source.TeamID,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, sourceGeneration.ID, restored.HeadGenerationID)
+
+	requested, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: source.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), requested.RuntimeGeneration)
+	require.Equal(t, restored.HeadGenerationID, requested.SourceGenerationID)
+	require.True(t, requested.ResetCopiedSessionState)
+
+	retry, found, err := fixture.store.RetryNomadSandboxResume(fixture.ctx, &RetryNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: source.TeamID,
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, requested.OperationID, retry.OperationID)
+	require.True(t, retry.ResetCopiedSessionState)
 }
 
 func TestNomadSandboxResumeFencesLateCommandReadyAfterAbortIntegration(t *testing.T) {

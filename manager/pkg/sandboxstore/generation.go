@@ -114,7 +114,11 @@ type RootFSGeneration struct {
 	DurabilityState    string
 	LocatorVersion     int64
 	Descriptor         []byte
-	CreatedAt          time.Time
+	// ResetCopiedSessionState is set only on an immutable generation cloned by
+	// cross-sandbox restore. The first successfully activated target runtime
+	// consumes it by publishing its own generation with the default false value.
+	ResetCopiedSessionState bool
+	CreatedAt               time.Time
 	// MaterializationPackLane and MaterializationTeamID are populated only by
 	// regional materialization scans. They prevent shared physical packs from
 	// crossing a tenant or format boundary.
@@ -619,7 +623,8 @@ func getInitialRootFSGenerationForSandbox(
 			g.generation_id, g.filesystem_id, g.parent_generation_id,
 			g.source_oci_digest, g.base_artifact_digest, g.base_block_root,
 			g.current_block_head, g.writer_epoch, g.format_generation,
-			g.durability_state, g.locator_version, g.descriptor, g.created_at
+			g.durability_state, g.locator_version, g.descriptor,
+			g.reset_copied_session_state, g.created_at
 		FROM manager.sandbox_rootfs_bindings b
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 		JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
@@ -775,7 +780,8 @@ func getRootFSFilesystemAndGenerationForUpdate(
 			g.generation_id, g.filesystem_id, g.parent_generation_id,
 			g.source_oci_digest, g.base_artifact_digest, g.base_block_root,
 			g.current_block_head, g.writer_epoch, g.format_generation,
-			g.durability_state, g.locator_version, g.descriptor, g.created_at
+			g.durability_state, g.locator_version, g.descriptor,
+			g.reset_copied_session_state, g.created_at
 		FROM manager.sandbox_rootfs_bindings binding
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = binding.filesystem_id
 		JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
@@ -883,13 +889,15 @@ func insertPreparedRootFSGeneration(ctx context.Context, tx pgx.Tx, generation *
 		INSERT INTO manager.rootfs_generations (
 			generation_id, filesystem_id, parent_generation_id, source_oci_digest,
 			base_artifact_digest, base_block_root, current_block_head, writer_epoch,
-			format_generation, durability_state, locator_version, descriptor, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+			format_generation, durability_state, locator_version, descriptor,
+			reset_copied_session_state, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
 		ON CONFLICT (generation_id) DO NOTHING
 	`, generation.ID, generation.FilesystemID, generation.ParentGenerationID,
 		generation.SourceOCIDigest, generation.BaseArtifactDigest, generation.BaseBlockRoot,
 		generation.CurrentBlockHead, generation.WriterEpoch, generation.FormatGeneration,
-		generation.DurabilityState, generation.LocatorVersion, generation.Descriptor); err != nil {
+		generation.DurabilityState, generation.LocatorVersion, generation.Descriptor,
+		generation.ResetCopiedSessionState); err != nil {
 		return fmt.Errorf("insert prepared rootfs generation: %w", err)
 	}
 	stored, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
@@ -910,7 +918,9 @@ func rootFSGenerationEqual(left, right *RootFSGeneration) bool {
 		left.BaseArtifactDigest == right.BaseArtifactDigest && left.BaseBlockRoot == right.BaseBlockRoot &&
 		left.CurrentBlockHead == right.CurrentBlockHead && left.WriterEpoch == right.WriterEpoch &&
 		left.FormatGeneration == right.FormatGeneration && left.DurabilityState == right.DurabilityState &&
-		left.LocatorVersion == right.LocatorVersion && bytes.Equal(left.Descriptor, right.Descriptor)
+		left.LocatorVersion == right.LocatorVersion &&
+		left.ResetCopiedSessionState == right.ResetCopiedSessionState &&
+		bytes.Equal(left.Descriptor, right.Descriptor)
 }
 
 func initialRootFSGenerationID(filesystemID, artifactDigest string, formatGeneration int) string {
@@ -942,7 +952,8 @@ func initialRootFSGenerationMatches(
 		generation.BaseArtifactDigest == artifact.ArtifactDigest &&
 		generation.BaseBlockRoot == artifact.BaseBlockRoot && generation.CurrentBlockHead == artifact.BaseBlockRoot &&
 		generation.WriterEpoch == 0 && generation.FormatGeneration == artifact.FormatGeneration &&
-		generation.DurabilityState == RootFSGenerationStateS3Materialized
+		generation.DurabilityState == RootFSGenerationStateS3Materialized &&
+		!generation.ResetCopiedSessionState
 }
 
 func rootFSBaseArtifactSelectSQL() string {
@@ -961,7 +972,8 @@ func rootFSGenerationSelectSQL() string {
 	return `
 		SELECT generation_id, filesystem_id, parent_generation_id, source_oci_digest,
 			base_artifact_digest, base_block_root, current_block_head, writer_epoch,
-			format_generation, durability_state, locator_version, descriptor, created_at
+			format_generation, durability_state, locator_version, descriptor,
+			reset_copied_session_state, created_at
 		FROM manager.rootfs_generations `
 }
 
@@ -988,7 +1000,7 @@ func scanRootFSGeneration(row sandboxRecordScanner) (*RootFSGeneration, error) {
 		&generation.SourceOCIDigest, &generation.BaseArtifactDigest, &generation.BaseBlockRoot,
 		&generation.CurrentBlockHead, &generation.WriterEpoch, &generation.FormatGeneration,
 		&generation.DurabilityState, &generation.LocatorVersion, &generation.Descriptor,
-		&generation.CreatedAt); err != nil {
+		&generation.ResetCopiedSessionState, &generation.CreatedAt); err != nil {
 		return nil, err
 	}
 	if parent != nil {
@@ -1012,7 +1024,7 @@ func scanRootFSFilesystemAndGeneration(row sandboxRecordScanner) (*RootFSFilesys
 		&generation.SourceOCIDigest, &generation.BaseArtifactDigest, &generation.BaseBlockRoot,
 		&generation.CurrentBlockHead, &generation.WriterEpoch, &generation.FormatGeneration,
 		&generation.DurabilityState, &generation.LocatorVersion, &generation.Descriptor,
-		&generation.CreatedAt,
+		&generation.ResetCopiedSessionState, &generation.CreatedAt,
 	); err != nil {
 		return nil, nil, err
 	}

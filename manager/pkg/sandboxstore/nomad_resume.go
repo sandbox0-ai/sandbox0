@@ -45,7 +45,12 @@ type NomadSandboxResumeCandidate struct {
 	RuntimeGeneration  int64
 	FilesystemID       string
 	SourceGenerationID string
-	Record             *SandboxRecord
+	// ResetCopiedSessionState is true when the exact paused RootFS head contains
+	// another sandbox's session identity and has not yet been activated and
+	// republished by this sandbox. procd must clear the copied identity before
+	// it can activate this runtime.
+	ResetCopiedSessionState bool
+	Record                  *SandboxRecord
 }
 
 // CompleteNomadSandboxResumeRequest commits only an exact command-ready slot
@@ -150,7 +155,7 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow) {
 		return nil, false, fmt.Errorf("%w: sandbox hard TTL has expired", ErrNomadSandboxResumeConflict)
 	}
-	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	filesystemID, sourceGenerationID, resetCopiedSessionState, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -163,7 +168,9 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit Nomad sandbox resume retry: %w", err)
 	}
-	return nomadSandboxResumeCandidate(record, activeLifecycle, filesystemID, sourceGenerationID), true, nil
+	return nomadSandboxResumeCandidate(
+		record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
+	), true, nil
 }
 
 // RequestNomadSandboxResume reserves active-sandbox quota and creates the
@@ -239,7 +246,7 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		return nil, fmt.Errorf("%w: sandbox hard TTL has expired", ErrNomadSandboxResumeConflict)
 	}
 
-	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	filesystemID, sourceGenerationID, resetCopiedSessionState, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +260,9 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit Nomad sandbox resume retry: %w", err)
 		}
-		return nomadSandboxResumeCandidate(record, activeLifecycle, filesystemID, sourceGenerationID), nil
+		return nomadSandboxResumeCandidate(
+			record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
+		), nil
 	}
 	if err := ensureNomadResumePhysicalStateTerminal(ctx, tx, record.ID); err != nil {
 		return nil, err
@@ -276,7 +285,9 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit Nomad sandbox resume request: %w", err)
 	}
-	return nomadSandboxResumeCandidate(record, lifecycle, filesystemID, sourceGenerationID), nil
+	return nomadSandboxResumeCandidate(
+		record, lifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
+	), nil
 }
 
 // AbortNomadSandboxResume terminally closes only the exact uncommitted resume
@@ -337,7 +348,7 @@ func (s *PGSandboxStore) AbortNomadSandboxResume(
 		}
 		return false, nil
 	}
-	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	filesystemID, sourceGenerationID, _, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
 		return false, err
 	}
@@ -445,7 +456,7 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 	if !nomadResumeLifecycleMatches(lifecycle, record, normalized.OperationID, lifecycle.ExpectedGenerationID, false) {
 		return nil, fmt.Errorf("%w: active resume lifecycle changed", ErrNomadSandboxResumeConflict)
 	}
-	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	filesystemID, sourceGenerationID, _, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -604,13 +615,18 @@ func validateCompletedRuntimeResourceLease(
 	return slot.ResourceLease.CPUMillicores, memoryMiB, nil
 }
 
-func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string) (string, string, error) {
+func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string) (string, string, bool, error) {
 	var filesystemID, generationID string
+	var resetCopiedSessionState bool
 	// A never-run fork points at its source's immutable generation until the
 	// child publishes its first generation, so the head need not be owned by
-	// the child's filesystem yet.
+	// the child's filesystem yet. Snapshot restore records the equivalent
+	// ownership transition explicitly on its cloned generation. A successful
+	// run followed by pause publishes a generation with the flag cleared.
 	err := tx.QueryRow(ctx, `
-		SELECT filesystem.filesystem_id, filesystem.head_generation_id
+		SELECT filesystem.filesystem_id, filesystem.head_generation_id,
+			generation.filesystem_id <> filesystem.filesystem_id OR
+				generation.reset_copied_session_state
 		FROM manager.sandbox_rootfs_bindings AS binding
 		JOIN manager.rootfs_filesystems AS filesystem
 			ON filesystem.filesystem_id = binding.filesystem_id
@@ -618,17 +634,17 @@ func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string
 			ON generation.generation_id = filesystem.head_generation_id
 		WHERE binding.sandbox_id = $1
 		FOR SHARE OF binding, filesystem, generation
-	`, sandboxID).Scan(&filesystemID, &generationID)
+	`, sandboxID).Scan(&filesystemID, &generationID, &resetCopiedSessionState)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", fmt.Errorf("%w: paused sandbox RootFS head is missing", ErrNomadSandboxResumeNotReady)
+		return "", "", false, fmt.Errorf("%w: paused sandbox RootFS head is missing", ErrNomadSandboxResumeNotReady)
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("lock Nomad resume RootFS head: %w", err)
+		return "", "", false, fmt.Errorf("lock Nomad resume RootFS head: %w", err)
 	}
 	if filesystemID == "" || generationID == "" {
-		return "", "", fmt.Errorf("%w: paused sandbox RootFS head is invalid", ErrNomadSandboxResumeNotReady)
+		return "", "", false, fmt.Errorf("%w: paused sandbox RootFS head is invalid", ErrNomadSandboxResumeNotReady)
 	}
-	return filesystemID, generationID, nil
+	return filesystemID, generationID, resetCopiedSessionState, nil
 }
 
 func ensureNomadResumePhysicalStateTerminal(ctx context.Context, tx pgx.Tx, sandboxID string) error {
@@ -692,11 +708,13 @@ func nomadSandboxResumeCandidate(
 	lifecycle *SandboxLifecycleTxn,
 	filesystemID string,
 	sourceGenerationID string,
+	resetCopiedSessionState bool,
 ) *NomadSandboxResumeCandidate {
 	return &NomadSandboxResumeCandidate{
 		SandboxID: record.ID, OperationID: lifecycle.ID, LifecyclePhase: lifecycle.Phase,
 		RuntimeGeneration: lifecycle.ToGeneration, FilesystemID: filesystemID,
-		SourceGenerationID: sourceGenerationID, Record: record,
+		SourceGenerationID: sourceGenerationID, ResetCopiedSessionState: resetCopiedSessionState,
+		Record: record,
 	}
 }
 

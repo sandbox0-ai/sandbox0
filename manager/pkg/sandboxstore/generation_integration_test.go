@@ -322,6 +322,7 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	require.Equal(t, source.ID, target.SourceFilesystemID)
 	require.Equal(t, initial.ID, target.HeadGenerationID)
 	require.Equal(t, int64(0), target.WriterEpoch)
+	requireNomadResumeHeadSessionReset(t, ctx, pool, "sandbox-fork-target", true)
 
 	var generationCount int
 	require.NoError(t, pool.QueryRow(ctx, `
@@ -404,6 +405,7 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	require.NoError(t, err)
 	require.Equal(t, target.ID, loadedChild.FilesystemID)
 	require.Equal(t, initial.ID, loadedChild.ParentGenerationID)
+	requireNomadResumeHeadSessionReset(t, ctx, pool, "sandbox-fork-target", false)
 	retired, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
@@ -1234,6 +1236,7 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, initial.ID, restored.HeadGenerationID)
 	require.Equal(t, int64(1), restored.WriterEpoch, "head restore must not rewind the writer epoch")
+	requireNomadResumeHeadSessionReset(t, ctx, pool, sourceRecord.ID, false)
 
 	rolledBack, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
 		SandboxID: sourceRecord.ID, OperationID: "restore-block-initial", TeamID: sourceRecord.TeamID,
@@ -1257,6 +1260,7 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.Equal(t, copied.ID, copiedGeneration.FilesystemID)
 	require.Equal(t, initial.ID, copiedGeneration.ParentGenerationID)
 	require.True(t, rootFSGenerationRestoreContentEqual(initial, copiedGeneration))
+	requireNomadResumeHeadSessionReset(t, ctx, pool, copyRecord.ID, true)
 	replacedCopy, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
 		SandboxID: copyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: copyRecord.TeamID,
 		OperationID: "restore-copy-to-second", RollbackExpiresAt: time.Now().Add(time.Hour),
@@ -1269,6 +1273,7 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.Equal(t, replacedCopy.ID, replacedGeneration.FilesystemID)
 	require.Equal(t, second.ID, replacedGeneration.ParentGenerationID)
 	require.True(t, rootFSGenerationRestoreContentEqual(second, replacedGeneration))
+	requireNomadResumeHeadSessionReset(t, ctx, pool, copyRecord.ID, true)
 	retriedReplacement, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
 		SandboxID: copyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: copyRecord.TeamID,
 		OperationID: "restore-copy-to-second", RollbackExpiresAt: time.Now().Add(time.Hour),
@@ -1283,11 +1288,28 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.Equal(t, copied.HeadGenerationID, rolledBackCopy.HeadGenerationID)
 	require.Equal(t, replacedCopy.WriterEpoch, rolledBackCopy.WriterEpoch,
 		"rollback must not rewind the target writer epoch")
+	requireNomadResumeHeadSessionReset(t, ctx, pool, copyRecord.ID, true)
 
 	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, snapshot.ID, sourceRecord.TeamID)
 	require.NoError(t, err)
 	require.Equal(t, initial.ID, loadedSnapshot.HeadGenerationID,
 		"moving and rolling back the source head must not mutate the snapshot")
+}
+
+func requireNomadResumeHeadSessionReset(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	sandboxID string,
+	want bool,
+) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, _, resetCopiedSessionState, err := lockNomadSandboxResumeHead(ctx, tx, sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, want, resetCopiedSessionState)
 }
 
 func TestBlockRootFSSnapshotRejectsActiveWriter(t *testing.T) {

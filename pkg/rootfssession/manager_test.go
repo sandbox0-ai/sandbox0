@@ -459,6 +459,39 @@ func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.
 	require.Len(t, recovery, 1, "restart must rebuild the due-proof recovery index")
 }
 
+func TestManagerExternalCrashFenceRepairsLegacyPlannedTombstoneWithoutDetachProof(t *testing.T) {
+	manager, _, request := newTestManager(t, "external-repairs-missing-proof")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "local-planned-operation"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateTombstoned, stored.State)
+	require.NotEmpty(t, stored.DetachProof)
+	stored.DetachProof = ""
+	require.NoError(t, manager.save(stored))
+	require.ErrorIs(
+		t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity), errdefs.ErrFailedPrecondition,
+	)
+
+	observation, err := manager.CrashFenceExternal(
+		request.WithoutWriterGrantToken(), "regional-terminal-recovery",
+	)
+	require.NoError(t, err)
+	require.NoError(t, observation.Validate())
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+
+	recovered, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, recovered.RetireOperationID)
+	require.NotNil(t, recovered.CrashFence)
+	require.True(t, recovered.CrashFence.External)
+	require.NotNil(t, recovered.CrashFence.Result)
+	require.True(t, recovered.BranchRemoved)
+}
+
 func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {
 	manager, _, request := newTestManager(t, "forget-planned")
 	_, err := manager.Ensure(t.Context(), request)

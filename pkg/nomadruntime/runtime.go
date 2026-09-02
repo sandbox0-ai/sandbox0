@@ -678,7 +678,7 @@ func (r *rootfsRuntime) CrashFence(
 	}
 	r.stopRenewal(request.Parent)
 	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err == nil {
-		if err := r.finalizeVerifiedTerminal(request); err != nil {
+		if err := r.finalizeVerifiedTerminal(ctx, request); err != nil {
 			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("finalize verified terminal RootFS session: %w", err)
 		}
 		return rootfshandoff.CrashFenceProof{}, nil
@@ -727,12 +727,16 @@ func (r *rootfsRuntime) CrashFence(
 	return proof, nil
 }
 
-func (r *rootfsRuntime) finalizeVerifiedTerminal(request rootfshandoff.StageRequest) error {
+func (r *rootfsRuntime) finalizeVerifiedTerminal(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+) error {
 	sessions, err := r.sessions.RecoverySessions()
 	if err != nil {
 		return fmt.Errorf("inspect terminal RootFS session ownership: %w", err)
 	}
 	keepProof := false
+	var matched *rootfssession.RecoverySession
 	for _, session := range sessions {
 		if session.Stage.Parent != request.Parent {
 			continue
@@ -741,14 +745,36 @@ func (r *rootfsRuntime) finalizeVerifiedTerminal(request rootfshandoff.StageRequ
 			session.Stage.Identity.WriterEpoch != request.Identity.WriterEpoch {
 			return fmt.Errorf("terminal RootFS session belongs to another writer: %w", errdefs.ErrFailedPrecondition)
 		}
+		candidate := session
+		matched = &candidate
 		keepProof = session.ExternalCrash
 		break
 	}
-	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
-		if errdefs.IsNotFound(err) {
+	reclaimErr := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity)
+	if errdefs.IsFailedPrecondition(reclaimErr) && matched != nil {
+		// A regional terminal CAS can win after physical teardown but before an
+		// older node journal persisted its local detach proof. Rebuild that proof
+		// from exact host absence instead of retrying the proof-less tombstone
+		// forever. External mode is required because regional truth already owns
+		// the terminal decision and any unpublished local seal must be discarded.
+		if err := r.sessions.Release(ctx, request.Identity); err != nil {
+			return fmt.Errorf("finish regionally verified RootFS release: %w", err)
+		}
+		operationID := matched.CrashOperationID
+		if operationID == "" {
+			operationID = crashOperationID(request)
+		}
+		if _, err := r.sessions.CrashFenceExternal(request, operationID); err != nil {
+			return fmt.Errorf("rebuild regionally verified RootFS detach proof: %w", err)
+		}
+		keepProof = true
+		reclaimErr = r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity)
+	}
+	if reclaimErr != nil {
+		if errdefs.IsNotFound(reclaimErr) {
 			return nil
 		}
-		return err
+		return reclaimErr
 	}
 	if keepProof {
 		return nil
@@ -770,7 +796,7 @@ func (r *rootfsRuntime) ReclaimVerifiedTerminal(
 	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
 		return fmt.Errorf("verify terminal writer grant: %w", err)
 	}
-	return r.finalizeVerifiedTerminal(request)
+	return r.finalizeVerifiedTerminal(ctx, request)
 }
 
 // ReclaimExternallyRetired removes large node-local artifacts once the

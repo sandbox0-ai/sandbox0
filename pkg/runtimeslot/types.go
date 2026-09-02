@@ -390,15 +390,60 @@ func NetworkPolicyDigest(raw string) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
+// NodeClaimTiming contains bounded, low-cardinality driver stages from one
+// synchronous claim. Values are elapsed microseconds from the node monotonic
+// clock and are diagnostic only; they are not lifecycle proof.
+type NodeClaimTiming struct {
+	ClaimDurationMicros      int64 `json:"claim_duration_us"`
+	BundleWriteMicros        int64 `json:"bundle_write_us"`
+	ClaimStatePersistMicros  int64 `json:"claim_state_persist_us"`
+	RootFSEnsureMicros       int64 `json:"rootfs_ensure_us"`
+	ConsumerRegisterMicros   int64 `json:"consumer_register_us"`
+	RootFSBindMicros         int64 `json:"rootfs_bind_us"`
+	StartingReportMicros     int64 `json:"starting_report_us"`
+	RunscCreateMicros        int64 `json:"runsc_create_us"`
+	RunscStartMicros         int64 `json:"runsc_start_us"`
+	ActiveStatePersistMicros int64 `json:"active_state_persist_us"`
+}
+
+func (t NodeClaimTiming) Validate() error {
+	for _, field := range []struct {
+		name  string
+		value int64
+	}{
+		{name: "claim_duration_us", value: t.ClaimDurationMicros},
+		{name: "bundle_write_us", value: t.BundleWriteMicros},
+		{name: "claim_state_persist_us", value: t.ClaimStatePersistMicros},
+		{name: "rootfs_ensure_us", value: t.RootFSEnsureMicros},
+		{name: "consumer_register_us", value: t.ConsumerRegisterMicros},
+		{name: "rootfs_bind_us", value: t.RootFSBindMicros},
+		{name: "starting_report_us", value: t.StartingReportMicros},
+		{name: "runsc_create_us", value: t.RunscCreateMicros},
+		{name: "runsc_start_us", value: t.RunscStartMicros},
+		{name: "active_state_persist_us", value: t.ActiveStatePersistMicros},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("node claim timing %s cannot be negative", field.name)
+		}
+	}
+	return nil
+}
+
 // NodeControlResponse is returned only after the driver has durably reached
 // the requested local phase.
 type NodeControlResponse struct {
-	Phase string `json:"phase"`
+	Phase       string           `json:"phase"`
+	ClaimTiming *NodeClaimTiming `json:"claim_timing,omitempty"`
 }
 
 func (r NodeControlResponse) Validate() error {
 	if r.Phase != string(StateActive) {
 		return fmt.Errorf("node control phase must be active")
+	}
+	if r.ClaimTiming != nil {
+		if err := r.ClaimTiming.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

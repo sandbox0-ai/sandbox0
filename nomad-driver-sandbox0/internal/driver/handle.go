@@ -168,6 +168,21 @@ type claimTimings struct {
 	activeStatePersist time.Duration
 }
 
+func (t claimTimings) observation(elapsed time.Duration) protocol.NodeClaimTiming {
+	return protocol.NodeClaimTiming{
+		ClaimDurationMicros:      elapsed.Microseconds(),
+		BundleWriteMicros:        t.bundleWrite.Microseconds(),
+		ClaimStatePersistMicros:  t.claimStatePersist.Microseconds(),
+		RootFSEnsureMicros:       t.rootFSEnsure.Microseconds(),
+		ConsumerRegisterMicros:   t.consumerRegister.Microseconds(),
+		RootFSBindMicros:         t.rootFSBind.Microseconds(),
+		StartingReportMicros:     t.startingReport.Microseconds(),
+		RunscCreateMicros:        t.runscCreate.Microseconds(),
+		RunscStartMicros:         t.runscStart.Microseconds(),
+		ActiveStatePersistMicros: t.activeStatePersist.Microseconds(),
+	}
+}
+
 func (h *taskHandle) logClaimTimings(success bool, elapsed time.Duration, timings claimTimings) {
 	args := []any{
 		"success", success,
@@ -445,7 +460,22 @@ func runtimeLeaseCgroupsPath(root, cgroupName string) (string, error) {
 }
 
 // Claim writes the OCI bundle, attaches D as its initial root, then creates and starts runsc.
-func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
+func (h *taskHandle) Claim(request ClaimRequest) error {
+	return h.executeClaim(request, nil)
+}
+
+func (h *taskHandle) claimWithTiming(request ClaimRequest) (*protocol.NodeClaimTiming, error) {
+	var observed *protocol.NodeClaimTiming
+	err := h.executeClaim(request, func(timing protocol.NodeClaimTiming) {
+		observed = &timing
+	})
+	return observed, err
+}
+
+func (h *taskHandle) executeClaim(
+	request ClaimRequest,
+	observe func(protocol.NodeClaimTiming),
+) (resultErr error) {
 	requestPayload, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("encode claim retry identity: %w", err)
@@ -491,7 +521,11 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 	claimStarted := time.Now()
 	timings := claimTimings{}
 	defer func() {
-		h.logClaimTimings(resultErr == nil, time.Since(claimStarted), timings)
+		elapsed := time.Since(claimStarted)
+		h.logClaimTimings(resultErr == nil, elapsed, timings)
+		if observe != nil {
+			observe(timings.observation(elapsed))
+		}
 	}()
 
 	if request.PolicyToken == "" || request.WriterEpoch == "" {

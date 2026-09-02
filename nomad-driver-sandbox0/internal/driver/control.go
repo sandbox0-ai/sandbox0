@@ -42,7 +42,8 @@ type statusResponse struct {
 }
 
 type claimResponse struct {
-	Phase string `json:"phase"`
+	Phase       string                    `json:"phase"`
+	ClaimTiming *protocol.NodeClaimTiming `json:"claim_timing,omitempty"`
 }
 
 func (h *taskHandle) ServeControl(ctx context.Context) {
@@ -84,11 +85,14 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 				writeControlError(w, http.StatusBadRequest, fmt.Sprintf("decode claim: %v", err))
 				return
 			}
-			if err := h.Claim(claim); err != nil {
+			claimTiming, err := h.claimWithTiming(claim)
+			if err != nil {
 				writeControlOperationError(w, err)
 				return
 			}
-			writeControlJSON(w, http.StatusOK, claimResponse{Phase: string(phaseActive)})
+			writeControlJSON(w, http.StatusOK, claimResponse{
+				Phase: string(phaseActive), ClaimTiming: claimTiming,
+			})
 		})
 		mux.HandleFunc(protocol.NodeCommandReadyControlPath, func(w http.ResponseWriter, request *http.Request) {
 			if request.Method != http.MethodPut {

@@ -186,6 +186,7 @@ type fakeNode struct {
 	commands      []protocol.CommandReadyControlRequest
 	claimErrors   []error
 	commandErrors []error
+	claimTiming   *protocol.NodeClaimTiming
 }
 
 func (f *fakeNode) Claim(_ context.Context, _ NodeTarget, request protocol.NodeClaimControlRequest) (protocol.NodeControlResponse, error) {
@@ -193,7 +194,9 @@ func (f *fakeNode) Claim(_ context.Context, _ NodeTarget, request protocol.NodeC
 	defer f.mu.Unlock()
 	f.claims = append(f.claims, cloneNodeClaim(request))
 	if len(f.claimErrors) == 0 {
-		return protocol.NodeControlResponse{Phase: string(protocol.StateActive)}, nil
+		return protocol.NodeControlResponse{
+			Phase: string(protocol.StateActive), ClaimTiming: f.claimTiming,
+		}, nil
 	}
 	err := f.claimErrors[0]
 	f.claimErrors = f.claimErrors[1:]
@@ -458,6 +461,9 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 
 func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 	fixture := newPlannerFixture(t)
+	fixture.node.claimTiming = &protocol.NodeClaimTiming{
+		ClaimDurationMicros: 250_000, RunscCreateMicros: 100_000,
+	}
 	result, err := fixture.planner.Claim(context.Background(), fixture.request)
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -470,6 +476,9 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 	}
 	if err := result.Stage.Validate(); err != nil {
 		t.Fatalf("result stage is invalid: %v", err)
+	}
+	if result.NodeClaimTiming == nil || result.NodeClaimTiming.RunscCreateMicros != 100_000 {
+		t.Fatalf("node claim timing = %+v, want driver response timing", result.NodeClaimTiming)
 	}
 	fixture.store.mu.Lock()
 	if len(fixture.store.acquires) != 1 || len(fixture.store.issues) != 1 || len(fixture.store.binds) != 1 {

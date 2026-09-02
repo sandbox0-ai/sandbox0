@@ -29,13 +29,19 @@ func TestNodeClientCallsRootOwnedUnixControlSocket(t *testing.T) {
 			t.Errorf("Content-Type = %q, want application/json", got)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(NodeControlResponse{Phase: string(StateActive)})
+		response := NodeControlResponse{Phase: string(StateActive)}
+		if request.URL.Path == NodeClaimControlPath {
+			response.ClaimTiming = &NodeClaimTiming{ClaimDurationMicros: 250_000}
+		}
+		_ = json.NewEncoder(writer).Encode(response)
 	})
 
 	claim := testNodeClaimControlRequest()
 	response, err := client.Claim(t.Context(), endpoint, claim)
 	require.NoError(t, err)
 	require.Equal(t, string(StateActive), response.Phase)
+	require.NotNil(t, response.ClaimTiming)
+	require.Equal(t, int64(250_000), response.ClaimTiming.ClaimDurationMicros)
 	proof := CommandReadyProof{
 		Version: CommandReadyProofVersion, SlotID: "slot-1", OperationID: claim.OperationID,
 		ClaimID: claim.ClaimID, LaunchAttempt: claim.Stage.Identity.LaunchAttempt,

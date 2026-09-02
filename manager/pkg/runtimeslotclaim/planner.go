@@ -193,6 +193,7 @@ type Result struct {
 	ProcdAddress    string
 	ProcdInstanceID string
 	CommandProof    protocol.CommandReadyProof
+	NodeClaimTiming *protocol.NodeClaimTiming
 	Duration        time.Duration
 	WithinSLO       bool
 	Phases          []PhaseObservation
@@ -617,6 +618,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	return &Result{
 		Slot: bound, Grant: issued.Grant, Stage: stage, ProcdAddress: procdAddress,
 		ProcdInstanceID: probe.InstanceID, CommandProof: proof,
+		NodeClaimTiming: nodeClaimResponse.ClaimTiming,
 	}, nil
 }
 

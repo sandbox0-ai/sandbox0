@@ -14,6 +14,24 @@ type orderedRuntimeResource struct {
 	events chan<- string
 }
 
+type orderedRuntimeSlotRegistry struct {
+	events chan<- string
+}
+
+func (r *orderedRuntimeSlotRegistry) Close() error {
+	r.events <- "registry"
+	return nil
+}
+
+type orderedRuntimeSlotControl struct {
+	events chan<- string
+}
+
+func (c *orderedRuntimeSlotControl) Shutdown(context.Context) error {
+	c.events <- "control"
+	return nil
+}
+
 func (r *orderedRuntimeResource) Close() {
 	r.events <- r.name
 }
@@ -46,6 +64,27 @@ func TestShutdownClosesRuntimeResourcesAfterMeteringLoopStops(t *testing.T) {
 
 	want := []string{"flush", "metering", "conntrack"}
 	for _, expected := range want {
+		select {
+		case got := <-events:
+			if got != expected {
+				t.Fatalf("event = %q, want %q", got, expected)
+			}
+		default:
+			t.Fatalf("missing event %q", expected)
+		}
+	}
+}
+
+func TestShutdownDrainsRuntimeSlotControlBeforeClosingRegistry(t *testing.T) {
+	events := make(chan string, 2)
+	d := &Daemon{
+		runtimeSlotRegistry: &orderedRuntimeSlotRegistry{events: events},
+		runtimeSlotControl:  &orderedRuntimeSlotControl{events: events},
+	}
+	if err := d.closeRuntimeSlotNetworkControl(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"control", "registry"} {
 		select {
 		case got := <-events:
 			if got != expected {

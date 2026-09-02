@@ -88,7 +88,11 @@ func selectRoutableIPv4(addresses map[string]struct{}) (string, error) {
 	}
 	sort.Strings(values)
 	if len(values) == 0 {
-		return "", fmt.Errorf("network namespace does not have a routable IPv4 address yet: %w", errdefs.ErrUnavailable)
+		return "", fmt.Errorf(
+			"network namespace does not have a routable IPv4 address yet: %w: %w",
+			errExactNamespaceUnroutable,
+			errdefs.ErrUnavailable,
+		)
 	}
 	if len(values) != 1 {
 		return "", fmt.Errorf("network namespace must have exactly one routable IPv4 address, got %v: %w", values, errdefs.ErrFailedPrecondition)

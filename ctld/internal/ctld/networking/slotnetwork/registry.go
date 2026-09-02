@@ -46,7 +46,8 @@ var (
 	metadataBucket   = []byte("metadata-v1")
 	generationKey    = []byte("generation")
 
-	errExactNamespaceAbsent = errors.New("exact runtime slot network namespace is absent")
+	errExactNamespaceAbsent     = errors.New("exact runtime slot network namespace is absent")
+	errExactNamespaceUnroutable = errors.New("exact runtime slot network namespace has no routable IPv4 address")
 )
 
 // Config constrains durable state and namespace inspection for one node-local
@@ -714,8 +715,9 @@ func recordMatchesCleanup(record registryRecord, request protocol.NodeCleanupCon
 
 // Snapshot returns the exact physically present warm and claimed desired set
 // and the revision that an external redirect reconciliation may acknowledge.
-// A disappeared namespace is fenced in memory so an orphaned durable record
-// cannot collide with an IP that Nomad has reassigned to a newer allocation.
+// A disappeared or no-longer-routable namespace is fenced in memory so an
+// orphaned durable record cannot collide with an IP that Nomad has reassigned
+// to a newer allocation.
 func (r *Registry) Snapshot() ([]*model.SandboxInfo, uint64, error) {
 	if r == nil {
 		return nil, 0, fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
@@ -790,7 +792,11 @@ func (r *Registry) fenceAbsentNamespaces() error {
 			filepath.Join(r.config.NetNSRoot, registration.NetNSRelativePath),
 			registration.NetNSIdentity,
 		)
-		if errors.Is(err, errExactNamespaceAbsent) {
+		// A registered namespace only enters the journal after it has exactly one
+		// routable IPv4 address. If that address is now gone while its recorded IP
+		// collides with another incarnation, it cannot still own the recorded
+		// source IP and must not poison the node-wide desired-state snapshot.
+		if errors.Is(err, errExactNamespaceAbsent) || errors.Is(err, errExactNamespaceUnroutable) {
 			absent = append(absent, candidate)
 			continue
 		}

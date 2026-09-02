@@ -45,8 +45,8 @@ type Daemon struct {
 	conntrackCloser          runtimeResource
 	meteringCloser           runtimeResource
 	meteringDone             <-chan struct{}
-	runtimeSlotRegistry      *slotnetwork.Registry
-	runtimeSlotControl       *slotnetwork.ControlServer
+	runtimeSlotRegistry      runtimeSlotRegistryCloser
+	runtimeSlotControl       runtimeSlotControlCloser
 	ready                    atomic.Bool
 }
 
@@ -58,6 +58,14 @@ type Options struct {
 
 type runtimeResource interface {
 	Close()
+}
+
+type runtimeSlotRegistryCloser interface {
+	Close() error
+}
+
+type runtimeSlotControlCloser interface {
+	Shutdown(context.Context) error
 }
 
 type sqlRuntimeResource struct {
@@ -559,11 +567,14 @@ func (d *Daemon) closeRuntimeSlotNetworkControl(ctx context.Context) error {
 	d.runtimeSlotControl = nil
 	d.runtimeMu.Unlock()
 	var result error
-	if registry != nil {
-		result = registry.Close()
-	}
+	// Stop accepting and drain control requests before closing the registry
+	// they use. Closing in the opposite order exposes a transient 503 to an
+	// otherwise valid in-flight manager request during ctld HA handoff.
 	if control != nil {
-		result = errors.Join(result, control.Shutdown(ctx))
+		result = control.Shutdown(ctx)
+	}
+	if registry != nil {
+		result = errors.Join(result, registry.Close())
 	}
 	return result
 }

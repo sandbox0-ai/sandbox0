@@ -19,7 +19,7 @@ func TestNamespaceInspectorClassifiesMissingExactIncarnation(t *testing.T) {
 }
 
 func TestSelectRoutableIPv4ClassifiesNetworkReadiness(t *testing.T) {
-	if _, err := selectRoutableIPv4(nil); !errdefs.IsUnavailable(err) {
+	if _, err := selectRoutableIPv4(nil); !errdefs.IsUnavailable(err) || !errors.Is(err, errExactNamespaceUnroutable) {
 		t.Fatalf("missing address error = %v", err)
 	}
 	if _, err := selectRoutableIPv4(map[string]struct{}{

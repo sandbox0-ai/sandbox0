@@ -4,9 +4,9 @@
 
 FROM sandbox0ai/otemplates:default-v0.2.0
 
-# Docker BuildKit supplies TARGETARCH. The default keeps direct local builds
-# deterministic on the production amd64 architecture.
-ARG TARGETARCH=amd64
+# Docker BuildKit supplies TARGETARCH for the selected output platform. Do not
+# give it a default: that would override BuildKit during native arm64 builds.
+ARG TARGETARCH
 ARG TTYD_VERSION=1.7.7
 
 # Keep Playwright CLI and its Agent Skill without bundling a browser runtime.

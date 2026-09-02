@@ -47,7 +47,7 @@ func TestCodingAgentImageIncludesPinnedTtydDiagnosticBinary(t *testing.T) {
 
 	contents := string(dockerfile)
 	for _, expected := range []string{
-		"ARG TARGETARCH=amd64",
+		"ARG TARGETARCH",
 		"ARG TTYD_VERSION=1.7.7",
 		"ttyd_asset=aarch64",
 		"ttyd.${ttyd_asset}",

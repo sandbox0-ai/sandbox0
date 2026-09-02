@@ -254,7 +254,10 @@ type ConsumerLease struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-const rootFSConsumerLeaseTTL = 30 * time.Second
+const (
+	rootFSConsumerLeaseTTL    = 30 * time.Second
+	slowRootFSEnsureThreshold = 500 * time.Millisecond
+)
 
 type CrashTaskObservation struct {
 	ActiveKey              string
@@ -395,24 +398,61 @@ func (r *rootfsRuntime) Ensure(
 	ctx context.Context,
 	request rootfshandoff.StageRequest,
 	onLeaseLost func(error),
-) (rootfssession.Mount, error) {
+) (mount rootfssession.Mount, err error) {
+	totalStarted := time.Now()
+	var reserveDuration time.Duration
+	var authorityDuration time.Duration
+	var sessionTiming rootfssession.EnsureTiming
+	defer func() {
+		totalDuration := time.Since(totalStarted)
+		if err == nil && totalDuration < slowRootFSEnsureThreshold {
+			return
+		}
+		r.logger.Info("RootFS ensure timing",
+			"parent", request.Parent,
+			"allocation_id", request.Identity.AllocationID,
+			"success", err == nil,
+			"total_us", totalDuration.Microseconds(),
+			"reserve_us", reserveDuration.Microseconds(),
+			"writer_authority_us", authorityDuration.Microseconds(),
+			"session_total_us", sessionTiming.Total.Microseconds(),
+			"lock_wait_us", sessionTiming.LockWait.Microseconds(),
+			"session_load_us", sessionTiming.SessionLoad.Microseconds(),
+			"reserved_state_persist_us", sessionTiming.ReservedStatePersist.Microseconds(),
+			"reader_open_us", sessionTiming.ReaderOpen.Microseconds(),
+			"branch_open_us", sessionTiming.BranchOpen.Microseconds(),
+			"device_reserve_us", sessionTiming.DeviceReserve.Microseconds(),
+			"device_reservation_persist_us", sessionTiming.DeviceReservationPersist.Microseconds(),
+			"device_attach_us", sessionTiming.DeviceAttach.Microseconds(),
+			"device_ready_persist_us", sessionTiming.DeviceReadyPersist.Microseconds(),
+			"xfs_mount_us", sessionTiming.XFSMount.Microseconds(),
+			"xfs_mounted_persist_us", sessionTiming.XFSMountedPersist.Microseconds(),
+			"overlay_mount_us", sessionTiming.OverlayMount.Microseconds(),
+			"ready_persist_us", sessionTiming.ReadyPersist.Microseconds(),
+		)
+	}()
 	if err := request.Validate(); err != nil {
 		return rootfssession.Mount{}, err
 	}
+	stepStarted := time.Now()
 	if err := r.sessions.Reserve(request); err != nil {
+		reserveDuration = time.Since(stepStarted)
 		return rootfssession.Mount{}, fmt.Errorf("reserve durable RootFS session: %w", err)
 	}
+	reserveDuration = time.Since(stepStarted)
 	if r.authority != nil {
 		if onLeaseLost == nil {
 			return rootfssession.Mount{}, fmt.Errorf("writer lease loss handler is required")
 		}
+		stepStarted = time.Now()
 		observation, err := r.authority.ConsumeWriterGrant(ctx, request)
+		authorityDuration = time.Since(stepStarted)
 		if err != nil {
 			return rootfssession.Mount{}, fmt.Errorf("consume regional writer grant: %w", err)
 		}
 		r.startRenewal(request, observation, onLeaseLost)
 	}
-	mount, err := r.sessions.Ensure(ctx, request)
+	mount, sessionTiming, err = r.sessions.EnsureWithTiming(ctx, request)
 	if err != nil && r.authority != nil {
 		return rootfssession.Mount{}, &ConsumedAttachError{Err: err}
 	}

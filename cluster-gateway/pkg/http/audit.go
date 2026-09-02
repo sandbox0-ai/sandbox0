@@ -243,7 +243,7 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 }
 
 func bindSandboxForkIdempotencyOperation(c *gin.Context) {
-	if c == nil || c.Request.Method != http.MethodPost || c.FullPath() != "/api/v1/sandboxes/:id/fork" {
+	if c == nil || c.Request == nil || c.Request.Method != http.MethodPost || c.FullPath() != "/api/v1/sandboxes/:id/fork" {
 		return
 	}
 	authCtx := gatewayauthn.FromContext(c.Request.Context())

@@ -17,6 +17,7 @@ import (
 type recordingSandboxPauser struct {
 	sandboxIDs []string
 	err        error
+	response   *service.PauseSandboxResponse
 }
 
 func (r *recordingSandboxPauser) PauseSandboxAndWait(_ context.Context, sandboxID string) (*service.PauseSandboxResponse, error) {
@@ -24,7 +25,22 @@ func (r *recordingSandboxPauser) PauseSandboxAndWait(_ context.Context, sandboxI
 	if r.err != nil {
 		return nil, r.err
 	}
+	if r.response != nil {
+		return r.response, nil
+	}
 	return &service.PauseSandboxResponse{SandboxID: sandboxID, Paused: true, Status: managerapi.SandboxStatusPaused}, nil
+}
+
+func TestPauseReturnsAcceptedWhileCheckpointIsPending(t *testing.T) {
+	pauser := &recordingSandboxPauser{response: &service.PauseSandboxResponse{
+		SandboxID: "sandbox-1", Paused: false, Status: managerapi.SandboxStatusStarting,
+	}}
+	server, pauseContext, pauseRecorder := newSandboxLifecycleHandlerFixture(t, pauser, nil, http.MethodPost)
+
+	server.pauseSandbox(pauseContext)
+	if pauseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("pause status=%d, want %d body=%s", pauseRecorder.Code, http.StatusAccepted, pauseRecorder.Body.String())
+	}
 }
 
 type recordingSandboxResumer struct {

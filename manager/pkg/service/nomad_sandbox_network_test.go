@@ -234,6 +234,35 @@ func TestNomadSandboxNetworkPolicyServiceActiveUpdateSurvivesResponseLossAndRest
 	}
 }
 
+func TestNomadSandboxNetworkPolicyServiceTreatsEquivalentInheritedPolicyAsNoOp(t *testing.T) {
+	base := nomadNetworkPolicyTestStore(sandboxstore.SandboxDesiredStateActive)
+	record := base.records["sandbox-a"]
+	record.TemplateSpec.Network = &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	record.Config.Network = nil
+	store := &nomadNetworkMutationTestStore{memorySandboxStore: base}
+	preparer := &nomadNetworkPreparerTest{err: errors.New("must not dispatch")}
+	service, err := NewNomadSandboxNetworkPolicyService(
+		store, networkpolicy.NewNetworkPolicyService(zap.NewNop()), preparer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, currentAnnotation, _, err := service.buildStoredPolicy(context.Background(), record, record.Config.Network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.runtimeSlots[record.ID] = activeNomadNetworkTestSlot(record, currentAnnotation)
+
+	updated, err := service.UpdateNetworkPolicy(context.Background(), record.ID,
+		&v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Mode != v1alpha1.NetworkModeAllowAll || store.mutation != nil || len(preparer.requests) != 0 {
+		t.Fatalf("update=%+v mutation=%+v prepares=%d", updated, store.mutation, len(preparer.requests))
+	}
+}
+
 func TestNomadSandboxNetworkPolicyServiceRejectsMismatchedAppliedToken(t *testing.T) {
 	base := nomadNetworkPolicyTestStore(sandboxstore.SandboxDesiredStateActive)
 	store := &nomadNetworkMutationTestStore{memorySandboxStore: base}

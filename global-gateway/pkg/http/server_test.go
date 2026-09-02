@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,8 +13,11 @@ import (
 	"github.com/gorilla/websocket"
 	memcachepkg "github.com/sandbox0-ai/sandbox0/global-gateway/pkg/memcache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -24,6 +28,18 @@ type stubRegionDirectory struct {
 	region *tenantdir.Region
 	err    error
 	calls  int
+}
+
+type stubTeamDirectory struct {
+	team *identity.Team
+	err  error
+}
+
+func (s *stubTeamDirectory) GetTeamByID(_ context.Context, _ string) (*identity.Team, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.team, nil
 }
 
 func (s *stubRegionDirectory) GetRegion(_ context.Context, _ string) (*tenantdir.Region, error) {
@@ -212,7 +228,35 @@ func TestGlobalGatewayNoRouteProxiesAPIKeyRequestsToRegion(t *testing.T) {
 	}
 }
 
-func TestGlobalGatewayNoRouteLeavesRequestsAsNotFoundWhenTheyAreNotRoutable(t *testing.T) {
+func TestGlobalGatewayNoRouteHidesUnknownAPIKeyRegion(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	server := &Server{
+		router:        gin.New(),
+		logger:        zap.NewNop(),
+		regionLookup:  &stubRegionDirectory{err: tenantdir.ErrRegionNotFound},
+		proxyTimeout:  time.Second,
+		regionProxies: make(map[string]*proxy.Router),
+	}
+	server.router.NoRoute(server.handleNoRoute)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/templates", nil)
+	request.Header.Set("Authorization", "Bearer s0_foo-bar_not-a-real-key")
+	recorder := httptest.NewRecorder()
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", recorder.Code, recorder.Body.String())
+	}
+	var body spec.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Success || body.Error == nil || body.Error.Code != spec.CodeUnauthorized {
+		t.Fatalf("unexpected response: %+v", body)
+	}
+}
+
+func TestGlobalGatewayNoRouteRejectsCredentialsForTheWrongRegionalRoute(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		method        string
@@ -224,11 +268,13 @@ func TestGlobalGatewayNoRouteLeavesRequestsAsNotFoundWhenTheyAreNotRoutable(t *t
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			gin.SetMode(gin.ReleaseMode)
+			jwtIssuer := authn.NewIssuer("test", "secret", time.Minute, time.Hour)
 			server := &Server{
-				router:        gin.New(),
-				logger:        zap.NewNop(),
-				proxyTimeout:  time.Second,
-				regionProxies: make(map[string]*proxy.Router),
+				router:         gin.New(),
+				logger:         zap.NewNop(),
+				authMiddleware: gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, zap.NewNop()),
+				proxyTimeout:   time.Second,
+				regionProxies:  make(map[string]*proxy.Router),
 			}
 			server.router.NoRoute(server.handleNoRoute)
 			gw := httptest.NewServer(server.router)
@@ -245,10 +291,85 @@ func TestGlobalGatewayNoRouteLeavesRequestsAsNotFoundWhenTheyAreNotRoutable(t *t
 			}
 			defer resp.Body.Close()
 
-			if resp.StatusCode != http.StatusNotFound {
-				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+			}
+			var body spec.Response
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.Success || body.Error == nil || body.Error.Code != spec.CodeUnauthorized {
+				t.Fatalf("unexpected response: %+v", body)
 			}
 		})
+	}
+}
+
+func TestGlobalGatewayNoRouteProxiesJWTRequestsUsingTeamHomeRegion(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	var gotAuth string
+	var gotTeamID string
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotTeamID = r.Header.Get(internalauth.TeamIDHeader)
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	homeRegionID := "aws-us-east-1"
+	teamID := "4fdd19de-515a-4e14-8515-c164d913f2ea"
+	issuer := authn.NewIssuer("global-gateway", "secret", time.Minute, time.Hour)
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{
+		TeamID:       teamID,
+		TeamRole:     "admin",
+		HomeRegionID: homeRegionID,
+	}})
+	if err != nil {
+		t.Fatalf("issue tokens: %v", err)
+	}
+	server := &Server{
+		router:         gin.New(),
+		logger:         zap.NewNop(),
+		authMiddleware: gatewaymiddleware.NewAuthMiddleware(nil, "secret", issuer, zap.NewNop()),
+		teamLookup:     &stubTeamDirectory{team: &identity.Team{ID: teamID, HomeRegionID: &homeRegionID}},
+		regionLookup:   &stubRegionDirectory{region: &tenantdir.Region{ID: homeRegionID, Enabled: true, RegionalGatewayURL: upstream.URL}},
+		proxyTimeout:   time.Second,
+		regionProxies:  make(map[string]*proxy.Router),
+	}
+	server.router.NoRoute(server.handleNoRoute)
+
+	for _, path := range []string{"/api/v1/templates", "/users/me/ssh-keys"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, teamID)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("path %s: status = %d, want %d body=%s", path, rec.Code, http.StatusNoContent, rec.Body.String())
+		}
+		if gotPath != path || gotTeamID != teamID || gotAuth != "Bearer "+tokens.AccessToken {
+			t.Fatalf("path %s: upstream got path=%q team=%q auth=%q", path, gotPath, gotTeamID, gotAuth)
+		}
+	}
+}
+
+func TestGlobalGatewayHealthUsesSuccessEnvelope(t *testing.T) {
+	server := &Server{}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	server.healthCheck(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	data, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil || (*data)["status"] != "healthy" || (*data)["timestamp"] == nil {
+		t.Fatalf("unexpected health response: data=%+v error=%+v", data, apiErr)
 	}
 }
 

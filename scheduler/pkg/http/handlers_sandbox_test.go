@@ -77,7 +77,7 @@ func TestSelectClusterForTemplateUsesExactMemoryOverride(t *testing.T) {
 	}}
 	server := routingServer(tpl, repo)
 	req := &apispec.ClaimRequest{
-		Template: stringPointer("tmpl-a"),
+		Template: "tmpl-a",
 		Config: &apispec.SandboxConfig{
 			Resources: &apispec.SandboxResourceConfig{Memory: &memory},
 		},
@@ -101,7 +101,7 @@ func TestSelectClusterForTemplateRejectsInvalidOverrideBeforeCapacityQuery(t *te
 	repo := &fakeCapacityRepository{}
 	server := routingServer(tpl, repo)
 	_, _, _, err := server.selectClusterForTemplate(routingContext(), &apispec.ClaimRequest{
-		Template: stringPointer("tmpl-a"),
+		Template: "tmpl-a",
 		Config: &apispec.SandboxConfig{
 			Resources: &apispec.SandboxResourceConfig{Memory: &empty},
 		},
@@ -281,5 +281,3 @@ func authenticatedClaimRouter(server *Server) *gin.Engine {
 	router.POST("/api/v1/sandboxes", server.createSandbox)
 	return router
 }
-
-func stringPointer(value string) *string { return &value }

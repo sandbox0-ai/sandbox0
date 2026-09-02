@@ -50,6 +50,47 @@ func (r *Repository) ValidateRefreshToken(ctx context.Context, tokenHash string)
 	return &token, nil
 }
 
+// RotateRefreshToken atomically revokes a live refresh token and stores its replacement.
+// Only one concurrent caller can successfully consume a given token hash.
+func (r *Repository) RotateRefreshToken(ctx context.Context, tokenHash string, replacement *RefreshToken) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin refresh token rotation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var userID string
+	err = tx.QueryRow(ctx, `
+		UPDATE refresh_tokens
+		SET revoked = true
+		WHERE token_hash = $1 AND revoked = false AND expires_at > NOW()
+		RETURNING user_id
+	`, tokenHash).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTokenRevoked
+		}
+		return fmt.Errorf("consume refresh token: %w", err)
+	}
+	if replacement == nil || userID != replacement.UserID {
+		return ErrTokenNotFound
+	}
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`, replacement.UserID, replacement.TokenHash, replacement.ExpiresAt,
+	).Scan(&replacement.ID, &replacement.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert replacement refresh token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit refresh token rotation: %w", err)
+	}
+	return nil
+}
+
 // RevokeRefreshToken revokes a refresh token.
 func (r *Repository) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
 	result, err := r.pool.Exec(ctx, `

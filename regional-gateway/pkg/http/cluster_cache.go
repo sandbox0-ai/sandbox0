@@ -240,7 +240,7 @@ func ensureAuditCorrelation(c *gin.Context, authCtx *authn.AuthContext) {
 }
 
 func sandboxForkIdempotencyOperationID(c *gin.Context, authCtx *authn.AuthContext) string {
-	if c == nil || authCtx == nil || c.Request.Method != http.MethodPost {
+	if c == nil || authCtx == nil || c.Request == nil || c.Request.Method != http.MethodPost {
 		return ""
 	}
 	const prefix = "/api/v1/sandboxes/"

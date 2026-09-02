@@ -103,7 +103,7 @@ func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
 	router.Use(httpobs.GinMiddleware(obsProvider.HTTPServerConfig(nil)))
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(logger))
-	router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
+	router.Use(gatewaymiddleware.MarkLongLivedRequests())
 
 	server := &Server{
 		router:                router,

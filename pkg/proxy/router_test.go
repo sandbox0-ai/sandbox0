@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
 
@@ -40,6 +42,13 @@ func TestRouterProxyToTargetTimesOutByDefault(t *testing.T) {
 
 	if resp.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusGatewayTimeout)
+	}
+	var body spec.Response
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode timeout response: %v", err)
+	}
+	if body.Success || body.Error == nil || body.Error.Code != spec.CodeUnavailable {
+		t.Fatalf("unexpected timeout response: %+v", body)
 	}
 }
 

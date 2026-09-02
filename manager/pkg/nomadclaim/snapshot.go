@@ -15,7 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 )
 
-const defaultNomadRunningSnapshotRecoveryTimeout = 10 * time.Minute
+const defaultNomadRunningSnapshotRecoveryTimeout = 30 * time.Second
 
 type nomadRunningRootFSCaptureAbortStore interface {
 	AbortStaleNomadRunningRootFSCapture(context.Context, string, string, string) (bool, error)

@@ -4,6 +4,11 @@
 
 FROM sandbox0ai/otemplates:default-v0.2.0
 
+# Docker BuildKit supplies TARGETARCH. The default keeps direct local builds
+# deterministic on the production amd64 architecture.
+ARG TARGETARCH=amd64
+ARG TTYD_VERSION=1.7.7
+
 # Keep Playwright CLI and its Agent Skill without bundling a browser runtime.
 ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_AUDIT=false \
@@ -28,6 +33,18 @@ RUN apt-get update \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' \
   && rm -rf /var/lib/apt/lists/*
 
+# ttyd is included as an explicitly launched diagnostic/compatibility surface.
+# procd sessions remain the durable terminal authority for agent platforms.
+RUN case "${TARGETARCH}" in \
+      amd64) ttyd_asset=x86_64; ttyd_sha=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55 ;; \
+      arm64) ttyd_asset=aarch64; ttyd_sha=b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165 ;; \
+      *) echo "Unsupported ttyd architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+  && curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_asset}" -o /usr/local/bin/ttyd \
+  && echo "${ttyd_sha}  /usr/local/bin/ttyd" | sha256sum -c - \
+  && chmod 0755 /usr/local/bin/ttyd \
+  && ttyd --version
+
 WORKDIR /opt/coding-agents
 
 COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/package-lock.json ./
@@ -35,7 +52,7 @@ COPY manager/procd/coding-agents/THIRD_PARTY.md ./
 
 RUN npm ci --omit=dev \
   && for agent in codex claude opencode pi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
-  && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/cli-client/skill/SKILL.md \
+  && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/skills/playwright-cli/SKILL.md \
   && codex --version \
   && claude --version \
   && opencode --version \

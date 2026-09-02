@@ -2040,6 +2040,13 @@ paths:
       x-upstream-path: /api/v1/sandboxes/{id}/fork
       parameters:
         - $ref: "#/components/parameters/SandboxID"
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: Optional key for retrying the fork without creating a duplicate child sandbox.
       requestBody:
         required: false
         content:

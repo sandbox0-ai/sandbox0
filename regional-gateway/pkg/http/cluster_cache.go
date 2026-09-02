@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/operationid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -223,7 +224,9 @@ func ensureAuditCorrelation(c *gin.Context, authCtx *authn.AuthContext) {
 	if c == nil || authCtx == nil {
 		return
 	}
-	if authCtx.OperationID == "" {
+	if operationID := sandboxForkIdempotencyOperationID(c, authCtx); operationID != "" {
+		authCtx.OperationID = operationID
+	} else if authCtx.OperationID == "" {
 		authCtx.OperationID = uuid.NewString()
 	}
 	requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
@@ -234,4 +237,27 @@ func ensureAuditCorrelation(c *gin.Context, authCtx *authn.AuthContext) {
 		requestID = authCtx.OperationID
 	}
 	authCtx.RequestID = requestID
+}
+
+func sandboxForkIdempotencyOperationID(c *gin.Context, authCtx *authn.AuthContext) string {
+	if c == nil || authCtx == nil || c.Request.Method != http.MethodPost {
+		return ""
+	}
+	const prefix = "/api/v1/sandboxes/"
+	const suffix = "/fork"
+	path := c.Request.URL.Path
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	sandboxID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if sandboxID == "" || strings.Contains(sandboxID, "/") {
+		return ""
+	}
+	return operationid.FromIdempotencyKey(
+		"sandbox.fork",
+		authCtx.TeamID,
+		authCtx.UserID,
+		sandboxID,
+		c.GetHeader("Idempotency-Key"),
+	)
 }

@@ -3499,6 +3499,12 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
 }
 
+// PostApiV1SandboxesIdForkParams defines parameters for PostApiV1SandboxesIdFork.
+type PostApiV1SandboxesIdForkParams struct {
+	// IdempotencyKey Optional key for retrying the fork without creating a duplicate child sandbox.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // GetSandboxRuntimeMetricsParams defines parameters for GetSandboxRuntimeMetrics.
 type GetSandboxRuntimeMetricsParams struct {
 	// StartTime Query observations at or after this RFC3339 timestamp. Defaults to one hour before end_time.

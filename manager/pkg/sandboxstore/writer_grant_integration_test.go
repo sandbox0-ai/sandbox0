@@ -493,10 +493,6 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	store := NewPGSandboxStore(pool)
 	record, filesystem, generation, registration := sandboxRuntimeClaimReadySlotFixture(t, store, "failed-writer")
 	record.RuntimeGeneration = 1
-	_, err := pool.Exec(ctx, `
-		UPDATE manager.sandboxes SET runtime_generation = $2 WHERE sandbox_id = $1
-	`, record.ID, record.RuntimeGeneration)
-	require.NoError(t, err)
 
 	acquire := sandboxRuntimeSlotAcquireRequest(record, filesystem, generation, registration, "failed-writer")
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
@@ -589,6 +585,7 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	stored, err := store.GetSandbox(ctx, record.ID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStateActive, stored.DesiredState)
+	require.Zero(t, stored.RuntimeGeneration)
 	require.Empty(t, stored.RuntimeNamespace)
 	require.Empty(t, stored.RuntimeID)
 	var claimPhase, lifecyclePhase string

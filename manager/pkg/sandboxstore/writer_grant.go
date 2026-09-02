@@ -1684,7 +1684,8 @@ func lockRootFSWriterCrashRuntime(
 		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration
 	failedClaimCandidate := !deletedAt.Valid &&
 		(desiredState == SandboxDesiredStateActive || desiredState == SandboxDesiredStateTerminating) &&
-		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration &&
+		currentRuntimeNamespace == "" && currentRuntimeID == "" &&
+		(runtimeGeneration == lifecycle.FromGeneration || runtimeGeneration == 0 && lifecycle.FromGeneration == 1) &&
 		lifecycle.FromRuntimeNamespace == record.RuntimeNamespace && lifecycle.FromRuntimeID == record.RuntimeIncarnationID
 	if failedClaimCandidate {
 		if err := db.QueryRow(ctx, `

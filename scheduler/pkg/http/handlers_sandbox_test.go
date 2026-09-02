@@ -281,5 +281,3 @@ func authenticatedClaimRouter(server *Server) *gin.Engine {
 	router.POST("/api/v1/sandboxes", server.createSandbox)
 	return router
 }
-
-func stringPointer(value string) *string { return &value }

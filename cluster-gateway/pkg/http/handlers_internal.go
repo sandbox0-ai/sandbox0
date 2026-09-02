@@ -66,6 +66,20 @@ func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *intern
 	}
 	if claims != nil {
 		opts.Audit = claims.Audit
+	} else if authCtx != nil && strings.TrimSpace(authCtx.OperationID) != "" {
+		principal := authCtx.Principal()
+		opts.Audit = &internalauth.AuditContext{
+			Actor: internalauth.AuditActor{
+				Kind:       string(principal.Kind),
+				ID:         principal.ID,
+				UserID:     principal.UserID,
+				APIKeyID:   principal.APIKeyID,
+				AuthMethod: string(principal.AuthMethod),
+			},
+			OperationID: authCtx.OperationID,
+			RequestID:   authCtx.RequestID,
+			Origin:      internalauth.ServiceClusterGateway,
+		}
 	}
 	if claims != nil && claims.IsSystem {
 		return s.internalAuthGen.GenerateSystem("manager", opts)

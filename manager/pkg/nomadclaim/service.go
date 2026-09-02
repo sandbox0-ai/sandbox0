@@ -503,6 +503,10 @@ func (s *Service) resumeNomadSandbox(
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
 		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
+	// Runtime generation zero is reserved for a paused fork target that has
+	// never owned a runtime. Its RootFS contains the source sandbox's procd
+	// session identity, which must be cleared exactly once on first resume.
+	plan.assignment.ResetCopiedSessionState = candidate.Record.RuntimeGeneration == 0
 	if err := plan.assignment.Validate(); err != nil {
 		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))

@@ -768,13 +768,16 @@ func (p *Planner) identities(operationID string) derivedIdentities {
 
 func generationDescriptor(filesystem *sandboxstore.RootFSFilesystem, generation *sandboxstore.RootFSGeneration) (*rootfshandoff.GenerationDescriptor, error) {
 	if filesystem == nil || generation == nil || generation.ID != filesystem.HeadGenerationID ||
-		generation.FilesystemID != filesystem.ID || generation.BaseArtifactDigest != filesystem.BaseArtifactDigest ||
+		generation.BaseArtifactDigest != filesystem.BaseArtifactDigest ||
 		generation.FormatGeneration != filesystem.FormatGeneration {
 		return nil, errors.New("RootFS generation does not match filesystem head")
 	}
+	// A paused fork initially shares its source's immutable generation row. The
+	// filesystem head is the authoritative attachment, so rebind the handoff
+	// descriptor to the child filesystem before issuing its first writer.
 	descriptor := &rootfshandoff.GenerationDescriptor{
 		Version:      rootfshandoff.GenerationDescriptorVersion,
-		GenerationID: generation.ID, FilesystemID: generation.FilesystemID,
+		GenerationID: generation.ID, FilesystemID: filesystem.ID,
 		SourceOCIDigest: generation.SourceOCIDigest, BaseArtifactDigest: generation.BaseArtifactDigest,
 		BaseBlockRoot: generation.BaseBlockRoot, CurrentBlockHead: generation.CurrentBlockHead,
 		WriterEpoch: generation.WriterEpoch, FormatGeneration: generation.FormatGeneration,

@@ -606,6 +606,9 @@ func validateCompletedRuntimeResourceLease(
 
 func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string) (string, string, error) {
 	var filesystemID, generationID string
+	// A never-run fork points at its source's immutable generation until the
+	// child publishes its first generation, so the head need not be owned by
+	// the child's filesystem yet.
 	err := tx.QueryRow(ctx, `
 		SELECT filesystem.filesystem_id, filesystem.head_generation_id
 		FROM manager.sandbox_rootfs_bindings AS binding
@@ -613,7 +616,6 @@ func lockNomadSandboxResumeHead(ctx context.Context, tx pgx.Tx, sandboxID string
 			ON filesystem.filesystem_id = binding.filesystem_id
 		JOIN manager.rootfs_generations AS generation
 			ON generation.generation_id = filesystem.head_generation_id
-			AND generation.filesystem_id = filesystem.filesystem_id
 		WHERE binding.sandbox_id = $1
 		FOR SHARE OF binding, filesystem, generation
 	`, sandboxID).Scan(&filesystemID, &generationID)

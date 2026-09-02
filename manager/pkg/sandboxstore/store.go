@@ -734,6 +734,16 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID, RuntimeSlotStateTerminal); err != nil {
 		return fmt.Errorf("detach terminal runtime slot storage: %w", err)
 	}
+	// A completed running fork retains the target checkpoint for idempotent
+	// retries while the target exists. Once the target is deleted, its durable
+	// sandbox row is enough to reject a replay and the fork record must release
+	// its RESTRICT references before the target filesystem can be collected.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM manager.rootfs_running_forks
+		WHERE target_sandbox_id = $1
+	`, sandboxID); err != nil {
+		return fmt.Errorf("delete completed running fork target metadata: %w", err)
+	}
 	filesystemRows, err := tx.Query(ctx, `
 		SELECT binding.filesystem_id
 		FROM manager.sandbox_rootfs_bindings AS binding

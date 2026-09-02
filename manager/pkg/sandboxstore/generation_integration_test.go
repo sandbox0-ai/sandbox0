@@ -534,6 +534,53 @@ func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.
 	require.Equal(t, checkpoint.ID, resume.SourceGenerationID)
 }
 
+func TestMarkSandboxDeletedReleasesCompletedRunningForkTargetIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-delete-target")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-delete-target")
+	operationID := "nomad-running-fork-delete-target-operation"
+	request := &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	}
+	candidate, err := fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, request)
+	require.NoError(t, err)
+	forkRequest, _ := nomadRunningForkCheckpointRequest(
+		t, fixture, source, target, candidate, operationID,
+	)
+	_, err = fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, forkRequest)
+	require.NoError(t, err)
+
+	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
+		fixture.ctx, target.ID, "delete completed running fork target",
+	)
+	require.NoError(t, err)
+	require.False(t, cleanup.PhysicalStateRequired)
+	require.Empty(t, cleanup.SlotID)
+	require.NoError(t, fixture.store.MarkSandboxDeleted(fixture.ctx, target.ID, time.Now().UTC()))
+	require.NoError(t, fixture.store.MarkSandboxRuntimeClaimCleaned(
+		fixture.ctx, target.ID, NomadSandboxForkClaimOperationID(operationID, target.ID),
+	))
+
+	var forkRows, generationRows, filesystemRows int
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM manager.rootfs_running_forks WHERE operation_id = $1),
+			(SELECT COUNT(*) FROM manager.rootfs_generations WHERE generation_id = $2),
+			(SELECT COUNT(*) FROM manager.rootfs_filesystems WHERE filesystem_id = $3)
+	`, operationID, candidate.TargetGenerationID, target.ID).Scan(
+		&forkRows, &generationRows, &filesystemRows,
+	))
+	require.Zero(t, forkRows)
+	require.Zero(t, generationRows)
+	require.Zero(t, filesystemRows)
+
+	_, err = fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, request)
+	require.ErrorIs(t, err, ErrNomadSandboxForkConflict,
+		"a deleted target sandbox must keep an idempotent replay from recreating it")
+}
+
 func TestRequestSandboxRuntimeClaimCleanupAbortsInboundNomadRunningForkIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "running-fork-target-cleanup")
 	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)

@@ -476,6 +476,9 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if !allowNewSlot {
 		return nil, fmt.Errorf("%w: ready sandbox claim has no runtime slot", ErrRuntimeSlotConflict)
 	}
+	// A never-run fork shares its source's immutable head until its first
+	// writer publishes a child generation. The globally unique generation ID
+	// still binds the exact current head without requiring filesystem ownership.
 	var sourceMarker int
 	if err := tx.QueryRow(ctx, `
 		SELECT 1
@@ -486,7 +489,6 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 			ON filesystem.filesystem_id = binding.filesystem_id
 		JOIN manager.rootfs_generations AS generation
 			ON generation.generation_id = filesystem.head_generation_id
-			AND generation.filesystem_id = filesystem.filesystem_id
 		WHERE sandbox.sandbox_id = $1
 			AND sandbox.deleted_at IS NULL
 			AND sandbox.desired_state IN ($4, $5)

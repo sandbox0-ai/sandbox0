@@ -1862,11 +1862,18 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 		}
 	}
 	var releaseErr error
-	if err := m.runtime.UnmountOverlay(current.MergedRoot, plannedRetire); err != nil {
+	// A planned retirement owned by this process must flush the mounted
+	// filesystem before it publishes a new durable head. After a process
+	// restart there is no live NBD userspace owner left to service syncfs on
+	// the crash-surviving mount; attempting that barrier returns EIO and keeps
+	// the node runtime in a permanent restart loop. The branch journal remains
+	// the recovery boundary in that case and is flushed again by Checkpoint.
+	requireFilesystemSync := plannedRetire && live != nil
+	if err := m.runtime.UnmountOverlay(current.MergedRoot, requireFilesystemSync); err != nil {
 		releaseErr = errors.Join(releaseErr, fmt.Errorf("unmount OverlayFS: %w", err))
 	}
 	if releaseErr == nil {
-		if err := m.runtime.UnmountXFS(current.XFSRoot, plannedRetire); err != nil {
+		if err := m.runtime.UnmountXFS(current.XFSRoot, requireFilesystemSync); err != nil {
 			releaseErr = errors.Join(releaseErr, fmt.Errorf("unmount XFS: %w", err))
 		}
 	}

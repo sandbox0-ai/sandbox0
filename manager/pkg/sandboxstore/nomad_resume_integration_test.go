@@ -256,6 +256,53 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.Equal(t, RuntimeSlotStateQuiescing, cleanup.SlotState)
 }
 
+func TestNomadSandboxResumeStartsNeverRunPausedForkIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "resume-fork-child")
+	terminalizeNomadPauseFixture(t, fixture)
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-resume-fork-child")
+	operationID := "nomad-resume-fork-child-operation"
+	_, err = fixture.store.ForkNomadPausedSandbox(fixture.ctx, &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	})
+	require.NoError(t, err)
+
+	targetFilesystem, err := fixture.store.GetRootFSFilesystem(fixture.ctx, target.ID)
+	require.NoError(t, err)
+	childFixture := *fixture
+	childFixture.sandboxID = target.ID
+	childFixture.filesystem = targetFilesystem
+	childFixture.writerEpoch = targetFilesystem.WriterEpoch
+	requested, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: target.ID, ExpectedTeamID: target.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), requested.RuntimeGeneration)
+	require.Equal(t, targetFilesystem.HeadGenerationID, requested.SourceGenerationID)
+
+	runtime := prepareNomadResumeRuntime(t, &childFixture, requested, "fork-child")
+	_, err = fixture.store.MarkRuntimeSlotCommandReady(fixture.ctx, &MarkRuntimeSlotCommandReadyRequest{
+		SlotID: runtime.claimed.ID, AllocationID: runtime.registration.AllocationID,
+		NodeUID: runtime.registration.NodeUID, NodeBootID: runtime.registration.NodeBootID,
+		OperationID: runtime.acquire.OperationID, ClaimID: runtime.acquire.ClaimID,
+		ProcdInstanceID: "procd-nomad-resume-fork-child", ProcdAddress: "http://192.0.2.12:49983",
+		CommandReadyDigest: bytes.Repeat([]byte{0xa5}, 32),
+	})
+	require.NoError(t, err)
+	completed, err := fixture.store.CompleteNomadSandboxResume(fixture.ctx, &CompleteNomadSandboxResumeRequest{
+		SandboxID: target.ID, OperationID: requested.OperationID, SlotID: runtime.claimed.ID,
+		AllocationID:        runtime.registration.AllocationID,
+		AllocationNamespace: runtime.registration.AllocationNamespace,
+		ResourceLeaseID:     runtime.claimed.ResourceLease.LeaseID,
+		ResourceLeaseDigest: runtime.claimed.ResourceLeaseDigest,
+	})
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateActive, completed.DesiredState)
+	require.Equal(t, int64(1), completed.RuntimeGeneration)
+}
+
 func TestNomadSandboxResumeFencesLateCommandReadyAfterAbortIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "resume-late-ready")
 	terminalizeNomadPauseFixture(t, fixture)

@@ -3,6 +3,7 @@ package objectstore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"strings"
 	"testing"
@@ -69,6 +70,61 @@ func TestEncryptedStorePlaintextRange(t *testing.T) {
 	}
 	if string(got) != "456789a" {
 		t.Fatalf("range = %q, want 456789a", got)
+	}
+}
+
+func TestEncryptedStoreRangeFetchesOnlyRequiredCiphertextFrames(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	recording := &recordingRangeStore{ContextConditionalStore: base.(ContextConditionalStore)}
+	store := Encrypting(recording, EncryptionConfig{
+		Enabled:      true,
+		KeyEncryptor: reversibleTestEncryptor{},
+		ChunkSize:    8,
+	})
+	plaintext := []byte("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	if err := store.Put("rootfs/pack", bytes.NewReader(plaintext)); err != nil {
+		t.Fatal(err)
+	}
+	recording.gets = nil
+
+	reader, err := store.Get("rootfs/pack", 33, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("read range: %v; close: %v", err, closeErr)
+	}
+	if string(got) != string(plaintext[33:38]) {
+		t.Fatalf("range = %q, want %q", got, plaintext[33:38])
+	}
+
+	rawReader, err := base.Get("rootfs/pack", 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(rawReader)
+	_ = rawReader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixBytes := int64(len(encryptedObjectMagic) + 4)
+	headerBytes := int64(binary.BigEndian.Uint32(raw[len(encryptedObjectMagic):prefixBytes]))
+	headerEnd := prefixBytes + headerBytes
+	frameBytes := int64(4 + 8 + 16)
+	want := []rangeReadCall{
+		{off: 0, limit: prefixBytes},
+		{off: prefixBytes, limit: headerBytes},
+		{off: headerEnd + 4*frameBytes, limit: frameBytes},
+	}
+	if len(recording.gets) != len(want) {
+		t.Fatalf("underlying reads = %+v, want %+v", recording.gets, want)
+	}
+	for i := range want {
+		if recording.gets[i] != want[i] {
+			t.Fatalf("underlying read %d = %+v, want %+v", i, recording.gets[i], want[i])
+		}
 	}
 }
 
@@ -224,6 +280,30 @@ func TestSupportsConditionalCreateFollowsStoreWrappers(t *testing.T) {
 }
 
 type objectStoreWithoutConditionalCreate struct{ Store }
+
+type rangeReadCall struct {
+	off   int64
+	limit int64
+}
+
+type recordingRangeStore struct {
+	ContextConditionalStore
+	gets []rangeReadCall
+}
+
+func (s *recordingRangeStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	s.gets = append(s.gets, rangeReadCall{off: off, limit: limit})
+	return s.ContextConditionalStore.Get(key, off, limit)
+}
+
+func (s *recordingRangeStore) GetContext(
+	ctx context.Context,
+	key string,
+	off, limit int64,
+) (io.ReadCloser, error) {
+	s.gets = append(s.gets, rangeReadCall{off: off, limit: limit})
+	return s.ContextConditionalStore.GetContext(ctx, key, off, limit)
+}
 
 type reversibleTestEncryptor struct{}
 

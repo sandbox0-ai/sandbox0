@@ -244,6 +244,13 @@ func (s *NomadSandboxNetworkPolicyService) updateActiveNetworkPolicy(
 		return nil, fmt.Errorf("%w: active Nomad network policy does not match the exact runtime slot",
 			ErrDataPlaneNotReady)
 	}
+	// Compare the effective policy and public credential-binding truth before
+	// comparing request-shape JSON. An explicit allow-all request is a no-op
+	// when the inherited policy already applies the same exact bytes.
+	if protocol.NetworkPolicyDigest(desiredPolicy) == currentDigest &&
+		currentBindings.Digest == desiredBindingDigest {
+		return sandboxNetworkPolicyFromState(effective), nil
+	}
 	desiredRequest := sanitizedNetworkPolicyForPersistence(policy)
 	currentRequestPayload, err := json.Marshal(record.Config.Network)
 	if err != nil {

@@ -49,6 +49,38 @@ func TestNomadBlockCOWTemplateTerminalCutoverIntegration(t *testing.T) {
 	require.Equal(t, "publishing", stage)
 }
 
+func TestTemplateMigrationRetiresInfraOperatorDescriptionsIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, schema := newTemplateMigrationIntegrationPool(t)
+	applyTemplateBaselineOnly(t, ctx, pool, schema)
+
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	_, err := pool.Exec(ctx, `
+		INSERT INTO scheduler_templates (template_id, scope, team_id, spec)
+		VALUES
+			('default', 'public', '', jsonb_build_object(
+				'description', 'Builtin template default installed by infra-operator.',
+				'mainContainer', jsonb_build_object('image', 'registry.invalid/default@' || $1))),
+			('custom', 'team', 'team-1', jsonb_build_object(
+				'description', 'Custom template installed by infra-operator.',
+				'mainContainer', jsonb_build_object('image', 'registry.invalid/custom@' || $1)))
+	`, digest)
+	require.NoError(t, err)
+	require.NoError(t, migrateTemplateSchema(ctx, pool, schema))
+
+	var publicDescription, teamDescription string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT spec->>'description' FROM scheduler_templates
+		WHERE scope = 'public' AND team_id = '' AND template_id = 'default'
+	`).Scan(&publicDescription))
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT spec->>'description' FROM scheduler_templates
+		WHERE scope = 'team' AND team_id = 'team-1' AND template_id = 'custom'
+	`).Scan(&teamDescription))
+	require.Equal(t, "Builtin template default provided by Sandbox0.", publicDescription)
+	require.Equal(t, "Custom template installed by infra-operator.", teamDescription)
+}
+
 func TestNomadBlockCOWTemplateTerminalCutoverRejectsMutableTemplateImageIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool, schema := newTemplateMigrationIntegrationPool(t)

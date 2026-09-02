@@ -302,9 +302,9 @@ func (s *PGSandboxStore) ContinueNomadRunningRootFSCapture(
 	return candidate, nil
 }
 
-// AbortStaleNomadRunningRootFSCapture releases a pending capture only after
-// its exact live writer identity has changed. Publication and abort serialize
-// on the source row, so a committed checkpoint always wins the race.
+// AbortStaleNomadRunningRootFSCapture releases a capture after the controller's
+// recovery deadline. Publication and abort serialize on the source row, so a
+// committed checkpoint wins while every later callback observes the abort.
 func (s *PGSandboxStore) AbortStaleNomadRunningRootFSCapture(
 	ctx context.Context,
 	operationID, sourceSandboxID, reason string,
@@ -323,8 +323,7 @@ func (s *PGSandboxStore) AbortStaleNomadRunningRootFSCapture(
 		return false, fmt.Errorf("begin stale Nomad running capture abort tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	source, err := lockNomadSandboxClaimRecord(ctx, tx, sourceSandboxID)
-	if err != nil {
+	if _, err := lockNomadSandboxClaimRecord(ctx, tx, sourceSandboxID); err != nil {
 		return false, err
 	}
 	intent, err := getNomadTemplateCaptureIntentForUpdate(ctx, tx, operationID)
@@ -352,17 +351,6 @@ func (s *PGSandboxStore) AbortStaleNomadRunningRootFSCapture(
 		lifecycle.TargetGenerationID != intent.CheckpointGeneration ||
 		!bytes.Equal(lifecycle.TargetRecordDigest, intent.RequestDigest) {
 		return false, fmt.Errorf("%w: pending capture lifecycle changed", ErrNomadTemplateCaptureConflict)
-	}
-	writer, writerErr := lockExactNomadLiveWriter(ctx, tx, source)
-	if writerErr == nil && lifecycle.FromGeneration == source.RuntimeGeneration &&
-		lifecycle.FromRuntimeNamespace == source.RuntimeNamespace && lifecycle.FromRuntimeID == source.RuntimeID &&
-		writer.filesystem.ID == intent.SourceFilesystemID && writer.generation.ID == intent.SourceGenerationID &&
-		writer.grant.ID == intent.SourceGrantID && writer.grant.WriterEpoch == intent.SourceWriterEpoch &&
-		writer.grant.BindingVersion == intent.BindingVersion && bytes.Equal(writer.grant.BindingDigest, intent.BindingDigest) {
-		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf("commit recoverable Nomad running capture check: %w", err)
-		}
-		return false, nil
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE manager.sandbox_lifecycle_txns

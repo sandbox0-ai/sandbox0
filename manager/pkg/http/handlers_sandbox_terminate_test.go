@@ -28,8 +28,8 @@ func TestTerminateSandboxUsesRuntime(t *testing.T) {
 
 	server.terminateSandbox(ctx)
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusAccepted, recorder.Body.String())
 	}
 	if len(terminator.sandboxIDs) != 1 || terminator.sandboxIDs[0] != "sandbox-1" {
 		t.Fatalf("termination calls = %v", terminator.sandboxIDs)

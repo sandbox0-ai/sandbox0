@@ -63,6 +63,30 @@ func (m *mockAuthRepository) ValidateRefreshToken(_ context.Context, tokenHash s
 	return token, nil
 }
 
+func (m *mockAuthRepository) RotateRefreshToken(_ context.Context, tokenHash string, replacement *identity.RefreshToken) error {
+	token, ok := m.refreshTokens[tokenHash]
+	if !ok {
+		return identity.ErrTokenNotFound
+	}
+	if token.Revoked {
+		return identity.ErrTokenRevoked
+	}
+	if time.Now().After(token.ExpiresAt) {
+		return identity.ErrTokenExpired
+	}
+	if replacement == nil || replacement.UserID != token.UserID {
+		return identity.ErrTokenNotFound
+	}
+	if _, exists := m.refreshTokens[replacement.TokenHash]; exists {
+		return errors.New("duplicate refresh token hash")
+	}
+	token.Revoked = true
+	copyToken := *replacement
+	m.refreshTokens[replacement.TokenHash] = &copyToken
+	m.createCalls++
+	return nil
+}
+
 func (m *mockAuthRepository) RevokeAllUserRefreshTokens(_ context.Context, userID string) error {
 	for _, token := range m.refreshTokens {
 		if token.UserID == userID {
@@ -216,6 +240,14 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 	if repo.createCalls != 2 {
 		t.Fatalf("expected 2 create calls (seed + refresh), got %d", repo.createCalls)
+	}
+
+	replayRec := httptest.NewRecorder()
+	replayReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(bodyBytes))
+	replayReq.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected replayed refresh token to return 401, got %d body=%s", replayRec.Code, replayRec.Body.String())
 	}
 }
 

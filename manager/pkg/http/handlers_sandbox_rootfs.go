@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
@@ -172,6 +173,13 @@ func (s *Server) rebaseSandboxRootFS(c *gin.Context) {
 	var req service.RebaseSandboxRootFSRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	req.TargetBaseArtifactDigest = strings.TrimSpace(req.TargetBaseArtifactDigest)
+	parsedDigest, err := digest.Parse(req.TargetBaseArtifactDigest)
+	if err != nil || parsedDigest.Algorithm() != digest.SHA256 || parsedDigest.String() != req.TargetBaseArtifactDigest {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
+			"target_base_artifact_digest must be a canonical sha256 digest")
 		return
 	}
 	req.OperationID = sandboxClaimOperationID(claims)

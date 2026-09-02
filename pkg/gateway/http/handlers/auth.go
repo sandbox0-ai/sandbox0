@@ -50,6 +50,7 @@ func WithCreateHomeRegionRequiredForAuth(regionLookup TeamRegionLookup) AuthHand
 type authRepository interface {
 	CreateRefreshToken(ctx context.Context, token *identity.RefreshToken) error
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (*identity.RefreshToken, error)
+	RotateRefreshToken(ctx context.Context, tokenHash string, replacement *identity.RefreshToken) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	CreateWebLoginCode(ctx context.Context, code *identity.WebLoginCode) error
 	ConsumeWebLoginCode(ctx context.Context, codeHash, returnURL string) (*identity.WebLoginCode, error)
@@ -292,10 +293,31 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Issue new tokens
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamGrants)
+	// Issue and atomically rotate the refresh token. Issuing first is safe because
+	// an unpersisted replacement cannot be used if the rotation loses a race.
+	tokens, err := h.jwtIssuer.IssueTokenPair(
+		user.ID,
+		user.Email,
+		user.Name,
+		user.IsAdmin,
+		teamGrants,
+	)
 	if err != nil {
 		h.logger.Error("Failed to issue tokens", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
+		return
+	}
+	err = h.repo.RotateRefreshToken(c.Request.Context(), tokenHash, &identity.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: authn.HashRefreshToken(tokens.RefreshToken),
+		ExpiresAt: tokens.RefreshExpiresAt,
+	})
+	if err != nil {
+		if errors.Is(err, identity.ErrTokenNotFound) || errors.Is(err, identity.ErrTokenRevoked) || errors.Is(err, identity.ErrTokenExpired) {
+			spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "invalid refresh token")
+			return
+		}
+		h.logger.Error("Failed to rotate refresh token", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
 		return
 	}

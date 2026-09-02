@@ -43,10 +43,11 @@ Use sandbox rootfs snapshots when the default writable filesystem is the state y
 ### Rootfs Path Semantics
 
 Snapshots, snapshot claims, restore, and fork use the same block-COW
-persistence boundary as pause and resume. Ordinary writable RootFS paths,
-including `/tmp`, `/var/tmp`, and workspace directories, are captured. Virtual
-runtime mounts such as `/proc`, `/dev`, and `/sys` are recreated for each
-runtime generation and are not snapshot content.
+persistence boundary as pause and resume. Ordinary writable RootFS paths such
+as `/var/tmp` and workspace directories are captured. `/tmp`, virtual runtime
+mounts such as `/proc`, `/dev`, and `/sys`, and template-defined
+`ephemeralMounts` are recreated for each runtime generation and are not
+snapshot content.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.

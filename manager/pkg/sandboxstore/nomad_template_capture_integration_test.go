@@ -262,7 +262,7 @@ func TestNomadRunningRootFSSnapshotExpirationReleasesCaptureIntegration(t *testi
 	require.Equal(t, 1, deleted)
 }
 
-func TestAbortStaleNomadRunningRootFSCaptureRequiresLostWriterIntegration(t *testing.T) {
+func TestAbortStaleNomadRunningRootFSCaptureFencesLateWriterIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "running-snapshot-abort")
 	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
 	require.NoError(t, err)
@@ -276,18 +276,7 @@ func TestAbortStaleNomadRunningRootFSCaptureRequiresLostWriterIntegration(t *tes
 	publication := nomadTemplateCaptureCheckpointRequest(t, fixture, source, candidate)
 
 	aborted, err := fixture.store.AbortStaleNomadRunningRootFSCapture(
-		fixture.ctx, request.OperationID, source.ID, "lost exact writer",
-	)
-	require.NoError(t, err)
-	require.False(t, aborted, "a still-bound exact writer remains recoverable")
-
-	_, err = fixture.pool.Exec(fixture.ctx, `
-		UPDATE manager.sandboxes SET runtime_id = 'replacement-allocation'
-		WHERE sandbox_id = $1
-	`, source.ID)
-	require.NoError(t, err)
-	aborted, err = fixture.store.AbortStaleNomadRunningRootFSCapture(
-		fixture.ctx, request.OperationID, source.ID, "lost exact writer",
+		fixture.ctx, request.OperationID, source.ID, "recovery deadline exceeded",
 	)
 	require.NoError(t, err)
 	require.True(t, aborted)

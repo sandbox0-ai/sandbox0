@@ -520,6 +520,32 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 	}
 }
 
+func TestPlannerRebindsSharedForkHeadToChildFilesystem(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.store.filesystem.ID = "filesystem-child"
+	fixture.store.filesystem.SourceFilesystemID = fixture.store.generation.FilesystemID
+
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if result.Stage.Generation == nil ||
+		result.Stage.Generation.GenerationID != fixture.store.generation.ID ||
+		result.Stage.Generation.FilesystemID != fixture.store.filesystem.ID {
+		t.Fatalf("fork generation descriptor = %+v", result.Stage.Generation)
+	}
+	if err := result.Stage.Validate(); err != nil {
+		t.Fatalf("fork stage is invalid: %v", err)
+	}
+	fixture.store.mu.Lock()
+	defer fixture.store.mu.Unlock()
+	if len(fixture.store.issues) != 1 ||
+		fixture.store.issues[0].ExpectedFilesystemID != fixture.store.filesystem.ID ||
+		fixture.store.issues[0].InitialGenerationID != fixture.store.generation.ID {
+		t.Fatalf("writer issue requests = %+v", fixture.store.issues)
+	}
+}
+
 func TestPlannerAdvancesPastTerminalWriterEpoch(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	fixture.store.filesystem.WriterEpoch = fixture.store.generation.WriterEpoch + 1

@@ -41,6 +41,11 @@ import (
 
 var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pending")
 
+type immediateSandboxCleanupStore interface {
+	MarkSandboxDeleted(context.Context, string, time.Time) error
+	MarkSandboxRuntimeClaimCleaned(context.Context, string, string) error
+}
+
 // Store is the durable sandbox and block-COW product boundary needed before a
 // slot can receive writer authority.
 type Store interface {
@@ -219,10 +224,25 @@ func (s *Service) TerminateSandbox(ctx context.Context, sandboxID string) error 
 	if sandboxID == "" || len(sandboxID) > 512 {
 		return fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
 	}
-	if _, err := s.store.RequestSandboxRuntimeClaimCleanup(
+	candidate, err := s.store.RequestSandboxRuntimeClaimCleanup(
 		ctx, sandboxID, "sandbox deletion requested",
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("request Nomad sandbox cleanup: %w", err)
+	}
+	// Paused fork targets have never owned physical runtime state. Complete
+	// their logical deletion immediately instead of waiting for a background
+	// scan that exists primarily to prove allocation and writer absence.
+	if candidate != nil && !candidate.PhysicalStateRequired && candidate.SlotID == "" {
+		if cleaner, ok := s.store.(immediateSandboxCleanupStore); ok {
+			if err := cleaner.MarkSandboxDeleted(ctx, sandboxID, s.now().UTC()); err != nil {
+				s.logger.Warn("Immediate logical sandbox deletion remains pending",
+					zap.String("sandboxID", sandboxID), zap.Error(err))
+			} else if err := cleaner.MarkSandboxRuntimeClaimCleaned(ctx, sandboxID, candidate.OperationID); err != nil {
+				s.logger.Warn("Immediate logical sandbox claim cleanup remains pending",
+					zap.String("sandboxID", sandboxID), zap.Error(err))
+			}
+		}
 	}
 	s.logger.Info("Nomad sandbox termination requested", zap.String("sandboxID", sandboxID))
 	return nil

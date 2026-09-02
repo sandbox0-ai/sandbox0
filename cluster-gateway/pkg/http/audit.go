@@ -15,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/operationid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.opentelemetry.io/otel/trace"
@@ -99,6 +101,7 @@ var sandboxAuditRoutePolicies = map[string]sandboxAuditRoutePolicy{
 
 func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		bindSandboxForkIdempotencyOperation(c)
 		if s == nil || s.cfg == nil || !s.cfg.SandboxObservability.AuditEnabled {
 			c.Next()
 			return
@@ -236,6 +239,30 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			}
 		}()
 		c.Next()
+	}
+}
+
+func bindSandboxForkIdempotencyOperation(c *gin.Context) {
+	if c == nil || c.Request == nil || c.Request.Method != http.MethodPost || c.FullPath() != "/api/v1/sandboxes/:id/fork" {
+		return
+	}
+	authCtx := gatewayauthn.FromContext(c.Request.Context())
+	if authCtx == nil {
+		return
+	}
+	operationID := operationid.FromIdempotencyKey(
+		"sandbox.fork",
+		authCtx.TeamID,
+		authCtx.UserID,
+		c.Param("id"),
+		c.GetHeader("Idempotency-Key"),
+	)
+	if operationID == "" {
+		return
+	}
+	authCtx.OperationID = operationID
+	if claims := internalauth.ClaimsFromContext(c.Request.Context()); claims != nil && claims.Audit != nil {
+		claims.Audit.OperationID = operationID
 	}
 }
 

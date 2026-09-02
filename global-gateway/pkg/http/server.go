@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	stdhttp "net/http"
 	"strings"
@@ -19,7 +20,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -36,6 +39,7 @@ type Server struct {
 	cfg             *config.GlobalGatewayConfig
 	pool            *pgxpool.Pool
 	identityRepo    *identity.Repository
+	teamLookup      teamDirectory
 	regionRepo      *tenantdir.Repository
 	regionLookup    regionDirectory
 	authMiddleware  *gatewaymiddleware.AuthMiddleware
@@ -56,6 +60,10 @@ type Server struct {
 
 type regionDirectory interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
+}
+
+type teamDirectory interface {
+	GetTeamByID(ctx context.Context, teamID string) (*identity.Team, error)
 }
 
 type serverOptions struct {
@@ -152,6 +160,7 @@ func NewServer(
 		cfg:             cfg,
 		pool:            pool,
 		identityRepo:    identityRepo,
+		teamLookup:      identityRepo,
 		regionRepo:      regionRepo,
 		regionLookup:    regionRepo,
 		authMiddleware:  authMiddleware,
@@ -185,7 +194,6 @@ func (s *Server) setupRoutes() {
 	s.router.Use(gatewaymiddleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(gatewaymiddleware.MarkLongLivedRequests())
-	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
 
 	s.router.GET("/healthz", s.healthCheck)
 	s.router.GET("/readyz", s.readinessCheck)
@@ -234,55 +242,108 @@ func effectiveProxyTimeout(timeout time.Duration) time.Duration {
 }
 
 func (s *Server) handleNoRoute(c *gin.Context) {
-	if s.handleAPIKeyRegionProxy(c) {
+	if s.handleRegionProxy(c) {
 		return
 	}
 	c.AbortWithStatus(stdhttp.StatusNotFound)
 }
 
-func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
+func (s *Server) handleRegionProxy(c *gin.Context) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
 	path := c.Request.URL.Path
-	if !shouldProxyAPIKeyRegionRequest(c.Request.Method, path) {
+	apiKeyRoute := shouldProxyAPIKeyRegionRequest(c.Request.Method, path)
+	humanRoute := shouldProxyHumanRegionRequest(c.Request.Method, path)
+	if !apiKeyRoute && !humanRoute {
 		return false
 	}
 
 	token, ok := extractBearerToken(c.GetHeader("Authorization"))
-	if !ok || !strings.HasPrefix(token, "s0_") {
-		return false
-	}
-
-	regionID, err := apikey.ParseRegionIDFromKey(token)
-	if err != nil {
-		c.AbortWithStatusJSON(stdhttp.StatusUnauthorized, gin.H{"error": "invalid api key"})
+	if !ok {
+		spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "missing or invalid bearer credentials")
 		return true
 	}
+
+	var regionID string
+	apiKeyAuth := false
+	if strings.HasPrefix(token, "s0_") {
+		if !apiKeyRoute {
+			spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "JWT authentication required")
+			return true
+		}
+		parsedRegionID, err := apikey.ParseRegionIDFromKey(token)
+		if err != nil {
+			spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid API key")
+			return true
+		}
+		regionID = parsedRegionID
+		apiKeyAuth = true
+	} else {
+		if !humanRoute {
+			spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "API key authentication required")
+			return true
+		}
+		if s.authMiddleware == nil {
+			spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "regional routing unavailable")
+			return true
+		}
+		authCtx, err := s.authMiddleware.AuthenticateRequest(c)
+		if err != nil || authCtx.AuthMethod != authn.AuthMethodJWT {
+			spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid bearer credentials")
+			return true
+		}
+		if strings.TrimSpace(authCtx.TeamID) == "" {
+			spec.JSONError(c, stdhttp.StatusBadRequest, spec.CodeBadRequest, internalauth.TeamIDHeader+" is required")
+			return true
+		}
+		if s.teamLookup == nil {
+			spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "regional routing unavailable")
+			return true
+		}
+		team, err := s.teamLookup.GetTeamByID(c.Request.Context(), authCtx.TeamID)
+		if err != nil || team == nil || team.HomeRegionID == nil || strings.TrimSpace(*team.HomeRegionID) == "" {
+			if err != nil && !errors.Is(err, identity.ErrTeamNotFound) {
+				s.logger.Error("Failed to resolve team home region", zap.Error(err), zap.String("team_id", authCtx.TeamID))
+			}
+			spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "team home region unavailable")
+			return true
+		}
+		regionID = strings.TrimSpace(*team.HomeRegionID)
+	}
+
+	return s.proxyToRegion(c, regionID, apiKeyAuth)
+}
+
+func (s *Server) proxyToRegion(c *gin.Context, regionID string, apiKeyAuth bool) bool {
 	if s.regionLookup == nil {
-		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "region directory unavailable"})
+		spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "region directory unavailable")
 		return true
 	}
 
 	region, err := s.resolveRoutableRegion(c.Request.Context(), regionID)
 	if err != nil {
-		if err == tenantdir.ErrRegionNotFound {
-			c.AbortWithStatusJSON(stdhttp.StatusNotFound, gin.H{"error": "region not found"})
+		if errors.Is(err, tenantdir.ErrRegionNotFound) {
+			if apiKeyAuth {
+				spec.JSONError(c, stdhttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid API key")
+				return true
+			}
+			spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "region gateway unavailable")
 			return true
 		}
-		s.logger.Error("Failed to resolve API key region", zap.Error(err), zap.String("region_id", regionID))
-		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "failed to resolve region"})
+		s.logger.Error("Failed to resolve request region", zap.Error(err), zap.String("region_id", regionID))
+		spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "failed to resolve region")
 		return true
 	}
-	if !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
-		c.AbortWithStatusJSON(stdhttp.StatusServiceUnavailable, gin.H{"error": "region gateway unavailable"})
+	if region == nil || !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
+		spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "region gateway unavailable")
 		return true
 	}
 
 	router, err := s.getRegionProxy(region.RegionalGatewayURL)
 	if err != nil {
 		s.logger.Error("Failed to initialize region proxy", zap.Error(err), zap.String("region_id", region.ID), zap.String("url", region.RegionalGatewayURL))
-		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "proxy initialization failed"})
+		spec.JSONError(c, stdhttp.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
 		return true
 	}
 
@@ -297,6 +358,16 @@ func shouldProxyAPIKeyRegionRequest(method string, path string) bool {
 	return method == stdhttp.MethodGet && path == "/api-keys/current"
 }
 
+func shouldProxyHumanRegionRequest(_ string, path string) bool {
+	if path == "/api" || strings.HasPrefix(path, "/api/") {
+		return true
+	}
+	if path == "/users/me/ssh-keys" || strings.HasPrefix(path, "/users/me/ssh-keys/") {
+		return true
+	}
+	return path != "/api-keys/current" && (path == "/api-keys" || strings.HasPrefix(path, "/api-keys/"))
+}
+
 func (s *Server) resolveRoutableRegion(ctx context.Context, regionID string) (*tenantdir.Region, error) {
 	if cached, ok := s.getCachedRoutableRegion(regionID); ok {
 		return cached, nil
@@ -306,7 +377,7 @@ func (s *Server) resolveRoutableRegion(ctx context.Context, regionID string) (*t
 	if err != nil {
 		return nil, err
 	}
-	if region.Enabled && strings.TrimSpace(region.RegionalGatewayURL) != "" {
+	if region != nil && region.Enabled && strings.TrimSpace(region.RegionalGatewayURL) != "" {
 		s.putCachedRoutableRegion(regionID, region)
 	}
 	return region, nil
@@ -378,21 +449,22 @@ func (s *Server) getRegionProxy(targetURL string) (*proxy.Router, error) {
 }
 
 func (s *Server) healthCheck(c *gin.Context) {
-	c.JSON(stdhttp.StatusOK, gin.H{
-		"status":  "ok",
-		"service": "global-gateway",
+	spec.JSONSuccess(c, stdhttp.StatusOK, gin.H{
+		"status":    "healthy",
+		"timestamp": time.Now().Unix(),
 	})
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
 	if err := s.pool.Ping(c.Request.Context()); err != nil {
-		c.JSON(stdhttp.StatusServiceUnavailable, gin.H{
-			"error": "database not ready",
+		spec.JSONError(c, stdhttp.StatusServiceUnavailable, spec.CodeUnavailable, "database unavailable", gin.H{
+			"status": "not ready",
 		})
 		return
 	}
-	c.JSON(stdhttp.StatusOK, gin.H{
-		"status": "ready",
+	spec.JSONSuccess(c, stdhttp.StatusOK, gin.H{
+		"status":    "ready",
+		"timestamp": time.Now().Unix(),
 	})
 }
 

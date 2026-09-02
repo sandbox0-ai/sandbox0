@@ -827,7 +827,7 @@ type ClaimRequest struct {
 
 	// SnapshotId Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.
 	SnapshotId *string `json:"snapshot_id,omitempty"`
-	Template   *string `json:"template,omitempty"`
+	Template   string  `json:"template"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
@@ -1004,7 +1004,8 @@ type CreateSandboxRootFSSnapshotRequest struct {
 
 // CreateTeamRequest defines model for CreateTeamRequest.
 type CreateTeamRequest struct {
-	HomeRegionId *string `json:"home_region_id"`
+	// HomeRegionId Required when creating a team through the global gateway.
+	HomeRegionId string `json:"home_region_id"`
 
 	// Name Display name. Team names are not unique.
 	Name string `json:"name"`
@@ -1752,9 +1753,9 @@ type RegisterRequest struct {
 	Email openapi_types.Email `json:"email"`
 
 	// HomeRegionId Required in global-gateway mode because registration creates the user's initial team.
-	HomeRegionId *string `json:"home_region_id"`
-	Name         string  `json:"name"`
-	Password     string  `json:"password"`
+	HomeRegionId string `json:"home_region_id"`
+	Name         string `json:"name"`
+	Password     string `json:"password"`
 }
 
 // RegistryCredentials defines model for RegistryCredentials.
@@ -2519,9 +2520,9 @@ type StaticUsernamePasswordSourceSpec struct {
 
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
 type SuccessAPIKeyListResponse struct {
-	Data *struct {
+	Data struct {
 		ApiKeys *[]APIKey `json:"api_keys,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessAPIKeyListResponseSuccess `json:"success"`
 }
 
@@ -2530,9 +2531,9 @@ type SuccessAPIKeyListResponseSuccess bool
 
 // SuccessAcceptedResponse defines model for SuccessAcceptedResponse.
 type SuccessAcceptedResponse struct {
-	Data *struct {
+	Data struct {
 		Accepted bool `json:"accepted"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessAcceptedResponseSuccess `json:"success"`
 }
 
@@ -2541,9 +2542,9 @@ type SuccessAcceptedResponseSuccess bool
 
 // SuccessAuthProvidersResponse defines model for SuccessAuthProvidersResponse.
 type SuccessAuthProvidersResponse struct {
-	Data *struct {
+	Data struct {
 		Providers *[]AuthProvider `json:"providers,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessAuthProvidersResponseSuccess `json:"success"`
 }
 
@@ -2552,7 +2553,7 @@ type SuccessAuthProvidersResponseSuccess bool
 
 // SuccessClaimResponse defines model for SuccessClaimResponse.
 type SuccessClaimResponse struct {
-	Data    *ClaimResponse              `json:"data,omitempty"`
+	Data    ClaimResponse               `json:"data"`
 	Success SuccessClaimResponseSuccess `json:"success"`
 }
 
@@ -2561,7 +2562,7 @@ type SuccessClaimResponseSuccess bool
 
 // SuccessContextExecResponse defines model for SuccessContextExecResponse.
 type SuccessContextExecResponse struct {
-	Data    *ContextExecResponse              `json:"data,omitempty"`
+	Data    ContextExecResponse               `json:"data"`
 	Success SuccessContextExecResponseSuccess `json:"success"`
 }
 
@@ -2570,9 +2571,9 @@ type SuccessContextExecResponseSuccess bool
 
 // SuccessContextListResponse defines model for SuccessContextListResponse.
 type SuccessContextListResponse struct {
-	Data *struct {
+	Data struct {
 		Contexts *[]ContextResponse `json:"contexts,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessContextListResponseSuccess `json:"success"`
 }
 
@@ -2581,7 +2582,7 @@ type SuccessContextListResponseSuccess bool
 
 // SuccessContextResponse defines model for SuccessContextResponse.
 type SuccessContextResponse struct {
-	Data    *ContextResponse              `json:"data,omitempty"`
+	Data    ContextResponse               `json:"data"`
 	Success SuccessContextResponseSuccess `json:"success"`
 }
 
@@ -2590,7 +2591,7 @@ type SuccessContextResponseSuccess bool
 
 // SuccessCreateAPIKeyResponse defines model for SuccessCreateAPIKeyResponse.
 type SuccessCreateAPIKeyResponse struct {
-	Data    *CreateAPIKeyResponse              `json:"data,omitempty"`
+	Data    CreateAPIKeyResponse               `json:"data"`
 	Success SuccessCreateAPIKeyResponseSuccess `json:"success"`
 }
 
@@ -2599,9 +2600,9 @@ type SuccessCreateAPIKeyResponseSuccess bool
 
 // SuccessCreatedResponse defines model for SuccessCreatedResponse.
 type SuccessCreatedResponse struct {
-	Data *struct {
+	Data struct {
 		Created *bool `json:"created,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessCreatedResponseSuccess `json:"success"`
 }
 
@@ -2610,7 +2611,7 @@ type SuccessCreatedResponseSuccess bool
 
 // SuccessCredentialSourceListResponse defines model for SuccessCredentialSourceListResponse.
 type SuccessCredentialSourceListResponse struct {
-	Data    *[]CredentialSourceMetadata                `json:"data,omitempty"`
+	Data    []CredentialSourceMetadata                 `json:"data"`
 	Success SuccessCredentialSourceListResponseSuccess `json:"success"`
 }
 
@@ -2619,7 +2620,7 @@ type SuccessCredentialSourceListResponseSuccess bool
 
 // SuccessCredentialSourceResponse defines model for SuccessCredentialSourceResponse.
 type SuccessCredentialSourceResponse struct {
-	Data    *CredentialSourceMetadata              `json:"data,omitempty"`
+	Data    CredentialSourceMetadata               `json:"data"`
 	Success SuccessCredentialSourceResponseSuccess `json:"success"`
 }
 
@@ -2628,9 +2629,9 @@ type SuccessCredentialSourceResponseSuccess bool
 
 // SuccessCurrentAPIKeyResponse defines model for SuccessCurrentAPIKeyResponse.
 type SuccessCurrentAPIKeyResponse struct {
-	Data *struct {
+	Data struct {
 		ApiKey *CurrentAPIKeyResponse `json:"api_key,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessCurrentAPIKeyResponseSuccess `json:"success"`
 }
 
@@ -2639,9 +2640,9 @@ type SuccessCurrentAPIKeyResponseSuccess bool
 
 // SuccessDeletedResponse defines model for SuccessDeletedResponse.
 type SuccessDeletedResponse struct {
-	Data *struct {
+	Data struct {
 		Deleted *bool `json:"deleted,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessDeletedResponseSuccess `json:"success"`
 }
 
@@ -2650,7 +2651,7 @@ type SuccessDeletedResponseSuccess bool
 
 // SuccessDeviceLoginPollResponse defines model for SuccessDeviceLoginPollResponse.
 type SuccessDeviceLoginPollResponse struct {
-	Data    *DeviceLoginPollResponse              `json:"data,omitempty"`
+	Data    DeviceLoginPollResponse               `json:"data"`
 	Success SuccessDeviceLoginPollResponseSuccess `json:"success"`
 }
 
@@ -2659,7 +2660,7 @@ type SuccessDeviceLoginPollResponseSuccess bool
 
 // SuccessDeviceLoginStartResponse defines model for SuccessDeviceLoginStartResponse.
 type SuccessDeviceLoginStartResponse struct {
-	Data    *DeviceLoginStartResponse              `json:"data,omitempty"`
+	Data    DeviceLoginStartResponse               `json:"data"`
 	Success SuccessDeviceLoginStartResponseSuccess `json:"success"`
 }
 
@@ -2677,7 +2678,7 @@ type SuccessEnvelopeSuccess bool
 
 // SuccessExecutionSessionEventPageResponse defines model for SuccessExecutionSessionEventPageResponse.
 type SuccessExecutionSessionEventPageResponse struct {
-	Data    *ExecutionSessionEventPage                      `json:"data,omitempty"`
+	Data    ExecutionSessionEventPage                       `json:"data"`
 	Success SuccessExecutionSessionEventPageResponseSuccess `json:"success"`
 }
 
@@ -2686,7 +2687,7 @@ type SuccessExecutionSessionEventPageResponseSuccess bool
 
 // SuccessExecutionSessionInputResponse defines model for SuccessExecutionSessionInputResponse.
 type SuccessExecutionSessionInputResponse struct {
-	Data    *ExecutionSessionInputResponse              `json:"data,omitempty"`
+	Data    ExecutionSessionInputResponse               `json:"data"`
 	Success SuccessExecutionSessionInputResponseSuccess `json:"success"`
 }
 
@@ -2695,9 +2696,9 @@ type SuccessExecutionSessionInputResponseSuccess bool
 
 // SuccessExecutionSessionListResponse defines model for SuccessExecutionSessionListResponse.
 type SuccessExecutionSessionListResponse struct {
-	Data *struct {
+	Data struct {
 		Sessions []ExecutionSession `json:"sessions"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessExecutionSessionListResponseSuccess `json:"success"`
 }
 
@@ -2706,7 +2707,7 @@ type SuccessExecutionSessionListResponseSuccess bool
 
 // SuccessExecutionSessionResponse defines model for SuccessExecutionSessionResponse.
 type SuccessExecutionSessionResponse struct {
-	Data    *ExecutionSession                      `json:"data,omitempty"`
+	Data    ExecutionSession                       `json:"data"`
 	Success SuccessExecutionSessionResponseSuccess `json:"success"`
 }
 
@@ -2715,9 +2716,9 @@ type SuccessExecutionSessionResponseSuccess bool
 
 // SuccessFileListResponse defines model for SuccessFileListResponse.
 type SuccessFileListResponse struct {
-	Data *struct {
+	Data struct {
 		Entries *[]FileInfo `json:"entries,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessFileListResponseSuccess `json:"success"`
 }
 
@@ -2726,7 +2727,7 @@ type SuccessFileListResponseSuccess bool
 
 // SuccessFileStatResponse defines model for SuccessFileStatResponse.
 type SuccessFileStatResponse struct {
-	Data    *FileInfo                      `json:"data,omitempty"`
+	Data    FileInfo                       `json:"data"`
 	Success SuccessFileStatResponseSuccess `json:"success"`
 }
 
@@ -2735,7 +2736,7 @@ type SuccessFileStatResponseSuccess bool
 
 // SuccessForkSandboxResponse defines model for SuccessForkSandboxResponse.
 type SuccessForkSandboxResponse struct {
-	Data    *ForkSandboxResponse              `json:"data,omitempty"`
+	Data    ForkSandboxResponse               `json:"data"`
 	Success SuccessForkSandboxResponseSuccess `json:"success"`
 }
 
@@ -2744,7 +2745,7 @@ type SuccessForkSandboxResponseSuccess bool
 
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
-	Data    *GatewayMetadata                      `json:"data,omitempty"`
+	Data    GatewayMetadata                       `json:"data"`
 	Success SuccessGatewayMetadataResponseSuccess `json:"success"`
 }
 
@@ -2753,10 +2754,10 @@ type SuccessGatewayMetadataResponseSuccess bool
 
 // SuccessHealthResponse defines model for SuccessHealthResponse.
 type SuccessHealthResponse struct {
-	Data *struct {
+	Data struct {
 		Status    *string `json:"status,omitempty"`
 		Timestamp *int64  `json:"timestamp,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessHealthResponseSuccess `json:"success"`
 }
 
@@ -2765,9 +2766,9 @@ type SuccessHealthResponseSuccess bool
 
 // SuccessIdentityListResponse defines model for SuccessIdentityListResponse.
 type SuccessIdentityListResponse struct {
-	Data *struct {
+	Data struct {
 		Identities *[]Identity `json:"identities,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessIdentityListResponseSuccess `json:"success"`
 }
 
@@ -2776,7 +2777,7 @@ type SuccessIdentityListResponseSuccess bool
 
 // SuccessLoginResponse defines model for SuccessLoginResponse.
 type SuccessLoginResponse struct {
-	Data    *LoginResponse              `json:"data,omitempty"`
+	Data    LoginResponse               `json:"data"`
 	Success SuccessLoginResponseSuccess `json:"success"`
 }
 
@@ -2785,9 +2786,9 @@ type SuccessLoginResponseSuccess bool
 
 // SuccessMessageResponse defines model for SuccessMessageResponse.
 type SuccessMessageResponse struct {
-	Data *struct {
+	Data struct {
 		Message *string `json:"message,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessMessageResponseSuccess `json:"success"`
 }
 
@@ -2796,9 +2797,9 @@ type SuccessMessageResponseSuccess bool
 
 // SuccessMovedResponse defines model for SuccessMovedResponse.
 type SuccessMovedResponse struct {
-	Data *struct {
+	Data struct {
 		Moved *bool `json:"moved,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessMovedResponseSuccess `json:"success"`
 }
 
@@ -2807,7 +2808,7 @@ type SuccessMovedResponseSuccess bool
 
 // SuccessPauseSandboxResponse defines model for SuccessPauseSandboxResponse.
 type SuccessPauseSandboxResponse struct {
-	Data    *PauseSandboxResponse              `json:"data,omitempty"`
+	Data    PauseSandboxResponse               `json:"data"`
 	Success SuccessPauseSandboxResponseSuccess `json:"success"`
 }
 
@@ -2816,7 +2817,7 @@ type SuccessPauseSandboxResponseSuccess bool
 
 // SuccessRebaseSandboxRootFSResponse defines model for SuccessRebaseSandboxRootFSResponse.
 type SuccessRebaseSandboxRootFSResponse struct {
-	Data    *RebaseSandboxRootFSResponse              `json:"data,omitempty"`
+	Data    RebaseSandboxRootFSResponse               `json:"data"`
 	Success SuccessRebaseSandboxRootFSResponseSuccess `json:"success"`
 }
 
@@ -2825,7 +2826,7 @@ type SuccessRebaseSandboxRootFSResponseSuccess bool
 
 // SuccessRefreshResponse defines model for SuccessRefreshResponse.
 type SuccessRefreshResponse struct {
-	Data    *RefreshResponse              `json:"data,omitempty"`
+	Data    RefreshResponse               `json:"data"`
 	Success SuccessRefreshResponseSuccess `json:"success"`
 }
 
@@ -2834,9 +2835,9 @@ type SuccessRefreshResponseSuccess bool
 
 // SuccessRegionListResponse defines model for SuccessRegionListResponse.
 type SuccessRegionListResponse struct {
-	Data *struct {
+	Data struct {
 		Regions *[]Region `json:"regions,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessRegionListResponseSuccess `json:"success"`
 }
 
@@ -2845,7 +2846,7 @@ type SuccessRegionListResponseSuccess bool
 
 // SuccessRegionResponse defines model for SuccessRegionResponse.
 type SuccessRegionResponse struct {
-	Data    *Region                      `json:"data,omitempty"`
+	Data    Region                       `json:"data"`
 	Success SuccessRegionResponseSuccess `json:"success"`
 }
 
@@ -2854,7 +2855,7 @@ type SuccessRegionResponseSuccess bool
 
 // SuccessRegistryCredentialsResponse defines model for SuccessRegistryCredentialsResponse.
 type SuccessRegistryCredentialsResponse struct {
-	Data    *RegistryCredentials                      `json:"data,omitempty"`
+	Data    RegistryCredentials                       `json:"data"`
 	Success SuccessRegistryCredentialsResponseSuccess `json:"success"`
 }
 
@@ -2863,9 +2864,9 @@ type SuccessRegistryCredentialsResponseSuccess bool
 
 // SuccessResizedResponse defines model for SuccessResizedResponse.
 type SuccessResizedResponse struct {
-	Data *struct {
+	Data struct {
 		Resized *bool `json:"resized,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessResizedResponseSuccess `json:"success"`
 }
 
@@ -2874,7 +2875,7 @@ type SuccessResizedResponseSuccess bool
 
 // SuccessRestoreSandboxRootFSResponse defines model for SuccessRestoreSandboxRootFSResponse.
 type SuccessRestoreSandboxRootFSResponse struct {
-	Data    *RestoreSandboxRootFSResponse              `json:"data,omitempty"`
+	Data    RestoreSandboxRootFSResponse               `json:"data"`
 	Success SuccessRestoreSandboxRootFSResponseSuccess `json:"success"`
 }
 
@@ -2883,7 +2884,7 @@ type SuccessRestoreSandboxRootFSResponseSuccess bool
 
 // SuccessResumeSandboxResponse defines model for SuccessResumeSandboxResponse.
 type SuccessResumeSandboxResponse struct {
-	Data    *ResumeSandboxResponse              `json:"data,omitempty"`
+	Data    ResumeSandboxResponse               `json:"data"`
 	Success SuccessResumeSandboxResponseSuccess `json:"success"`
 }
 
@@ -2892,9 +2893,9 @@ type SuccessResumeSandboxResponseSuccess bool
 
 // SuccessSSHPublicKeyListResponse defines model for SuccessSSHPublicKeyListResponse.
 type SuccessSSHPublicKeyListResponse struct {
-	Data *struct {
+	Data struct {
 		SshKeys *[]SSHPublicKey `json:"ssh_keys,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessSSHPublicKeyListResponseSuccess `json:"success"`
 }
 
@@ -2903,7 +2904,7 @@ type SuccessSSHPublicKeyListResponseSuccess bool
 
 // SuccessSSHPublicKeyResponse defines model for SuccessSSHPublicKeyResponse.
 type SuccessSSHPublicKeyResponse struct {
-	Data    *SSHPublicKey                      `json:"data,omitempty"`
+	Data    SSHPublicKey                       `json:"data"`
 	Success SuccessSSHPublicKeyResponseSuccess `json:"success"`
 }
 
@@ -2912,14 +2913,14 @@ type SuccessSSHPublicKeyResponseSuccess bool
 
 // SuccessSandboxListResponse defines model for SuccessSandboxListResponse.
 type SuccessSandboxListResponse struct {
-	Data *struct {
+	Data struct {
 		// Count Total matching sandboxes
 		Count int `json:"count"`
 
 		// HasMore More results available
 		HasMore   bool             `json:"has_more"`
 		Sandboxes []SandboxSummary `json:"sandboxes"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessSandboxListResponseSuccess `json:"success"`
 }
 
@@ -2928,7 +2929,7 @@ type SuccessSandboxListResponseSuccess bool
 
 // SuccessSandboxNetworkPolicyResponse defines model for SuccessSandboxNetworkPolicyResponse.
 type SuccessSandboxNetworkPolicyResponse struct {
-	Data    *SandboxNetworkPolicy                      `json:"data,omitempty"`
+	Data    SandboxNetworkPolicy                       `json:"data"`
 	Success SuccessSandboxNetworkPolicyResponseSuccess `json:"success"`
 }
 
@@ -2937,7 +2938,7 @@ type SuccessSandboxNetworkPolicyResponseSuccess bool
 
 // SuccessSandboxObservabilityEventsResponse defines model for SuccessSandboxObservabilityEventsResponse.
 type SuccessSandboxObservabilityEventsResponse struct {
-	Data    *SandboxObservabilityEventsResponse              `json:"data,omitempty"`
+	Data    SandboxObservabilityEventsResponse               `json:"data"`
 	Success SuccessSandboxObservabilityEventsResponseSuccess `json:"success"`
 }
 
@@ -2946,7 +2947,7 @@ type SuccessSandboxObservabilityEventsResponseSuccess bool
 
 // SuccessSandboxObservabilityLogsResponse defines model for SuccessSandboxObservabilityLogsResponse.
 type SuccessSandboxObservabilityLogsResponse struct {
-	Data    *SandboxObservabilityLogsResponse              `json:"data,omitempty"`
+	Data    SandboxObservabilityLogsResponse               `json:"data"`
 	Success SuccessSandboxObservabilityLogsResponseSuccess `json:"success"`
 }
 
@@ -2955,7 +2956,7 @@ type SuccessSandboxObservabilityLogsResponseSuccess bool
 
 // SuccessSandboxPreviewResponse defines model for SuccessSandboxPreviewResponse.
 type SuccessSandboxPreviewResponse struct {
-	Data    *SandboxPreviewGrant                 `json:"data,omitempty"`
+	Data    SandboxPreviewGrant                  `json:"data"`
 	Success SuccessSandboxPreviewResponseSuccess `json:"success"`
 }
 
@@ -2964,7 +2965,7 @@ type SuccessSandboxPreviewResponseSuccess bool
 
 // SuccessSandboxResponse defines model for SuccessSandboxResponse.
 type SuccessSandboxResponse struct {
-	Data    *Sandbox                      `json:"data,omitempty"`
+	Data    Sandbox                       `json:"data"`
 	Success SuccessSandboxResponseSuccess `json:"success"`
 }
 
@@ -2973,7 +2974,7 @@ type SuccessSandboxResponseSuccess bool
 
 // SuccessSandboxRootFSSnapshotListResponse defines model for SuccessSandboxRootFSSnapshotListResponse.
 type SuccessSandboxRootFSSnapshotListResponse struct {
-	Data    *SandboxRootFSSnapshotList                      `json:"data,omitempty"`
+	Data    SandboxRootFSSnapshotList                       `json:"data"`
 	Success SuccessSandboxRootFSSnapshotListResponseSuccess `json:"success"`
 }
 
@@ -2982,7 +2983,7 @@ type SuccessSandboxRootFSSnapshotListResponseSuccess bool
 
 // SuccessSandboxRootFSSnapshotResponse defines model for SuccessSandboxRootFSSnapshotResponse.
 type SuccessSandboxRootFSSnapshotResponse struct {
-	Data    *SandboxRootFSSnapshot                      `json:"data,omitempty"`
+	Data    SandboxRootFSSnapshot                       `json:"data"`
 	Success SuccessSandboxRootFSSnapshotResponseSuccess `json:"success"`
 }
 
@@ -2991,7 +2992,7 @@ type SuccessSandboxRootFSSnapshotResponseSuccess bool
 
 // SuccessSandboxRuntimeMetricsCatalogResponse defines model for SuccessSandboxRuntimeMetricsCatalogResponse.
 type SuccessSandboxRuntimeMetricsCatalogResponse struct {
-	Data    *SandboxRuntimeMetricsCatalogResponse              `json:"data,omitempty"`
+	Data    SandboxRuntimeMetricsCatalogResponse               `json:"data"`
 	Success SuccessSandboxRuntimeMetricsCatalogResponseSuccess `json:"success"`
 }
 
@@ -3000,7 +3001,7 @@ type SuccessSandboxRuntimeMetricsCatalogResponseSuccess bool
 
 // SuccessSandboxRuntimeMetricsResponse defines model for SuccessSandboxRuntimeMetricsResponse.
 type SuccessSandboxRuntimeMetricsResponse struct {
-	Data    *SandboxRuntimeMetricsResponse              `json:"data,omitempty"`
+	Data    SandboxRuntimeMetricsResponse               `json:"data"`
 	Success SuccessSandboxRuntimeMetricsResponseSuccess `json:"success"`
 }
 
@@ -3009,11 +3010,11 @@ type SuccessSandboxRuntimeMetricsResponseSuccess bool
 
 // SuccessSandboxServicesResponse defines model for SuccessSandboxServicesResponse.
 type SuccessSandboxServicesResponse struct {
-	Data *struct {
+	Data struct {
 		ExposureDomain *string                 `json:"exposure_domain,omitempty"`
 		SandboxId      string                  `json:"sandbox_id"`
 		Services       []SandboxAppServiceView `json:"services"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessSandboxServicesResponseSuccess `json:"success"`
 }
 
@@ -3022,7 +3023,7 @@ type SuccessSandboxServicesResponseSuccess bool
 
 // SuccessSandboxStatusResponse defines model for SuccessSandboxStatusResponse.
 type SuccessSandboxStatusResponse struct {
-	Data    *SandboxStatus                      `json:"data,omitempty"`
+	Data    SandboxStatus                       `json:"data"`
 	Success SuccessSandboxStatusResponseSuccess `json:"success"`
 }
 
@@ -3031,9 +3032,9 @@ type SuccessSandboxStatusResponseSuccess bool
 
 // SuccessSignaledResponse defines model for SuccessSignaledResponse.
 type SuccessSignaledResponse struct {
-	Data *struct {
+	Data struct {
 		Signaled *bool `json:"signaled,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessSignaledResponseSuccess `json:"success"`
 }
 
@@ -3042,9 +3043,9 @@ type SuccessSignaledResponseSuccess bool
 
 // SuccessTeamListResponse defines model for SuccessTeamListResponse.
 type SuccessTeamListResponse struct {
-	Data *struct {
+	Data struct {
 		Teams *[]Team `json:"teams,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessTeamListResponseSuccess `json:"success"`
 }
 
@@ -3053,9 +3054,9 @@ type SuccessTeamListResponseSuccess bool
 
 // SuccessTeamMemberListResponse defines model for SuccessTeamMemberListResponse.
 type SuccessTeamMemberListResponse struct {
-	Data *struct {
+	Data struct {
 		Members *[]TeamMember `json:"members,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessTeamMemberListResponseSuccess `json:"success"`
 }
 
@@ -3064,7 +3065,7 @@ type SuccessTeamMemberListResponseSuccess bool
 
 // SuccessTeamMemberResponse defines model for SuccessTeamMemberResponse.
 type SuccessTeamMemberResponse struct {
-	Data    *TeamMember                      `json:"data,omitempty"`
+	Data    TeamMember                       `json:"data"`
 	Success SuccessTeamMemberResponseSuccess `json:"success"`
 }
 
@@ -3073,7 +3074,7 @@ type SuccessTeamMemberResponseSuccess bool
 
 // SuccessTeamQuotaResponse defines model for SuccessTeamQuotaResponse.
 type SuccessTeamQuotaResponse struct {
-	Data    *TeamQuota                      `json:"data,omitempty"`
+	Data    TeamQuota                       `json:"data"`
 	Success SuccessTeamQuotaResponseSuccess `json:"success"`
 }
 
@@ -3082,7 +3083,7 @@ type SuccessTeamQuotaResponseSuccess bool
 
 // SuccessTeamResponse defines model for SuccessTeamResponse.
 type SuccessTeamResponse struct {
-	Data    *Team                      `json:"data,omitempty"`
+	Data    Team                       `json:"data"`
 	Success SuccessTeamResponseSuccess `json:"success"`
 }
 
@@ -3091,10 +3092,10 @@ type SuccessTeamResponseSuccess bool
 
 // SuccessTemplateListResponse defines model for SuccessTemplateListResponse.
 type SuccessTemplateListResponse struct {
-	Data *struct {
+	Data struct {
 		Count     *int        `json:"count,omitempty"`
 		Templates *[]Template `json:"templates,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessTemplateListResponseSuccess `json:"success"`
 }
 
@@ -3103,7 +3104,7 @@ type SuccessTemplateListResponseSuccess bool
 
 // SuccessTemplateResponse defines model for SuccessTemplateResponse.
 type SuccessTemplateResponse struct {
-	Data    *Template                      `json:"data,omitempty"`
+	Data    Template                       `json:"data"`
 	Success SuccessTemplateResponseSuccess `json:"success"`
 }
 
@@ -3112,7 +3113,7 @@ type SuccessTemplateResponseSuccess bool
 
 // SuccessUsageWindowsResponse defines model for SuccessUsageWindowsResponse.
 type SuccessUsageWindowsResponse struct {
-	Data    *UsageWindowPage                   `json:"data,omitempty"`
+	Data    UsageWindowPage                    `json:"data"`
 	Success SuccessUsageWindowsResponseSuccess `json:"success"`
 }
 
@@ -3121,7 +3122,7 @@ type SuccessUsageWindowsResponseSuccess bool
 
 // SuccessUserResponse defines model for SuccessUserResponse.
 type SuccessUserResponse struct {
-	Data    *User                      `json:"data,omitempty"`
+	Data    User                       `json:"data"`
 	Success SuccessUserResponseSuccess `json:"success"`
 }
 
@@ -3130,9 +3131,9 @@ type SuccessUserResponseSuccess bool
 
 // SuccessWrittenResponse defines model for SuccessWrittenResponse.
 type SuccessWrittenResponse struct {
-	Data *struct {
+	Data struct {
 		Written *bool `json:"written,omitempty"`
-	} `json:"data,omitempty"`
+	} `json:"data"`
 	Success SuccessWrittenResponseSuccess `json:"success"`
 }
 
@@ -3144,13 +3145,13 @@ type TLSClientCertificateProjection = map[string]interface{}
 
 // Team defines model for Team.
 type Team struct {
-	CreatedAt    time.Time `json:"created_at"`
-	HomeRegionId *string   `json:"home_region_id"`
-	Id           string    `json:"id"`
+	CreatedAt    time.Time          `json:"created_at"`
+	HomeRegionId *string            `json:"home_region_id"`
+	Id           openapi_types.UUID `json:"id"`
 
 	// Name Display name. Team names are not unique; use the team ID as the canonical identifier.
-	Name    string  `json:"name"`
-	OwnerId *string `json:"owner_id"`
+	Name    string              `json:"name"`
+	OwnerId *openapi_types.UUID `json:"owner_id"`
 
 	// Slug Human-readable alias. Team slugs are not unique; use the team ID as the canonical identifier.
 	Slug      string    `json:"slug"`
@@ -3196,14 +3197,14 @@ type TeamMember struct {
 
 	// Email User email address. Present in team member list responses.
 	Email    *openapi_types.Email `json:"email,omitempty"`
-	Id       string               `json:"id"`
+	Id       openapi_types.UUID   `json:"id"`
 	JoinedAt time.Time            `json:"joined_at"`
 
 	// Name User display name. Present in team member list responses.
-	Name   *string `json:"name,omitempty"`
-	Role   string  `json:"role"`
-	TeamId string  `json:"team_id"`
-	UserId string  `json:"user_id"`
+	Name   *string            `json:"name,omitempty"`
+	Role   string             `json:"role"`
+	TeamId openapi_types.UUID `json:"team_id"`
+	UserId openapi_types.UUID `json:"user_id"`
 }
 
 // TeamQuota defines model for TeamQuota.
@@ -3317,7 +3318,7 @@ type TrafficRuleAppProtocol string
 
 // TransferTeamOwnerRequest defines model for TransferTeamOwnerRequest.
 type TransferTeamOwnerRequest struct {
-	UserId string `json:"user_id"`
+	UserId openapi_types.UUID `json:"user_id"`
 }
 
 // UpdateRegionRequest defines model for UpdateRegionRequest.
@@ -3338,6 +3339,9 @@ type UpdateTeamMemberRequestRole string
 
 // UpdateTeamRequest defines model for UpdateTeamRequest.
 type UpdateTeamRequest struct {
+	// HomeRegionId Optional immutable home region assertion. A different value is rejected.
+	HomeRegionId *string `json:"home_region_id"`
+
 	// Name Display name. Team names are not unique.
 	Name *string `json:"name,omitempty"`
 
@@ -3446,13 +3450,19 @@ type SandboxID = string
 type SessionID = string
 
 // TeamID defines model for TeamID.
-type TeamID = string
+type TeamID = openapi_types.UUID
 
 // TemplateID defines model for TemplateID.
 type TemplateID = string
 
 // UserID defines model for UserID.
-type UserID = string
+type UserID = openapi_types.UUID
+
+// BadRequest defines model for BadRequest.
+type BadRequest = ErrorEnvelope
+
+// Unauthorized defines model for Unauthorized.
+type Unauthorized = ErrorEnvelope
 
 // GetApiV1SandboxesParams defines parameters for GetApiV1Sandboxes.
 type GetApiV1SandboxesParams struct {
@@ -3497,6 +3507,12 @@ type GetApiV1SandboxesIdFilesListParams struct {
 // GetApiV1SandboxesIdFilesStatParams defines parameters for GetApiV1SandboxesIdFilesStat.
 type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
+}
+
+// PostApiV1SandboxesIdForkParams defines parameters for PostApiV1SandboxesIdFork.
+type PostApiV1SandboxesIdForkParams struct {
+	// IdempotencyKey Optional key for retrying the fork without creating a duplicate child sandbox.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetSandboxRuntimeMetricsParams defines parameters for GetSandboxRuntimeMetrics.

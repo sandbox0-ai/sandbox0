@@ -505,8 +505,8 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"message": "sandbox terminated successfully",
+	spec.JSONSuccess(c, http.StatusAccepted, gin.H{
+		"message": "sandbox termination requested",
 	})
 }
 
@@ -534,7 +534,11 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, resp)
+	status := http.StatusAccepted
+	if resp.Paused {
+		status = http.StatusOK
+	}
+	spec.JSONSuccess(c, status, resp)
 }
 
 // resumeSandbox resumes a sandbox

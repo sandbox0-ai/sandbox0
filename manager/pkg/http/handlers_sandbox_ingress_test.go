@@ -247,3 +247,31 @@ func TestRebaseSandboxRootFSUsesSignedOperationAndPUTBackend(t *testing.T) {
 			rebaser.sandboxID, rebaser.teamID, rebaser.request)
 	}
 }
+
+func TestRebaseSandboxRootFSRejectsInvalidDigestBeforeBackend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rebaser := &recordingSandboxRootFSRebaser{}
+	server := &Server{sandboxRootFSRebaser: rebaser, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "id", Value: "sandbox-source"}}
+	request := httptest.NewRequest(http.MethodPut,
+		"/api/v1/sandboxes/sandbox-source/rootfs/rebase",
+		strings.NewReader(`{"target_base_artifact_digest":"not-a-digest"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		TeamID: "team-1", UserID: "user-1",
+		Audit: &internalauth.AuditContext{OperationID: "operation-signed"},
+	}))
+	ginContext.Request = request
+
+	server.rebaseSandboxRootFS(ginContext)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if rebaser.request != nil {
+		t.Fatalf("backend received invalid request: %+v", rebaser.request)
+	}
+}

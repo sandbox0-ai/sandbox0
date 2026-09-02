@@ -22,11 +22,12 @@ connections.
 | `runtime_id` | Replaced | Removed |
 | `runtime_generation` | Incremented on resume | Removed |
 
-The writable RootFS is a block-COW filesystem. `/tmp`, `/var/tmp`, workspace
-paths, and other ordinary RootFS paths persist after a successful checkpoint.
-Virtual mounts such as `/proc`, `/dev`, and `/sys` are recreated for each
-runtime generation. Do not treat process state under virtual filesystems as
-durable data.
+The writable RootFS is a block-COW filesystem. Ordinary RootFS paths such as
+`/var/tmp` and workspace directories persist after a successful checkpoint.
+`/tmp` is a runtime tmpfs and is recreated for each runtime generation, as are
+virtual mounts such as `/proc`, `/dev`, and `/sys`. Template-defined
+`ephemeralMounts` are also excluded from pause, resume, snapshots, and forks.
+Do not store durable data under any of these runtime-only mounts.
 
 For named restore points, fork, and rebase, see
 [Snapshot And Restore](/docs/sandbox/snapshot-restore).

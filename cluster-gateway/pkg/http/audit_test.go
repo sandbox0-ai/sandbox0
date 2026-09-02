@@ -20,10 +20,44 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/operationid"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
+
+func TestSandboxForkIdempotencyKeyBindsStableOperation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authCtx := &authn.AuthContext{TeamID: "team-1", UserID: "user-1", OperationID: "random-operation"}
+	claims := &internalauth.Claims{Audit: &internalauth.AuditContext{OperationID: "random-operation"}}
+	var gotAuthOperation, gotClaimOperation string
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
+		c.Request = c.Request.WithContext(internalauth.WithClaims(ctx, claims))
+		c.Next()
+	})
+	router.POST("/api/v1/sandboxes/:id/fork", (&Server{}).auditSandboxRequests(), func(c *gin.Context) {
+		gotAuthOperation = authn.FromContext(c.Request.Context()).OperationID
+		gotClaimOperation = internalauth.ClaimsFromContext(c.Request.Context()).Audit.OperationID
+		c.Status(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/fork", nil)
+	request.Header.Set("Idempotency-Key", " fork-attempt-1 ")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	want := operationid.FromIdempotencyKey("sandbox.fork", "team-1", "user-1", "sandbox-1", "fork-attempt-1")
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", recorder.Code)
+	}
+	if gotAuthOperation != want || gotClaimOperation != want {
+		t.Fatalf("operation IDs = auth %q claims %q, want %q", gotAuthOperation, gotClaimOperation, want)
+	}
+}
 
 type recordingAuditWriter struct {
 	events []sandboxobservability.Event

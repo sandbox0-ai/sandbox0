@@ -318,7 +318,7 @@ func (r *Repository) RemoveTeamMember(ctx context.Context, teamID, userID string
 func (r *Repository) GetTeamMembers(ctx context.Context, teamID string) ([]*TeamMemberWithUser, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT tm.id, tm.team_id, tm.user_id, tm.role, tm.joined_at,
-		       u.id, u.email, u.name, u.avatar_url, u.email_verified, u.is_admin, u.created_at, u.updated_at
+		       u.email, u.name, u.avatar_url
 		FROM team_members tm
 		INNER JOIN users u ON u.id = tm.user_id
 		WHERE tm.team_id = $1
@@ -339,7 +339,7 @@ func (r *Repository) SearchTeamMembers(ctx context.Context, teamID, query string
 
 	rows, err := r.pool.Query(ctx, `
 		SELECT tm.id, tm.team_id, tm.user_id, tm.role, tm.joined_at,
-		       u.id, u.email, u.name, u.avatar_url, u.email_verified, u.is_admin, u.created_at, u.updated_at
+		       u.email, u.name, u.avatar_url
 		FROM team_members tm
 		INNER JOIN users u ON u.id = tm.user_id
 		WHERE tm.team_id = $1
@@ -363,7 +363,7 @@ func scanTeamMembers(rows pgx.Rows) ([]*TeamMemberWithUser, error) {
 		var m TeamMemberWithUser
 		if err := rows.Scan(
 			&m.ID, &m.TeamID, &m.UserID, &m.Role, &m.JoinedAt,
-			&m.UserID2, &m.Email, &m.Name, &m.AvatarURL, &m.EmailVerified, &m.IsAdmin, &m.CreatedAt, &m.UpdatedAt,
+			&m.Email, &m.Name, &m.AvatarURL,
 		); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}

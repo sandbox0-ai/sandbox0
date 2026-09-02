@@ -709,6 +709,28 @@ func (f *fakeClaimStore) RequestHardExpiredSandboxRuntimeClaimCleanup(
 	return f.RequestSandboxRuntimeClaimCleanup(ctx, sandboxID, reason)
 }
 
+func (f *fakeClaimStore) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
+	record := f.records[sandboxID]
+	if record == nil {
+		return sandboxstore.ErrSandboxRecordNotFound
+	}
+	if lifecycle := f.activeLifecycles[sandboxID]; lifecycle != nil &&
+		lifecycle.Kind == sandboxstore.SandboxLifecycleKindRebase {
+		return sandboxstore.ErrSandboxClaimCleanupPending
+	}
+	record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
+	record.DeletedAt = deletedAt
+	return nil
+}
+
+func (f *fakeClaimStore) MarkSandboxRuntimeClaimCleaned(_ context.Context, sandboxID, _ string) error {
+	if f.records[sandboxID] == nil {
+		return sandboxstore.ErrSandboxRecordNotFound
+	}
+	f.claimPhases[sandboxID] = sandboxstore.SandboxRuntimeClaimPhaseCleaned
+	return nil
+}
+
 type fakeQuotaLimitStore struct {
 	limit *quota.Limit
 	err   error
@@ -1078,6 +1100,27 @@ func TestServiceTerminateSandboxUsesDurableClaimCleanup(t *testing.T) {
 	if err := fixture.service.TerminateSandbox(context.Background(), response.SandboxID); err == nil ||
 		!strings.Contains(err.Error(), "request Nomad sandbox cleanup") {
 		t.Fatalf("termination error = %v", err)
+	}
+}
+
+func TestServiceImmediatelyDeletesNeverRunPausedForkTarget(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := "sandbox-paused-fork-target"
+	fixture.store.records[sandboxID] = &sandboxstore.SandboxRecord{
+		ID: sandboxID, TeamID: "team-1", DesiredState: sandboxstore.SandboxDesiredStatePaused,
+	}
+	fixture.store.operations[sandboxID] = "nomad-fork-target-operation"
+	fixture.store.claimPhases[sandboxID] = sandboxstore.SandboxRuntimeClaimPhaseReady
+
+	if err := fixture.service.TerminateSandbox(t.Context(), sandboxID); err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.store.records[sandboxID]
+	if record.DesiredState != sandboxstore.SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
+		t.Fatalf("record = %+v, want immediately deleted", record)
+	}
+	if phase := fixture.store.claimPhases[sandboxID]; phase != sandboxstore.SandboxRuntimeClaimPhaseCleaned {
+		t.Fatalf("claim phase = %q, want %q", phase, sandboxstore.SandboxRuntimeClaimPhaseCleaned)
 	}
 }
 

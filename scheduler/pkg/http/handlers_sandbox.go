@@ -38,16 +38,16 @@ func (s *Server) createSandbox(c *gin.Context) {
 			return
 		}
 	}
-	if req.Template == nil {
+	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
 	}
-	canonicalTemplateID, err := naming.CanonicalTemplateID(*req.Template)
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
 	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	req.Template = &canonicalTemplateID
+	req.Template = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
@@ -190,10 +190,10 @@ func (s *Server) selectClusterForTemplate(
 	req *apispec.ClaimRequest,
 	teamID string,
 ) (*template.Cluster, *template.Template, string, error) {
-	if req == nil || req.Template == nil {
+	if req == nil || req.Template == "" {
 		return nil, nil, "", fmt.Errorf("template is required")
 	}
-	tpl, err := s.templateStore.GetTemplateForTeam(c.Request.Context(), teamID, *req.Template)
+	tpl, err := s.templateStore.GetTemplateForTeam(c.Request.Context(), teamID, req.Template)
 	if err != nil {
 		s.logger.Error("Failed to get template for routing", zap.Error(err))
 		return nil, nil, "", err
@@ -413,7 +413,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 			)
 			continue
 		}
-		if result.response == nil || result.response.Data == nil {
+		if result.response == nil {
 			s.logger.Warn("Cluster sandbox list response missing data",
 				zap.String("cluster_id", result.clusterID),
 			)

@@ -441,7 +441,6 @@ func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(middleware.MarkLongLivedRequests())
-	s.router.Use(middleware.UpstreamTimeoutWhitelist())
 
 	// Health check endpoints (no auth required)
 	s.router.GET("/healthz", s.healthCheck)

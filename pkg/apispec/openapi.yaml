@@ -358,6 +358,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Logged out
           content:
@@ -619,6 +621,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateTeamRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Team created
           content:
@@ -810,12 +814,16 @@ paths:
       parameters:
         - $ref: "#/components/parameters/TeamID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTeamResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           description: Not a member
           content:
@@ -843,6 +851,8 @@ paths:
             schema:
               $ref: "#/components/schemas/UpdateTeamRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team updated
           content:
@@ -881,12 +891,16 @@ paths:
       parameters:
         - $ref: "#/components/parameters/TeamID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team deleted
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           description: Forbidden
           content:
@@ -921,6 +935,8 @@ paths:
             schema:
               $ref: "#/components/schemas/TransferTeamOwnerRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team owner transferred
           content:
@@ -960,12 +976,16 @@ paths:
             type: string
           description: Search by member email, display name, or user ID.
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team members
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTeamMemberListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           description: Not a member
           content:
@@ -986,12 +1006,16 @@ paths:
             schema:
               $ref: "#/components/schemas/AddTeamMemberRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Member added
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTeamMemberResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           description: Forbidden
           content:
@@ -1026,6 +1050,8 @@ paths:
             schema:
               $ref: "#/components/schemas/UpdateTeamMemberRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Member updated
           content:
@@ -1059,6 +1085,8 @@ paths:
         - $ref: "#/components/parameters/TeamID"
         - $ref: "#/components/parameters/UserID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Member removed
           content:
@@ -1114,6 +1142,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateAPIKeyRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: API key created
           content:
@@ -1161,6 +1191,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/APIKeyID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: API key deleted
           content:
@@ -1188,6 +1220,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/APIKeyID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: API key deactivated
           content:
@@ -1247,6 +1281,8 @@ paths:
             default: 0
             minimum: 0
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: List of sandboxes
           content:
@@ -1273,6 +1309,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ClaimRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Sandbox claimed
           content:
@@ -1328,6 +1366,8 @@ paths:
       x-upstream-service: manager
       x-upstream-path: /api/v1/quotas
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: All team quota statuses
           content:
@@ -1352,6 +1392,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/QuotaDimension"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Team quota
           content:
@@ -1436,6 +1478,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox
           content:
@@ -1470,6 +1514,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxUpdateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox updated
           content:
@@ -1498,8 +1544,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
-        "200":
-          description: Sandbox terminated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "202":
+          description: Sandbox termination accepted for asynchronous cleanup
           content:
             application/json:
               schema:
@@ -1527,6 +1575,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox status
           content:
@@ -1625,6 +1675,8 @@ paths:
             type: string
             format: uuid
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Canonical signed sandbox observability events
           content:
@@ -1705,6 +1757,8 @@ paths:
           schema:
             $ref: "#/components/schemas/SandboxObservabilityLogStream"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Historical sandbox logs
           content:
@@ -1786,6 +1840,8 @@ paths:
             minimum: 1
             maximum: 1000
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Chart-ready sandbox runtime metric series
           content:
@@ -1822,6 +1878,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox runtime metric catalog
           content:
@@ -1845,8 +1903,16 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessPauseSandboxResponse"
+        "202":
+          description: Sandbox pause accepted and checkpoint cleanup is still in progress
           content:
             application/json:
               schema:
@@ -1886,6 +1952,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox resumed
           content:
@@ -1944,6 +2012,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateSandboxRootFSSnapshotRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Sandbox rootfs snapshot created
           content:
@@ -1978,6 +2048,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox rootfs snapshot list
           content:
@@ -2007,6 +2079,8 @@ paths:
             schema:
               $ref: "#/components/schemas/RestoreSandboxRootFSRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox rootfs restored
           content:
@@ -2040,6 +2114,13 @@ paths:
       x-upstream-path: /api/v1/sandboxes/{id}/fork
       parameters:
         - $ref: "#/components/parameters/SandboxID"
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: Optional key for retrying the fork without creating a duplicate child sandbox.
       requestBody:
         required: false
         content:
@@ -2047,6 +2128,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ForkSandboxRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Sandbox forked
           content:
@@ -2093,6 +2176,8 @@ paths:
             schema:
               $ref: "#/components/schemas/RebaseSandboxRootFSRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Paused sandbox rootfs rebased
           content:
@@ -2134,6 +2219,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RootFSSnapshotID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox rootfs snapshot
           content:
@@ -2156,6 +2243,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RootFSSnapshotID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Deleted
           content:
@@ -2185,6 +2274,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxRefreshRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: TTL refreshed
           content:
@@ -2208,6 +2299,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Network policy
           content:
@@ -2236,6 +2329,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxNetworkPolicy"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Network policy updated
           content:
@@ -2254,6 +2349,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox services
           content:
@@ -2283,6 +2380,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxServicesUpdateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Sandbox services updated
           content:
@@ -2316,6 +2415,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxPreviewCreateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Preview grant created
           content:
@@ -2363,6 +2464,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxPreviewRenewRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Preview grant renewed
           content:
@@ -2403,6 +2506,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/PreviewID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Preview grant revoked
           content:
@@ -2438,6 +2543,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateContextRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Context created
           content:
@@ -2454,6 +2561,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Context list
           content:
@@ -2472,6 +2581,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/ContextID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Context
           content:
@@ -2489,6 +2600,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/ContextID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Context deleted
           content:
@@ -2507,6 +2620,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/ContextID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Context restarted
           content:
@@ -2532,6 +2647,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ContextInputRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Input written
           content:
@@ -2557,6 +2674,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ContextInputRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution completed
           content:
@@ -2581,6 +2700,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ResizeContextRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Resized
           content:
@@ -2605,6 +2726,8 @@ paths:
             schema:
               $ref: "#/components/schemas/SignalContextRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Signal sent
           content:
@@ -2639,6 +2762,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/ContextID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "101":
           description: Switching Protocols
   /api/v1/sandboxes/{id}/sessions:
@@ -2653,6 +2778,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution session list
           content:
@@ -2682,6 +2809,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionSpec"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Execution session created
           content:
@@ -2706,6 +2835,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/SessionID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution session
           content:
@@ -2730,6 +2861,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionSpec"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution session updated
           content:
@@ -2747,6 +2880,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/SessionID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution session deleted
           content:
@@ -2771,6 +2906,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionDesiredStateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Desired state updated
           content:
@@ -2796,6 +2933,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateExecutionSessionAttemptRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Attempt created
           content:
@@ -2821,6 +2960,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionInputRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "202":
           description: Input accepted
           content:
@@ -2845,6 +2986,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionSignalRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "202":
           description: Signal accepted
           content:
@@ -2869,6 +3012,8 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecutionSessionTerminalResizeRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Terminal resized
           content:
@@ -2903,6 +3048,8 @@ paths:
             maximum: 10000
             default: 1000
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Execution session events
           content:
@@ -2940,6 +3087,8 @@ paths:
           schema:
             type: string
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Server-sent event stream
           content:
@@ -2971,6 +3120,8 @@ paths:
             format: int64
             minimum: 0
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "101":
           description: Switching Protocols
   /api/v1/sandboxes/{id}/files/move:
@@ -2990,6 +3141,8 @@ paths:
             schema:
               $ref: "#/components/schemas/MoveFileRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Moved
           content:
@@ -3022,6 +3175,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "101":
           description: Switching Protocols
   /api/v1/sandboxes/{id}/files:
@@ -3040,6 +3195,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: File content
           content:
@@ -3076,6 +3233,8 @@ paths:
               type: string
               format: binary
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: File written
           content:
@@ -3099,6 +3258,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Deleted
           content:
@@ -3120,6 +3281,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: File metadata
           content:
@@ -3141,6 +3304,8 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Directory entries
           content:
@@ -3156,6 +3321,8 @@ paths:
       x-upstream-service: manager
       x-upstream-path: /api/v1/templates
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Templates list
           content:
@@ -3176,6 +3343,8 @@ paths:
             schema:
               $ref: "#/components/schemas/TemplateCreateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Template created
           content:
@@ -3285,6 +3454,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/TemplateID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Template
           content:
@@ -3313,6 +3484,8 @@ paths:
             schema:
               $ref: "#/components/schemas/TemplateUpdateRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Template updated
           content:
@@ -3341,6 +3514,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/TemplateID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Template deleted
           content:
@@ -3401,6 +3576,8 @@ paths:
       x-upstream-service: manager
       x-upstream-path: /api/v1/credential-sources
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Credential sources
           content:
@@ -3421,6 +3598,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CredentialSourceWriteRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Credential source created
           content:
@@ -3448,6 +3627,8 @@ paths:
           schema:
             type: string
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Credential source
           content:
@@ -3481,6 +3662,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CredentialSourceWriteRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Credential source updated
           content:
@@ -3513,6 +3696,8 @@ paths:
           schema:
             type: string
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Credential source deleted
           content:
@@ -3568,18 +3753,21 @@ components:
       required: true
       schema:
         type: string
+        format: uuid
     RegionId:
       name: id
       in: path
       required: true
       schema:
         type: string
+        pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
     UserID:
       name: userId
       in: path
       required: true
       schema:
         type: string
+        format: uuid
     APIKeyID:
       name: id
       in: path
@@ -3623,6 +3811,19 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/QuotaDimension"
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: Authentication is required or the bearer credentials are invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
     Error:
       type: object
@@ -3654,6 +3855,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3676,6 +3878,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/GatewayMetadata"
@@ -3683,6 +3886,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3693,6 +3897,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/TeamQuota"
@@ -3754,6 +3959,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/UsageWindowPage"
@@ -3835,6 +4041,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/RegistryCredentials"
@@ -3842,6 +4049,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/CredentialSourceMetadata"
@@ -3849,6 +4057,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: array
@@ -3887,6 +4096,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3897,6 +4107,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3907,6 +4118,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3917,6 +4129,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3927,6 +4140,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3937,6 +4151,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3966,6 +4181,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -3996,9 +4212,9 @@ components:
           type: string
         home_region_id:
           type: string
-          nullable: true
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
           description: Required in global-gateway mode because registration creates the user's initial team.
-      required: [email, password, name]
+      required: [email, password, name, home_region_id]
     RefreshRequest:
       type: object
       properties:
@@ -4041,6 +4257,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/LoginResponse"
@@ -4065,6 +4282,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/DeviceLoginStartResponse"
@@ -4092,6 +4310,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/DeviceLoginPollResponse"
@@ -4145,6 +4364,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/User"
@@ -4174,6 +4394,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SSHPublicKey"
@@ -4181,6 +4402,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4204,6 +4426,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4217,17 +4440,21 @@ components:
       properties:
         id:
           type: string
+          format: uuid
         name:
           type: string
           description: Display name. Team names are not unique; use the team ID as the canonical identifier.
         slug:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
           description: Human-readable alias. Team slugs are not unique; use the team ID as the canonical identifier.
         owner_id:
           type: string
+          format: uuid
           nullable: true
         home_region_id:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
           nullable: true
         created_at:
           type: string
@@ -4287,6 +4514,7 @@ components:
       properties:
         id:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
         display_name:
           type: string
         regional_gateway_url:
@@ -4302,6 +4530,7 @@ components:
       properties:
         id:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
         display_name:
           type: string
         regional_gateway_url:
@@ -4328,6 +4557,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/Region"
@@ -4335,6 +4565,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4348,10 +4579,13 @@ components:
       properties:
         id:
           type: string
+          format: uuid
         team_id:
           type: string
+          format: uuid
         user_id:
           type: string
+          format: uuid
         role:
           type: string
         joined_at:
@@ -4376,11 +4610,13 @@ components:
           description: Display name. Team names are not unique.
         slug:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
           description: Human-readable alias. Team slugs are not unique.
         home_region_id:
           type: string
-          nullable: true
-      required: [name]
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
+          description: Required when creating a team through the global gateway.
+      required: [name, home_region_id]
     UpdateTeamRequest:
       type: object
       properties:
@@ -4389,12 +4625,19 @@ components:
           description: Display name. Team names are not unique.
         slug:
           type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
           description: Human-readable alias. Team slugs are not unique.
+        home_region_id:
+          type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)+$'
+          nullable: true
+          description: Optional immutable home region assertion. A different value is rejected.
     TransferTeamOwnerRequest:
       type: object
       properties:
         user_id:
           type: string
+          format: uuid
       required: [user_id]
     AddTeamMemberRequest:
       type: object
@@ -4417,6 +4660,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/Team"
@@ -4424,6 +4668,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4436,6 +4681,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/TeamMember"
@@ -4443,6 +4689,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4572,6 +4819,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/CreateAPIKeyResponse"
@@ -4579,6 +4827,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4589,6 +4838,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4607,7 +4857,7 @@ components:
           description: Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.
         config:
           $ref: "#/components/schemas/SandboxConfig"
-      required: []
+      required: [template]
     SandboxConfig:
       type: object
       properties:
@@ -4907,6 +5157,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxPreviewGrant"
@@ -4914,6 +5165,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -4961,6 +5213,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ClaimResponse"
@@ -5115,6 +5368,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/Sandbox"
@@ -5213,6 +5467,7 @@ components:
       properties:
         target_base_artifact_digest:
           type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
           description: Canonical SHA-256 digest of an already-attested immutable RootFS Base artifact.
         rollback_ttl:
           type: integer
@@ -5240,6 +5495,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxRootFSSnapshot"
@@ -5247,6 +5503,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxRootFSSnapshotList"
@@ -5254,6 +5511,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/RestoreSandboxRootFSResponse"
@@ -5261,6 +5519,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ForkSandboxResponse"
@@ -5268,6 +5527,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/RebaseSandboxRootFSResponse"
@@ -5275,6 +5535,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxStatus"
@@ -5326,6 +5587,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -5849,6 +6111,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxObservabilityEventsResponse"
@@ -5856,6 +6119,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxObservabilityLogsResponse"
@@ -5863,6 +6127,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxRuntimeMetricsResponse"
@@ -5870,6 +6135,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxRuntimeMetricsCatalogResponse"
@@ -5905,6 +6171,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/PauseSandboxResponse"
@@ -5912,6 +6179,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ResumeSandboxResponse"
@@ -5942,6 +6210,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/RefreshResponse"
@@ -6277,6 +6546,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ExecutionSession"
@@ -6284,6 +6554,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -6297,6 +6568,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ExecutionSessionInputResponse"
@@ -6304,6 +6576,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ExecutionSessionEventPage"
@@ -6311,6 +6584,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -6599,6 +6873,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ContextResponse"
@@ -6606,6 +6881,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -6618,6 +6894,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/ContextExecResponse"
@@ -6655,6 +6932,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               oneOf:
@@ -6670,6 +6948,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/FileInfo"
@@ -6677,6 +6956,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -6904,6 +7184,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/Template"
@@ -6911,6 +7192,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               type: object
@@ -7589,6 +7871,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
+          required: [data]
           properties:
             data:
               $ref: "#/components/schemas/SandboxNetworkPolicy"

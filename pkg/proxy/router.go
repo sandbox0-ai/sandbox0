@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
 
@@ -107,23 +108,23 @@ func (r *Router) createReverseProxyDirector(target *url.URL) *httputil.ReversePr
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			status := http.StatusBadGateway
-			body := `{"error": "upstream service unavailable"}`
+			code := spec.CodeUnavailable
+			message := "upstream service unavailable"
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				status = http.StatusRequestEntityTooLarge
-				body = `{"error": "request body too large"}`
+				code = spec.CodeBadRequest
+				message = "request body too large"
 			} else if IsTimeoutError(err) {
 				status = http.StatusGatewayTimeout
-				body = `{"error": "upstream request timed out"}`
+				message = "upstream request timed out"
 			}
 			r.logger.Error("Proxy error",
 				zap.String("target", req.URL.String()),
 				zap.Int("status", status),
 				zap.Error(err),
 			)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(body))
+			_ = spec.WriteError(w, status, code, message)
 		},
 	}
 

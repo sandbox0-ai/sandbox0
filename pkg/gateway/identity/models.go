@@ -40,19 +40,14 @@ type TeamMember struct {
 
 // TeamMemberWithUser combines membership and user details.
 type TeamMemberWithUser struct {
-	ID            string    `json:"id"`
-	TeamID        string    `json:"team_id"`
-	UserID        string    `json:"user_id"`
-	Role          string    `json:"role"`
-	JoinedAt      time.Time `json:"joined_at"`
-	UserID2       string    `json:"user_id2"`
-	Email         string    `json:"email"`
-	Name          string    `json:"name"`
-	AvatarURL     string    `json:"avatar_url"`
-	EmailVerified bool      `json:"email_verified"`
-	IsAdmin       bool      `json:"is_admin"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID        string    `json:"id"`
+	TeamID    string    `json:"team_id"`
+	UserID    string    `json:"user_id"`
+	Role      string    `json:"role"`
+	JoinedAt  time.Time `json:"joined_at"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name"`
+	AvatarURL string    `json:"avatar_url"`
 }
 
 // TeamGrantRecord stores the data needed to issue JWT team grants.

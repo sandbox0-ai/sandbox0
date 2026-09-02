@@ -133,10 +133,6 @@ func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamI
 	if !bool(result.Success) {
 		return nil, fmt.Errorf("cluster-gateway returned unsuccessful sandbox list response")
 	}
-	if result.Data == nil {
-		return nil, fmt.Errorf("cluster-gateway sandbox list response missing data")
-	}
-
 	return &result, nil
 }
 

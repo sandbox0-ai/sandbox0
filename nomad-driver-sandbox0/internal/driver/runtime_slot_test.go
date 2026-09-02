@@ -630,6 +630,17 @@ func runtimeSlotAssignment() *runtimecontrol.Assignment {
 	}
 }
 
+func TestSlowRuntimeSlotClaimTimingIsWarning(t *testing.T) {
+	var claimLogs bytes.Buffer
+	handle := newTaskHandle(taskHandleOptions{logger: hclog.New(&hclog.LoggerOptions{
+		Output: &claimLogs, JSONFormat: true, Level: hclog.Info,
+	})})
+	handle.logClaimTimings(true, time.Second, claimTimings{})
+	if log := claimLogs.String(); !strings.Contains(log, `"@level":"warn"`) {
+		t.Fatalf("slow claim timing log = %q, want warning level", log)
+	}
+}
+
 func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	var claimLogs bytes.Buffer

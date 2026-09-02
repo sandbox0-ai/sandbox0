@@ -1029,6 +1029,20 @@ func (t sandboxStoreTx) GetActiveLifecycleTxn(ctx context.Context, sandboxID str
 	return getActiveLifecycleTxn(ctx, t.tx, sandboxID)
 }
 
+// GetLifecycleTxn returns an exact lifecycle while the sandbox row is already
+// locked. Recovery controllers use this narrower concrete capability to prove
+// ownership of an aborted runtime attempt without widening SandboxStoreTx.
+func (t sandboxStoreTx) GetLifecycleTxn(ctx context.Context, txnID string) (*SandboxLifecycleTxn, error) {
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return nil, fmt.Errorf("txn_id is required")
+	}
+	return scanLifecycleTxn(t.tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1
+		FOR SHARE
+	`, txnID))
+}
+
 func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error {
 	if txn == nil {
 		return nil

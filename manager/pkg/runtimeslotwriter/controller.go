@@ -35,6 +35,10 @@ type sandboxRuntimeSlotReader interface {
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 }
 
+type sandboxLifecycleReader interface {
+	GetLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
+}
+
 type sandboxCrashLifecycleStarter interface {
 	BeginOrRestartRootFSWriterCrashLifecycleTxn(context.Context, *sandboxstore.SandboxLifecycleTxn) error
 }
@@ -288,16 +292,54 @@ func (c *Controller) ensureCrashLifecycle(
 			}
 			failedInitialClaim = claim != nil && claim.Phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
 		}
+		terminatingFailedResume := false
+		terminatingFailedResumeCandidate := record != nil && record.DeletedAt.IsZero() &&
+			record.DesiredState == sandboxstore.SandboxDesiredStateTerminating &&
+			record.RuntimeNamespace == "" && record.RuntimeID == "" &&
+			record.RuntimeGeneration >= 0 && record.RuntimeGeneration+1 == runtimeGeneration &&
+			!failedInitialClaim
+		if terminatingFailedResumeCandidate {
+			claimReader, ok := tx.(sandboxRuntimeClaimReader)
+			if !ok {
+				return errors.New("sandbox transaction cannot inspect terminated Nomad resume cleanup")
+			}
+			claim, err := claimReader.GetSandboxRuntimeClaim(lockCtx, grant.SandboxID)
+			if err != nil {
+				return err
+			}
+			slotReader, ok := tx.(sandboxRuntimeSlotReader)
+			if !ok {
+				return errors.New("sandbox transaction cannot inspect the terminated Nomad resume slot")
+			}
+			slot, err := slotReader.GetRuntimeSlot(lockCtx, request.SlotID)
+			if err != nil {
+				return err
+			}
+			lifecycleReader, ok := tx.(sandboxLifecycleReader)
+			if !ok {
+				return errors.New("sandbox transaction cannot inspect the terminated Nomad resume lifecycle")
+			}
+			resume, err := lifecycleReader.GetLifecycleTxn(lockCtx, slot.ClaimOperationID)
+			if err != nil {
+				return err
+			}
+			terminatingFailedResume = claim != nil &&
+				claim.Phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending &&
+				terminatingFailedResumeLifecycleMatches(resume, record, grant, slot, runtimeGeneration)
+		}
+		deletedFailedClaim := record != nil && record.DesiredState == sandboxstore.SandboxDesiredStateDeleted &&
+			!record.DeletedAt.IsZero() && record.RuntimeNamespace == "" && record.RuntimeID == "" &&
+			record.RuntimeGeneration == runtimeGeneration
 		fromRuntimeNamespace, fromRuntimeID := grant.RuntimeNamespace, grant.RuntimeIncarnationID
 		switch {
 		case regularRuntime && record.RuntimeNamespace == grant.RuntimeNamespace &&
 			record.RuntimeID == grant.RuntimeIncarnationID:
 			fromRuntimeNamespace = record.RuntimeNamespace
 			fromRuntimeID = record.RuntimeID
-		case failedInitialClaim, precommitResume:
+		case failedInitialClaim, precommitResume, terminatingFailedResume, deletedFailedClaim:
 			// A first claim publishes generation 1 only after command readiness.
-			// Cleanup must therefore accept the durable generation-0 identity
-			// while fencing the exact generation-1 writer bound to its slot.
+			// Cleanup must also survive termination or deletion clearing the
+			// runtime identity after the exact failed attempt was fenced.
 		default:
 			return errors.New("sandbox runtime does not match the runtime slot writer")
 		}
@@ -317,6 +359,36 @@ func (c *Controller) ensureCrashLifecycle(
 		return fmt.Errorf("prepare runtime slot writer crash lifecycle: %w", err)
 	}
 	return nil
+}
+
+func terminatingFailedResumeLifecycleMatches(
+	resume *sandboxstore.SandboxLifecycleTxn,
+	record *sandboxstore.SandboxRecord,
+	grant *sandboxstore.RootFSWriterGrant,
+	slot *sandboxstore.RuntimeSlot,
+	runtimeGeneration int64,
+) bool {
+	return resume != nil && record != nil && grant != nil && slot != nil &&
+		resume.ID == slot.ClaimOperationID && resume.SandboxID == record.ID &&
+		resume.Kind == sandboxstore.SandboxLifecycleKindResume &&
+		resume.Source == sandboxstore.SandboxLifecycleSourceManual && !resume.Cancelable &&
+		resume.Phase == sandboxstore.SandboxLifecyclePhaseAborted &&
+		resume.CancelRequestedAt.IsZero() && !resume.AbortedAt.IsZero() && resume.Error != "" &&
+		resume.Epoch > 0 &&
+		resume.FromGeneration == record.RuntimeGeneration && resume.ToGeneration == runtimeGeneration &&
+		resume.ToGeneration == resume.FromGeneration+1 &&
+		resume.FromRuntimeNamespace == "" && resume.FromRuntimeID == "" &&
+		resume.ToRuntimeNamespace == "" && resume.ToRuntimeID == "" &&
+		resume.ExpectedGenerationID == grant.InitialGenerationID && resume.PreparedGenerationID == "" &&
+		resume.ID == sandboxstore.NomadSandboxResumeOperationID(
+			record.ID, resume.FromGeneration, resume.ExpectedGenerationID, resume.Epoch,
+		) &&
+		slot.ID == grant.SlotID && slot.SandboxID == record.ID && slot.WriterGrantID == grant.ID &&
+		slot.ClaimID == grant.ClaimID && slot.SourceGenerationID == grant.InitialGenerationID &&
+		slot.AllocationID == grant.RuntimeIncarnationID &&
+		slot.AllocationNamespace == grant.RuntimeNamespace &&
+		(slot.State == sandboxstore.RuntimeSlotStateQuiescing ||
+			slot.State == sandboxstore.RuntimeSlotStateOrphaned)
 }
 
 func precommitResumeLifecycleMatches(

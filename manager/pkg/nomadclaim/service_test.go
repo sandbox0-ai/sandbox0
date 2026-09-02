@@ -123,6 +123,9 @@ type fakeClaimStore struct {
 	deletedSnapshots         []string
 	templateCaptureCandidate *sandboxstore.NomadTemplateCaptureCandidate
 	templateCaptureRequests  []*sandboxstore.NomadRunningRootFSCaptureRequest
+	snapshotAbortCalls       [][3]string
+	snapshotAbortErr         error
+	snapshotAbortResult      bool
 	rebaseCandidate          *sandboxstore.NomadPausedRebaseCandidate
 	rebaseErr                error
 	rebaseRequests           []*sandboxstore.NomadPausedRebaseRequest
@@ -883,6 +886,21 @@ func (f *fakeClaimStore) ContinueNomadRunningRootFSCapture(
 		return nil, nil
 	}
 	return f.RequestNomadRunningRootFSCapture(ctx, request)
+}
+
+func (f *fakeClaimStore) AbortStaleNomadRunningRootFSCapture(
+	_ context.Context,
+	operationID, sourceSandboxID, reason string,
+) (bool, error) {
+	f.snapshotAbortCalls = append(f.snapshotAbortCalls, [3]string{operationID, sourceSandboxID, reason})
+	if f.snapshotAbortErr != nil {
+		return false, f.snapshotAbortErr
+	}
+	if f.snapshotAbortResult {
+		delete(f.activeLifecycles, sourceSandboxID)
+		f.templateCaptureCandidate = nil
+	}
+	return f.snapshotAbortResult, nil
 }
 
 func (f *fakeClaimStore) RestoreRootFSFromSnapshot(_ context.Context, request *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error) {
@@ -1959,6 +1977,53 @@ func TestServiceSnapshotsActiveSandboxAndRecoversLostResponse(t *testing.T) {
 	}
 	if retry == nil || retry.ID != snapshotID || len(fixture.runningFork.requests) != 2 {
 		t.Fatalf("snapshot retry = %#v, node requests = %d", retry, len(fixture.runningFork.requests))
+	}
+}
+
+func TestServiceAbortsStaleUnavailableRunningSnapshot(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sourceID := "source-stale-running-snapshot"
+	operationID := "operation-stale-running-snapshot"
+	snapshotID := runningRootFSSnapshotID(sourceID, operationID)
+	fixture.store.records[sourceID] = &sandboxstore.SandboxRecord{
+		ID: sourceID, TeamID: "team-1", ClusterID: "cluster-1",
+		DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		RuntimeGeneration: 4, RuntimeNamespace: "nomad", RuntimeID: "allocation-snapshot",
+		TemplateSpec: fixture.service.templates.(*fakeTemplateStore).template.Spec,
+	}
+	prepareRunningRootFSCaptureCheckpoint(
+		t, &fixture, sourceID, operationID, snapshotID, "stale checkpoint", "", time.Time{},
+	)
+	fixture.runningFork.err = errdefs.ErrUnavailable
+	fixture.runningFork.onCall = nil
+	request := &service.CreateSandboxRootFSSnapshotRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+	}
+	_, err := fixture.service.CreateRunningSandboxRootFSSnapshot(
+		t.Context(), sourceID, "team-1", request,
+	)
+	if !errors.Is(err, service.ErrSandboxCheckpointRequiresCtld) {
+		t.Fatalf("initial snapshot error = %v, want checkpoint backend unavailable", err)
+	}
+	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{sourceID: {
+		ID: operationID, SandboxID: sourceID,
+		Kind:      sandboxstore.SandboxLifecycleKindSnapshot,
+		UpdatedAt: fixture.now.Add(-defaultNomadRunningSnapshotRecoveryTimeout - time.Second),
+	}}
+	fixture.store.snapshotAbortResult = true
+
+	if err := fixture.service.CompleteSandboxRootFSSnapshot(t.Context(), sourceID); err != nil {
+		t.Fatalf("complete stale snapshot: %v", err)
+	}
+	if len(fixture.store.snapshotAbortCalls) != 1 {
+		t.Fatalf("snapshot abort calls = %v, want one", fixture.store.snapshotAbortCalls)
+	}
+	call := fixture.store.snapshotAbortCalls[0]
+	if call[0] != operationID || call[1] != sourceID || call[2] == "" {
+		t.Fatalf("snapshot abort call = %v", call)
+	}
+	if fixture.store.activeLifecycles[sourceID] != nil {
+		t.Fatal("stale snapshot lifecycle owner was not released")
 	}
 }
 

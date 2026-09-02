@@ -154,6 +154,20 @@ type claimAttempt struct {
 	err    error
 }
 
+// claimTimings splits the synchronous node claim without adding identifiers to
+// metric cardinality or changing the one-shot claim protocol.
+type claimTimings struct {
+	bundleWrite        time.Duration
+	claimStatePersist  time.Duration
+	rootFSEnsure       time.Duration
+	consumerRegister   time.Duration
+	rootFSBind         time.Duration
+	startingReport     time.Duration
+	runscCreate        time.Duration
+	runscStart         time.Duration
+	activeStatePersist time.Duration
+}
+
 func (h *taskHandle) statePath() string {
 	return filepath.Join(h.bundleDir, ".sandbox0-driver-state.json")
 }
@@ -222,6 +236,10 @@ func readPersistedState(path string) (PersistedState, error) {
 }
 
 func newTaskHandle(options taskHandleOptions) *taskHandle {
+	logger := options.logger
+	if logger == nil {
+		logger = hclog.NewNullLogger()
+	}
 	return &taskHandle{
 		taskConfig:                    options.taskConfig,
 		driverConfig:                  options.driverConfig,
@@ -237,7 +255,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		procdInternalJWTPublicKeyFile: options.procdInternalJWTPublicKeyFile,
 		rootfs:                        options.rootfs,
 		procdPort:                     options.procdPort,
-		logger:                        options.logger,
+		logger:                        logger,
 		networkChain:                  networkChainName(options.containerID),
 		phase:                         phaseWarm,
 		done:                          make(chan struct{}),
@@ -449,6 +467,23 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 		close(attempt.done)
 		h.mu.Unlock()
 	}()
+	claimStarted := time.Now()
+	timings := claimTimings{}
+	defer func() {
+		h.logger.Info("Runtime slot claim timing",
+			"success", resultErr == nil,
+			"claim_duration_us", time.Since(claimStarted).Microseconds(),
+			"bundle_write_us", timings.bundleWrite.Microseconds(),
+			"claim_state_persist_us", timings.claimStatePersist.Microseconds(),
+			"rootfs_ensure_us", timings.rootFSEnsure.Microseconds(),
+			"consumer_register_us", timings.consumerRegister.Microseconds(),
+			"rootfs_bind_us", timings.rootFSBind.Microseconds(),
+			"starting_report_us", timings.startingReport.Microseconds(),
+			"runsc_create_us", timings.runscCreate.Microseconds(),
+			"runsc_start_us", timings.runscStart.Microseconds(),
+			"active_state_persist_us", timings.activeStatePersist.Microseconds(),
+		)
+	}()
 
 	if request.PolicyToken == "" || request.WriterEpoch == "" {
 		h.setPhase(phaseWarm)
@@ -515,7 +550,10 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 			return err
 		}
 	}
-	if err := h.writeClaimBundle(request.Runtime, request.Resources); err != nil {
+	stepStarted := time.Now()
+	err = h.writeClaimBundle(request.Runtime, request.Resources)
+	timings.bundleWrite = time.Since(stepStarted)
+	if err != nil {
 		h.setPhase(phaseWarm)
 		return err
 	}
@@ -537,19 +575,24 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 		h.stage = durableStage
 	}
 	h.mu.Unlock()
-	if err := h.persist(); err != nil {
+	stepStarted = time.Now()
+	err = h.persist()
+	timings.claimStatePersist = time.Since(stepStarted)
+	if err != nil {
 		_ = h.rollbackClaim()
 		return fmt.Errorf("persist claiming state: %w", err)
 	}
 
 	if durableStage != nil {
 		attachCtx, attachCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		mount, err := h.rootfs.Ensure(attachCtx, *request.Stage, h.handleWriterLeaseLoss)
+		stepStarted = time.Now()
+		mount, ensureErr := h.rootfs.Ensure(attachCtx, *request.Stage, h.handleWriterLeaseLoss)
+		timings.rootFSEnsure = time.Since(stepStarted)
 		attachCancel()
-		if err != nil {
-			attachErr := fmt.Errorf("attach RootFS session: %w", err)
+		if ensureErr != nil {
+			attachErr := fmt.Errorf("attach RootFS session: %w", ensureErr)
 			var consumedErr *consumedRootFSAttachError
-			if !errors.As(err, &consumedErr) {
+			if !errors.As(ensureErr, &consumedErr) {
 				_ = h.rollbackClaim()
 				return attachErr
 			}
@@ -579,20 +622,27 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 			consumer.NetNSIdentity = durableStage.ExpectedPolicyToken.NetNSIdentity
 			consumer.NetworkChain = h.networkChain
 		}
-		lease, err := h.rootfs.RegisterConsumer(registerCtx, *durableStage, consumer)
+		stepStarted = time.Now()
+		lease, registerErr := h.rootfs.RegisterConsumer(registerCtx, *durableStage, consumer)
+		timings.consumerRegister = time.Since(stepStarted)
 		registerCancel()
-		if err != nil {
-			return h.poisonClaimLaunch(fmt.Errorf("register RootFS runtime consumer: %w", err), false)
+		if registerErr != nil {
+			return h.poisonClaimLaunch(fmt.Errorf("register RootFS runtime consumer: %w", registerErr), false)
 		}
 		h.startConsumerRenewal(*durableStage, lease)
 	}
 
-	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
+	stepStarted = time.Now()
+	err = h.mounter.Bind(resolvedRootfs, h.rootMount)
+	timings.rootFSBind = time.Since(stepStarted)
+	if err != nil {
 		return h.failClaimBeforeLaunch(err, durableStage != nil)
 	}
 	if startingRequest != nil {
 		startingCtx, startingCancel := context.WithTimeout(context.Background(), runtimeSlotStartingTimeout)
-		_, err := runtimeSlot.reportStarting(startingCtx, *startingRequest)
+		stepStarted = time.Now()
+		_, err = runtimeSlot.reportStarting(startingCtx, *startingRequest)
+		timings.startingReport = time.Since(stepStarted)
 		startingCancel()
 		if err != nil {
 			return h.poisonClaimLaunch(err, false)
@@ -601,13 +651,19 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
 	defer cancel()
-	if err := h.runner.Create(ctx, h.bundleDir, h.containerID); err != nil {
+	stepStarted = time.Now()
+	err = h.runner.Create(ctx, h.bundleDir, h.containerID)
+	timings.runscCreate = time.Since(stepStarted)
+	if err != nil {
 		return h.poisonClaimLaunch(fmt.Errorf("runsc create: %w", err), true)
 	}
 	cancel()
 	startCtx, startCancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
 	defer startCancel()
-	if err := h.runner.Start(startCtx, h.containerID); err != nil {
+	stepStarted = time.Now()
+	err = h.runner.Start(startCtx, h.containerID)
+	timings.runscStart = time.Since(stepStarted)
+	if err != nil {
 		return h.poisonClaimLaunch(fmt.Errorf("runsc start: %w", err), true)
 	}
 
@@ -619,7 +675,10 @@ func (h *taskHandle) Claim(request ClaimRequest) (resultErr error) {
 	h.claim.RootfsPath = resolvedRootfs
 	h.stage = durableStage
 	h.mu.Unlock()
-	if err := h.persist(); err != nil {
+	stepStarted = time.Now()
+	err = h.persist()
+	timings.activeStatePersist = time.Since(stepStarted)
+	if err != nil {
 		_ = h.runner.Kill(context.Background(), h.containerID, "KILL")
 		_ = h.mounter.Unmount(h.rootMount)
 		_ = h.runner.Delete(context.Background(), h.containerID, true)

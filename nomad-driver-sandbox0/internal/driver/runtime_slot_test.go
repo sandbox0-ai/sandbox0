@@ -15,6 +15,7 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -631,6 +632,10 @@ func runtimeSlotAssignment() *runtimecontrol.Assignment {
 
 func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
+	var claimLogs bytes.Buffer
+	fixture.plugin.logger = hclog.New(&hclog.LoggerOptions{
+		Output: &claimLogs, JSONFormat: true, Level: hclog.Info,
+	})
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
 	fixture.authority.mu.Lock()
 	fixture.authority.startingErrors = []error{fmtErrorUnavailable("response lost")}
@@ -686,6 +691,15 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	}
 	if calls := fixture.runner.callsSnapshot(); !contains(calls, "create") || !contains(calls, "start") {
 		t.Fatalf("runsc calls = %v, want create and start after regional starting", calls)
+	}
+	for _, field := range []string{
+		"Runtime slot claim timing", "claim_duration_us", "bundle_write_us", "claim_state_persist_us",
+		"rootfs_ensure_us", "consumer_register_us", "rootfs_bind_us", "starting_report_us",
+		"runsc_create_us", "runsc_start_us", "active_state_persist_us",
+	} {
+		if !strings.Contains(claimLogs.String(), field) {
+			t.Fatalf("claim timing log = %q, missing %q", claimLogs.String(), field)
+		}
 	}
 	configPayload, err := os.ReadFile(filepath.Join(handle.bundleDir, "config.json"))
 	if err != nil {

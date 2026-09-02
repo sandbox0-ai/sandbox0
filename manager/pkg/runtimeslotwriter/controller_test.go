@@ -121,6 +121,13 @@ func (f fakeTx) GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.Sa
 	return cloneLifecycle(f.store.lifecycle), nil
 }
 
+func (f fakeTx) GetLifecycleTxn(_ context.Context, txnID string) (*sandboxstore.SandboxLifecycleTxn, error) {
+	if f.store.lifecycle == nil || f.store.lifecycle.ID != txnID {
+		return nil, errors.New("sandbox lifecycle not found")
+	}
+	return cloneLifecycle(f.store.lifecycle), nil
+}
+
 func (f fakeTx) BeginLifecycleTxn(_ context.Context, txn *sandboxstore.SandboxLifecycleTxn) error {
 	if f.store.lifecycle != nil && f.store.lifecycle.Phase != sandboxstore.SandboxLifecyclePhaseAborted &&
 		f.store.lifecycle.Phase != sandboxstore.SandboxLifecyclePhaseCommitted {
@@ -441,6 +448,120 @@ func TestControllerRejectsGenerationGapForFailedInitialClaim(t *testing.T) {
 		SandboxID: store.record.ID, OperationID: "claim-operation-1",
 		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
 	}
+	_, err := controller.Fence(context.Background(), request)
+	if err == nil || store.lifecycle != nil || store.beginCalls != 0 {
+		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)
+	}
+}
+
+func TestControllerFencesConsumedWriterAfterFailedClaimDeletion(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
+	store.record.DeletedAt = time.Now().UTC()
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fence() error = %v", err)
+	}
+	if len(fence.ProofDigest) != 32 || store.lifecycle == nil ||
+		store.lifecycle.FromGeneration != store.record.RuntimeGeneration ||
+		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
+		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
+		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
+	}
+}
+
+func TestControllerFencesConsumedWriterAfterFailedResumeTermination(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	store.record.RuntimeGeneration = 6
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.record.LifecycleEpoch = 4
+	resumeOperationID := sandboxstore.NomadSandboxResumeOperationID(
+		store.record.ID, store.record.RuntimeGeneration, store.grant.InitialGenerationID, store.record.LifecycleEpoch,
+	)
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "initial-claim-operation",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
+	}
+	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: resumeOperationID, SandboxID: store.record.ID,
+		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhaseAborted,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
+		ExpectedGenerationID: store.grant.InitialGenerationID,
+		Error:                "resume runtime did not reach command-ready", AbortedAt: time.Now().UTC(),
+	}
+	store.slot = &sandboxstore.RuntimeSlot{
+		ID: store.grant.SlotID, SandboxID: store.record.ID, ClaimOperationID: resumeOperationID,
+		ClaimID: store.grant.ClaimID, WriterGrantID: store.grant.ID,
+		SourceGenerationID: store.grant.InitialGenerationID,
+		AllocationID:       store.grant.RuntimeIncarnationID, AllocationNamespace: store.grant.RuntimeNamespace,
+		State: sandboxstore.RuntimeSlotStateQuiescing,
+	}
+
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fence() error = %v", err)
+	}
+	if len(fence.ProofDigest) != 32 || store.lifecycle == nil ||
+		store.lifecycle.ID != request.OperationID ||
+		store.lifecycle.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		store.lifecycle.Source != sandboxstore.SandboxLifecycleSourceCrash ||
+		store.lifecycle.FromGeneration != 7 ||
+		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
+		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
+		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
+	}
+}
+
+func TestControllerRejectsTerminatingResumeOwnedByAnotherSlot(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	store.record.RuntimeGeneration = 6
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.record.LifecycleEpoch = 4
+	resumeOperationID := sandboxstore.NomadSandboxResumeOperationID(
+		store.record.ID, store.record.RuntimeGeneration, store.grant.InitialGenerationID, store.record.LifecycleEpoch,
+	)
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "initial-claim-operation",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
+	}
+	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: resumeOperationID, SandboxID: store.record.ID,
+		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhaseAborted,
+		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
+		ExpectedGenerationID: store.grant.InitialGenerationID,
+		Error:                "resume runtime did not reach command-ready", AbortedAt: time.Now().UTC(),
+	}
+	store.slot = &sandboxstore.RuntimeSlot{
+		ID: store.grant.SlotID, SandboxID: store.record.ID, ClaimOperationID: "another-resume-operation",
+		ClaimID: store.grant.ClaimID, WriterGrantID: store.grant.ID,
+		SourceGenerationID: store.grant.InitialGenerationID,
+		AllocationID:       store.grant.RuntimeIncarnationID, AllocationNamespace: store.grant.RuntimeNamespace,
+		State: sandboxstore.RuntimeSlotStateQuiescing,
+	}
+
+	_, err := controller.Fence(context.Background(), request)
+	if err == nil || store.lifecycle.ID != resumeOperationID || store.beginCalls != 0 {
+		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)
+	}
+}
+
+func TestControllerRejectsDeletedSandboxAtAnotherRuntimeGeneration(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
+	store.record.DeletedAt = time.Now().UTC()
+	store.record.RuntimeNamespace = ""
+	store.record.RuntimeID = ""
+	store.record.RuntimeGeneration++
+
 	_, err := controller.Fence(context.Background(), request)
 	if err == nil || store.lifecycle != nil || store.beginCalls != 0 {
 		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)

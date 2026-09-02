@@ -1628,11 +1628,13 @@ func completeRootFSWriterCrashAbandon(
 }
 
 type rootFSWriterCrashRuntimeMatch struct {
-	active              bool
-	terminating         bool
-	failedClaimCleanup  bool
-	failedClaimDeletion bool
-	renewalRevoked      bool
+	active                  bool
+	terminating             bool
+	precommitResume         bool
+	terminatingFailedResume bool
+	failedClaimCleanup      bool
+	failedClaimDeletion     bool
+	renewalRevoked          bool
 }
 
 func lockRootFSWriterCrashRuntime(
@@ -1663,7 +1665,7 @@ func lockRootFSWriterCrashRuntime(
 	match.terminating = !deletedAt.Valid && desiredState == SandboxDesiredStateTerminating &&
 		runtimeGeneration == lifecycle.FromGeneration &&
 		currentRuntimeNamespace == lifecycle.FromRuntimeNamespace && currentRuntimeID == lifecycle.FromRuntimeID
-	precommitResume := !deletedAt.Valid && desiredState == SandboxDesiredStatePaused &&
+	match.precommitResume = !deletedAt.Valid && desiredState == SandboxDesiredStatePaused &&
 		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration >= 0 &&
 		runtimeGeneration+1 == lifecycle.FromGeneration
 	if err := db.QueryRow(ctx, `
@@ -1679,6 +1681,46 @@ func lockRootFSWriterCrashRuntime(
 		record.NodeUID, record.NodeBootID, RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned,
 	).Scan(&match.renewalRevoked); err != nil {
 		return match, fmt.Errorf("verify runtime slot writer renewal fence: %w", err)
+	}
+	terminatingFailedResumeCandidate := !deletedAt.Valid && desiredState == SandboxDesiredStateTerminating &&
+		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration >= 0 &&
+		runtimeGeneration+1 == lifecycle.FromGeneration && match.renewalRevoked
+	if terminatingFailedResumeCandidate {
+		if err := db.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM manager.sandbox_runtime_claims AS claim
+				JOIN manager.runtime_slots AS slot
+					ON slot.sandbox_id = claim.sandbox_id
+				JOIN manager.sandbox_lifecycle_txns AS resume
+					ON resume.txn_id = slot.claim_operation_id
+					AND resume.sandbox_id = slot.sandbox_id
+				WHERE claim.sandbox_id = $1 AND claim.phase = $2
+					AND slot.slot_id = $3 AND slot.writer_grant_id = $4
+					AND slot.claim_id = $5 AND slot.filesystem_id = $6
+					AND slot.node_uid = $7 AND slot.node_boot_id = $8
+					AND slot.source_generation_id = $9
+					AND slot.allocation_namespace = $10 AND slot.allocation_id = $11
+					AND slot.state IN ($12, $13)
+					AND resume.kind = $14 AND resume.source = $15 AND resume.phase = $16
+					AND resume.cancelable = FALSE AND resume.cancel_requested_at IS NULL
+					AND resume.epoch > 0 AND resume.from_generation = $17
+					AND resume.to_generation = $18
+					AND resume.from_runtime_namespace = '' AND resume.from_runtime_id = ''
+					AND resume.to_runtime_namespace = '' AND resume.to_runtime_id = ''
+					AND resume.expected_generation_id = $9 AND resume.prepared_generation_id = ''
+					AND resume.error <> '' AND resume.aborted_at IS NOT NULL
+			)
+		`, record.SandboxID, SandboxRuntimeClaimPhaseCleanupPending,
+			record.SlotID, record.ID, record.ClaimID, record.FilesystemID,
+			record.NodeUID, record.NodeBootID, record.InitialGenerationID,
+			record.RuntimeNamespace, record.RuntimeIncarnationID,
+			RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned,
+			SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted,
+			runtimeGeneration, lifecycle.FromGeneration,
+		).Scan(&match.terminatingFailedResume); err != nil {
+			return match, fmt.Errorf("verify terminated failed Nomad resume: %w", err)
+		}
 	}
 	match.failedClaimDeletion = desiredState == SandboxDesiredStateDeleted && deletedAt.Valid &&
 		currentRuntimeNamespace == "" && currentRuntimeID == "" && runtimeGeneration == lifecycle.FromGeneration
@@ -1712,8 +1754,8 @@ func lockRootFSWriterCrashRuntime(
 		// logical claim worker no longer exposes cleanup_pending.
 		match.failedClaimCleanup = true
 	}
-	if !match.active && !match.terminating && !precommitResume &&
-		!match.failedClaimCleanup && !match.failedClaimDeletion {
+	if !match.active && !match.terminating && !match.precommitResume &&
+		!match.terminatingFailedResume && !match.failedClaimCleanup && !match.failedClaimDeletion {
 		return match, fmt.Errorf("%w: sandbox runtime no longer matches crash lifecycle txn %s",
 			ErrRootFSWriterGrantConflict, lifecycleTxnID)
 	}

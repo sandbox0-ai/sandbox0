@@ -733,6 +733,158 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 	require.Equal(t, SandboxRuntimeClaimPhaseCleaned, claimPhase)
 }
 
+func TestRootFSWriterCrashAbandonCompletesTerminatedFailedResumeIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record, filesystem, generation, registration := sandboxRuntimeClaimReadySlotFixture(
+		t, store, "terminated-failed-resume-writer",
+	)
+	_, err := pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET phase = $2, lease_expires_at = NULL, completed_at = NOW()
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxRuntimeClaimPhaseReady)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET desired_state = $2, runtime_generation = 1,
+			runtime_namespace = '', runtime_id = ''
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxDesiredStatePaused)
+	require.NoError(t, err)
+	record, err = store.GetSandbox(ctx, record.ID)
+	require.NoError(t, err)
+	resumeOperationID := NomadSandboxResumeOperationID(
+		record.ID, record.RuntimeGeneration, generation.ID, record.LifecycleEpoch+1,
+	)
+	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		locked *SandboxRecord,
+	) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: resumeOperationID, SandboxID: locked.ID,
+			Kind: SandboxLifecycleKindResume, Phase: SandboxLifecyclePhasePreparing,
+			Source: SandboxLifecycleSourceManual, Cancelable: false,
+			FromGeneration: locked.RuntimeGeneration, ToGeneration: locked.RuntimeGeneration + 1,
+			ExpectedGenerationID: generation.ID,
+		})
+	}))
+
+	acquire := sandboxRuntimeSlotAcquireRequest(record, filesystem, generation, registration,
+		"terminated-failed-resume-writer")
+	acquire.OperationID = resumeOperationID
+	acquire.ClaimID = "claim-terminated-failed-resume-writer"
+	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
+	require.NoError(t, err)
+	binding := sha256.Sum256([]byte("terminated-failed-resume-writer"))
+	issue := rootFSWriterGrantTestIssueRequest(
+		record.ID, "grant-terminated-failed-resume", acquire.ClaimID, claimed.ID, binding[:],
+	)
+	issue.ExpectedFilesystemID = filesystem.ID
+	issue.InitialGenerationID = generation.ID
+	issue.NodeUID = claimed.NodeUID
+	issue.NodeBootID = claimed.NodeBootID
+	issue.RuntimeNamespace = claimed.AllocationNamespace
+	issue.RuntimeID = "slot"
+	issue.RuntimeIncarnationID = claimed.AllocationID
+	issue.NodeName = claimed.NodeID
+	issue.RuntimeGeneration = "2"
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	_, err = store.BindRuntimeSlotWriterGrant(ctx, &BindRuntimeSlotWriterGrantRequest{
+		SlotID: claimed.ID, OperationID: acquire.OperationID,
+		ClaimID: acquire.ClaimID, GrantID: issued.Grant.ID,
+	})
+	require.NoError(t, err)
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+		ConsumerNodeUID: claimed.NodeUID, ConsumerAgentUID: "ctld-terminated-resume", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - ($2::bigint * INTERVAL '1 millisecond')
+		WHERE grant_id = $1
+	`, issued.Grant.ID, RootFSWriterCrashAbandonGrace.Milliseconds()+1000)
+	require.NoError(t, err)
+
+	_, err = store.AbortNomadSandboxResume(
+		ctx, record.ID, resumeOperationID, "resume runtime did not reach command-ready",
+	)
+	require.NoError(t, err)
+	candidate, err := store.RequestSandboxRuntimeClaimCleanup(
+		ctx, record.ID, "sandbox deletion requested",
+	)
+	require.NoError(t, err)
+	require.Equal(t, claimed.ID, candidate.SlotID)
+	require.Equal(t, RuntimeSlotStateQuiescing, candidate.SlotState)
+
+	crashLifecycleID := "reconcile-terminated-failed-resume-writer"
+	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: crashLifecycleID, SandboxID: record.ID,
+			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
+			Source: SandboxLifecycleSourceCrash, Cancelable: false,
+			FromGeneration: 2, FromRuntimeNamespace: claimed.AllocationNamespace,
+			FromRuntimeID: claimed.AllocationID, ExpectedGenerationID: generation.ID,
+		})
+	}))
+	_, err = store.BeginRootFSWriterCrashAbandon(ctx, &BeginRootFSWriterCrashAbandonRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		OperationID: crashLifecycleID, BindingVersion: RootFSWriterBindingVersion,
+		BindingDigest: binding[:], NodeUID: claimed.NodeUID, NodeBootID: claimed.NodeBootID,
+		ExpectedOldGenerationID: generation.ID,
+	})
+	require.NoError(t, err)
+	proof := sha256.Sum256([]byte("terminated-failed-resume-node-cleanup-proof"))
+	complete := func() error {
+		return store.WithSandboxLock(ctx, record.ID, func(
+			lockCtx context.Context,
+			tx SandboxStoreTx,
+			_ *SandboxRecord,
+		) error {
+			_, completeErr := tx.(RootFSWriterCrashAbandonTx).CompleteRootFSWriterCrashAbandon(
+				lockCtx, &CompleteRootFSWriterCrashAbandonRequest{
+					LifecycleTxnID: crashLifecycleID, GrantID: issued.Grant.ID,
+					WriterEpoch: issued.Grant.WriterEpoch, OperationID: crashLifecycleID,
+					BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+					ProofVersion: RootFSWriterCrashAbandonProofVersion, ProofDigest: proof[:],
+					NodeUID: claimed.NodeUID, NodeBootID: claimed.NodeBootID,
+					ExpectedOldGenerationID: generation.ID,
+				},
+			)
+			return completeErr
+		})
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns SET source = $2 WHERE txn_id = $1
+	`, resumeOperationID, SandboxLifecycleSourceAuto)
+	require.NoError(t, err)
+	require.ErrorIs(t, complete(), ErrRootFSWriterGrantConflict)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns SET source = $2 WHERE txn_id = $1
+	`, resumeOperationID, SandboxLifecycleSourceManual)
+	require.NoError(t, err)
+	err = complete()
+	require.NoError(t, err)
+	grant, err := store.GetRootFSWriterGrant(ctx, issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, grant.State)
+	stored, err := store.GetSandbox(ctx, record.ID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateTerminating, stored.DesiredState)
+	require.EqualValues(t, 1, stored.RuntimeGeneration)
+	require.Empty(t, stored.RuntimeNamespace)
+	require.Empty(t, stored.RuntimeID)
+}
+
 func newRootFSWriterCrashAbandonFixture(
 	t *testing.T,
 	lifecycleSource string,

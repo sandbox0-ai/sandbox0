@@ -1704,6 +1704,14 @@ func lockRootFSWriterCrashRuntime(
 			return match, fmt.Errorf("verify failed Nomad claim cleanup: %w", err)
 		}
 	}
+	if !match.failedClaimCleanup && failedClaimCandidate && runtimeGeneration == 0 &&
+		lifecycle.FromGeneration == 1 && match.renewalRevoked {
+		// Older initial claims left the sandbox generation unpublished while
+		// their exact slot was already fenced. The slot identity is sufficient
+		// authority to finish that interrupted terminal operation even if the
+		// logical claim worker no longer exposes cleanup_pending.
+		match.failedClaimCleanup = true
+	}
 	if !match.active && !match.terminating && !precommitResume &&
 		!match.failedClaimCleanup && !match.failedClaimDeletion {
 		return match, fmt.Errorf("%w: sandbox runtime no longer matches crash lifecycle txn %s",

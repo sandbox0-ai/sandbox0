@@ -22,6 +22,7 @@ type fakeStore struct {
 	abortCalls    int
 	cancelCalls   int
 	beginCalls    int
+	restartCalls  int
 	completeCalls int
 	cancelLost    bool
 	beginLost     bool
@@ -127,6 +128,19 @@ func (f fakeTx) BeginLifecycleTxn(_ context.Context, txn *sandboxstore.SandboxLi
 	}
 	f.store.lifecycle = cloneLifecycle(txn)
 	return nil
+}
+
+func (f fakeTx) BeginOrRestartRootFSWriterCrashLifecycleTxn(
+	ctx context.Context,
+	txn *sandboxstore.SandboxLifecycleTxn,
+) error {
+	if f.store.lifecycle != nil && f.store.lifecycle.ID == txn.ID &&
+		f.store.lifecycle.Phase == sandboxstore.SandboxLifecyclePhaseAborted {
+		f.store.restartCalls++
+		f.store.lifecycle = cloneLifecycle(txn)
+		return nil
+	}
+	return f.BeginLifecycleTxn(ctx, txn)
 }
 
 func (f fakeTx) CompleteRootFSWriterCrashAbandon(
@@ -388,6 +402,32 @@ func TestControllerFencesConsumedWriterBeforeInitialGenerationPublishes(t *testi
 		store.lifecycle.FromRuntimeNamespace != store.grant.RuntimeNamespace ||
 		store.lifecycle.FromRuntimeID != store.grant.RuntimeIncarnationID {
 		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
+	}
+}
+
+func TestControllerRestartsExactAbortedCrashLifecycle(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
+		ID: request.OperationID, SandboxID: store.record.ID,
+		Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhaseAborted,
+		Source: sandboxstore.SandboxLifecycleSourceCrash, Cancelable: false,
+		FromGeneration:       store.record.RuntimeGeneration,
+		FromRuntimeNamespace: store.grant.RuntimeNamespace,
+		FromRuntimeID:        store.grant.RuntimeIncarnationID,
+		ExpectedGenerationID: store.grant.InitialGenerationID,
+		Error:                "earlier terminal reconciliation failed",
+	}
+
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fence() error = %v", err)
+	}
+	if len(fence.ProofDigest) != 32 || store.restartCalls != 1 || store.lifecycle == nil ||
+		store.lifecycle.ID != request.OperationID ||
+		store.lifecycle.Phase != sandboxstore.SandboxLifecyclePhasePublishing ||
+		store.lifecycle.Error != "" || store.grant.State != sandboxstore.RootFSWriterGrantStateRetiring {
+		t.Fatalf("fence = %+v restart calls = %d lifecycle = %+v grant = %+v",
+			fence, store.restartCalls, store.lifecycle, store.grant)
 	}
 }
 

@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1100,6 +1101,108 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 	txn.Phase = phase
 	txn.Source = source
 	return nil
+}
+
+// BeginOrRestartRootFSWriterCrashLifecycleTxn recovers the deterministic
+// runtime-slot writer operation when an earlier pre-fence attempt left the
+// same lifecycle ID aborted but the exact writer grant remained live. A
+// successfully completed crash-abandon is never reopened.
+func (t sandboxStoreTx) BeginOrRestartRootFSWriterCrashLifecycleTxn(
+	ctx context.Context,
+	txn *SandboxLifecycleTxn,
+) error {
+	if txn == nil || strings.TrimSpace(txn.ID) == "" || strings.TrimSpace(txn.SandboxID) == "" ||
+		txn.Kind != SandboxLifecycleKindPause ||
+		!rootFSWriterCrashAbandonSource(txn.Source) || txn.Cancelable ||
+		txn.Phase != SandboxLifecyclePhasePublishing || txn.FromGeneration <= 0 || txn.ToGeneration != 0 ||
+		strings.TrimSpace(txn.FromRuntimeNamespace) == "" || strings.TrimSpace(txn.FromRuntimeID) == "" ||
+		strings.TrimSpace(txn.ToRuntimeNamespace) != "" || strings.TrimSpace(txn.ToRuntimeID) != "" ||
+		strings.TrimSpace(txn.TargetSandboxID) != "" || strings.TrimSpace(txn.TargetGenerationID) != "" ||
+		len(txn.TargetRecordDigest) != 0 || strings.TrimSpace(txn.SourceBaseArtifactDigest) != "" ||
+		strings.TrimSpace(txn.TargetBaseArtifactDigest) != "" || !txn.RollbackExpiresAt.IsZero() ||
+		strings.TrimSpace(txn.WorkerClusterID) != "" || strings.TrimSpace(txn.WorkerNodeID) != "" ||
+		strings.TrimSpace(txn.WorkerNodeUID) != "" || len(txn.WorkerProofDigest) != 0 ||
+		!txn.WorkerAcknowledgedAt.IsZero() || strings.TrimSpace(txn.ExpectedGenerationID) == "" ||
+		strings.TrimSpace(txn.PreparedGenerationID) != "" {
+		return fmt.Errorf("restartable RootFS writer crash lifecycle is invalid")
+	}
+	existing, err := scanLifecycleTxn(t.tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1
+		FOR UPDATE
+	`, txn.ID))
+	if err != nil {
+		return fmt.Errorf("lock restartable RootFS writer crash lifecycle: %w", err)
+	}
+	if existing == nil {
+		return t.BeginLifecycleTxn(ctx, txn)
+	}
+	if !restartableRootFSWriterCrashLifecycleMatches(existing, txn) {
+		return fmt.Errorf("RootFS writer crash lifecycle %s is not restartable", txn.ID)
+	}
+	if err := cancelPendingNomadSandboxNetworkMutationForSandbox(
+		ctx, t.tx, txn.SandboxID, "sandbox lifecycle preempted network update",
+	); err != nil {
+		return err
+	}
+	var epoch int64
+	if err := t.tx.QueryRow(ctx, `
+		UPDATE manager.sandboxes
+		SET lifecycle_epoch = lifecycle_epoch + 1,
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+		RETURNING lifecycle_epoch
+	`, txn.SandboxID).Scan(&epoch); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, txn.SandboxID)
+		}
+		return fmt.Errorf("advance restarted lifecycle epoch: %w", err)
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2,
+			epoch = $3,
+			error = '',
+			cancel_reason = '',
+			cancel_requested_at = NULL,
+			committed_at = NULL,
+			aborted_at = NULL,
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase = $4
+			AND epoch = $5
+	`, txn.ID, SandboxLifecyclePhasePublishing, epoch,
+		SandboxLifecyclePhaseAborted, existing.Epoch)
+	if err != nil {
+		return fmt.Errorf("restart RootFS writer crash lifecycle: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("RootFS writer crash lifecycle %s changed before restart", txn.ID)
+	}
+	txn.Epoch = epoch
+	return nil
+}
+
+func restartableRootFSWriterCrashLifecycleMatches(existing, requested *SandboxLifecycleTxn) bool {
+	return existing != nil && requested != nil &&
+		existing.ID == requested.ID && existing.SandboxID == requested.SandboxID &&
+		existing.Kind == requested.Kind && existing.Source == requested.Source &&
+		!existing.Cancelable && !requested.Cancelable &&
+		existing.Phase == SandboxLifecyclePhaseAborted && existing.CancelRequestedAt.IsZero() &&
+		existing.Error != RootFSWriterCrashAbandonReason &&
+		existing.FromGeneration == requested.FromGeneration && existing.ToGeneration == requested.ToGeneration &&
+		existing.FromRuntimeNamespace == requested.FromRuntimeNamespace && existing.FromRuntimeID == requested.FromRuntimeID &&
+		existing.ToRuntimeNamespace == requested.ToRuntimeNamespace && existing.ToRuntimeID == requested.ToRuntimeID &&
+		existing.TargetSandboxID == requested.TargetSandboxID && existing.TargetGenerationID == requested.TargetGenerationID &&
+		bytes.Equal(existing.TargetRecordDigest, requested.TargetRecordDigest) &&
+		existing.SourceBaseArtifactDigest == requested.SourceBaseArtifactDigest &&
+		existing.TargetBaseArtifactDigest == requested.TargetBaseArtifactDigest &&
+		existing.RollbackExpiresAt.Equal(requested.RollbackExpiresAt) &&
+		existing.WorkerClusterID == requested.WorkerClusterID && existing.WorkerNodeID == requested.WorkerNodeID &&
+		existing.WorkerNodeUID == requested.WorkerNodeUID &&
+		bytes.Equal(existing.WorkerProofDigest, requested.WorkerProofDigest) &&
+		existing.WorkerAcknowledgedAt.Equal(requested.WorkerAcknowledgedAt) &&
+		existing.ExpectedGenerationID == requested.ExpectedGenerationID &&
+		existing.PreparedGenerationID == "" && requested.PreparedGenerationID == ""
 }
 
 func (t sandboxStoreTx) SetLifecycleTxnRuntime(ctx context.Context, txnID, runtimeNamespace, runtimeID string) error {

@@ -179,6 +179,69 @@ func TestRootFSWriterCrashAbandonCompletesWithRecoveryLifecycleAfterBeginOwnerAb
 	require.Equal(t, RootFSWriterCrashAbandonReason, lifecycleError)
 }
 
+func TestRootFSWriterCrashAbandonRestartsExactAbortedLifecycle(t *testing.T) {
+	fixture := newRootFSWriterCrashAbandonFixture(t, SandboxLifecycleSourceCrash, true)
+	ctx := context.Background()
+	var originalEpoch int64
+	require.NoError(t, fixture.pool.QueryRow(ctx, `
+		SELECT epoch FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
+	`, fixture.request.LifecycleTxnID).Scan(&originalEpoch))
+	require.NoError(t, fixture.store.WithSandboxLock(ctx, fixture.sandboxID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		return tx.AbortLifecycleTxn(lockCtx, fixture.request.LifecycleTxnID,
+			"earlier terminal reconciliation failed")
+	}))
+
+	var restarted *SandboxLifecycleTxn
+	require.NoError(t, fixture.store.WithSandboxLock(ctx, fixture.sandboxID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		restarted = &SandboxLifecycleTxn{
+			ID: fixture.request.LifecycleTxnID, SandboxID: fixture.sandboxID,
+			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
+			Source: SandboxLifecycleSourceCrash, Cancelable: false,
+			FromGeneration:       fixture.runtimeGeneration,
+			FromRuntimeNamespace: "sandbox0", FromRuntimeID: "sandbox-crash-abandon-pod",
+			ExpectedGenerationID: fixture.initial.ID,
+		}
+		restarter, ok := tx.(interface {
+			BeginOrRestartRootFSWriterCrashLifecycleTxn(context.Context, *SandboxLifecycleTxn) error
+		})
+		require.True(t, ok)
+		return restarter.BeginOrRestartRootFSWriterCrashLifecycleTxn(lockCtx, restarted)
+	}))
+	require.Greater(t, restarted.Epoch, originalEpoch)
+
+	stored, err := fixture.store.GetLifecycleTxn(ctx, fixture.request.LifecycleTxnID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxLifecyclePhasePublishing, stored.Phase)
+	require.Empty(t, stored.Error)
+	require.True(t, stored.AbortedAt.IsZero())
+	require.Equal(t, restarted.Epoch, stored.Epoch)
+
+	_, err = fixture.store.BeginRootFSWriterCrashAbandon(ctx, fixture.beginRequest)
+	require.NoError(t, err)
+	require.NoError(t, fixture.complete(t))
+	grant, err := fixture.store.GetRootFSWriterGrant(ctx, fixture.issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, grant.State)
+	err = fixture.store.WithSandboxLock(ctx, fixture.sandboxID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		return tx.(interface {
+			BeginOrRestartRootFSWriterCrashLifecycleTxn(context.Context, *SandboxLifecycleTxn) error
+		}).BeginOrRestartRootFSWriterCrashLifecycleTxn(lockCtx, restarted)
+	})
+	require.Error(t, err)
+}
+
 func TestRootFSWriterCrashAbandonCompletesAcceptedPrecommitResumePod(t *testing.T) {
 	fixture := newRootFSWriterCrashAbandonFixture(t, SandboxLifecycleSourceLost, true)
 	ctx := context.Background()
@@ -552,6 +615,14 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		})
 	})
 	require.NoError(t, err)
+	// Reproduce an older failed initial claim whose logical worker no longer
+	// advertises cleanup_pending even though its exact runtime slot is fenced.
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET phase = $2, cleanup_started_at = NULL, last_error = ''
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxRuntimeClaimPhaseReady)
+	require.NoError(t, err)
 	begin := &BeginRootFSWriterCrashAbandonRequest{
 		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
 		OperationID: lifecycleID, BindingVersion: RootFSWriterBindingVersion,
@@ -559,6 +630,12 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		ExpectedOldGenerationID: generation.ID,
 	}
 	_, err = store.BeginRootFSWriterCrashAbandon(ctx, begin)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandbox_runtime_claims
+		SET phase = $2, cleanup_started_at = NOW()
+		WHERE sandbox_id = $1
+	`, record.ID, SandboxRuntimeClaimPhaseCleanupPending)
 	require.NoError(t, err)
 	proof := sha256.Sum256([]byte("failed-initial-claim-node-cleanup-proof"))
 	err = store.WithSandboxLock(ctx, record.ID, func(

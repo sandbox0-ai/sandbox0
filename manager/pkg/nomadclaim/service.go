@@ -1002,10 +1002,25 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err != nil {
 		return nil, fmt.Errorf("complete Nomad sandbox claim: %w", err)
 	}
-	s.logger.Info("Claimed Nomad sandbox",
+	claimLogFields := []zap.Field{
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Duration("endToEndDuration", result.Duration),
-	)
+	}
+	if timing := result.NodeClaimTiming; timing != nil {
+		claimLogFields = append(claimLogFields,
+			zap.Int64("nodeClaimDurationMicros", timing.ClaimDurationMicros),
+			zap.Int64("bundleWriteMicros", timing.BundleWriteMicros),
+			zap.Int64("claimStatePersistMicros", timing.ClaimStatePersistMicros),
+			zap.Int64("rootFSEnsureMicros", timing.RootFSEnsureMicros),
+			zap.Int64("consumerRegisterMicros", timing.ConsumerRegisterMicros),
+			zap.Int64("rootFSBindMicros", timing.RootFSBindMicros),
+			zap.Int64("startingReportMicros", timing.StartingReportMicros),
+			zap.Int64("runscCreateMicros", timing.RunscCreateMicros),
+			zap.Int64("runscStartMicros", timing.RunscStartMicros),
+			zap.Int64("activeStatePersistMicros", timing.ActiveStatePersistMicros),
+		)
+	}
+	s.logger.Info("Claimed Nomad sandbox", claimLogFields...)
 	clusterID := runtimeClass.ClusterID
 	return &service.ClaimResponse{
 		SandboxID: sandboxID, Status: "running", ProcdAddress: result.ProcdAddress,

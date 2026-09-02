@@ -658,13 +658,16 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	}
 	fixture.authority.mu.Unlock()
 
-	err := handle.Claim(ClaimRequest{
+	claimTiming, err := handle.claimWithTiming(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
 		Runtime: runtimeSlotAssignment(), Resources: runtimeSlotResourceLease(t, fixture, stage),
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
+	}
+	if claimTiming == nil || claimTiming.ClaimDurationMicros <= 0 || claimTiming.RunscCreateMicros < 0 {
+		t.Fatalf("claim timing = %+v, want populated non-negative timing", claimTiming)
 	}
 	if startedTooEarly {
 		t.Fatal("runsc create happened before the regional starting transition")

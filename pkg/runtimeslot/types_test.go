@@ -186,6 +186,18 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 	require.ErrorContains(t, changed.ValidateRegional(), "exceeds 64 KiB")
 }
 
+func TestNodeControlResponseRejectsNegativeClaimTiming(t *testing.T) {
+	response := NodeControlResponse{
+		Phase: string(StateActive),
+		ClaimTiming: &NodeClaimTiming{
+			RunscCreateMicros: -1,
+		},
+	}
+	if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "runsc_create_us") {
+		t.Fatalf("Validate() error = %v, want negative timing rejection", err)
+	}
+}
+
 func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 	resources := testNodeClaimControlRequest().Resources
 	resourceDigest, err := resources.Digest()

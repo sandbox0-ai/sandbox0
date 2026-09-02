@@ -1,7 +1,6 @@
 package objectstore
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -9,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +21,7 @@ const (
 	defaultEncryptedObjectChunkSize = 1 << 20
 	encryptedObjectMagic            = "s0.object.encrypted.v1\n"
 	encryptedObjectVersion          = 1
+	maxEncryptedObjectHeaderBytes   = 1 << 20
 	maxUint32                       = int64(^uint32(0))
 	maxInt64                        = int64(^uint64(0) >> 1)
 	maxInt                          = int64(^uint(0) >> 1)
@@ -217,27 +218,143 @@ func (s *encryptedStore) getContext(
 	if limit == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	var reader io.ReadCloser
-	var err error
-	if requireContext {
-		store, ok := s.store.(ContextConditionalStore)
-		if !ok || !SupportsContextConditionalCreate(s.store) {
-			return nil, fmt.Errorf("underlying object store does not support contextual conditional access")
-		}
-		reader, err = store.GetContext(ctx, key, 0, -1)
-	} else {
-		reader, err = s.store.Get(key, 0, -1)
+	if off < 0 {
+		return nil, fmt.Errorf("negative object read offset: %d", off)
 	}
+	header, headerEnd, encrypted, err := s.readEncryptedObjectHeader(ctx, key, requireContext)
+	if err != nil {
+		return nil, err
+	}
+	if !encrypted {
+		if !s.allowPlaintextReads {
+			return nil, fmt.Errorf("object %q is missing the required encrypted-object header", key)
+		}
+		return s.getUnderlying(ctx, key, off, limit, requireContext)
+	}
+	aead, err := s.objectAEAD(header)
+	if err != nil {
+		return nil, err
+	}
+	frameBytes := int64(4) + header.ChunkSize + int64(aead.Overhead())
+	startChunk := off / header.ChunkSize
+	if startChunk > (maxInt64-headerEnd)/frameBytes {
+		return nil, fmt.Errorf("encrypted object range offset is too large: %d", off)
+	}
+	cipherOffset := headerEnd + startChunk*frameBytes
+	cipherLimit := int64(-1)
+	rangeEnd := int64(-1)
+	if limit >= 0 {
+		if off > maxInt64-limit {
+			return nil, fmt.Errorf("encrypted object range overflows: offset %d limit %d", off, limit)
+		}
+		rangeEnd = off + limit
+		endChunk := (rangeEnd-1)/header.ChunkSize + 1
+		if endChunk < startChunk || endChunk-startChunk > maxInt64/frameBytes {
+			return nil, fmt.Errorf("encrypted object range is too large: offset %d limit %d", off, limit)
+		}
+		cipherLimit = (endChunk - startChunk) * frameBytes
+	}
+	reader, err := s.getUnderlying(ctx, key, cipherOffset, cipherLimit, requireContext)
 	if err != nil {
 		return nil, err
 	}
 	pr, pw := io.Pipe()
 	go func() {
 		defer reader.Close()
-		err := s.decryptTo(pw, key, withObjectReadContext(ctx, reader), off, limit)
+		err := decryptEncryptedObjectFrames(
+			pw, key, withObjectReadContext(ctx, reader), header, aead,
+			uint64(startChunk), startChunk*header.ChunkSize, off, rangeEnd,
+		)
 		_ = pw.CloseWithError(err)
 	}()
 	return pr, nil
+}
+
+func (s *encryptedStore) getUnderlying(
+	ctx context.Context,
+	key string,
+	off, limit int64,
+	requireContext bool,
+) (io.ReadCloser, error) {
+	if requireContext {
+		store, ok := s.store.(ContextConditionalStore)
+		if !ok || !SupportsContextConditionalCreate(s.store) {
+			return nil, fmt.Errorf("underlying object store does not support contextual conditional access")
+		}
+		return store.GetContext(ctx, key, off, limit)
+	}
+	return s.store.Get(key, off, limit)
+}
+
+// readEncryptedObjectHeader reads only the fixed prefix and bounded JSON
+// header. Data frames are fetched separately so a logical range near the end
+// of a large pack does not download and decrypt every preceding frame.
+func (s *encryptedStore) readEncryptedObjectHeader(
+	ctx context.Context,
+	key string,
+	requireContext bool,
+) (encryptedObjectHeader, int64, bool, error) {
+	prefixBytes := int64(len(encryptedObjectMagic) + 4)
+	reader, err := s.getUnderlying(ctx, key, 0, prefixBytes, requireContext)
+	if err != nil {
+		return encryptedObjectHeader{}, 0, false, err
+	}
+	prefix, readErr := io.ReadAll(io.LimitReader(reader, prefixBytes+1))
+	closeErr := reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return encryptedObjectHeader{}, 0, false, err
+	}
+	if len(prefix) < len(encryptedObjectMagic) || string(prefix[:len(encryptedObjectMagic)]) != encryptedObjectMagic {
+		return encryptedObjectHeader{}, 0, false, nil
+	}
+	if int64(len(prefix)) != prefixBytes {
+		return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header length: %w", io.ErrUnexpectedEOF)
+	}
+	headerBytes := int64(binary.BigEndian.Uint32(prefix[len(encryptedObjectMagic):]))
+	if headerBytes <= 0 || headerBytes > maxEncryptedObjectHeaderBytes {
+		return encryptedObjectHeader{}, 0, true, fmt.Errorf("invalid encrypted object header size %d", headerBytes)
+	}
+	reader, err = s.getUnderlying(ctx, key, prefixBytes, headerBytes, requireContext)
+	if err != nil {
+		return encryptedObjectHeader{}, 0, true, err
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(reader, headerBytes+1))
+	closeErr = reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return encryptedObjectHeader{}, 0, true, err
+	}
+	if int64(len(payload)) != headerBytes {
+		return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header: %w", io.ErrUnexpectedEOF)
+	}
+	var header encryptedObjectHeader
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return encryptedObjectHeader{}, 0, true, fmt.Errorf("unmarshal encrypted object header: %w", err)
+	}
+	return header, prefixBytes + headerBytes, true, nil
+}
+
+func (s *encryptedStore) objectAEAD(header encryptedObjectHeader) (cipher.AEAD, error) {
+	if header.Version != encryptedObjectVersion {
+		return nil, fmt.Errorf("unsupported encrypted object version %d", header.Version)
+	}
+	if header.ChunkSize <= 0 || header.ChunkSize > maxUint32 {
+		return nil, fmt.Errorf("invalid encrypted object chunk size %d", header.ChunkSize)
+	}
+	dataKey, err := s.cfg.KeyEncryptor.Decrypt(header.WrappedKey)
+	if err != nil {
+		return nil, fmt.Errorf("unwrap object data key: %w", err)
+	}
+	aead, err := newObjectAEAD(header.Algorithm, dataKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(header.NoncePrefix) != aead.NonceSize()-8 {
+		return nil, fmt.Errorf("invalid encrypted object nonce prefix size %d", len(header.NoncePrefix))
+	}
+	if header.ChunkSize > maxUint32-int64(aead.Overhead()) {
+		return nil, fmt.Errorf("encrypted object chunk size is too large: %d", header.ChunkSize)
+	}
+	return aead, nil
 }
 
 func (s *encryptedStore) Delete(key string) error {
@@ -313,53 +430,18 @@ func (s *encryptedStore) encryptTo(out io.Writer, key string, in io.Reader) erro
 	}
 }
 
-func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off, limit int64) error {
-	if off < 0 {
-		return fmt.Errorf("negative object read offset: %d", off)
-	}
-	buffered := bufio.NewReader(in)
-	magic, err := buffered.Peek(len(encryptedObjectMagic))
-	if err != nil || string(magic) != encryptedObjectMagic {
-		if s.allowPlaintextReads {
-			return copyPlaintextObjectRange(out, buffered, off, limit)
-		}
-		return fmt.Errorf("object %q is missing the required encrypted-object header", key)
-	}
-	if _, err := buffered.Discard(len(encryptedObjectMagic)); err != nil {
-		return err
-	}
-	header, err := readEncryptedObjectHeader(buffered)
-	if err != nil {
-		return err
-	}
-	if header.Version != encryptedObjectVersion {
-		return fmt.Errorf("unsupported encrypted object version %d", header.Version)
-	}
-	if header.ChunkSize <= 0 {
-		return fmt.Errorf("encrypted object chunk size is required")
-	}
-	dataKey, err := s.cfg.KeyEncryptor.Decrypt(header.WrappedKey)
-	if err != nil {
-		return fmt.Errorf("unwrap object data key: %w", err)
-	}
-	aead, err := newObjectAEAD(header.Algorithm, dataKey)
-	if err != nil {
-		return err
-	}
-	if len(header.NoncePrefix) != aead.NonceSize()-8 {
-		return fmt.Errorf("invalid encrypted object nonce prefix size %d", len(header.NoncePrefix))
-	}
-	rangeEnd := int64(-1)
-	if limit >= 0 {
-		rangeEnd = off + limit
-		if rangeEnd < off {
-			rangeEnd = maxInt64
-		}
-	}
-	var plainOffset int64
-	for chunkIndex := uint64(0); ; chunkIndex++ {
+func decryptEncryptedObjectFrames(
+	out io.Writer,
+	key string,
+	in io.Reader,
+	header encryptedObjectHeader,
+	aead cipher.AEAD,
+	startChunk uint64,
+	plainOffset, rangeStart, rangeEnd int64,
+) error {
+	for chunkIndex := startChunk; ; chunkIndex++ {
 		var lenBuf [4]byte
-		if _, err := io.ReadFull(buffered, lenBuf[:]); err != nil {
+		if _, err := io.ReadFull(in, lenBuf[:]); err != nil {
 			if err == io.EOF {
 				return nil
 			}
@@ -370,7 +452,7 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 			return fmt.Errorf("invalid encrypted object chunk size %d", cipherLen)
 		}
 		ciphertext := make([]byte, cipherLen)
-		if _, err := io.ReadFull(buffered, ciphertext); err != nil {
+		if _, err := io.ReadFull(in, ciphertext); err != nil {
 			return err
 		}
 		nonce := encryptedObjectNonce(aead.NonceSize(), header.NoncePrefix, chunkIndex)
@@ -378,35 +460,17 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 		if err != nil {
 			return fmt.Errorf("decrypt object chunk %d: %w", chunkIndex, err)
 		}
-		if err := writeRangeChunk(out, plaintext, plainOffset, off, rangeEnd); err != nil {
+		if err := writeRangeChunk(out, plaintext, plainOffset, rangeStart, rangeEnd); err != nil {
 			return err
 		}
 		plainOffset += int64(len(plaintext))
 		if rangeEnd >= 0 && plainOffset >= rangeEnd {
 			return nil
 		}
-	}
-}
-
-func copyPlaintextObjectRange(out io.Writer, in io.Reader, off, limit int64) error {
-	if off > 0 {
-		copied, err := io.CopyN(io.Discard, in, off)
-		if err != nil {
-			if (err == io.EOF || err == io.ErrUnexpectedEOF) && copied < off {
-				return nil
-			}
-			return err
+		if int64(len(plaintext)) < header.ChunkSize {
+			return nil
 		}
 	}
-	if limit < 0 {
-		_, err := io.Copy(out, in)
-		return err
-	}
-	_, err := io.CopyN(out, in, limit)
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		return nil
-	}
-	return err
 }
 
 func writeEncryptedObjectHeader(out io.Writer, header encryptedObjectHeader) error {
@@ -427,26 +491,6 @@ func writeEncryptedObjectHeader(out io.Writer, header encryptedObjectHeader) err
 	}
 	_, err = out.Write(headerBytes)
 	return err
-}
-
-func readEncryptedObjectHeader(in io.Reader) (encryptedObjectHeader, error) {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(in, lenBuf[:]); err != nil {
-		return encryptedObjectHeader{}, err
-	}
-	headerLen := binary.BigEndian.Uint32(lenBuf[:])
-	if headerLen == 0 || headerLen > 1<<20 {
-		return encryptedObjectHeader{}, fmt.Errorf("invalid encrypted object header size %d", headerLen)
-	}
-	headerBytes := make([]byte, headerLen)
-	if _, err := io.ReadFull(in, headerBytes); err != nil {
-		return encryptedObjectHeader{}, err
-	}
-	var header encryptedObjectHeader
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return encryptedObjectHeader{}, fmt.Errorf("unmarshal encrypted object header: %w", err)
-	}
-	return header, nil
 }
 
 func newObjectAEAD(algorithm string, key []byte) (cipher.AEAD, error) {

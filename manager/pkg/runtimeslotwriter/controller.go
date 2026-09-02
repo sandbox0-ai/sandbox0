@@ -35,6 +35,10 @@ type sandboxRuntimeSlotReader interface {
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 }
 
+type sandboxCrashLifecycleStarter interface {
+	BeginOrRestartRootFSWriterCrashLifecycleTxn(context.Context, *sandboxstore.SandboxLifecycleTxn) error
+}
+
 // Controller fences renewal and terminally abandons unsealed writers while
 // preserving the last durable RootFS generation.
 type Controller struct {
@@ -297,13 +301,17 @@ func (c *Controller) ensureCrashLifecycle(
 		default:
 			return errors.New("sandbox runtime does not match the runtime slot writer")
 		}
-		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
+		lifecycle := &sandboxstore.SandboxLifecycleTxn{
 			ID: request.OperationID, SandboxID: grant.SandboxID,
 			Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePublishing,
 			Source: sandboxstore.SandboxLifecycleSourceCrash, Cancelable: false,
 			FromGeneration: runtimeGeneration, FromRuntimeNamespace: fromRuntimeNamespace,
 			FromRuntimeID: fromRuntimeID, ExpectedGenerationID: grant.InitialGenerationID,
-		})
+		}
+		if starter, ok := tx.(sandboxCrashLifecycleStarter); ok {
+			return starter.BeginOrRestartRootFSWriterCrashLifecycleTxn(lockCtx, lifecycle)
+		}
+		return tx.BeginLifecycleTxn(lockCtx, lifecycle)
 	})
 	if err != nil {
 		return fmt.Errorf("prepare runtime slot writer crash lifecycle: %w", err)

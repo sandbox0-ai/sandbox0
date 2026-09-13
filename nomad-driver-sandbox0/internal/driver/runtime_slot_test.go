@@ -299,12 +299,13 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	if err := os.WriteFile(netnsPath, []byte("netns"), 0o600); err != nil {
 		t.Fatalf("create network namespace identity: %v", err)
 	}
+	const procdAddrEnv = "NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel
 	task := &drivers.TaskConfig{
 		ID: "slot-1", AllocID: "allocation-1", Namespace: "default", NodeID: "node-1",
 		Name: protocol.NomadTaskName, AllocDir: filepath.Join(tempDir, "allocation"),
 		Env: map[string]string{
-			"NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel: "172.26.64.2:49983",
-			"UNTRUSTED_TASK_ENV":                               "must-not-enter-procd",
+			procdAddrEnv:         "172.26.64.2:49983",
+			"UNTRUSTED_TASK_ENV": "must-not-enter-procd",
 		},
 		Resources: &drivers.Resources{
 			NomadResources: &structs.AllocatedTaskResources{

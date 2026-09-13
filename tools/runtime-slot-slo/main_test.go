@@ -21,9 +21,6 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 	var mu sync.Mutex
 	requestIDs := map[string]struct{}{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		if request.Header.Get("Authorization") != "Bearer test-token" {
 			writer.WriteHeader(http.StatusUnauthorized)
 			return
@@ -73,10 +70,7 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 		t.Fatalf("claims=%d deletes=%d", claims.Load(), deletes.Load())
 	}
 	bodyDigest := sha256.Sum256(cfg.body)
-	if result.Version != 7 || !result.StartupPassed || !result.WorkloadPassed || len(result.ExecutableSHA256) != sha256.Size*2 ||
-		result.FirstCommand.Count != 4 || result.WorkloadWall.Count != 4 ||
-		result.FirstCommandErrors != 0 || result.FirstCommandMisses != 0 ||
-		len(result.WorkloadSHA256) != sha256.Size*2 ||
+	if result.Version != 5 || len(result.ExecutableSHA256) != sha256.Size*2 ||
 		result.ClaimBodySHA256 != fmt.Sprintf("%x", bodyDigest[:]) ||
 		result.RequestTimeout != cfg.requestTimeout || result.CleanupTimeout != cfg.cleanupTimeout ||
 		result.CleanupPoll != cfg.cleanupPoll || result.BatchSettle != cfg.settle || result.Cleanup.Count != 4 {
@@ -86,9 +80,6 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 
 func TestRunRejectsCleanupThatNeverConverges(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=100")
@@ -116,9 +107,6 @@ func TestRunRejectsCleanupThatNeverConverges(t *testing.T) {
 
 func TestRunRejectsNoncanonicalCleanupAbsence(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=100")
@@ -152,9 +140,6 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 	var firstAbsent atomic.Bool
 	var overlap atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			index := claims.Add(1)
@@ -194,12 +179,7 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 }
 
 func TestRunRejectsReplayedSandboxIdentity(t *testing.T) {
-	var commands atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			commands.Add(1)
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=100")
@@ -221,7 +201,7 @@ func TestRunRejectsReplayedSandboxIdentity(t *testing.T) {
 		hardLimit: time.Second, p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
-	if err == nil || result.Passed || result.StartupPassed || result.ClaimErrors != 1 || result.Errors != 1 || commands.Load() != 1 ||
+	if err == nil || result.Passed || result.Errors != 1 ||
 		result.Samples[1].Error != "claim sandbox_id duplicates sample 0" {
 		t.Fatalf("report=%+v error=%v", result, err)
 	}
@@ -229,9 +209,6 @@ func TestRunRejectsReplayedSandboxIdentity(t *testing.T) {
 
 func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1000.001")
@@ -253,16 +230,13 @@ func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 		p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
-	if err == nil || result.Passed || result.StartupPassed || result.SLOMisses != 1 {
+	if err == nil || result.Passed || result.SLOMisses != 1 {
 		t.Fatalf("report=%+v error=%v", result, err)
 	}
 }
 
 func TestRunRejectsSlowPublicRoundTripDespiteFastReportedCommandReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if serveDefaultCommand(t, writer, request) {
-			return
-		}
 		switch request.Method {
 		case http.MethodPost:
 			time.Sleep(100 * time.Millisecond)
@@ -285,7 +259,7 @@ func TestRunRejectsSlowPublicRoundTripDespiteFastReportedCommandReadiness(t *tes
 		p50Target: 25 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
-	if err == nil || result.Passed || result.StartupPassed || result.SLOMisses != 0 || result.WallMisses != 1 ||
+	if err == nil || result.Passed || result.SLOMisses != 0 || result.WallMisses != 1 ||
 		result.Wall.Count != 1 || result.Wall.Max <= cfg.hardLimit {
 		t.Fatalf("report=%+v error=%v", result, err)
 	}

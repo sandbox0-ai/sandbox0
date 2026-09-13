@@ -65,39 +65,6 @@ High-value claim metrics include:
 - the canonical regional-gateway-to-procd SLO timing recorded by the acceptance
   tool.
 
-`tools/runtime-slot-slo` report v7 keeps the canonical `command_ready`
-Server-Timing metric for authenticated procd API readiness. That boundary does
-not prove that a user shell, Node, or Codex executable has started. The tool also
-offers real CMD contexts through the public regional endpoint as independent
-diagnostics, with exit code zero, terminal state, and matching stdout for every
-configured workload step. Use `--workload none` for the sandbox-startup gate:
-no user executable runs, but all runtime/readiness publication checks remain.
-
-Read `wall` as the full public claim round trip, `first_command` as public
-claim-start-to-first-executable completion, and `workload_wall` as claim start
-through all ordered command steps. These client wall measurements are separate
-from the canonical ingress timer and exclude cleanup. Failed or missing command
-evidence fails the selected workload, not a previously successful startup. A
-later workload step is not an independent cold first command.
-
-The default workload executes a shell; `--workload coding-agent` executes Node
-then Codex startup, and `--workload-file` supplies literal argv and stdout
-expectations. `startup_passed` requires every claim's authenticated readiness and
-complete response within the one-second hard limit; failed/unattempted claims
-cannot disappear from that decision. The p50 engineering target is diagnostic.
-The optional first-command limit defaults to zero (disabled) and affects only
-workload acceptance. `passed` additionally checks cleanup and any selected
-workload's result; `workload_measured: false` supplies no executable evidence.
-Report consumers must require v7 and distinguish startup from user-process
-latency, without reinterpreting old report decisions. For the existing
-canary, explicitly set `--request-timeout 10s`; the tool's original 15-second
-default remains unchanged. Node and Codex share one 10-second command budget
-after claim, and a later-step timeout fails the workload even when the first
-command succeeded. Command contexts have bounded TTL and all known
-claimed sandboxes are deleted and checked for public absence after each batch,
-including command failures. Production-width and cold/hot scenario labels still
-require the corresponding runtime evidence.
-
 Initial RootFS publication uses a per-sandbox row lock for idempotence and
 deletion fencing. Claims of different sandboxes share a read lock on the ready
 base artifact, so template reuse does not require an exclusive artifact queue.

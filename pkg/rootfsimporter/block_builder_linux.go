@@ -105,6 +105,27 @@ func (b BlockBuilder) build(
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("RootFS block build options: %w", err)
 	}
+	if mutator != nil && blockOptions.MappingGroupPolicy != "" {
+		return BuildResult{}, fmt.Errorf("mapping group policy applies to base image imports only")
+	}
+	format := blockOptions.FormatVersion
+	if format == 0 {
+		format = rootfsblock.DescriptorVersion
+	}
+	if err := ValidateDataLayoutPolicy(request.DataLayoutPolicy, format, blockOptions); err != nil {
+		return BuildResult{}, err
+	}
+	var dataRangeBuilder FilesystemDataRangeBuilder
+	if request.DataLayoutPolicy != "" {
+		if mutator != nil {
+			return BuildResult{}, fmt.Errorf("data layout policy applies to base image imports only")
+		}
+		var ok bool
+		dataRangeBuilder, ok = b.Filesystem.(FilesystemDataRangeBuilder)
+		if !ok {
+			return BuildResult{}, fmt.Errorf("filesystem builder does not support the requested data layout policy")
+		}
+	}
 	imported, err := b.Unpacker.Import(ctx, request.Image)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("import OCI root filesystem: %w", err)
@@ -140,23 +161,37 @@ func (b BlockBuilder) build(
 		return BuildResult{}, fmt.Errorf("inspect OCI block image path: %w", err)
 	}
 	imageOwned = true
-	if err := b.Filesystem.Build(ctx, rootPath, imagePath, request.LogicalSizeBytes); err != nil {
+	var dataPlan rootfsartifact.XFSDataRangePlan
+	if dataRangeBuilder != nil {
+		dataPlan, err = dataRangeBuilder.BuildWithBoundedDataRanges(ctx, rootPath, imagePath, request.LogicalSizeBytes, blockOptions.DataRangeBytes)
+	} else {
+		err = b.Filesystem.Build(ctx, rootPath, imagePath, request.LogicalSizeBytes)
+	}
+	if err != nil {
 		if errors.Is(err, rootfsartifact.ErrXFSImageStillMounted) {
 			imageOwned = false
 		}
 		return BuildResult{}, fmt.Errorf("build XFS base image: %w", err)
 	}
+	if dataRangeBuilder != nil {
+		if dataPlan.Layout == nil {
+			return BuildResult{}, fmt.Errorf("filesystem builder returned no data range plan")
+		}
+		if err := validateDataLayoutEvidence(request.DataLayoutPolicy, dataPlan.Fallback, format, blockOptions.DataRangeBytes); err != nil {
+			return BuildResult{}, err
+		}
+	}
 	image, err := openVerifiedFilesystemImage(imagePath, request.LogicalSizeBytes)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	built, buildErr := rootfsblock.BuildMaterializedGeneration(
-		ctx,
-		image,
-		request.LogicalSizeBytes,
-		b.Publisher,
-		blockOptions,
-	)
+	var built rootfsblock.BuildResult
+	var buildErr error
+	var layout *rootfsblock.DataRangeLayout
+	if dataRangeBuilder != nil && dataPlan.Fallback == "" {
+		layout = dataPlan.Layout
+	}
+	built, buildErr = rootfsblock.BuildMaterializedFileGeneration(ctx, image, request.LogicalSizeBytes, b.Publisher, blockOptions, layout)
 	closeErr := image.Close()
 	if err := errors.Join(buildErr, closeErr); err != nil {
 		return BuildResult{}, fmt.Errorf("publish OCI block generation: %w", err)
@@ -180,6 +215,12 @@ func (b BlockBuilder) build(
 		Descriptor: built.Descriptor, DescriptorBytes: append([]byte(nil), built.Payload...),
 		Objects: built.Objects, Bytes: built.Bytes,
 		References: append([]rootfsblock.ObjectReference(nil), built.References...),
+	}
+	result.MappingGroupPolicy = blockOptions.MappingGroupPolicy
+	if request.DataLayoutPolicy != "" {
+		result.DataLayoutPolicy = request.DataLayoutPolicy
+		result.DataLayoutRangeBytes = blockOptions.DataRangeBytes
+		result.DataLayoutFallback = dataPlan.Fallback
 	}
 	return result, nil
 }

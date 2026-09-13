@@ -9,6 +9,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 )
 
+// New objects use small independently authenticated frames so a small block
+// mapping range need not download/decrypt a 1MiB frame. Readers always honor the
+// stored header; existing objects and keys retain their original geometry.
+const rootFSObjectChunkSize = 16 << 10
+
 func Create(
 	cfg config.RootFSObjectStorageConfig,
 	observer objectstore.RequestObserver,
@@ -68,9 +73,24 @@ func wrapEncryption(
 	}
 	encryption := objectstore.EncryptionConfig{
 		Enabled: true, Algorithm: cfg.ObjectEncryptionAlgo, KeyEncryptor: keyEncryptor,
+		ChunkSize: rootFSObjectChunkSize,
 	}
 	if allowLegacyPlaintext {
 		return objectstore.EncryptingLegacyReadCompatible(store, encryption), nil
 	}
-	return objectstore.Encrypting(store, encryption), nil
+	// RootFS keys identify immutable content. Conditional publishers verify
+	// collisions and readers independently verify block/descriptor digests. GC can
+	// delete/recreate a key with a new envelope; the wrapper refreshes stale crypto
+	// once before plaintext delivery and authenticates the replacement frames.
+	// Keep migration readers above uncached because their source can be rewritten.
+	return objectstore.EncryptingImmutable(store, encryption, objectstore.EncryptedHeaderCacheConfig{
+		MaxEntries: 1024,
+		MaxBytes:   8 << 20,
+		// Cold mapping objects begin at offset zero. Co-read their envelope and
+		// demanded frames without retaining ciphertext in the header cache.
+		MaxPrefixBytes: 256 << 10,
+		// Cold nonzero pack reads can overlap header and bounded ciphertext
+		// acquisition; stored geometry and AEAD remain mandatory before use.
+		MaxParallelReadBytes: 256 << 10,
+	}), nil
 }

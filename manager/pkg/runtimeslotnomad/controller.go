@@ -88,14 +88,16 @@ func (c *Controller) Observe(
 	}, nil
 }
 
-// Purge first disables server scheduling ownership with an idempotency token,
-// then invokes the exact client's synchronous allocation GC endpoint. A retry
-// after successful client GC observes an already absent allocation as success.
+// Purge requests scheduling after observing terminal server state, then invokes
+// the exact client's allocation GC endpoint. Nomad's first system-job stop
+// evaluation can mark an allocation stopped without placing its replacement or
+// queuing another evaluation. An accepted stop of an already-terminal allocation
+// supplies that durable follow-up without changing the job's desired count.
 func (c *Controller) Purge(
 	ctx context.Context,
 	request runtimeslotreconciler.AllocationPurgeRequest,
 ) error {
-	if err := c.Stop(ctx, request); err != nil {
+	if err := c.stop(ctx, request, true); err != nil {
 		return err
 	}
 	present, err := c.api.ClientAllocationPresent(ctx, request.Target)
@@ -111,13 +113,22 @@ func (c *Controller) Purge(
 	return nil
 }
 
-// Stop durably removes Nomad server scheduling ownership without forcing
-// client GC. Planned pause uses this boundary so the task driver can publish
+// Stop requests exact-allocation retirement without forcing client GC. The
+// acknowledgement records stop intent, not terminal or replacement proof.
+// Planned pause uses this boundary so the task driver can publish
 // its sealed RootFS generation before terminal reconciliation purges the
 // allocation directory.
 func (c *Controller) Stop(
 	ctx context.Context,
 	request runtimeslotreconciler.AllocationPurgeRequest,
+) error {
+	return c.stop(ctx, request, false)
+}
+
+func (c *Controller) stop(
+	ctx context.Context,
+	request runtimeslotreconciler.AllocationPurgeRequest,
+	postTerminalEvaluation bool,
 ) error {
 	if err := validateOperationID(request.OperationID); err != nil {
 		return err
@@ -133,9 +144,17 @@ func (c *Controller) Stop(
 		if err := validateAllocation(*allocation, request.Target); err != nil {
 			return err
 		}
-		if allocation.DesiredStatus == "run" {
+		if allocation.DesiredStatus == "run" || postTerminalEvaluation {
 			if err := c.api.StopAllocation(ctx, request.Target, request.OperationID); err != nil {
 				return fmt.Errorf("stop Nomad server allocation: %w", err)
+			}
+			if postTerminalEvaluation && allocation.DesiredStatus == "run" &&
+				!allocationClientTerminal(allocation.ClientStatus) {
+				// Do not treat the accepted migration intent as the final
+				// scheduling notification. A later pass must observe terminal
+				// catalog state before sending that notification, including when
+				// the direct client artifacts have already disappeared.
+				return fmt.Errorf("await Nomad terminal state before replacement evaluation: %w", runtimeslotreconciler.ErrAllocationStillPresent)
 			}
 		}
 	}

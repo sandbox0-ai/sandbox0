@@ -552,8 +552,8 @@ func TestReconcilerRecoversPurgeResponseLossWithExactOperations(t *testing.T) {
 	if len(fixture.writer.completes) != 2 || !reflect.DeepEqual(fixture.writer.completes[0], fixture.writer.completes[1]) {
 		t.Fatalf("writer completion retries changed: %+v", fixture.writer.completes)
 	}
-	if len(fixture.allocation.purges) != 1 {
-		t.Fatalf("purge calls = %d, want one accepted call", len(fixture.allocation.purges))
+	if len(fixture.allocation.purges) != 2 || !reflect.DeepEqual(fixture.allocation.purges[0], fixture.allocation.purges[1]) {
+		t.Fatalf("purge retry did not preserve exact operation: %+v", fixture.allocation.purges)
 	}
 }
 

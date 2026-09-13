@@ -299,11 +299,12 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	if err := os.WriteFile(netnsPath, []byte("netns"), 0o600); err != nil {
 		t.Fatalf("create network namespace identity: %v", err)
 	}
+	const procdAddrEnv = "NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel
 	task := &drivers.TaskConfig{
 		ID: "slot-1", AllocID: "allocation-1", Namespace: "default", NodeID: "node-1",
 		Name: protocol.NomadTaskName, AllocDir: filepath.Join(tempDir, "allocation"),
 		Env: map[string]string{
-			"NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel: "172.26.64.2:49983",
+			procdAddrEnv:         "172.26.64.2:49983",
 			"UNTRUSTED_TASK_ENV": "must-not-enter-procd",
 		},
 		Resources: &drivers.Resources{
@@ -1112,11 +1113,27 @@ func TestRuntimeSlotCommandReadyRejectionFencesWriter(t *testing.T) {
 }
 
 func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
+	testRecoverTaskResumesExactRuntimeSlotHeartbeat(t, nil)
+}
+
+func TestRecoverTaskAfterNomadPersistence(t *testing.T) {
+	testRecoverTaskResumesExactRuntimeSlotHeartbeat(t, roundTripNomadTaskHandle)
+}
+
+func TestRecoverTaskAfterNomadDatabaseReopen(t *testing.T) {
+	testRecoverTaskResumesExactRuntimeSlotHeartbeat(t, roundTripNomadTaskHandleDatabase)
+}
+
+func testRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T, persist func(*testing.T, *drivers.TaskHandle) *drivers.TaskHandle) {
+	t.Helper()
 	fixture := newRuntimeSlotPluginFixture(t)
 	fixture.authority.heartbeatTTL = 5 * time.Second
 	handle, _, err := fixture.plugin.StartTask(fixture.task)
 	if err != nil {
 		t.Fatalf("StartTask() error = %v", err)
+	}
+	if persist != nil {
+		handle = persist(t, handle)
 	}
 	fixture.plugin.cancel()
 
@@ -1131,12 +1148,16 @@ func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
 	recoveredRunner := newFakeRunsc()
 	recovered := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return recoveredRunner }).(*Plugin)
 	recovered.config = fixture.config
+	t.Cleanup(recovered.cancel)
 	recovered.rootfs = fixture.rootfs
 	recovered.rootfsOnce.Do(func() {})
 	recovered.newSlotAuthority = func(*PluginConfig) (runtimeSlotAuthority, error) { return fixture.authority, nil }
 
 	if err := recovered.RecoverTask(handle); err != nil {
 		t.Fatalf("RecoverTask() error = %v", err)
+	}
+	if err := recovered.RecoverTask(handle); err != nil {
+		t.Fatalf("idempotent RecoverTask() error = %v", err)
 	}
 	calls, registrations, readiness, _ := fixture.authority.snapshot()
 	if !reflect.DeepEqual(calls, []string{"register"}) {
@@ -1222,7 +1243,8 @@ func TestRecoverTaskRegistrationFailureDoesNotDestroyActiveRuntime(t *testing.T)
 	nomadHandle.Config = fixture.task
 	if err := nomadHandle.SetDriverState(PersistedState{
 		TaskConfig: fixture.task, ContainerID: safeContainerID(fixture.task.ID),
-		BundleDir: bundleDir, RootMount: rootMount, StartedAt: time.Now(),
+		DriverConfig: &TaskConfig{Command: "/procd", SecurityClass: "standard"},
+		BundleDir:    bundleDir, RootMount: rootMount, StartedAt: time.Now(),
 		Phase: phaseActive, RootMounted: true,
 	}); err != nil {
 		t.Fatalf("encode active driver state: %v", err)

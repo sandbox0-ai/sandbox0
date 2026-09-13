@@ -46,10 +46,13 @@ jobs:
           if [ -z "$files" ]; then
             exit 0
           fi
-          unformatted="$(gofmt -l $files)"
+          gofmt_bin="$(go env GOROOT)/bin/gofmt"
+          go version -m "$gofmt_bin"
+          unformatted="$("$gofmt_bin" -l $files)"
           if [ -n "$unformatted" ]; then
             echo "Unformatted Go files:"
             echo "$unformatted"
+            "$gofmt_bin" -d $files
             exit 1
           fi
 

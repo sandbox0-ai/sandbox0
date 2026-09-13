@@ -664,14 +664,16 @@ type rootFSObjectStoreInspector struct {
 }
 
 func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (sandboxstore.RootFSObjectInfo, error) {
-	info, err := i.store.Head(key)
+	// The catalog records immutable payload bytes before envelope encryption.
+	info, err := objectstore.HeadContent(i.store, key)
 	if err != nil {
 		return sandboxstore.RootFSObjectInfo{}, err
 	}
 	return sandboxstore.RootFSObjectInfo{
-		Key:      info.Key,
-		Size:     info.Size,
-		Modified: info.Modified,
+		Key:           info.Key,
+		Size:          info.Size,
+		SizeIsLogical: true,
+		Modified:      info.Modified,
 	}, nil
 }
 

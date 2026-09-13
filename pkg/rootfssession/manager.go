@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -246,18 +247,19 @@ const (
 // finish writer retirement without Nomad allocation or plugin state. Live is
 // process-local and is true only while this Manager owns the NBD endpoint.
 type RecoverySession struct {
-	Stage               rootfshandoff.StageRequest
-	Kind                RecoveryKind
-	State               string
-	RetireOperationID   string
-	PressureOperationID string
-	CrashOperationID    string
-	CrashRequestedAt    time.Time
-	ExternalCrash       bool
-	BranchRemoved       bool
-	Live                bool
-	Consumer            *ConsumerRegistration
-	CreatedAt           time.Time
+	Stage                  rootfshandoff.StageRequest
+	Kind                   RecoveryKind
+	State                  string
+	RetireOperationID      string
+	PressureOperationID    string
+	CrashOperationID       string
+	CrashRequestedAt       time.Time
+	ExternalProofExpiresAt time.Time
+	ExternalCrash          bool
+	BranchRemoved          bool
+	Live                   bool
+	Consumer               *ConsumerRegistration
+	CreatedAt              time.Time
 }
 
 // DirtyTailPressureSession binds a blocked local writer admission to the exact
@@ -976,6 +978,11 @@ func recoverySessionFromRecord(key string, current record, live bool) (RecoveryS
 		}
 		recovery.CrashRequestedAt = requestedAt
 	}
+	if expiresAt, quiet, err := externalProofQuietUntil(current); err != nil {
+		return RecoverySession{}, err
+	} else if quiet {
+		recovery.ExternalProofExpiresAt = expiresAt
+	}
 	if current.Consumer != nil {
 		consumer := *current.Consumer
 		if _, err := consumer.Validate(); err != nil {
@@ -1357,7 +1364,7 @@ func (m *Manager) ensure(
 		timing.ReaderOpen = time.Since(stepStarted)
 		return Mount{}, m.fail(current, fmt.Errorf("decode immutable generation: %w", err))
 	}
-	reader, err := rootfsblock.NewReaderWithCache(m.source, descriptor, m.readCache)
+	reader, err := rootfsblock.NewReaderWithCacheContext(m.lifetime, m.source, descriptor, m.readCache)
 	timing.ReaderOpen = time.Since(stepStarted)
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open immutable generation: %w", err))
@@ -1581,8 +1588,63 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 // durable authority while allowing the node journal to remain bounded by
 // active and unreconciled sessions instead of lifetime churn.
 func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.Identity) error {
+	_, err := m.forgetTerminal(parent, identity, nil)
+	return err
+}
+
+// ForgetExpiredExternalTerminal removes only an expired compact external proof
+// whose exact writer was already made terminal before ReclaimTerminalArtifacts
+// persisted BranchRemoved. It never supplies regional terminal authority or
+// deletes physical artifacts. This local history GC must not require an online
+// grant/proof lookup: both regional records may expire while a node is offline.
+func (m *Manager) ForgetExpiredExternalTerminal(request rootfshandoff.StageRequest, now time.Time) (bool, error) {
+	request = request.WithoutWriterGrantToken()
+	if err := request.ValidateDurableBinding(); err != nil {
+		return false, fmt.Errorf("validate external proof expiry binding: %w", err)
+	}
+	if now.IsZero() {
+		return false, fmt.Errorf("external proof expiry time is required: %w", errdefs.ErrInvalidArgument)
+	}
+	binding, err := request.BindingDigest()
+	if err != nil {
+		return false, err
+	}
+	return m.forgetTerminal(request.Parent, request.Identity, func(current record) (bool, error) {
+		if current.Stage == nil || !sameBinding(current, request, hex.EncodeToString(binding[:])) {
+			return false, fmt.Errorf("external proof belongs to another durable writer binding: %w", errdefs.ErrFailedPrecondition)
+		}
+		if _, err := recoverySessionFromRecord(request.Parent, current, false); err != nil {
+			return false, fmt.Errorf("validate external proof recovery binding: %w", err)
+		}
+		if current.CrashFence == nil || !current.CrashFence.External || current.CrashFence.Result == nil ||
+			!current.BranchRemoved || current.RetireOperationID != "" || current.DirtyTailPressure != nil {
+			return false, nil
+		}
+		proof := current.CrashFence.Result
+		if err := proof.Validate(); err != nil {
+			return false, fmt.Errorf("validate external physical proof: %w: %w", err, errdefs.ErrFailedPrecondition)
+		}
+		if current.State != stateTombstoned || proof.Parent != current.Parent || proof.RootFSID != current.RootFSID ||
+			proof.WriterEpoch != current.WriterEpoch || proof.OperationID != current.CrashFence.OperationID ||
+			proof.BindingDigest != current.BindingDigest || proof.BranchPath != current.BranchPath ||
+			proof.DevicePath != current.DevicePath || proof.DeviceBound != (current.DevicePath != "") ||
+			(current.DevicePath != "" && (current.DeviceAllocationID == "" || !current.DeviceReservationReleased)) {
+			return false, fmt.Errorf("external physical proof does not match its reclaimed session: %w", errdefs.ErrFailedPrecondition)
+		}
+		expiresAt, eligible, err := externalProofQuietUntil(current)
+		if err != nil {
+			return false, err
+		}
+		return eligible && !now.Before(expiresAt), nil
+	})
+}
+
+// forgetTerminal serializes the physical absence check, optional expiry policy,
+// and exact journal/index deletion under the same parent lock. The predicate is
+// repeated in the write transaction, never trusted from a recovery snapshot.
+func (m *Manager) forgetTerminal(parent string, identity rootfshandoff.Identity, eligible func(record) (bool, error)) (bool, error) {
 	if strings.TrimSpace(parent) == "" || strings.TrimSpace(identity.RootFSID) == "" || identity.WriterEpoch <= 0 {
-		return fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
+		return false, fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
 	}
 	unlock := m.lock(parent)
 	defer unlock()
@@ -1590,36 +1652,45 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 	_, live := m.live[parent]
 	m.mu.Unlock()
 	if live {
-		return fmt.Errorf("RootFS session still has a live userspace owner: %w", errdefs.ErrFailedPrecondition)
+		return false, fmt.Errorf("RootFS session still has a live userspace owner: %w", errdefs.ErrFailedPrecondition)
 	}
 	current, err := m.load(parent)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch {
-		return fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
+		return false, fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	if eligible != nil {
+		if accepted, err := eligible(current); err != nil || !accepted {
+			return false, err
+		}
 	}
 	terminal, err := terminalDeviceProof(current)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if current.State != stateTombstoned || !terminal || !current.BranchRemoved {
-		return fmt.Errorf("RootFS session has not reclaimed verified terminal artifacts: %w", errdefs.ErrFailedPrecondition)
+		return false, fmt.Errorf("RootFS session has not reclaimed verified terminal artifacts: %w", errdefs.ErrFailedPrecondition)
 	}
 	paths := sessionPaths(m.branchRoot, m.mountRoot, parent)
 	if current.BranchPath != paths.branch {
-		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+		return false, fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := m.nodeDirty.ValidateOwnerDetached(paths.branch); err != nil {
+		return false, fmt.Errorf("validate terminal RootFS branch owner absence: %w", err)
 	}
 	for _, path := range []string{paths.branch, filepath.Dir(paths.xfs)} {
 		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
+			return false, fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
+			return false, fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
 		}
 	}
+	forgotten := false
 	err = m.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		identityBucket := tx.Bucket(sessionIdentityBucket)
@@ -1631,9 +1702,23 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 		if err := json.Unmarshal(payload, &stored); err != nil {
 			return fmt.Errorf("decode RootFS session %q: %w", parent, err)
 		}
-		if stored.RootFSID != identity.RootFSID || stored.WriterEpoch != identity.WriterEpoch ||
-			stored.State != stateTombstoned || !stored.BranchRemoved {
+		if stored.Parent != parent || stored.RootFSID != identity.RootFSID || stored.WriterEpoch != identity.WriterEpoch ||
+			stored.State != stateTombstoned || !stored.BranchRemoved || stored.BindingDigest != current.BindingDigest ||
+			stored.BranchPath != current.BranchPath || stored.DeviceAllocationID != current.DeviceAllocationID {
 			return fmt.Errorf("RootFS session changed before terminal forget: %w", errdefs.ErrFailedPrecondition)
+		}
+		if terminal, err := terminalDeviceProof(stored); err != nil || !terminal {
+			return fmt.Errorf("RootFS terminal proof changed before forget: %w", errdefs.ErrFailedPrecondition)
+		}
+		if eligible != nil {
+			if accepted, err := eligible(stored); err != nil {
+				return err
+			} else if !accepted {
+				return fmt.Errorf("RootFS proof is no longer eligible for expiry: %w", errdefs.ErrFailedPrecondition)
+			}
+		}
+		if !reflect.DeepEqual(stored, current) {
+			return fmt.Errorf("RootFS terminal record changed before forget: %w", errdefs.ErrFailedPrecondition)
 		}
 		identityKey := writerIdentityKey(identity.RootFSID, identity.WriterEpoch)
 		if indexed := identityBucket.Get(identityKey); string(indexed) != parent {
@@ -1642,7 +1727,11 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 		if err := identityBucket.Delete(identityKey); err != nil {
 			return err
 		}
-		return bucket.Delete([]byte(parent))
+		if err := bucket.Delete([]byte(parent)); err != nil {
+			return err
+		}
+		forgotten = true
+		return nil
 	})
 	if err == nil {
 		m.recoveryMu.Lock()
@@ -1650,7 +1739,7 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 		delete(m.quietExternal, parent)
 		m.recoveryMu.Unlock()
 	}
-	return err
+	return forgotten && err == nil, err
 }
 
 // CrashFence durably proves that a non-cooperatively stopped session has no
@@ -2065,7 +2154,7 @@ func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode session base generation: %w", err)
 	}
-	reader, err := rootfsblock.NewReaderWithCache(m.source, descriptor, m.readCache)
+	reader, err := rootfsblock.NewReaderWithCacheContext(m.lifetime, m.source, descriptor, m.readCache)
 	if err != nil {
 		return nil, fmt.Errorf("open session base generation: %w", err)
 	}
@@ -2506,11 +2595,20 @@ func externalProofQuietUntil(current record) (time.Time, bool, error) {
 	if current.State != stateTombstoned || !terminal {
 		return time.Time{}, false, fmt.Errorf("external RootFS proof is not physically terminal: %w", errdefs.ErrFailedPrecondition)
 	}
-	requestedAt, err := time.Parse(time.RFC3339Nano, current.CrashFence.RequestedAt)
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("parse external RootFS proof request time: %w", err)
+	// A crash intent may predate physical fencing or artifact reclamation by
+	// days. Preserve the full replay window after the latest durable boundary,
+	// including a planned-to-external conversion that reuses a reclaimed branch.
+	var lastBoundary time.Time
+	for _, timestamp := range []string{current.CrashFence.RequestedAt, current.CrashFence.Result.ObservedAt, current.UpdatedAt} {
+		boundary, err := time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil || boundary.IsZero() {
+			return time.Time{}, false, fmt.Errorf("external RootFS proof has an invalid boundary timestamp: %w", errdefs.ErrFailedPrecondition)
+		}
+		if boundary.After(lastBoundary) {
+			lastBoundary = boundary
+		}
 	}
-	return requestedAt.Add(ExternalTerminalProofRetention), true, nil
+	return lastBoundary.Add(ExternalTerminalProofRetention), true, nil
 }
 
 func putRecord(bucket *bolt.Bucket, value record) error {

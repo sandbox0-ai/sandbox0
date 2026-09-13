@@ -110,15 +110,15 @@ func (s *PGSandboxStore) BeginRootFSImport(
 			oci_os, oci_architecture, oci_variant, format_generation,
 			procd_protocol, procd_digest, logical_size_bytes,
 			block_data_range_bytes, block_pack_bytes, block_page_entries,
-			object_prefix, state
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending')
+			object_prefix, data_layout_policy, mapping_group_policy, state
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'pending')
 		ON CONFLICT (operation_id) DO NOTHING
 	`, normalized.OperationID, normalized.Spec.SourceOCIRef, sourceDigest.String(),
 		normalized.Spec.Platform.OS, normalized.Spec.Platform.Architecture,
 		normalized.Spec.Platform.Variant, normalized.Spec.FormatGeneration,
 		normalized.Spec.ProcdProtocol, normalized.Spec.ProcdDigest,
 		normalized.Spec.LogicalSizeBytes, options.DataRangeBytes, options.PackBytes,
-		options.PageEntries, options.ObjectPrefix)
+		options.PageEntries, options.ObjectPrefix, normalized.Spec.DataLayoutPolicy, options.MappingGroupPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("begin rootfs import operation: %w", err)
 	}
@@ -131,7 +131,59 @@ func (s *PGSandboxStore) BeginRootFSImport(
 		return nil, fmt.Errorf("%w: operation %s has different immutable inputs",
 			ErrRootFSImportConflict, normalized.OperationID)
 	}
+	if operation.State == RootFSImportStateReady {
+		// Discovery may have missed an artifact published without geometry by an
+		// old replica. Repair proven legacy metadata before returning Ready again.
+		return s.recoverReadyRootFSImportGeometry(ctx, normalized, sourceDigest.String())
+	}
 	return operation, nil
+}
+
+func (s *PGSandboxStore) recoverReadyRootFSImportGeometry(ctx context.Context, request *BeginRootFSImportRequest, sourceDigest string) (*RootFSImportOperation, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	operation, err := scanRootFSImportOperation(tx.QueryRow(ctx,
+		rootFSImportOperationSelectSQL()+" WHERE operation_id = $1 FOR UPDATE", request.OperationID))
+	if err != nil {
+		return nil, err
+	}
+	if operation.State != RootFSImportStateReady || !rootFSImportOperationMatchesSpec(operation, request.Spec, sourceDigest) {
+		return nil, fmt.Errorf("%w: ready rootfs import changed during geometry recovery", ErrRootFSImportConflict)
+	}
+	geometry, err := recoverRootFSArtifactImportGeometry(ctx, tx, operation.ArtifactDigest)
+	if err != nil {
+		return nil, err
+	}
+	if geometry == nil || *geometry != operation.Spec.BlockOptions.DataRangeBytes {
+		return nil, fmt.Errorf("%w: ready rootfs import lacks matching unanimous geometry provenance", ErrRootFSImportConflict)
+	}
+	if err := commitRootFSImportTx(ctx, tx, "ready geometry recovery"); err != nil {
+		return nil, err
+	}
+	return operation, nil
+}
+
+// recoverRootFSArtifactImportGeometry serializes monotonic metadata repair with
+// publication. The database applies the same full-input, unanimous provenance
+// rule used by migration; a NULL result is unresolved evidence, not a default.
+func recoverRootFSArtifactImportGeometry(ctx context.Context, tx pgx.Tx, artifactDigest string) (*int, error) {
+	var geometry *int
+	if err := tx.QueryRow(ctx, `SELECT import_data_range_bytes FROM manager.rootfs_base_artifacts
+		WHERE artifact_digest = $1 FOR UPDATE`, artifactDigest).Scan(&geometry); err != nil {
+		return nil, fmt.Errorf("lock rootfs import geometry: %w", err)
+	}
+	if geometry != nil {
+		return geometry, nil
+	}
+	if err := tx.QueryRow(ctx, `UPDATE manager.rootfs_base_artifacts artifact
+		SET import_data_range_bytes = manager.rootfs_import_geometry_provenance(artifact.artifact_digest)
+		WHERE artifact_digest = $1 RETURNING import_data_range_bytes`, artifactDigest).Scan(&geometry); err != nil {
+		return nil, fmt.Errorf("recover rootfs import geometry: %w", err)
+	}
+	return geometry, nil
 }
 
 func (s *PGSandboxStore) GetRootFSImportOperation(
@@ -311,24 +363,19 @@ func (s *PGSandboxStore) ReleaseRootFSImportLease(
 }
 
 func rootFSImportOperationSelectSQL() string {
-	return `
-		SELECT operation_id, source_oci_ref, source_oci_digest,
-			oci_os, oci_architecture, oci_variant, format_generation,
-			procd_protocol, procd_digest, logical_size_bytes,
-			block_data_range_bytes, block_pack_bytes, block_page_entries,
-			object_prefix, state, lease_owner, lease_token, lease_expires_at,
-			attempt_count, result_artifact_digest, abandon_reason,
-			created_at, updated_at, ready_at, abandoned_at
-		FROM manager.rootfs_import_operations `
+	return "SELECT " + rootFSImportOperationReturningColumns("") + " FROM manager.rootfs_import_operations "
 }
 
 func rootFSImportOperationReturningColumns(alias string) string {
-	prefix := alias + "."
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
 	return prefix + "operation_id, " + prefix + "source_oci_ref, " + prefix + "source_oci_digest, " +
 		prefix + "oci_os, " + prefix + "oci_architecture, " + prefix + "oci_variant, " +
 		prefix + "format_generation, " + prefix + "procd_protocol, " + prefix + "procd_digest, " +
 		prefix + "logical_size_bytes, " + prefix + "block_data_range_bytes, " + prefix + "block_pack_bytes, " +
-		prefix + "block_page_entries, " + prefix + "object_prefix, " + prefix + "state, " +
+		prefix + "block_page_entries, " + prefix + "object_prefix, " + prefix + "data_layout_policy, " + prefix + "mapping_group_policy, " + prefix + "state, " +
 		prefix + "lease_owner, " + prefix + "lease_token, " + prefix + "lease_expires_at, " +
 		prefix + "attempt_count, " + prefix + "result_artifact_digest, " + prefix + "abandon_reason, " +
 		prefix + "created_at, " + prefix + "updated_at, " + prefix + "ready_at, " + prefix + "abandoned_at"
@@ -345,12 +392,17 @@ func scanRootFSImportOperation(row sandboxRecordScanner) (*RootFSImportOperation
 		&operation.Spec.ProcdProtocol, &operation.Spec.ProcdDigest,
 		&operation.Spec.LogicalSizeBytes, &operation.Spec.BlockOptions.DataRangeBytes,
 		&operation.Spec.BlockOptions.PackBytes, &operation.Spec.BlockOptions.PageEntries,
-		&operation.Spec.BlockOptions.ObjectPrefix, &operation.State,
+		&operation.Spec.BlockOptions.ObjectPrefix, &operation.Spec.DataLayoutPolicy, &operation.Spec.BlockOptions.MappingGroupPolicy, &operation.State,
 		&leaseOwner, &leaseToken, &leaseExpiresAt, &operation.AttemptCount,
 		&artifactDigest, &operation.AbandonReason, &operation.CreatedAt,
 		&operation.UpdatedAt, &readyAt, &abandonedAt,
 	); err != nil {
 		return nil, err
+	}
+	// Builder format is derived from the existing durable authority, not a
+	// second persisted field that could disagree after a worker restart.
+	if operation.Spec.FormatGeneration == rootfsblock.CompressedFormatVersion {
+		operation.Spec.BlockOptions.FormatVersion = rootfsblock.CompressedFormatVersion
 	}
 	if leaseOwner != nil {
 		operation.LeaseOwner = *leaseOwner
@@ -807,11 +859,11 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 			manifest_digest, config_digest, base_block_root,
 			format_generation, oci_os, oci_architecture, oci_variant,
 			procd_protocol, procd_digest, logical_size_bytes,
-			descriptor_digest, state, descriptor, attestation,
+			descriptor_digest, state, descriptor, attestation, import_data_range_bytes, data_layout_policy, mapping_group_policy,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, 'ready', $15, $16, NOW(), NOW()
+			$11, $12, $13, $14, 'ready', $15, $16, $17, $18, $19, NOW(), NOW()
 		)
 		ON CONFLICT (artifact_digest) DO NOTHING
 	`, artifactDigest.String(), attestation.SourceOCIRef, attestation.SourceOCIDigest,
@@ -819,7 +871,8 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 		attestation.FormatGeneration, attestation.Platform.OS,
 		attestation.Platform.Architecture, attestation.Platform.Variant,
 		attestation.ProcdProtocol, attestation.ProcdDigest, attestation.LogicalSizeBytes,
-		attestation.DescriptorDigest, req.Result.DescriptorBytes, attestationBytes)
+		attestation.DescriptorDigest, req.Result.DescriptorBytes, attestationBytes,
+		operation.Spec.BlockOptions.DataRangeBytes, operation.Spec.DataLayoutPolicy, operation.Spec.BlockOptions.MappingGroupPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("insert ready rootfs base artifact: %w", err)
 	}
@@ -830,6 +883,10 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 	}
 	if !rootFSBaseArtifactMatchesAttestation(artifact, req.Result.DescriptorBytes, attestationBytes, attestation) {
 		return nil, fmt.Errorf("%w: artifact %s has different immutable attestation",
+			ErrRootFSBaseArtifactConflict, artifactDigest)
+	}
+	if artifact.ImportDataRangeBytes != nil && !rootFSBaseArtifactMatchesImportGeometry(artifact, operation) {
+		return nil, fmt.Errorf("%w: artifact %s has different or unknown immutable import geometry",
 			ErrRootFSBaseArtifactConflict, artifactDigest)
 	}
 	if artifactInsert.RowsAffected() == 1 {
@@ -859,6 +916,17 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 	}
 	if tag.RowsAffected() != 1 {
 		return nil, fmt.Errorf("%w: %s", ErrRootFSImportLeaseLost, operation.ID)
+	}
+	if artifact.ImportDataRangeBytes == nil {
+		// The current operation is now ready inside this transaction, so a
+		// collision with an old NULL artifact must agree with every ready import.
+		artifact.ImportDataRangeBytes, err = recoverRootFSArtifactImportGeometry(ctx, tx, artifact.ArtifactDigest)
+		if err != nil {
+			return nil, err
+		}
+		if !rootFSBaseArtifactMatchesImportGeometry(artifact, operation) {
+			return nil, fmt.Errorf("%w: artifact lacks matching unanimous geometry provenance", ErrRootFSBaseArtifactConflict)
+		}
 	}
 	if err := commitRootFSImportTx(ctx, tx, "ready publication"); err != nil {
 		return nil, err
@@ -942,10 +1010,16 @@ func (s *PGSandboxStore) ReconcileRootFSImportGarbage(
 	}
 	result.RecoveredLeases = int(tag.RowsAffected())
 	rows, err := tx.Query(ctx, `
-		SELECT operation_id, state
-		FROM manager.rootfs_import_operations
+		SELECT operation_id, state, COALESCE(result_artifact_digest, '')
+		FROM manager.rootfs_import_operations operation
 		WHERE state IN ('ready', 'abandoned')
 			AND updated_at <= NOW() - ($1::bigint * INTERVAL '1 millisecond')
+			AND (state = 'abandoned' OR EXISTS (
+				SELECT 1 FROM manager.rootfs_base_artifacts artifact
+				WHERE artifact.artifact_digest = operation.result_artifact_digest
+					AND (artifact.import_data_range_bytes IS NOT NULL
+						OR manager.rootfs_import_geometry_provenance(artifact.artifact_digest) IS NOT NULL)
+			))
 		ORDER BY updated_at, operation_id
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED
@@ -953,11 +1027,11 @@ func (s *PGSandboxStore) ReconcileRootFSImportGarbage(
 	if err != nil {
 		return nil, fmt.Errorf("list terminal rootfs import operations: %w", err)
 	}
-	type terminalImport struct{ id, state string }
+	type terminalImport struct{ id, state, artifactDigest string }
 	terminal := make([]terminalImport, 0)
 	for rows.Next() {
 		var item terminalImport
-		if err := rows.Scan(&item.id, &item.state); err != nil {
+		if err := rows.Scan(&item.id, &item.state, &item.artifactDigest); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -969,6 +1043,17 @@ func (s *PGSandboxStore) ReconcileRootFSImportGarbage(
 	}
 	rows.Close()
 	for _, operation := range terminal {
+		if operation.state == RootFSImportStateReady {
+			geometry, err := recoverRootFSArtifactImportGeometry(ctx, tx, operation.artifactDigest)
+			if err != nil {
+				return nil, err
+			}
+			if geometry == nil {
+				// Retain ambiguous/unverifiable evidence: deleting only one side
+				// could turn a later partial GC batch into false unanimity.
+				continue
+			}
+		}
 		objectRows, err := tx.Query(ctx, `
 			SELECT object_key FROM manager.rootfs_import_operation_objects
 			WHERE operation_id = $1 ORDER BY object_key
@@ -1024,12 +1109,22 @@ func validateRootFSImportResult(
 	if operation == nil {
 		return rootfsimporter.ReadyArtifactAttestation{}, nil, "", fmt.Errorf("rootfs import operation is required")
 	}
+	// Publication derives provenance from the fenced durable specification, not
+	// mutable worker defaults or an unvalidated database value.
+	normalized, err := rootfsimporter.NormalizeOperationSpec(operation.Spec)
+	if err != nil || normalized != operation.Spec {
+		return rootfsimporter.ReadyArtifactAttestation{}, nil, "",
+			fmt.Errorf("%w: rootfs import operation has a non-canonical durable specification", ErrRootFSImportConflict)
+	}
 	if result.SourceOCIRef != operation.Spec.SourceOCIRef ||
 		result.SourceOCIDigest.String() != operation.SourceOCIDigest ||
 		result.Platform.OS != operation.Spec.Platform.OS ||
 		result.Platform.Architecture != operation.Spec.Platform.Architecture ||
 		result.Platform.Variant != operation.Spec.Platform.Variant ||
 		result.ProcdDigest.String() != operation.Spec.ProcdDigest ||
+		result.DataLayoutPolicy != operation.Spec.DataLayoutPolicy ||
+		result.MappingGroupPolicy != operation.Spec.BlockOptions.MappingGroupPolicy ||
+		(result.DataLayoutPolicy != "" && result.DataLayoutRangeBytes != operation.Spec.BlockOptions.DataRangeBytes) ||
 		result.LogicalSizeBytes != operation.Spec.LogicalSizeBytes {
 		return rootfsimporter.ReadyArtifactAttestation{}, nil, "",
 			fmt.Errorf("%w: rootfs import result does not match its durable inputs", ErrRootFSImportConflict)
@@ -1050,12 +1145,19 @@ func validateRootFSImportResult(
 	return attestation, payload, artifactDigest, nil
 }
 
+func rootFSBaseArtifactMatchesImportGeometry(artifact *RootFSBaseArtifact, operation *RootFSImportOperation) bool {
+	return artifact != nil && operation != nil && artifact.ImportDataRangeBytes != nil &&
+		*artifact.ImportDataRangeBytes == operation.Spec.BlockOptions.DataRangeBytes
+}
+
 func rootFSBaseArtifactMatchesAttestation(
 	artifact *RootFSBaseArtifact,
 	descriptor, attestationBytes []byte,
 	attestation rootfsimporter.ReadyArtifactAttestation,
 ) bool {
 	return artifact != nil && artifact.ArtifactDigest == digest.FromBytes(attestationBytes).String() &&
+		artifact.ImportDataLayoutPolicy == attestation.DataLayoutPolicy &&
+		artifact.ImportMappingGroupPolicy == attestation.MappingGroupPolicy &&
 		artifact.SourceOCIRef == attestation.SourceOCIRef &&
 		artifact.SourceOCIDigest == attestation.SourceOCIDigest &&
 		artifact.ManifestDigest == attestation.ManifestDigest && artifact.ConfigDigest == attestation.ConfigDigest &&
@@ -1140,6 +1242,15 @@ func validateReadyRootFSImportRetry(
 	}
 	if !rootFSBaseArtifactMatchesAttestation(artifact, descriptor, attestationBytes, attestation) {
 		return nil, fmt.Errorf("%w: ready rootfs import artifact changed", ErrRootFSImportConflict)
+	}
+	if artifact.ImportDataRangeBytes == nil {
+		artifact.ImportDataRangeBytes, err = recoverRootFSArtifactImportGeometry(ctx, tx, artifactDigest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !rootFSBaseArtifactMatchesImportGeometry(artifact, operation) {
+		return nil, fmt.Errorf("%w: ready rootfs import geometry changed or is unknown", ErrRootFSImportConflict)
 	}
 	if err := verifyRootFSBaseArtifactObjects(ctx, tx, artifactDigest, references); err != nil {
 		return nil, err

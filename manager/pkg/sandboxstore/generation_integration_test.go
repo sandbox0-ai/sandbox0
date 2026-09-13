@@ -154,7 +154,7 @@ func TestInitialRootFSGenerationRejectsDifferentArtifact(t *testing.T) {
 	require.ErrorIs(t, err, ErrRootFSGenerationConflict)
 }
 
-func TestInitialRootFSGenerationConcurrentSandboxesRetrySerialization(t *testing.T) {
+func TestInitialRootFSGenerationConcurrentSandboxesIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)

@@ -69,6 +69,14 @@ carriers, and the provider scale-out lifecycle action are complete. Scale-in
 removes a node only after leases, allocations, routes, and runtime state are
 absent.
 
+For the supported single fixed worker, carriers that are ready or serving
+active leases preserve its CPU and memory contribution even while another
+carrier is being replaced. Slot demand
+receives credit only for the actual usable carriers, not the configured full
+pool. Manager scales for the largest remaining CPU, memory, or slot deficit,
+including headroom; a fixed worker without usable carriers receives no credit.
+Normal scale-in stabilization and terminal cleanup fences still apply.
+
 ## RootFS Boundary
 
 Manager owns regional RootFS metadata and the durable OCI importer. `ctld` owns

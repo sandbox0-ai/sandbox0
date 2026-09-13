@@ -28,6 +28,12 @@ import (
 // Validate verifies that every field returned by a block build is internally
 // consistent before it can participate in a ready-artifact attestation.
 func (result BuildResult) Validate() error {
+	if err := ValidateMappingGroupPolicy(result.MappingGroupPolicy, result.Descriptor.Version); err != nil {
+		return err
+	}
+	if err := validateDataLayoutEvidence(result.DataLayoutPolicy, result.DataLayoutFallback, result.Descriptor.Version, result.DataLayoutRangeBytes); err != nil {
+		return err
+	}
 	if err := result.Descriptor.Validate(); err != nil {
 		return fmt.Errorf("generated RootFS descriptor: %w", err)
 	}

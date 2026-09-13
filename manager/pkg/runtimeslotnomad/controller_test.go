@@ -164,10 +164,10 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := runtimeslotreconciler.AllocationPurgeRequest{OperationID: "purge-operation", Target: target}
-	if err := controller.Purge(t.Context(), request); err != nil {
+	if err := controller.Purge(t.Context(), request); !errors.Is(err, runtimeslotreconciler.ErrAllocationStillPresent) {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(api.stopCalls, []string{request.OperationID}) || api.gcCalls != 1 {
+	if !reflect.DeepEqual(api.stopCalls, []string{request.OperationID}) || api.gcCalls != 0 {
 		t.Fatalf("stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 
@@ -175,7 +175,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 1 || api.gcCalls != 2 {
+	if len(api.stopCalls) != 2 || api.gcCalls != 1 {
 		t.Fatalf("retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 
@@ -183,7 +183,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 1 || api.gcCalls != 3 {
+	if len(api.stopCalls) != 2 || api.gcCalls != 2 {
 		t.Fatalf("server-GC retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 
@@ -191,7 +191,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 1 || api.gcCalls != 3 {
+	if len(api.stopCalls) != 2 || api.gcCalls != 2 {
 		t.Fatalf("absent retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 }

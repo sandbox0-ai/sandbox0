@@ -126,6 +126,9 @@ func (d GenerationDescriptor) Validate() error {
 	if err != nil {
 		return fmt.Errorf("block descriptor: %w", err)
 	}
+	if err := rootfsblock.ValidateFormatBinding(d.FormatGeneration, blockDescriptor.Version); err != nil {
+		return err
+	}
 	if blockDescriptor.MappingRoot.RootDigest != d.CurrentBlockHead {
 		return fmt.Errorf("block descriptor mapping root does not match current_block_head")
 	}

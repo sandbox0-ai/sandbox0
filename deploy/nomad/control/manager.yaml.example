@@ -84,6 +84,17 @@ rootfs_importer:
   procd_digest: sha256:<replace-with-64-lowercase-hex>
   discovery_interval: 5s
   discovery_page_size: 100
+  # New image imports only. Upgrade all manager/ctld/driver readers before selecting 2.
+  format_generation: 1
+  # Optional strict geometry for format 1; 0 preserves unfiltered geometry selection.
+  # Format 2 defaults to 65536 decoded bytes and rejects larger data ranges.
+  # data_range_bytes: 1048576
+  # Optional xfs-file-ranges-v1 requires format 2 / 65536 and all managers upgraded.
+  # Empty keeps legacy segmentation and source selection. Not a runtime class.
+  data_layout_policy: ""
+  # Optional contiguous-mapping-v1 requires format 2 and upgraded managers.
+  # Empty preserves existing imports. Validate cold command-ready before rollout.
+  mapping_group_policy: ""
 
 node_authority:
   enabled: true

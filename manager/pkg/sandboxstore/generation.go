@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
@@ -71,11 +70,16 @@ type RootFSBaseArtifact struct {
 	ProcdDigest      string
 	LogicalSizeBytes int64
 	DescriptorDigest string
-	State            string
-	Descriptor       []byte
-	Attestation      []byte
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ImportDataRangeBytes is immutable import provenance, not a runtime-format
+	// requirement. Nil means the legacy artifact's geometry is unknown.
+	ImportDataRangeBytes     *int
+	ImportDataLayoutPolicy   string
+	ImportMappingGroupPolicy string
+	State                    string
+	Descriptor               []byte
+	Attestation              []byte
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // RootFSArtifactPlatform is the OCI platform selected while converting an
@@ -134,6 +138,14 @@ type ReadyRootFSArtifactRequirements struct {
 	LogicalSizeBytes int64
 	ProcdProtocol    string
 	ProcdDigest      string
+	// Source-only selection policy. Exact-digest lookups must leave these unset
+	// so a new import policy cannot invalidate existing generations or snapshots.
+	ImportDataRangeBytes int
+	SourceOCIRef         string
+	// Empty selects legacy layout for source lookups; it is never a wildcard
+	// over future policies. Digest-bound generations ignore mutable selection.
+	ImportDataLayoutPolicy   string
+	ImportMappingGroupPolicy string
 }
 
 func (r ReadyRootFSArtifactRequirements) Validate() error {
@@ -151,6 +163,35 @@ func (r ReadyRootFSArtifactRequirements) Validate() error {
 	procdDigest, err := digest.Parse(r.ProcdDigest)
 	if err != nil || rootfsimporter.ValidateArtifactSHA256Digest(procdDigest) != nil {
 		return fmt.Errorf("procd_digest must be canonical SHA-256")
+	}
+	if r.ImportDataRangeBytes != 0 {
+		if _, err := rootfsblock.NormalizeBuildOptions(rootfsblock.BuildOptions{DataRangeBytes: r.ImportDataRangeBytes}); err != nil {
+			return fmt.Errorf("import_data_range_bytes: %w", err)
+		}
+	}
+	if err := rootfsimporter.ValidateDataLayoutPolicy(r.ImportDataLayoutPolicy, r.FormatGeneration, rootfsblock.BuildOptions{DataRangeBytes: r.ImportDataRangeBytes}); err != nil {
+		return err
+	}
+	if err := rootfsimporter.ValidateMappingGroupPolicy(r.ImportMappingGroupPolicy, r.FormatGeneration); err != nil {
+		return err
+	}
+	if r.SourceOCIRef != "" {
+		if _, err := rootfsimporter.PinnedSourceDigest(r.SourceOCIRef); err != nil {
+			return fmt.Errorf("source_oci_ref: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r ReadyRootFSArtifactRequirements) validateSourceLookup(sourceOCIDigest string) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	if r.SourceOCIRef != "" {
+		pinned, err := rootfsimporter.PinnedSourceDigest(r.SourceOCIRef)
+		if err != nil || pinned.String() != sourceOCIDigest {
+			return fmt.Errorf("source_oci_ref must bind the requested source_oci_digest")
+		}
 	}
 	return nil
 }
@@ -384,7 +425,7 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 	if err := platform.Validate(); err != nil {
 		return nil, err
 	}
-	if err := requirements.Validate(); err != nil {
+	if err := requirements.validateSourceLookup(sourceOCIDigest); err != nil {
 		return nil, err
 	}
 	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
@@ -397,11 +438,16 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 			AND logical_size_bytes = $7
 			AND procd_protocol = $8
 			AND procd_digest = $9
+			AND ($10::integer = 0 OR import_data_range_bytes = $10)
+			AND ($11::text = '' OR source_oci_ref = $11)
+			AND data_layout_policy = $12
+			AND mapping_group_policy = $13
 		ORDER BY format_generation DESC, created_at DESC
 		LIMIT 1
 	`, sourceOCIDigest, RootFSBaseArtifactStateReady, platform.OS,
 		platform.Architecture, platform.Variant, requirements.FormatGeneration,
-		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest))
+		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest,
+		requirements.ImportDataRangeBytes, requirements.SourceOCIRef, requirements.ImportDataLayoutPolicy, requirements.ImportMappingGroupPolicy))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: source %s with logical size %d",
 			ErrRootFSBaseArtifactNotFound, sourceOCIDigest, requirements.LogicalSizeBytes)
@@ -422,6 +468,9 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 		return nil, fmt.Errorf("rootfs generation store is not configured")
 	}
 	artifactDigest = strings.TrimSpace(artifactDigest)
+	if requirements.ImportDataRangeBytes != 0 || requirements.SourceOCIRef != "" || requirements.ImportDataLayoutPolicy != "" || requirements.ImportMappingGroupPolicy != "" {
+		return nil, fmt.Errorf("source selection filters are not allowed for an exact artifact digest")
+	}
 	if _, err := digest.Parse(artifactDigest); err != nil {
 		return nil, fmt.Errorf("artifact_digest: %w", err)
 	}
@@ -454,30 +503,12 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 	return artifact, nil
 }
 
+// EnsureInitialRootFSGeneration publishes one initial binding under the sandbox
+// row lock, which also fences deletion and concurrent retries of that identity.
+// READ COMMITTED observes a predecessor's binding after waiting for that lock;
+// SERIALIZABLE would retain the earlier snapshot and introduce cross-sandbox
+// predicate conflicts while inserting otherwise independent filesystem rows.
 func (s *PGSandboxStore) EnsureInitialRootFSGeneration(
-	ctx context.Context,
-	req *EnsureInitialRootFSGenerationRequest,
-) (*RootFSFilesystem, *RootFSGeneration, error) {
-	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
-		filesystem, generation, err := s.ensureInitialRootFSGenerationOnce(ctx, req)
-		if err == nil || !isSerializationFailure(err) {
-			return filesystem, generation, err
-		}
-		lastErr = err
-		delay := time.Duration(1<<attempt) * time.Millisecond
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, nil, fmt.Errorf("initial rootfs generation serialization retries exhausted: %w", lastErr)
-}
-
-func (s *PGSandboxStore) ensureInitialRootFSGenerationOnce(
 	ctx context.Context,
 	req *EnsureInitialRootFSGenerationRequest,
 ) (*RootFSFilesystem, *RootFSGeneration, error) {
@@ -488,7 +519,7 @@ func (s *PGSandboxStore) ensureInitialRootFSGenerationOnce(
 	if err != nil {
 		return nil, nil, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin initial rootfs generation: %w", err)
 	}
@@ -510,9 +541,12 @@ func (s *PGSandboxStore) ensureInitialRootFSGenerationOnce(
 			ErrRootFSGenerationConflict, sandboxTeamID, normalized.TeamID)
 	}
 
+	// Claims only read the shared artifact. Protect its ready state and metadata
+	// from mutation/deletion until the new filesystem's FK pins it, without
+	// serializing all claims of the same template behind an exclusive row lock.
 	artifact, err := scanRootFSBaseArtifact(tx.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
 		WHERE artifact_digest = $1 AND state = $2
-		FOR UPDATE
+		FOR SHARE
 	`, normalized.BaseArtifactDigest, RootFSBaseArtifactStateReady))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, fmt.Errorf("%w: %s", ErrRootFSBaseArtifactNotFound, normalized.BaseArtifactDigest)
@@ -586,11 +620,6 @@ func (s *PGSandboxStore) ensureInitialRootFSGenerationOnce(
 		return nil, nil, fmt.Errorf("commit initial rootfs generation: %w", err)
 	}
 	return filesystem, generation, nil
-}
-
-func isSerializationFailure(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "40001"
 }
 
 func (s *PGSandboxStore) GetRootFSGeneration(ctx context.Context, generationID string) (*RootFSGeneration, error) {
@@ -748,6 +777,9 @@ func normalizeDurableRootFSGeneration(input *RootFSGeneration, expectedParent st
 	}
 	descriptor, err := rootfsblock.DecodeDescriptor(generation.Descriptor)
 	if err != nil {
+		return nil, fmt.Errorf("generation descriptor: %w", err)
+	}
+	if err := rootfsblock.ValidateFormatBinding(generation.FormatGeneration, descriptor.Version); err != nil {
 		return nil, fmt.Errorf("generation descriptor: %w", err)
 	}
 	if descriptor.MappingRoot.RootDigest != generation.CurrentBlockHead {
@@ -964,7 +996,7 @@ func rootFSBaseArtifactSelectSQL() string {
 			COALESCE(attestation, ''::bytea), COALESCE(manifest_digest, ''),
 			COALESCE(config_digest, ''), COALESCE(procd_protocol, ''),
 			COALESCE(procd_digest, ''), COALESCE(logical_size_bytes, 0),
-			COALESCE(descriptor_digest, ''), created_at, updated_at
+			COALESCE(descriptor_digest, ''), import_data_range_bytes, data_layout_policy, mapping_group_policy, created_at, updated_at
 		FROM manager.rootfs_base_artifacts `
 }
 
@@ -985,6 +1017,8 @@ func scanRootFSBaseArtifact(row sandboxRecordScanner) (*RootFSBaseArtifact, erro
 		&artifact.State, &artifact.Descriptor, &artifact.Attestation,
 		&artifact.ManifestDigest, &artifact.ConfigDigest, &artifact.ProcdProtocol,
 		&artifact.ProcdDigest, &artifact.LogicalSizeBytes, &artifact.DescriptorDigest,
+		&artifact.ImportDataRangeBytes, &artifact.ImportDataLayoutPolicy,
+		&artifact.ImportMappingGroupPolicy,
 		&artifact.CreatedAt, &artifact.UpdatedAt); err != nil {
 		return nil, err
 	}

@@ -26,10 +26,13 @@ type ImmutableObjectPublisher interface {
 }
 
 type BuildOptions struct {
-	DataRangeBytes int
-	PackBytes      int
-	PageEntries    int
-	ObjectPrefix   string
+	// Zero retains the version-one publication identity and defaults.
+	FormatVersion      int `json:",omitempty"`
+	DataRangeBytes     int
+	PackBytes          int
+	PageEntries        int
+	ObjectPrefix       string
+	MappingGroupPolicy string `json:",omitempty"`
 }
 
 type BuildResult struct {
@@ -92,6 +95,17 @@ func BuildMaterializedGeneration(
 	publisher ImmutableObjectPublisher,
 	options BuildOptions,
 ) (BuildResult, error) {
+	return buildMaterializedGeneration(ctx, reader, logicalSize, publisher, options, nil)
+}
+
+func buildMaterializedGeneration(
+	ctx context.Context,
+	reader io.ReaderAt,
+	logicalSize int64,
+	publisher ImmutableObjectPublisher,
+	options BuildOptions,
+	layout *DataRangeLayout,
+) (BuildResult, error) {
 	if reader == nil || publisher == nil {
 		return BuildResult{}, fmt.Errorf("reader and publisher are required")
 	}
@@ -102,19 +116,42 @@ func BuildMaterializedGeneration(
 	if err != nil {
 		return BuildResult{}, err
 	}
+	if layout != nil && (options.formatVersion() != CompressedFormatVersion ||
+		layout.logicalSize != logicalSize || layout.rangeBytes != int64(options.DataRangeBytes)) {
+		return BuildResult{}, fmt.Errorf("data range layout must bind the same format-two image size and data unit")
+	}
 	state := generationBuilder{
 		ctx: ctx, publisher: publisher, options: options,
 		references: make(map[string]ObjectReference),
 	}
-	entries := make([]MappingEntry, 0)
+	defer state.encoder.close()
+	tree := newMappingStream(&state, uint64(logicalSize/LogicalBlockSize))
 	pack := make([]pendingDataEntry, 0, options.PackBytes/options.DataRangeBytes)
 	packBytes := 0
+	payload := make([]byte, int(min(int64(options.DataRangeBytes), logicalSize)))
+	cursor := dataRangeCursor{layout: layout}
+	dataReader, sparse := reader.(materializedDataReader)
 	for offset := int64(0); offset < logicalSize; {
 		if err := ctx.Err(); err != nil {
 			return BuildResult{}, err
 		}
-		length := min(int64(options.DataRangeBytes), logicalSize-offset)
-		payload := make([]byte, int(length))
+		if sparse {
+			next, err := dataReader.nextDataOffset(ctx, offset)
+			if err != nil {
+				return BuildResult{}, fmt.Errorf("locate logical disk data at %d: %w", offset, err)
+			}
+			if next < offset || next > logicalSize {
+				return BuildResult{}, fmt.Errorf("logical disk data offset is outside the remaining image")
+			}
+			if next == logicalSize {
+				break
+			}
+			// Read the original complete unit containing the next data byte.
+			// Re-basing a unit at an extent boundary would change publication.
+			offset = cursor.rangeStart(next, options.DataRangeBytes)
+		}
+		length := cursor.nextLength(offset, logicalSize, options.DataRangeBytes)
+		payload = payload[:int(length)]
 		n, readErr := reader.ReadAt(payload, offset)
 		if readErr != nil && readErr != io.EOF {
 			return BuildResult{}, fmt.Errorf("read logical disk at %d: %w", offset, readErr)
@@ -128,7 +165,10 @@ func BuildMaterializedGeneration(
 				if err != nil {
 					return BuildResult{}, err
 				}
-				entries = append(entries, published...)
+				if err := tree.addEntries(published); err != nil {
+					return BuildResult{}, err
+				}
+				clear(pack)
 				pack = pack[:0]
 				packBytes = 0
 			}
@@ -144,6 +184,11 @@ func BuildMaterializedGeneration(
 				data: payload,
 			})
 			packBytes += len(payload)
+			// Nonzero bytes belong to the pending pack. Zero ranges reuse the
+			// read buffer instead of allocating for every sparse image range.
+			if offset+length < logicalSize {
+				payload = make([]byte, int(min(int64(options.DataRangeBytes), logicalSize-offset-length)))
+			}
 		}
 		offset += length
 	}
@@ -152,15 +197,18 @@ func BuildMaterializedGeneration(
 		if err != nil {
 			return BuildResult{}, err
 		}
-		entries = append(entries, published...)
+		if err := tree.addEntries(published); err != nil {
+			return BuildResult{}, err
+		}
+		clear(pack)
 	}
-	root, rootPayload, err := state.publishMappingTree(entries, uint64(logicalSize/LogicalBlockSize))
+	root, rootPayload, err := tree.finish()
 	if err != nil {
 		return BuildResult{}, err
 	}
 	descriptor := Descriptor{
-		Version: DescriptorVersion, LogicalSizeBytes: logicalSize, BlockSizeBytes: LogicalBlockSize,
-		MappingRoot: MappingRootLocator{Version: MappingPageVersion, RootDigest: digest.FromBytes(rootPayload).String(), Object: root},
+		Version: options.formatVersion(), LogicalSizeBytes: logicalSize, BlockSizeBytes: LogicalBlockSize,
+		MappingRoot: MappingRootLocator{Version: options.formatVersion(), RootDigest: digest.FromBytes(rootPayload).String(), Object: root},
 	}
 	descriptorPayload, err := EncodeDescriptor(descriptor)
 	if err != nil {
@@ -180,6 +228,7 @@ type generationBuilder struct {
 	objects    int
 	bytes      int64
 	references map[string]ObjectReference
+	encoder    rangeEncoder
 }
 
 func (b *generationBuilder) publishPack(pending []pendingDataEntry) ([]MappingEntry, error) {
@@ -188,17 +237,26 @@ func (b *generationBuilder) publishPack(pending []pendingDataEntry) ([]MappingEn
 		size += len(item.data)
 	}
 	payload := make([]byte, 0, size)
-	for _, item := range pending {
-		payload = append(payload, item.data...)
+	entries := make([]MappingEntry, len(pending))
+	for index, item := range pending {
+		data := item.data
+		if b.options.formatVersion() == CompressedFormatVersion {
+			var err error
+			data, item.entry.Object, err = b.encoder.encode(b.ctx, item.data)
+			if err != nil {
+				return nil, err
+			}
+		}
+		item.entry.Object.Offset = int64(len(payload))
+		entries[index] = item.entry
+		payload = append(payload, data...)
 	}
 	key, err := b.publish("packs", payload)
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]MappingEntry, len(pending))
-	for index, item := range pending {
-		item.entry.Object.Key = key
-		entries[index] = item.entry
+	for index := range entries {
+		entries[index].Object.Key = key
 	}
 	return entries, nil
 }
@@ -209,50 +267,30 @@ type publishedPage struct {
 	level   uint8
 	object  ObjectRange
 	payload []byte
+	stored  []byte
 }
 
 func (b *generationBuilder) publishMappingTree(entries []MappingEntry, totalBlocks uint64) (ObjectRange, []byte, error) {
-	if len(entries) <= b.options.PageEntries {
-		return b.publishRootPage(MappingPage{StartBlock: 0, BlockCount: totalBlocks, Entries: entries})
-	}
-	pages := make([]publishedPage, 0, (len(entries)+b.options.PageEntries-1)/b.options.PageEntries)
-	for start := 0; start < len(entries); start += b.options.PageEntries {
-		end := min(start+b.options.PageEntries, len(entries))
-		first := entries[start].LogicalStart
-		last := entries[end-1].LogicalStart + uint64(entries[end-1].BlockCount)
-		page, err := b.publishPage(MappingPage{StartBlock: first, BlockCount: last - first, Entries: entries[start:end]})
-		if err != nil {
-			return ObjectRange{}, nil, err
-		}
-		pages = append(pages, page)
-	}
-	for len(pages) > b.options.PageEntries {
-		if pages[0].level == math.MaxUint8 {
-			return ObjectRange{}, nil, fmt.Errorf("mapping tree is too deep")
-		}
-		next := make([]publishedPage, 0, (len(pages)+b.options.PageEntries-1)/b.options.PageEntries)
-		for start := 0; start < len(pages); start += b.options.PageEntries {
-			end := min(start+b.options.PageEntries, len(pages))
-			page, err := b.publishInternalPage(pages[start:end], pages[start].level+1, false, totalBlocks)
-			if err != nil {
-				return ObjectRange{}, nil, err
-			}
-			next = append(next, page)
-		}
-		pages = next
-	}
-	root, err := b.publishInternalPage(pages, pages[0].level+1, true, totalBlocks)
-	if err != nil {
+	tree := newMappingStream(b, totalBlocks)
+	if err := tree.addEntries(entries); err != nil {
 		return ObjectRange{}, nil, err
 	}
-	return root.object, root.payload, nil
+	return tree.finish()
 }
 
 func (b *generationBuilder) publishInternalPage(children []publishedPage, level uint8, root bool, totalBlocks uint64) (publishedPage, error) {
+	page, err := internalMappingPage(children, level, root, totalBlocks)
+	if err != nil {
+		return publishedPage{}, err
+	}
+	return b.publishPage(page)
+}
+
+func internalMappingPage(children []publishedPage, level uint8, root bool, totalBlocks uint64) (MappingPage, error) {
 	entries := make([]MappingEntry, 0, len(children))
 	for _, child := range children {
 		if child.count > math.MaxUint32 {
-			return publishedPage{}, fmt.Errorf("mapping child covers too many blocks")
+			return MappingPage{}, fmt.Errorf("mapping child covers too many blocks")
 		}
 		entries = append(entries, MappingEntry{LogicalStart: child.start, BlockCount: uint32(child.count), Kind: MappingEntryChild, Object: child.object})
 	}
@@ -262,7 +300,7 @@ func (b *generationBuilder) publishInternalPage(children []publishedPage, level 
 		start = 0
 		count = totalBlocks
 	}
-	return b.publishPage(MappingPage{Level: level, StartBlock: start, BlockCount: count, Entries: entries})
+	return MappingPage{Level: level, StartBlock: start, BlockCount: count, Entries: entries}, nil
 }
 
 func (b *generationBuilder) publishRootPage(page MappingPage) (ObjectRange, []byte, error) {
@@ -271,21 +309,41 @@ func (b *generationBuilder) publishRootPage(page MappingPage) (ObjectRange, []by
 }
 
 func (b *generationBuilder) publishPage(page MappingPage) (publishedPage, error) {
+	prepared, err := b.prepareMappingPage(page)
+	if err != nil {
+		return publishedPage{}, err
+	}
+	pages, err := b.publishMappingGroup([]publishedPage{prepared})
+	if err != nil {
+		return publishedPage{}, err
+	}
+	return pages[0], nil
+}
+
+func (b *generationBuilder) prepareMappingPage(page MappingPage) (publishedPage, error) {
+	page.Version = b.options.FormatVersion
 	payload, err := EncodeMappingPage(page)
 	if err != nil {
 		return publishedPage{}, err
 	}
-	key, err := b.publish("maps", payload)
-	if err != nil {
-		return publishedPage{}, err
+	stored := payload
+	object := ObjectRange{Length: int64(len(payload)), Checksum: digest.FromBytes(payload).String()}
+	if b.options.formatVersion() == CompressedFormatVersion {
+		stored, object, err = b.encoder.encode(b.ctx, payload)
+		if err != nil {
+			return publishedPage{}, err
+		}
 	}
 	return publishedPage{
 		start: page.StartBlock, count: page.BlockCount, level: page.Level, payload: payload,
-		object: ObjectRange{Key: key, Length: int64(len(payload)), Checksum: digest.FromBytes(payload).String()},
+		object: object, stored: stored,
 	}, nil
 }
 
 func (b *generationBuilder) publish(kind string, payload []byte) (string, error) {
+	if err := b.ctx.Err(); err != nil {
+		return "", err
+	}
 	var objectKind string
 	switch kind {
 	case "packs":
@@ -314,8 +372,20 @@ func (b *generationBuilder) publish(kind string, payload []byte) (string, error)
 // NormalizeBuildOptions applies production defaults and validates immutable
 // block publication bounds.
 func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
+	if options.MappingGroupPolicy != "" && (options.MappingGroupPolicy != ContiguousMappingV1 || options.FormatVersion != CompressedFormatVersion) {
+		return BuildOptions{}, fmt.Errorf("unsupported mapping group policy or format")
+	}
+	if options.FormatVersion == DescriptorVersion {
+		options.FormatVersion = 0
+	}
+	if options.FormatVersion != 0 && options.FormatVersion != CompressedFormatVersion {
+		return BuildOptions{}, fmt.Errorf("unsupported build format version %d", options.FormatVersion)
+	}
 	if options.DataRangeBytes == 0 {
 		options.DataRangeBytes = DefaultDataRangeBytes
+		if options.formatVersion() == CompressedFormatVersion {
+			options.DataRangeBytes = CompressedDataRangeBytes
+		}
 	}
 	if options.PackBytes == 0 {
 		options.PackBytes = DefaultPackBytes
@@ -324,13 +394,16 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 		options.PageEntries = DefaultPageEntries
 	}
 	if options.ObjectPrefix == "" {
-		options.ObjectPrefix = "rootfs/v1"
+		options.ObjectPrefix = fmt.Sprintf("rootfs/v%d", options.formatVersion())
 	}
 	if err := ValidateObjectPrefix(options.ObjectPrefix); err != nil {
 		return BuildOptions{}, err
 	}
 	if options.DataRangeBytes <= 0 || options.DataRangeBytes > MaxDataRangeBytes || options.DataRangeBytes%LogicalBlockSize != 0 {
 		return BuildOptions{}, fmt.Errorf("data range must be a positive block-aligned value no greater than %d", MaxDataRangeBytes)
+	}
+	if options.formatVersion() == CompressedFormatVersion && options.DataRangeBytes > CompressedDataRangeBytes {
+		return BuildOptions{}, fmt.Errorf("compressed data range exceeds %d bytes", CompressedDataRangeBytes)
 	}
 	if options.PackBytes < options.DataRangeBytes || options.PackBytes > DefaultPackBytes ||
 		options.PackBytes%options.DataRangeBytes != 0 {
@@ -340,6 +413,26 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 		return BuildOptions{}, fmt.Errorf("mapping page entry limit is invalid")
 	}
 	return options, nil
+}
+
+func (o BuildOptions) formatVersion() int {
+	if o.FormatVersion == 0 {
+		return DescriptorVersion
+	}
+	return o.FormatVersion
+}
+
+func inheritBuildFormat(options BuildOptions, base Descriptor) (BuildOptions, error) {
+	if options.MappingGroupPolicy != "" {
+		return BuildOptions{}, fmt.Errorf("mapping group policy applies to materialized image imports only")
+	}
+	if options.FormatVersion == 0 {
+		options.FormatVersion = base.Version
+	}
+	if options.formatVersion() != base.Version {
+		return BuildOptions{}, fmt.Errorf("incremental publication cannot change RootFS format")
+	}
+	return NormalizeBuildOptions(options)
 }
 
 // ValidateObjectPrefix rejects paths that could escape or alias a caller's

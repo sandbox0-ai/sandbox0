@@ -29,7 +29,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -147,6 +149,11 @@ type Config struct {
 	RootFSFormatGeneration int
 	RootFSProcdProtocol    string
 	RootFSProcdDigest      string
+	// Zero leaves image artifact geometry unfiltered; it is not a runtime or
+	// snapshot compatibility requirement.
+	RootFSImportDataRangeBytes     int
+	RootFSImportDataLayoutPolicy   string
+	RootFSImportMappingGroupPolicy string
 }
 
 // Service claims resource-neutral Nomad slots and binds exact resource leases.
@@ -170,6 +177,10 @@ type Service struct {
 	rootFSProcdProtocol    string
 	rootFSProcdDigest      string
 	pauseEnqueuer          service.SandboxPauseEnqueuer
+
+	rootFSImportDataRangeBytes     int
+	rootFSImportDataLayoutPolicy   string
+	rootFSImportMappingGroupPolicy string
 }
 
 // New validates all claim authorities. There is no partially configured mode.
@@ -185,6 +196,20 @@ func New(config Config) (*Service, error) {
 	}
 	if config.ClaimTTL < time.Second || config.ClaimTTL > time.Minute {
 		return nil, fmt.Errorf("nomad claim TTL must be between 1s and 1m")
+	}
+	format, err := rootfsimporter.ImageImportFormat(config.RootFSFormatGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("nomad claim RootFS artifact policy: %w", err)
+	}
+	config.RootFSFormatGeneration = format
+	if _, err := rootfsimporter.NormalizeBlockOptions(format, rootfsblock.BuildOptions{DataRangeBytes: config.RootFSImportDataRangeBytes}); err != nil {
+		return nil, fmt.Errorf("nomad claim RootFS import data range: %w", err)
+	}
+	if err := rootfsimporter.ValidateDataLayoutPolicy(config.RootFSImportDataLayoutPolicy, format, rootfsblock.BuildOptions{DataRangeBytes: config.RootFSImportDataRangeBytes}); err != nil {
+		return nil, err
+	}
+	if err := rootfsimporter.ValidateMappingGroupPolicy(config.RootFSImportMappingGroupPolicy, format); err != nil {
+		return nil, err
 	}
 	defaultLogicalSize, err := templatepkg.ResolveRootFSLogicalSize(v1alpha1.SandboxTemplateSpec{})
 	if err != nil {
@@ -213,7 +238,10 @@ func New(config Config) (*Service, error) {
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		rootFSFormatGeneration: config.RootFSFormatGeneration,
 		rootFSProcdProtocol:    config.RootFSProcdProtocol, rootFSProcdDigest: config.RootFSProcdDigest,
-		now: config.Now, logger: config.Logger,
+		rootFSImportDataRangeBytes:     config.RootFSImportDataRangeBytes,
+		rootFSImportDataLayoutPolicy:   config.RootFSImportDataLayoutPolicy,
+		rootFSImportMappingGroupPolicy: config.RootFSImportMappingGroupPolicy,
+		now:                            config.Now, logger: config.Logger,
 	}, nil
 }
 
@@ -1005,6 +1033,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	claimLogFields := []zap.Field{
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Duration("endToEndDuration", result.Duration),
+		zap.Array("claimPhases", claimPhaseLogs(result.Phases)),
 	}
 	if timing := result.NodeClaimTiming; timing != nil {
 		claimLogFields = append(claimLogFields,
@@ -1117,10 +1146,6 @@ func (s *Service) prepareRootFS(
 	req *service.ClaimRequest,
 	platform sandboxstore.RootFSArtifactPlatform,
 ) (rootFSPlan, error) {
-	requirements, err := s.rootFSArtifactRequirements(tpl.Spec)
-	if err != nil {
-		return rootFSPlan{}, fmt.Errorf("%w: template RootFS requirements: %v", service.ErrInvalidClaimRequest, err)
-	}
 	if req.SnapshotID != "" {
 		snapshotID := strings.TrimSpace(req.SnapshotID)
 		if snapshotID != req.SnapshotID || templatepkg.IsBuildSnapshotID(snapshotID) {
@@ -1133,7 +1158,12 @@ func (s *Service) prepareRootFS(
 		if snapshot == nil {
 			return rootFSPlan{}, sandboxstore.ErrRootFSSnapshotNotFound
 		}
-		if _, err := s.validateSnapshotGeneration(ctx, snapshot); err != nil {
+		generation, err := s.validateSnapshotGeneration(ctx, snapshot)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
+		requirements, err := s.rootFSArtifactRequirements(tpl.Spec, generation.FormatGeneration)
+		if err != nil {
 			return rootFSPlan{}, err
 		}
 		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
@@ -1142,7 +1172,7 @@ func (s *Service) prepareRootFS(
 		if err != nil {
 			return rootFSPlan{}, err
 		}
-		if artifact.SourceOCIDigest != snapshot.SourceOCIDigest || artifact.FormatGeneration != snapshot.FormatGeneration {
+		if artifact == nil || artifact.SourceOCIDigest != snapshot.SourceOCIDigest || artifact.FormatGeneration != snapshot.FormatGeneration {
 			return rootFSPlan{}, fmt.Errorf("%w: snapshot Base artifact attestation changed", sandboxstore.ErrRootFSBaseArtifactConflict)
 		}
 		return rootFSPlan{snapshotID: snapshotID}, nil
@@ -1184,24 +1214,38 @@ func (s *Service) prepareRootFS(
 			return rootFSPlan{}, fmt.Errorf("%w: template RootFS generation attestation changed",
 				sandboxstore.ErrRootFSGenerationConflict)
 		}
+		requirements, err := s.rootFSArtifactRequirements(tpl.Spec, generation.FormatGeneration)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
 		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
 			ctx, source.BaseArtifactDigest, platform, requirements,
 		)
 		if err != nil {
 			return rootFSPlan{}, err
 		}
-		if artifact.SourceOCIDigest != source.SourceOCIDigest ||
+		if artifact == nil || artifact.SourceOCIDigest != source.SourceOCIDigest ||
 			artifact.FormatGeneration != source.FormatGeneration {
 			return rootFSPlan{}, fmt.Errorf("%w: template RootFS base artifact attestation changed",
 				sandboxstore.ErrRootFSBaseArtifactConflict)
 		}
 		return rootFSPlan{snapshotID: source.SnapshotID}, nil
 	}
+	requirements, err := s.rootFSArtifactRequirements(tpl.Spec, s.rootFSFormatGeneration)
+	if err != nil {
+		return rootFSPlan{}, err
+	}
 	sourceRef := strings.TrimSpace(tpl.Spec.MainContainer.Image)
 	sourceDigest, err := digestPinnedImage(sourceRef)
 	if err != nil {
 		return rootFSPlan{}, fmt.Errorf("%w: template image: %v", service.ErrInvalidClaimRequest, err)
 	}
+	// These are image-import selection filters only. Snapshot and captured
+	// template branches above deliberately retain their digest-bound policy.
+	requirements.ImportDataRangeBytes = s.rootFSImportDataRangeBytes
+	requirements.ImportDataLayoutPolicy = s.rootFSImportDataLayoutPolicy
+	requirements.ImportMappingGroupPolicy = s.rootFSImportMappingGroupPolicy
+	requirements.SourceOCIRef = sourceRef
 	artifact, err := s.store.GetReadyRootFSBaseArtifact(
 		ctx,
 		sourceDigest,
@@ -1220,15 +1264,18 @@ func (s *Service) prepareRootFS(
 	}, nil
 }
 
+// Existing sources supply their committed format; only an image claim supplies
+// the mutable import policy. Geometry and source-reference filters stay image-only.
 func (s *Service) rootFSArtifactRequirements(
 	spec v1alpha1.SandboxTemplateSpec,
+	formatGeneration int,
 ) (sandboxstore.ReadyRootFSArtifactRequirements, error) {
 	logicalSize, err := templatepkg.ResolveRootFSLogicalSize(spec)
 	if err != nil {
-		return sandboxstore.ReadyRootFSArtifactRequirements{}, err
+		return sandboxstore.ReadyRootFSArtifactRequirements{}, fmt.Errorf("%w: template RootFS requirements: %v", service.ErrInvalidClaimRequest, err)
 	}
 	requirements := sandboxstore.ReadyRootFSArtifactRequirements{
-		FormatGeneration: s.rootFSFormatGeneration,
+		FormatGeneration: formatGeneration,
 		LogicalSizeBytes: logicalSize,
 		ProcdProtocol:    s.rootFSProcdProtocol,
 		ProcdDigest:      s.rootFSProcdDigest,

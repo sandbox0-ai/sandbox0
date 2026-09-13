@@ -22,12 +22,15 @@ import (
 	"strings"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
 const (
-	ReadyArtifactAttestationVersion  = 1
-	ReadyArtifactStorageFormat       = "block-cow-v1"
-	MaxReadyArtifactAttestationBytes = 64 << 10
+	ReadyArtifactAttestationVersion        = 1
+	ReadyArtifactLayoutAttestationVersion  = 2
+	ReadyArtifactMappingAttestationVersion = 3
+	ReadyArtifactStorageFormat             = "block-cow-v1"
+	MaxReadyArtifactAttestationBytes       = 64 << 10
 )
 
 // ReadyArtifactPlatform is the exact OCI platform selected during import.
@@ -43,19 +46,23 @@ type ReadyArtifactPlatform struct {
 // ManifestDigest and ConfigDigest transitively bind ordered layer digests and
 // DiffIDs, so the attestation does not maintain a duplicate layer list.
 type ReadyArtifactAttestation struct {
-	Version          int                   `json:"version"`
-	StorageFormat    string                `json:"storage_format"`
-	FormatGeneration int                   `json:"format_generation"`
-	SourceOCIRef     string                `json:"source_oci_ref"`
-	SourceOCIDigest  string                `json:"source_oci_digest"`
-	ManifestDigest   string                `json:"manifest_digest"`
-	ConfigDigest     string                `json:"config_digest"`
-	Platform         ReadyArtifactPlatform `json:"platform"`
-	ProcdProtocol    string                `json:"procd_protocol"`
-	ProcdDigest      string                `json:"procd_digest"`
-	LogicalSizeBytes int64                 `json:"logical_size_bytes"`
-	DescriptorDigest string                `json:"descriptor_digest"`
-	BaseBlockRoot    string                `json:"base_block_root"`
+	Version              int                   `json:"version"`
+	StorageFormat        string                `json:"storage_format"`
+	FormatGeneration     int                   `json:"format_generation"`
+	SourceOCIRef         string                `json:"source_oci_ref"`
+	SourceOCIDigest      string                `json:"source_oci_digest"`
+	ManifestDigest       string                `json:"manifest_digest"`
+	ConfigDigest         string                `json:"config_digest"`
+	Platform             ReadyArtifactPlatform `json:"platform"`
+	ProcdProtocol        string                `json:"procd_protocol"`
+	ProcdDigest          string                `json:"procd_digest"`
+	LogicalSizeBytes     int64                 `json:"logical_size_bytes"`
+	DescriptorDigest     string                `json:"descriptor_digest"`
+	BaseBlockRoot        string                `json:"base_block_root"`
+	DataLayoutPolicy     string                `json:"data_layout_policy,omitempty"`
+	DataLayoutRangeBytes int                   `json:"data_layout_range_bytes,omitempty"`
+	DataLayoutFallback   string                `json:"data_layout_fallback,omitempty"`
+	MappingGroupPolicy   string                `json:"mapping_group_policy,omitempty"`
 }
 
 // Attest constructs canonical ready-artifact bytes and their SHA-256 identity.
@@ -69,6 +76,9 @@ func (result BuildResult) Attest(
 	}
 	if formatGeneration <= 0 {
 		return ReadyArtifactAttestation{}, nil, "", fmt.Errorf("RootFS format generation must be positive")
+	}
+	if err := rootfsblock.ValidateFormatBinding(formatGeneration, result.Descriptor.Version); err != nil {
+		return ReadyArtifactAttestation{}, nil, "", err
 	}
 	if err := validateProcdProtocol(procdProtocol); err != nil {
 		return ReadyArtifactAttestation{}, nil, "", err
@@ -85,6 +95,16 @@ func (result BuildResult) Attest(
 		LogicalSizeBytes: result.LogicalSizeBytes,
 		DescriptorDigest: result.DescriptorDigest.String(), BaseBlockRoot: result.BaseBlockRoot.String(),
 	}
+	if result.DataLayoutPolicy != "" {
+		attestation.Version = ReadyArtifactLayoutAttestationVersion
+		attestation.DataLayoutPolicy = result.DataLayoutPolicy
+		attestation.DataLayoutRangeBytes = result.DataLayoutRangeBytes
+		attestation.DataLayoutFallback = result.DataLayoutFallback
+	}
+	if result.MappingGroupPolicy != "" {
+		attestation.Version = ReadyArtifactMappingAttestationVersion
+		attestation.MappingGroupPolicy = result.MappingGroupPolicy
+	}
 	payload, err := json.Marshal(attestation)
 	if err != nil {
 		return ReadyArtifactAttestation{}, nil, "", fmt.Errorf("encode ready RootFS artifact attestation: %w", err)
@@ -100,9 +120,25 @@ func (result BuildResult) Attest(
 
 // Validate rejects non-canonical or incomplete ready-artifact identities.
 func (a ReadyArtifactAttestation) Validate() error {
-	if a.Version != ReadyArtifactAttestationVersion || a.StorageFormat != ReadyArtifactStorageFormat ||
+	if a.StorageFormat != ReadyArtifactStorageFormat ||
 		a.FormatGeneration <= 0 || a.LogicalSizeBytes <= 0 {
 		return fmt.Errorf("ready RootFS artifact version, format, generation, or size is invalid")
+	}
+	expectedVersion := ReadyArtifactAttestationVersion
+	if a.DataLayoutPolicy != "" {
+		expectedVersion = ReadyArtifactLayoutAttestationVersion
+	}
+	if a.MappingGroupPolicy != "" {
+		expectedVersion = ReadyArtifactMappingAttestationVersion
+	}
+	if a.Version != expectedVersion {
+		return fmt.Errorf("ready RootFS attestation version does not bind its import policies")
+	}
+	if err := ValidateMappingGroupPolicy(a.MappingGroupPolicy, a.FormatGeneration); err != nil {
+		return err
+	}
+	if err := validateDataLayoutEvidence(a.DataLayoutPolicy, a.DataLayoutFallback, a.FormatGeneration, a.DataLayoutRangeBytes); err != nil {
+		return err
 	}
 	if err := validateProcdProtocol(a.ProcdProtocol); err != nil {
 		return err

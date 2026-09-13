@@ -1,13 +1,32 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
 )
+
+func TestSandboxRuntimeClaimConfigPreservesImportGeometryPolicy(t *testing.T) {
+	for _, configured := range []int{0, 1 << 20, 8 << 20} {
+		t.Run(fmt.Sprint(configured), func(t *testing.T) {
+			catalog := &nomadclaim.RuntimeClassCatalog{}
+			cfg := &config.ManagerConfig{RootFSImporter: config.RootFSImporterConfig{
+				DataRangeBytes: configured, ProcdProtocol: "sandbox0.procd.v3",
+				ProcdDigest: "sha256:" + strings.Repeat("f", 64),
+			}}
+			got := sandboxRuntimeClaimConfig(cfg, sandboxRuntimeBackendDependencies{runtimeClasses: catalog}, nil)
+			if got.RootFSImportDataRangeBytes != configured || got.RuntimeClasses != catalog ||
+				got.RootFSProcdProtocol != cfg.RootFSImporter.ProcdProtocol || got.RootFSProcdDigest != cfg.RootFSImporter.ProcdDigest {
+				t.Fatalf("claim policy=%+v, want raw import geometry %d and unchanged runtime catalog", got, configured)
+			}
+		})
+	}
+}
 
 func TestBuildSandboxRuntimeFailsClosedBeforeLoadingAssets(t *testing.T) {
 	cfg := &config.ManagerConfig{}

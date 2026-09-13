@@ -74,14 +74,17 @@ type claimMetadata struct {
 
 // PersistedState carries enough identity to recover a runsc task without reusing its claim token.
 type PersistedState struct {
-	TaskConfig  *drivers.TaskConfig `json:"task_config"`
-	ContainerID string              `json:"container_id"`
-	BundleDir   string              `json:"bundle_dir"`
-	RootMount   string              `json:"root_mount"`
-	StartedAt   time.Time           `json:"started_at"`
-	Phase       slotPhase           `json:"phase"`
-	RootMounted bool                `json:"root_mounted"`
-	Claim       *claimMetadata      `json:"claim,omitempty"`
+	TaskConfig *drivers.TaskConfig `json:"task_config"`
+	// Nomad's TaskConfig omits its private raw driver config during persistence.
+	// Save the normalized immutable inputs explicitly, never reconstruct defaults.
+	DriverConfig *TaskConfig    `json:"driver_config"`
+	ContainerID  string         `json:"container_id"`
+	BundleDir    string         `json:"bundle_dir"`
+	RootMount    string         `json:"root_mount"`
+	StartedAt    time.Time      `json:"started_at"`
+	Phase        slotPhase      `json:"phase"`
+	RootMounted  bool           `json:"root_mounted"`
+	Claim        *claimMetadata `json:"claim,omitempty"`
 }
 
 type taskHandleOptions struct {
@@ -209,15 +212,18 @@ func (h *taskHandle) statePath() string {
 }
 
 func (h *taskHandle) persistedLocked() PersistedState {
+	driverConfig := h.driverConfig
+	driverConfig.Args = append([]string(nil), driverConfig.Args...)
 	return PersistedState{
-		TaskConfig:  h.taskConfig,
-		ContainerID: h.containerID,
-		BundleDir:   h.bundleDir,
-		RootMount:   h.rootMount,
-		StartedAt:   h.startedAt,
-		Phase:       h.phase,
-		RootMounted: h.rootMounted,
-		Claim:       h.claim,
+		TaskConfig:   h.taskConfig,
+		DriverConfig: &driverConfig,
+		ContainerID:  h.containerID,
+		BundleDir:    h.bundleDir,
+		RootMount:    h.rootMount,
+		StartedAt:    h.startedAt,
+		Phase:        h.phase,
+		RootMounted:  h.rootMounted,
+		Claim:        h.claim,
 	}
 }
 
@@ -1173,13 +1179,19 @@ func (h *taskHandle) Recover(state PersistedState) error {
 	if !filepath.IsAbs(state.BundleDir) || !filepath.IsAbs(state.RootMount) {
 		return errors.New("persisted bundle and root mount paths must be absolute")
 	}
-	if localState, err := readPersistedState(filepath.Join(state.BundleDir, ".sandbox0-driver-state.json")); err == nil &&
-		localState.ContainerID == state.ContainerID && localState.BundleDir == state.BundleDir &&
-		localState.RootMount == state.RootMount && localState.TaskConfig != nil {
+	if localState, err := readPersistedState(filepath.Join(state.BundleDir, ".sandbox0-driver-state.json")); err == nil {
+		if !sameRecoveryIdentity(localState, state) {
+			return errors.New("local driver state does not match the persisted recovery identity")
+		}
 		state = localState
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	h.mu.Lock()
 	h.taskConfig = state.TaskConfig
+	if state.DriverConfig != nil {
+		h.driverConfig = *state.DriverConfig
+	}
 	h.startedAt = state.StartedAt
 	h.rootMounted = state.RootMounted
 	h.claim = state.Claim

@@ -27,3 +27,15 @@ type XFSBuilder struct{}
 func (XFSBuilder) Build(context.Context, string, string, int64) error {
 	return fmt.Errorf("XFS RootFS artifact construction requires Linux")
 }
+
+func (XFSBuilder) BuildWithDataRanges(context.Context, string, string, int64, int) (XFSDataRangePlan, error) {
+	return XFSDataRangePlan{}, fmt.Errorf("XFS RootFS artifact construction requires Linux")
+}
+
+func (XFSBuilder) BuildWithBoundedDataRanges(context.Context, string, string, int64, int) (XFSDataRangePlan, error) {
+	return XFSDataRangePlan{}, fmt.Errorf("XFS RootFS artifact construction requires Linux")
+}
+
+func CollectReadOnlyXFSDataRanges(context.Context, string, int64, int) (XFSDataRangePlan, error) {
+	return XFSDataRangePlan{}, fmt.Errorf("XFS data range discovery requires Linux")
+}

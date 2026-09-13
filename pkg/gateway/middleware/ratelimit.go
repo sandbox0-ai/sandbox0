@@ -2,10 +2,12 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,6 +29,9 @@ type RateLimiter struct {
 	bucket      tokenbucket.Bucket
 	keyPrefix   string
 	failOpen    bool
+	closeOnce   sync.Once
+	closeOwned  func() error
+	closeErr    error
 }
 
 func NewRateLimiterWithConfig(ctx context.Context, rps, burst int, cfg ratelimit.Config, logger *zap.Logger) (*RateLimiter, error) {
@@ -35,10 +40,11 @@ func NewRateLimiterWithConfig(ctx context.Context, rps, burst int, cfg ratelimit
 		return nil, err
 	}
 	return &RateLimiter{
-		logger:   logger,
-		limit:    ratelimit.Limit{RPS: rps, Burst: burst},
-		limiter:  limiter,
-		failOpen: cfg.FailOpen,
+		logger:     logger,
+		limit:      ratelimit.Limit{RPS: rps, Burst: burst},
+		limiter:    limiter,
+		failOpen:   cfg.FailOpen,
+		closeOwned: limiter.Close,
 	}, nil
 }
 
@@ -102,7 +108,25 @@ func NewTeamQuotaRateLimiterWithConfig(ctx context.Context, pool *pgxpool.Pool, 
 		_ = policies.Close()
 		return nil, err
 	}
+	limiter.closeOwned = func() error {
+		return errors.Join(policies.Close(), bucket.Close())
+	}
 	return limiter, nil
+}
+
+// Close releases resources created by the WithConfig constructors, including
+// the policy listener's database connection. Injected stores and buckets remain
+// owned by their caller. Repeated or concurrent calls are safe.
+func (rl *RateLimiter) Close() error {
+	if rl == nil {
+		return nil
+	}
+	rl.closeOnce.Do(func() {
+		if rl.closeOwned != nil {
+			rl.closeErr = rl.closeOwned()
+		}
+	})
+	return rl.closeErr
 }
 
 func RateLimitConfigFromGatewayConfig(cfg apiconfig.GatewayConfig) ratelimit.Config {

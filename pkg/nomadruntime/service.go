@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,12 @@ const (
 	rootFSSessionReconcileInterval = time.Second
 	rootFSSessionAttachGrace       = 2 * time.Minute
 	rootFSSessionReconcileTimeout  = 3 * time.Minute
+	// Periodic terminal-proof housekeeping must leave capacity for recovery of
+	// physical writers. Explicit fencing/cleanup and pressure planning do not
+	// enter this speculative-work budget.
+	rootFSRecoveryConcurrency      = 4
+	rootFSProofRecoveryConcurrency = 2
+	rootFSRecoveryBackoffMax       = time.Minute
 	// Startup recovery may have to rebuild and idempotently verify the full
 	// configured 10 GiB dirty-tail bound. Keep this separate from the shorter
 	// steady-state reconciliation budget so a normal node does not retain
@@ -163,7 +170,12 @@ type nodeRuntime struct {
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
 	inflight           map[string]*reconciliationState
-	preempting         map[string]bool
+	preempting         map[string]int
+	scanMu             sync.Mutex
+	recoveryRetries    map[string]*recoveryRetry
+	recoverySequence   uint64
+	periodicRecovery   int
+	periodicProofs     int
 	trigger            chan string
 	allocations        nomadAllocationSource
 	runtimeSlotNetwork runtimeSlotNetworkControl
@@ -176,8 +188,20 @@ type nodeRuntime struct {
 }
 
 type reconciliationState struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel   context.CancelFunc
+	done     chan struct{}
+	periodic bool
+	proof    bool
+}
+
+// recoveryRetry is disposable scheduling state, never evidence of writer
+// ownership or terminal absence. A new immutable binding or observed recovery
+// transition replaces it; a session absent from the next snapshot removes it.
+type recoveryRetry struct {
+	version     [sha256.Size]byte
+	lastAttempt uint64
+	delay       time.Duration
+	next        time.Time
 }
 
 type nodeRuntimeBackend interface {
@@ -1475,7 +1499,17 @@ func (d *nodeRuntime) scanDirtyTailPressures(ctx context.Context) {
 }
 
 func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
-	now := time.Now()
+	d.scanAt(ctx, onlyParent, time.Now())
+}
+
+func (d *nodeRuntime) scanAt(ctx context.Context, onlyParent string, now time.Time) {
+	// Snapshot replacement and admission must be ordered even when an explicit
+	// trigger races a periodic scan. Backend work never holds this mutex.
+	d.scanMu.Lock()
+	defer d.scanMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 	if d.journal != nil && (d.lastJournalPrune.IsZero() || now.Sub(d.lastJournalPrune) >= runtimeSlotJournalPruneInterval) {
 		if _, err := d.journal.Prune(now); err != nil {
 			d.logger.Error("prune runtime slot cleanup proofs", "error", err)
@@ -1488,19 +1522,28 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		d.logger.Error("list durable RootFS recovery sessions", "error", err)
 		return
 	}
+	retries := d.observeRecoverySessions(sessions)
 	if len(sessions) == 0 {
 		return
 	}
-	now = time.Now()
 	var activeAllocations map[string]bool
-	if d.allocations != nil {
+	// An exact writer-loss trigger already supplies the reason to fence; do
+	// not delay it on the optional Nomad catalog.
+	if onlyParent == "" && d.allocations != nil {
 		activeAllocations, err = d.allocations.ActiveAllocations(ctx)
 		if err != nil {
 			d.logger.Error("list active Nomad allocations for RootFS reconciliation", "error", err)
 			activeAllocations = nil
 		}
 	}
-	for _, session := range sessions {
+	type candidate struct {
+		session rootfssession.RecoverySession
+		retry   *recoveryRetry
+		last    uint64
+		proof   bool
+	}
+	var candidates []candidate
+	for index, session := range sessions {
 		if onlyParent != "" && session.Stage.Parent != onlyParent {
 			continue
 		}
@@ -1522,32 +1565,162 @@ func (d *nodeRuntime) scan(ctx context.Context, onlyParent string) {
 		if !rootFSSessionNeedsReconciliation(session, now, onlyParent != "" || allocationPurged) {
 			continue
 		}
-		inflightKey := session.Stage.Identity.SlotNonce
-		if inflightKey == "" {
-			inflightKey = session.Stage.Parent
-		}
+		inflightKey := recoveryInflightKey(session)
 		if d.runtimeSlotCleanupPending(inflightKey) {
 			continue
 		}
-		reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
-		if !d.beginReconciliation(inflightKey, cancel) {
-			cancel()
+		if retries[index] == nil {
 			continue
 		}
 		d.mu.Lock()
-		d.wg.Add(1)
+		lastAttempt := retries[index].lastAttempt
 		d.mu.Unlock()
+		candidates = append(candidates, candidate{
+			session: session, retry: retries[index], last: lastAttempt,
+			proof: session.ExternalCrash && session.BranchRemoved,
+		})
+	}
+	// Prefer physical writers, then the least recently attempted eligible
+	// identity. Fast failures at the front of a sorted journal cannot repeatedly
+	// consume admission ahead of sessions that have never had a turn.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.proof != b.proof {
+			return !a.proof
+		}
+		if a.session.Live != b.session.Live {
+			return a.session.Live
+		}
+		if a.last != b.last {
+			return a.last < b.last
+		}
+		return a.session.Stage.Parent < b.session.Stage.Parent
+	})
+	for _, candidate := range candidates {
+		session := candidate.session
+		inflightKey := recoveryInflightKey(session)
+		reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
+		state := d.beginRecoveryReconciliation(reconcileCtx, cancel, session.Stage.Parent,
+			inflightKey, candidate.retry, onlyParent == "", candidate.proof, now)
+		if state == nil {
+			cancel()
+			continue
+		}
 		go func(session rootfssession.RecoverySession, inflightKey string) {
+			defer d.wg.Done()
 			defer cancel()
 			defer func() {
-				d.endReconciliation(inflightKey)
-				d.wg.Done()
+				d.finishRecoveryReconciliation(reconcileCtx, session.Stage.Parent, inflightKey, state, candidate.retry)
 			}()
+			if reconcileCtx.Err() != nil {
+				return
+			}
 			if err := d.reconcile(reconcileCtx, session); err != nil && !errors.Is(err, context.Canceled) {
 				d.logger.Error("reconcile orphan RootFS writer", "parent", session.Stage.Parent, "error", err)
 			}
 		}(session, inflightKey)
 	}
+}
+
+func recoveryInflightKey(session rootfssession.RecoverySession) string {
+	if key := session.Stage.Identity.SlotNonce; key != "" {
+		return key
+	}
+	return session.Stage.Parent
+}
+
+func recoveryVersion(session rootfssession.RecoverySession) ([sha256.Size]byte, error) {
+	session.Stage = session.Stage.WithoutWriterGrantToken()
+	if session.Consumer != nil {
+		consumer := *session.Consumer
+		// A heartbeat is not recovery progress. A new consumer lease or changed
+		// physical binding is, and remains part of the scheduling fingerprint.
+		consumer.LeaseExpiresAt = ""
+		session.Consumer = &consumer
+	}
+	payload, err := json.Marshal(session)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(payload), nil
+}
+
+func (d *nodeRuntime) observeRecoverySessions(sessions []rootfssession.RecoverySession) []*recoveryRetry {
+	versions := make([][sha256.Size]byte, len(sessions))
+	valid := make([]bool, len(sessions))
+	for index, session := range sessions {
+		version, err := recoveryVersion(session)
+		if err != nil {
+			d.logger.Error("fingerprint RootFS recovery session", "parent", session.Stage.Parent, "error", err)
+			continue
+		}
+		versions[index], valid[index] = version, true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	current := make(map[string]*recoveryRetry, len(sessions))
+	retries := make([]*recoveryRetry, len(sessions))
+	for index, session := range sessions {
+		if !valid[index] {
+			continue
+		}
+		parent := session.Stage.Parent
+		retry := d.recoveryRetries[parent]
+		if retry == nil || retry.version != versions[index] {
+			retry = &recoveryRetry{version: versions[index]}
+		}
+		current[parent], retries[index] = retry, retry
+	}
+	d.recoveryRetries = current
+	return retries
+}
+
+func (d *nodeRuntime) beginRecoveryReconciliation(
+	ctx context.Context, cancel context.CancelFunc, parent, key string,
+	retry *recoveryRetry, periodic, proof bool, now time.Time,
+) *reconciliationState {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if ctx.Err() != nil || d.recoveryRetries[parent] != retry {
+		return nil
+	}
+	if periodic && (now.Before(retry.next) || d.periodicRecovery >= rootFSRecoveryConcurrency ||
+		proof && d.periodicProofs >= rootFSProofRecoveryConcurrency) {
+		return nil
+	}
+	if !d.beginReconciliationLocked(key, cancel) {
+		return nil
+	}
+	state := d.inflight[key]
+	state.periodic, state.proof = periodic, proof
+	if periodic {
+		d.periodicRecovery++
+		if proof {
+			d.periodicProofs++
+		}
+	}
+	d.recoverySequence++
+	retry.lastAttempt = d.recoverySequence
+	d.wg.Add(1)
+	return state
+}
+
+func (d *nodeRuntime) finishRecoveryReconciliation(
+	ctx context.Context, parent, key string, state *reconciliationState, retry *recoveryRetry,
+) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inflight[key] != state {
+		return
+	}
+	if d.recoveryRetries[parent] == retry && !errors.Is(ctx.Err(), context.Canceled) {
+		// A nil error alone is not progress (external retirement may return
+		// false, nil). The next snapshot resets this delay only for an observed
+		// transition, or removes it when the session no longer needs recovery.
+		retry.delay = min(max(rootFSSessionReconcileInterval, retry.delay*2), rootFSRecoveryBackoffMax)
+		retry.next = time.Now().Add(retry.delay)
+	}
+	d.endReconciliationLocked(key)
 }
 
 func (d *nodeRuntime) runtimeSlotCleanupPending(slotID string) bool {
@@ -1568,10 +1741,14 @@ func (d *nodeRuntime) runtimeSlotCleanupPending(slotID string) bool {
 func (d *nodeRuntime) beginReconciliation(key string, cancel context.CancelFunc) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.beginReconciliationLocked(key, cancel)
+}
+
+func (d *nodeRuntime) beginReconciliationLocked(key string, cancel context.CancelFunc) bool {
 	if d.inflight == nil {
 		d.inflight = make(map[string]*reconciliationState)
 	}
-	if d.inflight[key] != nil || d.preempting[key] {
+	if d.inflight[key] != nil || d.preempting[key] != 0 {
 		return false
 	}
 	d.inflight[key] = &reconciliationState{cancel: cancel, done: make(chan struct{})}
@@ -1583,15 +1760,29 @@ func (d *nodeRuntime) beginReconciliation(key string, cancel context.CancelFunc)
 // old planned marker from occupying the slot for the full recovery timeout
 // after the regional authority has selected crash abandonment.
 func (d *nodeRuntime) beginExternalReconciliation(ctx context.Context, key string) error {
+	waiting := false
+	defer func() {
+		if waiting {
+			d.mu.Lock()
+			d.preempting[key]--
+			if d.preempting[key] == 0 {
+				delete(d.preempting, key)
+			}
+			d.mu.Unlock()
+		}
+	}()
 	for {
 		d.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			d.mu.Unlock()
+			return errors.Join(err, errdefs.ErrUnavailable)
+		}
 		if d.inflight == nil {
 			d.inflight = make(map[string]*reconciliationState)
 		}
 		current := d.inflight[key]
 		if current == nil {
 			d.inflight[key] = &reconciliationState{done: make(chan struct{})}
-			delete(d.preempting, key)
 			d.mu.Unlock()
 			return nil
 		}
@@ -1599,10 +1790,13 @@ func (d *nodeRuntime) beginExternalReconciliation(ctx context.Context, key strin
 			d.mu.Unlock()
 			return errdefs.ErrUnavailable
 		}
-		if d.preempting == nil {
-			d.preempting = make(map[string]bool)
+		if !waiting {
+			if d.preempting == nil {
+				d.preempting = make(map[string]int)
+			}
+			d.preempting[key]++
+			waiting = true
 		}
-		d.preempting[key] = true
 		cancel := current.cancel
 		done := current.done
 		d.mu.Unlock()
@@ -1618,12 +1812,22 @@ func (d *nodeRuntime) beginExternalReconciliation(ctx context.Context, key strin
 
 func (d *nodeRuntime) endReconciliation(key string) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.endReconciliationLocked(key)
+}
+
+func (d *nodeRuntime) endReconciliationLocked(key string) {
 	current := d.inflight[key]
 	delete(d.inflight, key)
 	if current != nil {
+		if current.periodic {
+			d.periodicRecovery--
+			if current.proof {
+				d.periodicProofs--
+			}
+		}
 		close(current.done)
 	}
-	d.mu.Unlock()
 }
 
 func (d *nodeRuntime) reconciliationInFlight(key string) bool {
@@ -1780,9 +1984,19 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 		// The regional authority and physical cleanup were already verified.
 		// Keep the compact local proof for the bounded response-replay window,
 		// but do not poll the authority once per second for every retained
-		// terminal session. Reconcile once more at expiry to verify and forget
-		// the proof.
-		return !now.Before(session.CrashRequestedAt.Add(rootfssession.ExternalTerminalProofRetention))
+		// terminal session. Expiry includes the final physical cleanup time,
+		// not just the earlier crash request. Missing expiry fails closed, even
+		// on a forced scan; only the session manager can establish this bound.
+		return !session.ExternalProofExpiresAt.IsZero() && !now.Before(session.ExternalProofExpiresAt)
+	}
+	if session.ExternalCrash {
+		// External retirement owns this tombstoned session; checking its
+		// terminal authority does not fence a live consumer. The retained branch
+		// may still own the node-wide retirement reserve, so do not postpone that
+		// check until its old consumer lease expires. ReclaimExternallyRetired
+		// still requires the exact regional terminal grant and local physical
+		// proof before deleting artifacts or releasing space.
+		return true
 	}
 	if forced || session.Kind == rootfssession.RecoveryPlannedRetire {
 		return true

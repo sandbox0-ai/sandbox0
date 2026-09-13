@@ -36,6 +36,7 @@ type OperationSpec struct {
 	ProcdDigest      string
 	LogicalSizeBytes int64
 	BlockOptions     rootfsblock.BuildOptions
+	DataLayoutPolicy string
 }
 
 type operationIdentity struct {
@@ -46,6 +47,7 @@ type operationIdentity struct {
 	ProcdDigest      string                   `json:"procd_digest"`
 	LogicalSizeBytes int64                    `json:"logical_size_bytes"`
 	BlockOptions     rootfsblock.BuildOptions `json:"block_options"`
+	DataLayoutPolicy string                   `json:"data_layout_policy,omitempty"`
 }
 
 // DeterministicOperation returns the canonical durable identity shared by all
@@ -96,9 +98,12 @@ func NormalizeOperationSpec(input OperationSpec) (OperationSpec, error) {
 			rootfsblock.LogicalBlockSize,
 		)
 	}
-	normalized.BlockOptions, err = rootfsblock.NormalizeBuildOptions(input.BlockOptions)
+	normalized.BlockOptions, err = NormalizeBlockOptions(input.FormatGeneration, normalized.BlockOptions)
 	if err != nil {
-		return OperationSpec{}, fmt.Errorf("RootFS block build options: %w", err)
+		return OperationSpec{}, err
+	}
+	if err := ValidateDataLayoutPolicy(normalized.DataLayoutPolicy, normalized.FormatGeneration, normalized.BlockOptions); err != nil {
+		return OperationSpec{}, err
 	}
 	return normalized, nil
 }

@@ -907,7 +907,7 @@ func normalizeRootFSMaterializationBatchPublication(
 func normalizeRootFSMaterializationObjectReferences(
 	references []rootfsblock.ObjectReference,
 ) ([]rootfsblock.ObjectReference, error) {
-	if len(references) == 0 || len(references) > rootfsblock.MaxMappingEntriesPerGeneration+1 {
+	if len(references) == 0 || len(references) > rootfsblock.MaxEditedMappingEntries+1 {
 		return nil, fmt.Errorf("materialization object references are required and bounded")
 	}
 	normalized := append([]rootfsblock.ObjectReference(nil), references...)

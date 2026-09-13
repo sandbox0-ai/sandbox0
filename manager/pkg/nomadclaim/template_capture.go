@@ -252,7 +252,7 @@ func (s *Service) nomadTemplateCaptureMetadata(
 		return nil, fmt.Errorf("%w: no unambiguous Nomad runtime class for captured template",
 			templatepkg.ErrTemplateSourceUnavailable)
 	}
-	requirements, err := s.rootFSArtifactRequirements(desiredSpec)
+	requirements, err := s.rootFSArtifactRequirements(desiredSpec, generation.FormatGeneration)
 	if err != nil {
 		return nil, err
 	}

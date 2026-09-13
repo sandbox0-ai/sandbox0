@@ -131,6 +131,7 @@ func ChangedBlocks(
 }
 
 type mappingExtentIterator struct {
+	version   int
 	ctx       context.Context
 	source    RangeSource
 	stack     []mappingPageFrame
@@ -148,7 +149,7 @@ func newMappingExtentIterator(
 	source RangeSource,
 	descriptor Descriptor,
 ) (*mappingExtentIterator, error) {
-	iterator := &mappingExtentIterator{ctx: ctx, source: source}
+	iterator := &mappingExtentIterator{ctx: ctx, source: source, version: descriptor.Version}
 	root, err := iterator.readPage(descriptor.MappingRoot.Object, descriptor.MappingRoot.RootDigest)
 	if err != nil {
 		return nil, err
@@ -200,17 +201,21 @@ func (i *mappingExtentIterator) readPage(object ObjectRange, expectedDigest stri
 	if err := i.ctx.Err(); err != nil {
 		return MappingPage{}, err
 	}
-	body, err := i.source.Get(object.Key, object.Offset, object.Length)
+	body, err := i.source.Get(object.Key, object.Offset, object.StoredLength())
 	if err != nil {
 		return MappingPage{}, err
 	}
 	defer body.Close()
-	payload, err := io.ReadAll(io.LimitReader(body, object.Length+1))
+	payload, err := io.ReadAll(io.LimitReader(body, object.StoredLength()+1))
 	if err != nil {
 		return MappingPage{}, err
 	}
-	if int64(len(payload)) != object.Length {
-		return MappingPage{}, fmt.Errorf("mapping range returned %d bytes, expected %d", len(payload), object.Length)
+	if int64(len(payload)) != object.StoredLength() {
+		return MappingPage{}, fmt.Errorf("mapping range returned %d bytes, expected %d", len(payload), object.StoredLength())
+	}
+	payload, err = decodeRangePayload(i.ctx, object, payload)
+	if err != nil {
+		return MappingPage{}, err
 	}
 	actualDigest := digest.FromBytes(payload).String()
 	if actualDigest != object.Checksum || actualDigest != expectedDigest {
@@ -219,6 +224,9 @@ func (i *mappingExtentIterator) readPage(object ObjectRange, expectedDigest stri
 	page, err := DecodeMappingPage(payload)
 	if err != nil {
 		return MappingPage{}, err
+	}
+	if page.formatVersion() != i.version {
+		return MappingPage{}, fmt.Errorf("mapping page format differs from descriptor")
 	}
 	i.pageCount++
 	i.pageBytes += object.Length
@@ -301,6 +309,9 @@ func mappingEntryEnd(entry MappingEntry) uint64 {
 func sameMappedRangeAt(oldEntry, currentEntry MappingEntry, block uint64) bool {
 	oldDelta := int64(block-oldEntry.LogicalStart) * LogicalBlockSize
 	currentDelta := int64(block-currentEntry.LogicalStart) * LogicalBlockSize
+	if oldEntry.Object.Encoding != "" || currentEntry.Object.Encoding != "" {
+		return oldEntry.Object == currentEntry.Object && int64(oldEntry.DataOffset)+oldDelta == int64(currentEntry.DataOffset)+currentDelta
+	}
 	if oldEntry.Object.Offset > math.MaxInt64-oldDelta || currentEntry.Object.Offset > math.MaxInt64-currentDelta {
 		return false
 	}

@@ -77,6 +77,62 @@ The object-encryption key is installation state. Losing it loses access to
 encrypted RootFS objects; changing it without a migration makes existing
 objects unreadable.
 
+RootFS caches are demand-filled after the artifact is selected; warm carriers
+do not preload tenant RootFS data. Before exposing its runtime, a ctld primary
+resolves initial S3-compatible provider credentials into the SDK's existing
+credential cache. This does not read tenant objects or require OSS bucket
+lifecycle permissions. Initial credential failures prevent runtime readiness;
+later expiry/refresh still follows the provider and can affect subsequent reads.
+This initialization is not proof of object permissions or a latency guarantee.
+The session manager shares a 128 MiB verified
+range LRU, including decoded mapping pages and their accounted memory. Parent
+bindings are still checked on mapping-cache hits. A cold encrypted-object header
+load normally combines its fixed prefix and JSON header in one bounded 1 KiB
+range GET. For bounded offset-zero demands, including mapping pages, the first
+GET can also include demanded ciphertext, up to 256 KiB total. That ciphertext
+belongs only to the initiating read, not the shared header cache; other waiters
+share only parsed crypto state. For cold nonzero offsets, the store may overlap
+the header load with a bounded ciphertext probe using current writer geometry.
+There are at most eight private probes of up to 256 KiB per store, including
+completed probes waiting for a header. At most 1 KiB of incidental bytes can
+precede the demanded frame; the intervening pack prefix is never downloaded.
+The stored header must validate the hinted layout before use. Old frame sizes,
+large headers or failed probes fall back to the ordinary exact demanded range;
+probe saturation never queues extra speculative work. Cancellation is per
+caller, and slow private probes do not delay shared-header publication.
+Larger valid headers require one exact remainder GET, up to the existing 1 MiB
+header limit. Stored frame geometry determines any continuation range, including
+old objects whose frames differ from current writer defaults. Demanded frames
+still authenticate separately, and plaintext ranges still require checksum validation.
+This reduces request round trips without changing persisted objects or requiring
+tenant RootFS prewarming. Each encrypted RootFS store also bounds cached envelope
+headers and crypto state to 1,024 entries / 8 MiB.
+If GC recreates an immutable plaintext key with a new encryption envelope, a
+reader can refresh the header once before any frame authenticates; following an
+authentication failure it retries data only when the header changed. These caches do not change persisted formats
+or replace PostgreSQL/S3 authority. Cache budgets do not include active read
+buffers, live reader state, kernel caches, or total process RSS.
+
+New encrypted RootFS objects use independently authenticated 16 KiB frames.
+Existing objects keep the frame size recorded in their header, including older
+1 MiB and 64 KiB frames; changing the writer does not rewrite existing immutable keys.
+Block-map checksums and encryption frames are separate boundaries: reducing only
+one does not remove overfetch imposed by the other. Keys, algorithms and stored
+format versions are unchanged.
+
+For mapping entries smaller than 128 KiB, a bulk read of at least 128 KiB can
+combine logically and physically adjacent entries from the same verified leaf
+and object into a bounded 1 MiB window. Every entry is checksum-verified before
+use or cache admission. Small reads retain the selected entry's granularity.
+With less than 2 MiB of read cache, coalescing stays within the actual demand;
+otherwise a bulk demand can fill the remainder of its 1 MiB window. It does not
+fetch extra mapping pages or cross holes, object boundaries, or coarse entries.
+Verified cache hits at a window's edges are excluded from its transport range.
+Interior hits stay inside the single contiguous request, avoiding extra serial
+GETs; their verified cached bytes are reused when assembling the result. The
+whole-window flight identity and source-buffer/concurrency limits are unchanged.
+This is claim-time demand-driven reading, not tenant RootFS prewarming.
+
 Set dirty-tail and materializer limits from measured storage latency and node
 disk headroom. The regional composite-tail backlog is bounded: an S3 outage
 must apply backpressure instead of growing unbounded local or PostgreSQL data.
@@ -95,6 +151,11 @@ rootfs_importer:
     procd_digest: sha256:<pinned-digest>
     discovery_interval: 5s
     discovery_page_size: 100
+    format_generation: 1
+    # Optional for format 1: require 1 MiB ranges for new image-based claims.
+    # data_range_bytes: 1048576
+    data_layout_policy: ""
+    mapping_group_policy: ""
 ```
 
 The work root must have enough space for bounded OCI extraction and block-image
@@ -105,6 +166,127 @@ are the durable authority. PostgreSQL leases and conditional object publication
 provide active-active ownership and retry safety. The importer identity includes
 the image digest, OCI platform, block format, exact RootFS size, and pinned
 `procd` protocol and digest.
+
+`rootfs_importer.format_generation` selects the durable format for new image
+imports and image-based claims. Omitted or `0` selects format `1`; `2` opts into
+independently compressed, directly addressed data and mapping ranges. Other
+values are rejected. Discovery, durable operation reconstruction, and claim
+selection use the same format binding; there is no fallback to a different
+format when the requested artifact is not yet ready.
+
+`rootfs_importer.data_range_bytes` controls the checksummed data ranges of new
+imported base artifacts. An omitted value or `0` uses the selected format's
+build default and does not filter compatible artifacts by their import geometry.
+
+| Import format | Default data range | Maximum data range |
+| --- | --- | --- |
+| `1` | 8 MiB | 8 MiB |
+| `2` | 64 KiB decoded | 64 KiB decoded |
+
+An explicit value must be a positive multiple of 4 KiB that evenly divides the
+default 64 MiB pack size. `1048576` selects 1 MiB ranges for format `1`, but is
+rejected for format `2`. These decoded/checksummed ranges are distinct from the
+16 KiB encryption frames of newly written objects.
+Smaller ranges reduce overfetch for sparse demand, but can increase object GET
+counts. Measure both bytes and first-command latency against the actual storage
+backend before enabling this policy.
+
+Explicit geometry is shared by template discovery and ordinary image-based
+claims. A ready artifact with different or unknown import geometry cannot
+satisfy that policy. Discovery uses the existing durable importer to ensure a
+matching artifact, and new claims remain unavailable until one is selectable.
+For a legacy artifact, retained ready-import records can supply missing geometry
+only when their complete source and build-contract provenance agrees. Conflicting
+or unverifiable history stays unknown and is reported as unavailable, not guessed
+from the old default or accepted merely because an import says `ready`. Source
+selection also matches the exact digest-pinned image reference, not just its
+digest. Import geometry provenance stays with immutable artifact metadata after
+completed import operations are garbage-collected.
+
+Changing `data_range_bytes` alone does not rewrite existing objects, change the
+block or encryption format, or add a runtime compatibility class. Existing generations, captured
+templates, snapshots, forks, and resume continue to use their exact artifact
+identity; the new-import selector is not applied to those lookups. It does not
+change incremental checkpoint or materializer geometry. Quiesce old import and
+import-GC workers before applying the geometry migration or recovering legacy
+provenance: old workers cannot preserve conflicting evidence under the new
+rules. Upgrade all participating managers, then enable the same value on every
+manager in the region. Already-collected history cannot be recovered. Do not
+prewarm tenant RootFS contents or increase request timeouts to make an acceptance
+test pass.
+
+`rootfs_importer.data_layout_policy` is an optional import optimization, not a
+runtime compatibility class. Empty retains legacy global-grid segmentation and
+selects legacy-policy artifacts for new image claims. `xfs-file-ranges-v1`
+requires format `2` and 64 KiB data ranges (explicit or the format-2 default).
+It aligns complete data ranges relative to files after read-only XFS extent
+discovery; it does not change filesystem placement, read tenant data at claim
+in advance, or cache a tenant RootFS in the generic warm carrier.
+
+The requested policy participates in the immutable import operation identity.
+Version-2 artifact attestations additionally bind policy, range size and any
+whole-image fallback. Existing legacy operation/attestation bytes do not change.
+Discovery and new image claims select the exact policy; snapshots, captured
+templates, forks and resume remain bound to their committed artifact digest.
+Upgrade all managers and apply the layout migration before enabling the same
+policy across the region. The database rejects a pre-policy worker attempting
+to complete a new-policy operation with a legacy artifact. Downgrading the
+migration is refused while policy-bearing rows exist; do not erase provenance
+to force a downgrade.
+
+Discovery is bounded to 10,000,000 entries, 1,048,576 extents, hardlink identities
+and preferred spans, depth 256, and 4096-byte paths. Exhausting an optimization
+budget discards the entire preferred plan and publishes the original global
+segmentation; the attestation and successful import log record
+`scan-budget-exceeded`. This preserves ordinary OCI input support and is not an
+optimization success. Unsafe or malformed metadata, filesystem boundary changes,
+I/O failures and cancellation still fail closed. A successful import or absence
+of fallback is not a cold-start guarantee: verify full-image cost, fresh-node
+claim plus the first real command, and actual density/reclaim before rollout.
+
+`rootfs_importer.mapping_group_policy` defaults to empty and applies only to new
+image imports. The opt-in `contiguous-mapping-v1` requires format `2` and packs
+adjacent mapping pages into bounded immutable objects (up to four pages,
+240 KiB stored and 1 MiB decoded per group). It can coexist with
+`xfs-file-ranges-v1`; it does not alter data-range geometry or carrier identity.
+Readers can fetch contiguous sibling mappings together, verify each page, and
+parse entries only on demand using the existing bounded shared cache and source
+admission. This reduces some request counts but can amplify bytes for partial
+reads; it is not a cold-start latency guarantee.
+
+The policy is part of the durable import identity and version-3 Ready artifact
+attestation. Empty-policy operation and version-1/2 attestation identities remain
+unchanged. Upgrade all managers and apply the mapping migration before enabling
+the same policy region-wide. PostgreSQL prevents old workers from completing a
+grouped operation with an ungrouped artifact. Rollback refuses policy-bearing
+rows rather than discarding their provenance. New image selection matches the
+exact policy; committed snapshots, captures, forks and resume retain their exact
+artifact identity. Incremental and batch publishers do not accept this import
+setting. Validate fresh-node claim plus the first real command and occupied
+production width before rollout; neither tenant prewarming nor a larger timeout
+is part of this policy.
+
+After the staging XFS image is unmounted, the importer reads it through an
+exclusively owned read-only descriptor. On Linux, filesystem-reported holes can
+be skipped without changing the data-unit boundaries, immutable objects or
+descriptor. Unsupported hole discovery falls back to a complete scan; actual
+I/O failures or detected file changes still fail the import. No extra setting,
+format migration, tenant prewarming or timeout increase is involved. A sparse
+logical image is not equivalent to the same size of populated data, and faster
+offline import does not prove faster sandbox claim or first-command execution.
+
+Before selecting format `2`, upgrade every participating manager, ctld instance,
+and task driver to readers that support it. The upgraded runtime still uses the
+same generic carrier catalog; do not split pools by image or tenant. Do not enable
+format `2` while old readers can receive claims. Apply the same import policy to
+all managers in the region. Existing snapshot claims and captured templates use
+their attested generation's format, and resume retains its committed generation,
+even if the new-image policy changes in either direction. Reverting that policy
+does not permit rolling readers back to binaries that cannot read already
+published format-two generations. No automatic migration or object rewrite is
+performed. Format-two opt-in is not a production cold-start acceptance result;
+validate empty-node-cache and cached-new-sandbox claims, first real commands,
+mixed images and sustained node occupancy before rollout.
 
 ## Manager Node Authority
 
@@ -129,6 +311,21 @@ endpoint.
 The terminal worker must remain independent of the task-driver process. It
 owns exact Nomad stop and client GC, node cleanup requests, physical absence
 observation, RootFS fencing, and the final PostgreSQL capacity release.
+
+Compact external-crash proofs are replay history for exact writer bindings
+already verified terminal regionally and reclaimed on the node. Local expiry
+requires the matching durable binding and physical proof, `BranchRemoved`,
+absent branch/mount paths, no live owner, and released device reservations where
+applicable. It deletes history only, never physical artifacts, and supplies no
+new terminal release authority. Missing records, expired regional proofs, and
+HTTP 403 responses are not terminal authority; reclamation outside this
+history-only path still requires positive regional verification.
+
+The compact proof stays quiet until 48 hours after the latest of its crash
+`RequestedAt`, proof `ObservedAt`, and record `UpdatedAt`, not just the crash
+request. After that deadline, eligible history can be forgotten without a fresh
+regional grant/proof lookup, including after a node is offline beyond
+PostgreSQL's 72-hour terminal-proof retention window.
 
 ## Runtime Classes
 
@@ -191,11 +388,33 @@ The kernel's `nbds_max` alone does not make devices available to ctld. Keep the
 configured list wider than the largest synchronized claim batch plus
 replacement/retirement headroom.
 
+Each NBD connection admits up to 64 independent read requests, with a separate
+byte budget of eight maximum-sized responses. This wider small-read window
+helps expose independent ranges while callers wait on coalesced range loads.
+Both limits remain held through the complete reply; writes, flushes, trims,
+zeroing, and disconnects wait for earlier reads and replies. With the default
+8 MiB request limit, outstanding read-response buffers remain bounded to 64 MiB
+per attached device, before object decryption, verified-range caches, and kernel
+memory. Each generation reader separately limits distinct source range loads
+to eight; callers coalescing on the same immutable range share one load slot.
+Reserve host memory
+for the configured attachment count, not just warm carrier overhead. Clean
+branch reads retain verified ranges for the current request and stop at journal
+overrides; this is demand coalescing, not speculative RootFS prefetch.
+
 `state_path`, `runtime_slot_journal_path`, and branch state under
 `/var/lib/sandbox0/ctld` must survive process restarts. Runtime mounts and
 control sockets under `/run/sandbox0` are boot-scoped. On reboot, only the
 new authenticated boot for the same durable node UID may reconcile old state,
 and only after proving the old runtime absent.
+
+Periodic RootFS recovery has bounded aggregate concurrency, a smaller allowance
+for proof housekeeping, per-attempt deadlines, and capped exponential backoff
+for unchanged sessions. Physical-writer recovery takes priority; authenticated
+regional cleanup is not held behind this speculative retry budget. Retry
+scheduling is disposable boot-local/process-local state, rebuilt after restart
+or an observed recovery transition, not durable ownership or terminal truth.
+The durable journal and regional authority remain the recovery inputs.
 
 ## Network Runtime
 

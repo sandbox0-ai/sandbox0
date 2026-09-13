@@ -88,6 +88,15 @@ boot may clean an old boot only for the same authenticated node UID and only
 after independently proving old runsc, mounts, network state, writer, and
 lease cgroup absent.
 
+Driver task handles use version 2 and persist the normalized command and security
+class inside the opaque driver state. Nomad's public task handle does not retain
+its private driver configuration across client database persistence. Recovery
+rejects version 1/unknown handles, missing configuration, and identity or local
+state conflicts; it never fills missing security inputs from defaults. Plan
+upgrades through the normal one-shot carrier replacement lifecycle, not seamless
+recovery of old handles. Regional fencing and replacement proofs remain required;
+this state-format change does not preserve processes across a node reboot.
+
 ## Build And Test
 
 The driver is a separate Go module so Nomad dependencies do not enter every
@@ -207,7 +216,7 @@ Build one fixed harness artifact:
 
 ```sh
 go build -buildvcs=false -trimpath -o /tmp/runtime-slot-slo \
-  ./tools/runtime-slot-slo
+    ./tools/runtime-slot-slo
 sha256sum /tmp/runtime-slot-slo
 ```
 
@@ -215,29 +224,31 @@ Serial gate:
 
 ```sh
 SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
-  --url https://region.example.com/api/v1/sandboxes \
-  --template default \
-  --batches 1000 \
-  --concurrency 1 \
-  --p50-target 500ms \
-  --hard-limit 1s \
-  --cleanup-timeout 2m \
-  --cleanup-poll 100ms \
-  --output serial-1000.json
+    --url https://region.example.com/api/v1/sandboxes \
+    --template default \
+    --batches 1000 \
+    --concurrency 1 \
+    --p50-target 500ms \
+    --hard-limit 1s \
+    --request-timeout 10s \
+    --cleanup-timeout 2m \
+    --cleanup-poll 100ms \
+    --output serial-1000.json
 ```
 
 Synchronized production-width gate:
 
 ```sh
 SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
-  --url https://region.example.com/api/v1/sandboxes \
-  --template default \
-  --batches 100 \
-  --concurrency 8 \
-  --batch-settle 5s \
-  --cleanup-timeout 2m \
-  --cleanup-poll 100ms \
-  --output concurrency-8.json
+    --url https://region.example.com/api/v1/sandboxes \
+    --template default \
+    --batches 100 \
+    --concurrency 8 \
+    --request-timeout 10s \
+    --batch-settle 5s \
+    --cleanup-timeout 2m \
+    --cleanup-poll 100ms \
+    --output concurrency-8.json
 ```
 
 The harness requires signed `Server-Timing` and SLO headers, performs no hidden
@@ -251,6 +262,10 @@ devices, quota headroom, and replacement capacity. A narrower machine may run
 only its truthful width and must not label that report as concurrency eight.
 Cold S3, refill, unclean recovery, and full-cold-node reports remain separate
 from the hot distribution.
+Test logical RootFS size and actual stored data volume independently, including
+mapping depth and file count; do not use a large empty sparse filesystem as the
+sole large-RootFS case. No tenant RootFS contents may be prewarmed. The supported
+size matrix must pass the same startup boundary without relaxing the hard limit.
 
 ## Running Fork Diagnostic
 

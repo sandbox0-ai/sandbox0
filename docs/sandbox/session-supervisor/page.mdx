@@ -439,6 +439,8 @@ Runtime recovery is process restart, not process checkpoint/restore. The old PID
 
 The session is scoped to one sandbox identity. A fork receives filesystem state from its source, but copied supervised sessions are cleared before the fork starts so it cannot execute the source sandbox's processes. Sandbox deletion and `hard_ttl` delete the session and journal.
 
+An explicit copied-session reset also clears legacy session state without an owner marker. Without that reset instruction, ownerless legacy state is adopted in place. An existing marker matching the target sandbox preserves its sessions on an activation retry.
+
 ### Readiness
 
 Readiness controls when an attempt moves from `starting` to `running`.

@@ -791,11 +791,33 @@ func (b *Branch) readAtLocked(target []byte, offset int64) (int, error) {
 		wanted = int(remaining)
 	}
 	written := 0
+	_, verifiedBase := b.base.(*Reader)
 	for written < wanted {
 		absolute := offset + int64(written)
 		block := uint64(absolute / LogicalBlockSize)
 		inBlock := int(absolute % LogicalBlockSize)
 		length := min(wanted-written, LogicalBlockSize-inBlock)
+		if _, dirty := b.blocks[block]; verifiedBase && !dirty {
+			// A verified immutable reader can serve the whole demanded clean
+			// span, retaining each authenticated/checksummed range while it is
+			// copied. Stop at every journal override; generic ReaderAt backends
+			// keep the conservative full-block fallback below.
+			for next := block + 1; length < wanted-written; next++ {
+				if _, dirty := b.blocks[next]; dirty {
+					break
+				}
+				length += min(LogicalBlockSize, wanted-written-length)
+			}
+			n, err := b.base.ReadAt(target[written:written+length], absolute)
+			written += n
+			if err != nil && (err != io.EOF || n != length) {
+				return written, err
+			}
+			if n != length {
+				return written, io.ErrUnexpectedEOF
+			}
+			continue
+		}
 		data := make([]byte, LogicalBlockSize)
 		if _, err := b.readBlockLocked(data, block); err != nil {
 			return written, err

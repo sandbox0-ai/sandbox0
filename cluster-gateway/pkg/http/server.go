@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -232,6 +233,12 @@ func NewServer(
 	var publicBuiltin *gatewaybuiltin.Provider
 	var publicOIDC *gatewayoidc.Manager
 	var publicJWT *gatewayauthn.Issuer
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = rateLimiter.Close()
+		}
+	}()
 
 	if pool != nil {
 		publicIdentityRepo = gatewayidentity.NewRepository(pool)
@@ -368,6 +375,7 @@ func NewServer(
 
 	server.setupRoutes()
 
+	initialized = true
 	return server, nil
 }
 
@@ -732,7 +740,10 @@ func (s *Server) setupAdmissionRoutes() {
 }
 
 // Start starts the HTTP server
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) Start(ctx context.Context) (err error) {
+	// Release the LISTEN connection before the caller closes its database pool,
+	// including when the HTTP listener fails to start.
+	defer func() { err = errors.Join(err, s.rateLimiter.Close()) }()
 	if s.auditDelivery != nil {
 		s.auditDelivery.Start(ctx)
 	}

@@ -102,6 +102,9 @@ CREATE TRIGGER preserve_rootfs_operation_layout
 
 -- Dropping this fence with live policy-bearing rows would make old workers
 -- reinterpret them. Fail closed; do not rewrite or delete those identities.
+-- Wait for in-flight publishers before checking, and exclude new ones until
+-- the guard and schema changes commit together.
+LOCK TABLE manager.rootfs_import_operations, manager.rootfs_base_artifacts IN ACCESS EXCLUSIVE MODE;
 -- +goose StatementBegin
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM manager.rootfs_import_operations WHERE data_layout_policy <> '')

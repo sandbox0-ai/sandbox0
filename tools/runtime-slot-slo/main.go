@@ -1,5 +1,5 @@
 // Command runtime-slot-slo validates the public regional claim route against
-// the trusted ingress-to-procd timer emitted by the Nomad manager backend.
+// the trusted ingress-to-procd timer, with optional public executable diagnostics.
 package main
 
 import (
@@ -30,32 +30,46 @@ import (
 const commandReadyTimingMetric = "sandbox0-command-ready"
 
 type config struct {
-	endpoint       string
-	token          string
-	body           []byte
-	batches        int
-	concurrency    int
-	requestTimeout time.Duration
-	cleanupTimeout time.Duration
-	cleanupPoll    time.Duration
-	settle         time.Duration
-	hardLimit      time.Duration
-	p50Target      time.Duration
-	label          string
-	client         *http.Client
+	endpoint              string
+	token                 string
+	body                  []byte
+	batches               int
+	concurrency           int
+	requestTimeout        time.Duration
+	cleanupTimeout        time.Duration
+	cleanupPoll           time.Duration
+	settle                time.Duration
+	hardLimit             time.Duration
+	p50Target             time.Duration
+	label                 string
+	client                *http.Client
+	workload              workload
+	contextTTL            time.Duration
+	firstCommandHardLimit time.Duration
+	cases                 []claimCase
+	caseName              string
 }
 
 type sample struct {
-	Index           int           `json:"index"`
-	Batch           int           `json:"batch"`
-	Lane            int           `json:"lane"`
-	SandboxID       string        `json:"sandbox_id,omitempty"`
-	WallDuration    time.Duration `json:"wall_duration_ns"`
-	CommandDuration time.Duration `json:"command_ready_duration_ns"`
-	WithinSLO       bool          `json:"within_slo"`
-	Error           string        `json:"error,omitempty"`
-	CleanupError    string        `json:"cleanup_error,omitempty"`
-	CleanupDuration time.Duration `json:"cleanup_duration_ns,omitempty"`
+	Index                int             `json:"index"`
+	Batch                int             `json:"batch"`
+	Lane                 int             `json:"lane"`
+	CaseName             string          `json:"case_name,omitempty"`
+	ClaimBodySHA256      string          `json:"claim_body_sha256,omitempty"`
+	WorkloadSHA256       string          `json:"workload_sha256,omitempty"`
+	SandboxID            string          `json:"sandbox_id,omitempty"`
+	ClaimStartedAt       time.Time       `json:"claim_started_at"`
+	ClaimCompletedAt     time.Time       `json:"claim_completed_at"`
+	WallDuration         time.Duration   `json:"wall_duration_ns"`
+	CommandDuration      time.Duration   `json:"command_ready_duration_ns"`
+	WithinSLO            bool            `json:"within_slo"`
+	Error                string          `json:"error,omitempty"`
+	CleanupError         string          `json:"cleanup_error,omitempty"`
+	CleanupDuration      time.Duration   `json:"cleanup_duration_ns,omitempty"`
+	ClaimSucceeded       bool            `json:"claim_succeeded"`
+	FirstCommandDuration time.Duration   `json:"first_command_duration_ns"`
+	WorkloadDuration     time.Duration   `json:"workload_duration_ns"`
+	Steps                []commandSample `json:"steps"`
 }
 
 type distribution struct {
@@ -68,30 +82,44 @@ type distribution struct {
 }
 
 type report struct {
-	Version          int           `json:"version"`
-	ExecutableSHA256 string        `json:"executable_sha256"`
-	ClaimBodySHA256  string        `json:"claim_body_sha256"`
-	Label            string        `json:"label,omitempty"`
-	StartedAt        time.Time     `json:"started_at"`
-	CompletedAt      time.Time     `json:"completed_at"`
-	Endpoint         string        `json:"endpoint"`
-	Batches          int           `json:"batches"`
-	Concurrency      int           `json:"concurrency"`
-	RequestTimeout   time.Duration `json:"request_timeout_ns"`
-	CleanupTimeout   time.Duration `json:"cleanup_timeout_ns"`
-	CleanupPoll      time.Duration `json:"cleanup_poll_ns"`
-	BatchSettle      time.Duration `json:"batch_settle_ns"`
-	HardLimit        time.Duration `json:"hard_limit_ns"`
-	P50Target        time.Duration `json:"p50_target_ns"`
-	CommandReady     distribution  `json:"command_ready"`
-	Wall             distribution  `json:"wall"`
-	Cleanup          distribution  `json:"cleanup"`
-	Errors           int           `json:"errors"`
-	SLOMisses        int           `json:"slo_misses"`
-	WallMisses       int           `json:"wall_misses"`
-	CleanupErrors    int           `json:"cleanup_errors"`
-	Passed           bool          `json:"passed"`
-	Samples          []sample      `json:"samples"`
+	Cases                 []caseEvidence `json:"cases,omitempty"`
+	Version               int            `json:"version"`
+	ExecutableSHA256      string         `json:"executable_sha256"`
+	ClaimBodySHA256       string         `json:"claim_body_sha256"`
+	Label                 string         `json:"label,omitempty"`
+	StartedAt             time.Time      `json:"started_at"`
+	CompletedAt           time.Time      `json:"completed_at"`
+	Endpoint              string         `json:"endpoint"`
+	Batches               int            `json:"batches"`
+	Concurrency           int            `json:"concurrency"`
+	RequestTimeout        time.Duration  `json:"request_timeout_ns"`
+	CleanupTimeout        time.Duration  `json:"cleanup_timeout_ns"`
+	CleanupPoll           time.Duration  `json:"cleanup_poll_ns"`
+	BatchSettle           time.Duration  `json:"batch_settle_ns"`
+	HardLimit             time.Duration  `json:"hard_limit_ns"`
+	P50Target             time.Duration  `json:"p50_target_ns"`
+	CommandReady          distribution   `json:"command_ready"`
+	Wall                  distribution   `json:"wall"`
+	Cleanup               distribution   `json:"cleanup"`
+	Errors                int            `json:"errors"`
+	SLOMisses             int            `json:"slo_misses"`
+	WallMisses            int            `json:"wall_misses"`
+	CleanupErrors         int            `json:"cleanup_errors"`
+	Passed                bool           `json:"passed"`
+	StartupPassed         bool           `json:"startup_passed"`
+	ClaimErrors           int            `json:"claim_errors"`
+	P50TargetMet          bool           `json:"p50_target_met"`
+	WorkloadMeasured      bool           `json:"workload_measured"`
+	WorkloadPassed        bool           `json:"workload_passed"`
+	Samples               []sample       `json:"samples"`
+	Workload              workload       `json:"workload"`
+	WorkloadSHA256        string         `json:"workload_sha256"`
+	ContextTTL            time.Duration  `json:"context_ttl_ns"`
+	FirstCommandHardLimit time.Duration  `json:"first_command_hard_limit_ns"`
+	FirstCommand          distribution   `json:"first_command"`
+	WorkloadWall          distribution   `json:"workload_wall"`
+	FirstCommandErrors    int            `json:"first_command_errors"`
+	FirstCommandMisses    int            `json:"first_command_misses"`
 }
 
 type claimResponse struct {
@@ -106,23 +134,40 @@ var (
 
 func main() {
 	var (
-		endpoint       = flag.String("url", "", "full regional POST /api/v1/sandboxes URL")
-		tokenFile      = flag.String("token-file", "", "file containing the public API bearer token")
-		templateID     = flag.String("template", "default", "sandbox template ID")
-		bodyFile       = flag.String("body-file", "", "optional complete claim JSON body")
-		batches        = flag.Int("batches", 1000, "number of synchronized request batches")
-		concurrent     = flag.Int("concurrency", 1, "requests in each synchronized batch")
-		timeout        = flag.Duration("request-timeout", 15*time.Second, "per-request timeout")
-		cleanupTimeout = flag.Duration("cleanup-timeout", 2*time.Minute, "maximum time for each DELETE to converge to public absence")
-		cleanupPoll    = flag.Duration("cleanup-poll", 100*time.Millisecond, "public GET interval while waiting for cleanup convergence")
-		settle         = flag.Duration("batch-settle", 0, "delay after cleanup before the next batch")
-		hardLimit      = flag.Duration("hard-limit", time.Second, "maximum successful command-ready sample")
-		p50Target      = flag.Duration("p50-target", 500*time.Millisecond, "engineering p50 target")
-		output         = flag.String("output", "", "optional JSON report path; stdout is always written")
-		label          = flag.String("label", "", "optional environment label included in the report")
+		endpoint          = flag.String("url", "", "full regional POST /api/v1/sandboxes URL")
+		tokenFile         = flag.String("token-file", "", "file containing the public API bearer token")
+		templateID        = flag.String("template", "default", "sandbox template ID")
+		bodyFile          = flag.String("body-file", "", "optional complete claim JSON body")
+		casesFile         = flag.String("cases-file", "", "version 1 mixed claim/workload cases; exclusive with template, body-file, and workload flags")
+		batches           = flag.Int("batches", 1000, "number of synchronized request batches")
+		concurrent        = flag.Int("concurrency", 1, "requests in each synchronized batch")
+		timeout           = flag.Duration("request-timeout", 15*time.Second, "per-request timeout")
+		cleanupTimeout    = flag.Duration("cleanup-timeout", 2*time.Minute, "maximum time for each DELETE to converge to public absence")
+		cleanupPoll       = flag.Duration("cleanup-poll", 100*time.Millisecond, "public GET interval while waiting for cleanup convergence")
+		settle            = flag.Duration("batch-settle", 0, "delay after cleanup before the next batch")
+		hardLimit         = flag.Duration("hard-limit", time.Second, "maximum successful command-ready sample")
+		p50Target         = flag.Duration("p50-target", 500*time.Millisecond, "engineering p50 target")
+		output            = flag.String("output", "", "optional JSON report path; stdout is always written")
+		label             = flag.String("label", "", "optional environment label included in the report")
+		workloadName      = flag.String("workload", "shell", "diagnostic workload: none, shell, or coding-agent; none measures sandbox startup only")
+		workloadFile      = flag.String("workload-file", "", "JSON workload with ordered command argv and stdout expectations; overrides --workload")
+		contextTTL        = flag.Duration("context-ttl", 15*time.Second, "command context lifetime, whole seconds in [1s, 1m]")
+		firstCommandLimit = flag.Duration("first-command-hard-limit", 0, "optional workload-only claim-start to first executable completion limit; 0 disables it, independent of sandbox startup")
 	)
 	flag.Parse()
+	if *casesFile != "" {
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "template", "body-file", "workload", "workload-file":
+				fatal(fmt.Errorf("--cases-file cannot be combined with --%s", f.Name))
+			}
+		})
+	}
 
+	work, err := loadWorkload(*workloadName, *workloadFile)
+	if err != nil {
+		fatal(err)
+	}
 	body, err := claimBody(*templateID, *bodyFile)
 	if err != nil {
 		fatal(err)
@@ -135,7 +180,14 @@ func main() {
 		endpoint: *endpoint, token: token, body: body, batches: *batches, concurrency: *concurrent,
 		requestTimeout: *timeout, cleanupTimeout: *cleanupTimeout, cleanupPoll: *cleanupPoll,
 		settle: *settle, hardLimit: *hardLimit, p50Target: *p50Target,
-		label: strings.TrimSpace(*label),
+		label:    strings.TrimSpace(*label),
+		workload: work, contextTTL: *contextTTL, firstCommandHardLimit: *firstCommandLimit,
+	}
+	if *casesFile != "" {
+		cfg.cases, err = loadCases(*casesFile)
+		if err != nil {
+			fatal(err)
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		fatal(err)
@@ -171,7 +223,7 @@ func (c config) validate() error {
 	if c.token == "" {
 		return errors.New("a bearer token is required")
 	}
-	if len(c.body) == 0 || len(c.body) > 1<<20 || !json.Valid(c.body) {
+	if len(c.cases) == 0 && (len(c.body) == 0 || len(c.body) > 1<<20 || !json.Valid(c.body)) {
 		return errors.New("claim body must be valid non-empty JSON no larger than 1 MiB")
 	}
 	if c.batches <= 0 || c.concurrency <= 0 || c.batches > 100000 || c.concurrency > 1024 || c.batches*c.concurrency > 1000000 {
@@ -187,31 +239,62 @@ func (c config) validate() error {
 	if c.hardLimit <= 0 || c.p50Target <= 0 || c.p50Target > c.hardLimit {
 		return errors.New("p50 target must be positive and no greater than the hard limit")
 	}
-	return nil
+	return c.validateWorkload()
 }
 
 func run(ctx context.Context, cfg config) (report, error) {
 	if cfg.client == nil {
 		return report{}, errors.New("HTTP client is required")
 	}
+	// Internal callers receive the same default diagnostic workload as the CLI.
+	if cfg.workload.Name == "" && cfg.workload.Steps == nil {
+		cfg.workload = shellWorkload()
+	}
+	if cfg.contextTTL == 0 {
+		cfg.contextTTL = 15 * time.Second
+	}
+	if err := cfg.validateWorkload(); err != nil {
+		return report{}, err
+	}
 	executableDigest, err := currentExecutableSHA256()
 	if err != nil {
 		return report{}, fmt.Errorf("hash acceptance executable: %w", err)
 	}
 	bodyDigest := sha256.Sum256(cfg.body)
+	workloadJSON, _ := json.Marshal(cfg.workload)
+	workloadDigest := sha256.Sum256(workloadJSON)
 	result := report{
-		Version: 5, ExecutableSHA256: executableDigest,
+		Version: 7, ExecutableSHA256: executableDigest,
 		ClaimBodySHA256: fmt.Sprintf("%x", bodyDigest[:]),
 		Label:           cfg.label, StartedAt: time.Now().UTC(), Endpoint: cfg.endpoint,
 		Batches: cfg.batches, Concurrency: cfg.concurrency,
 		RequestTimeout: cfg.requestTimeout, CleanupTimeout: cfg.cleanupTimeout,
 		CleanupPoll: cfg.cleanupPoll, BatchSettle: cfg.settle,
 		HardLimit: cfg.hardLimit, P50Target: cfg.p50Target,
-		Samples: make([]sample, cfg.batches*cfg.concurrency),
+		Samples:  make([]sample, cfg.batches*cfg.concurrency),
+		Workload: cfg.workload, WorkloadSHA256: fmt.Sprintf("%x", workloadDigest[:]),
+		ContextTTL: cfg.contextTTL, FirstCommandHardLimit: cfg.firstCommandHardLimit,
+		WorkloadMeasured: len(cfg.workload.Steps) > 0,
+	}
+	if len(cfg.cases) > 0 {
+		result.Version = 8
+		result.Cases = cfg.caseInventory()
+		// No single body or workload describes a heterogeneous cohort.
+		result.ClaimBodySHA256, result.WorkloadSHA256 = "", ""
+		result.Workload, result.WorkloadMeasured = workload{}, true
+	}
+	for index := range result.Samples {
+		result.Samples[index] = sample{Index: index, Batch: index / cfg.concurrency, Lane: index % cfg.concurrency,
+			Error: "sample was not attempted"}
+		annotateCase(&result.Samples[index], cfg.forSample(index))
 	}
 	var cleanupErrors atomic.Int64
-	seenSandboxIDs := make(map[string]int, len(result.Samples))
+	var seenSandboxIDs sync.Map
+batches:
 	for batch := range cfg.batches {
+		if ctx.Err() != nil {
+			break
+		}
 		var wait sync.WaitGroup
 		start := make(chan struct{})
 		for lane := range cfg.concurrency {
@@ -220,25 +303,11 @@ func run(ctx context.Context, cfg config) (report, error) {
 			go func() {
 				defer wait.Done()
 				<-start
-				result.Samples[index] = claim(ctx, cfg, index, batch, lane)
+				result.Samples[index] = claim(ctx, cfg.forSample(index), index, batch, lane, &seenSandboxIDs)
 			}()
 		}
 		close(start)
 		wait.Wait()
-		for lane := range cfg.concurrency {
-			index := batch*cfg.concurrency + lane
-			current := &result.Samples[index]
-			if current.SandboxID == "" {
-				continue
-			}
-			if firstIndex, duplicate := seenSandboxIDs[current.SandboxID]; duplicate {
-				if current.Error == "" {
-					current.Error = fmt.Sprintf("claim sandbox_id duplicates sample %d", firstIndex)
-				}
-				continue
-			}
-			seenSandboxIDs[current.SandboxID] = index
-		}
 		for lane := range cfg.concurrency {
 			current := result.Samples[batch*cfg.concurrency+lane]
 			if current.SandboxID == "" {
@@ -249,7 +318,8 @@ func run(ctx context.Context, cfg config) (report, error) {
 			go func(sandboxID string, index int) {
 				defer wait.Done()
 				started := time.Now()
-				if err := cleanupSandbox(ctx, cfg, sandboxID); err != nil {
+				// Cancellation of a command/run must not cancel deletion of its sandbox.
+				if err := cleanupSandbox(context.WithoutCancel(ctx), cfg, sandboxID); err != nil {
 					cleanupErrors.Add(1)
 					result.Samples[index].CleanupError = err.Error()
 				}
@@ -260,7 +330,8 @@ func run(ctx context.Context, cfg config) (report, error) {
 		if cfg.settle > 0 && batch+1 < cfg.batches {
 			select {
 			case <-ctx.Done():
-				return result, ctx.Err()
+				// Continue to final accounting; unattempted samples cannot pass.
+				break batches
 			case <-time.After(cfg.settle):
 			}
 		}
@@ -270,12 +341,33 @@ func run(ctx context.Context, cfg config) (report, error) {
 	commandDurations := make([]time.Duration, 0, len(result.Samples))
 	wallDurations := make([]time.Duration, 0, len(result.Samples))
 	cleanupDurations := make([]time.Duration, 0, len(result.Samples))
-	for _, current := range result.Samples {
+	firstCommandDurations := make([]time.Duration, 0, len(result.Samples))
+	workloadDurations := make([]time.Duration, 0, len(result.Samples))
+	for index := range result.Samples {
+		current := &result.Samples[index]
 		if current.CleanupError == "" && current.SandboxID != "" {
 			cleanupDurations = append(cleanupDurations, current.CleanupDuration)
 		}
-		if current.Error != "" {
+		firstOK, workloadOK := successfulCommands(*current, cfg.forSample(index).workload)
+		if result.WorkloadMeasured && !workloadOK && current.Error == "" {
+			current.Error = "workload completion evidence is missing or invalid"
+		}
+		if result.WorkloadMeasured && !firstOK {
+			result.FirstCommandErrors++
+		} else if result.WorkloadMeasured {
+			firstCommandDurations = append(firstCommandDurations, current.FirstCommandDuration)
+			if cfg.firstCommandHardLimit > 0 && current.FirstCommandDuration > cfg.firstCommandHardLimit {
+				result.FirstCommandMisses++
+			}
+		}
+		if result.WorkloadMeasured && workloadOK {
+			workloadDurations = append(workloadDurations, current.WorkloadDuration)
+		}
+		if current.Error != "" || !current.ClaimSucceeded || (result.WorkloadMeasured && !workloadOK) {
 			result.Errors++
+		}
+		if !current.ClaimSucceeded {
+			result.ClaimErrors++
 			continue
 		}
 		commandDurations = append(commandDurations, current.CommandDuration)
@@ -290,17 +382,26 @@ func run(ctx context.Context, cfg config) (report, error) {
 	result.CommandReady = summarize(commandDurations)
 	result.Wall = summarize(wallDurations)
 	result.Cleanup = summarize(cleanupDurations)
-	result.Passed = result.Errors == 0 && result.SLOMisses == 0 && result.WallMisses == 0 && result.CleanupErrors == 0 &&
-		result.CommandReady.Count == len(result.Samples) && result.CommandReady.P50 <= cfg.p50Target &&
+	result.FirstCommand = summarize(firstCommandDurations)
+	result.WorkloadWall = summarize(workloadDurations)
+	// The startup contract ends at authenticated readiness and the complete
+	// claim response. User executable latency and the engineering p50 target
+	// are deliberately not part of that hard per-sandbox boundary.
+	result.P50TargetMet = result.CommandReady.Count > 0 && result.CommandReady.P50 <= cfg.p50Target
+	result.StartupPassed = result.ClaimErrors == 0 && result.SLOMisses == 0 && result.WallMisses == 0 &&
+		len(result.Samples) > 0 && result.CommandReady.Count == len(result.Samples) &&
 		result.CommandReady.P99 <= cfg.hardLimit && result.CommandReady.Max <= cfg.hardLimit &&
-		result.Wall.Count == len(result.Samples) && result.Wall.P99 <= cfg.hardLimit && result.Wall.Max <= cfg.hardLimit &&
-		result.Cleanup.Count == len(result.Samples)
+		result.Wall.Count == len(result.Samples) && result.Wall.P99 <= cfg.hardLimit && result.Wall.Max <= cfg.hardLimit
+	result.WorkloadPassed = result.WorkloadMeasured && result.FirstCommandErrors == 0 && result.FirstCommandMisses == 0 &&
+		result.FirstCommand.Count == len(result.Samples) && result.WorkloadWall.Count == len(result.Samples)
+	result.Passed = result.StartupPassed && result.Errors == 0 && result.CleanupErrors == 0 &&
+		result.Cleanup.Count == len(result.Samples) && (!result.WorkloadMeasured || result.WorkloadPassed)
 	if !result.Passed {
 		return result, fmt.Errorf(
-			"SLO acceptance failed: samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s",
-			len(result.Samples), result.Errors, result.SLOMisses, result.WallMisses, result.CleanupErrors,
+			"Acceptance failed: startup_passed=%t workload_measured=%t workload_passed=%t samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s first_command_errors=%d first_command_misses=%d first_command_max=%s",
+			result.StartupPassed, result.WorkloadMeasured, result.WorkloadPassed, len(result.Samples), result.Errors, result.SLOMisses, result.WallMisses, result.CleanupErrors,
 			result.CommandReady.P50, result.CommandReady.P99, result.CommandReady.Max,
-			result.Wall.P99, result.Wall.Max,
+			result.Wall.P99, result.Wall.Max, result.FirstCommandErrors, result.FirstCommandMisses, result.FirstCommand.Max,
 		)
 	}
 	return result, nil
@@ -338,8 +439,9 @@ func currentExecutableSHA256() (string, error) {
 	return executableSHA, executableSHAErr
 }
 
-func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
+func claim(ctx context.Context, cfg config, index, batch, lane int, seenSandboxIDs *sync.Map) sample {
 	result := sample{Index: index, Batch: batch, Lane: lane}
+	annotateCase(&result, cfg)
 	requestCtx, cancel := context.WithTimeout(ctx, cfg.requestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, cfg.endpoint, bytes.NewReader(cfg.body))
@@ -351,14 +453,18 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-ID", fmt.Sprintf("runtime-slot-slo-%d-%d-%d", time.Now().UnixNano(), batch, lane))
 	started := time.Now()
+	result.ClaimStartedAt = started.UTC()
 	response, err := cfg.client.Do(request)
 	result.WallDuration = time.Since(started)
+	result.ClaimCompletedAt = time.Now().UTC()
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
 	defer response.Body.Close()
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	result.WallDuration = time.Since(started)
+	result.ClaimCompletedAt = time.Now().UTC()
 	if readErr != nil {
 		result.Error = readErr.Error()
 		return result
@@ -377,6 +483,12 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 		return result
 	}
 	result.SandboxID = decoded.SandboxID
+	// Admit each claimed identity once before any executable is dispatched, even
+	// when duplicate responses arrive concurrently in a synchronized batch.
+	if firstIndex, duplicate := seenSandboxIDs.LoadOrStore(result.SandboxID, index); duplicate {
+		result.Error = fmt.Sprintf("claim sandbox_id duplicates sample %d", firstIndex)
+		return result
+	}
 	duration, err := commandReadyDuration(strings.Join(response.Header.Values("Server-Timing"), ","))
 	if err != nil {
 		result.Error = err.Error()
@@ -389,6 +501,10 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 		return result
 	}
 	result.WithinSLO = withinSLO
+	result.ClaimSucceeded = true
+	// Command requests have their own unchanged request budget. The end-to-end
+	// clock continues from before claim, including its complete response body.
+	runCommands(ctx, cfg, started, &result)
 	return result
 }
 

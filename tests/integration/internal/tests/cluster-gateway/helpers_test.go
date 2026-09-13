@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 )
 
@@ -205,11 +206,21 @@ func newGatewayTestDB(t *testing.T) (*pgxpool.Pool, *gatewayidentity.Repository,
 
 	ctx := context.Background()
 	dbURL := requireTestDatabaseURL(t)
+	// Quota uses a fixed schema, so isolate the entire database, not only identity.
+	basePool, dbName := newIsolatedTestDatabasePool(t, "gateway_public")
+	if err := quota.RunMigrations(ctx, basePool, nil); err != nil {
+		t.Fatalf("migrate quota schema: %v", err)
+	}
 	schema := fmt.Sprintf("shared_gateway_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      schema,
+		ConfigModifier: func(cfg *pgxpool.Config) error {
+			cfg.ConnConfig.Database = dbName
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)

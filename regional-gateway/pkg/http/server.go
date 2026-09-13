@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -212,6 +213,12 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = rateLimiter.Close()
+		}
+	}()
 	requestLogger := middleware.NewRequestLogger(logger)
 	var admissionStore admission.Store
 	if pool != nil {
@@ -278,6 +285,7 @@ func NewServer(
 
 	server.setupRoutes()
 
+	initialized = true
 	return server, nil
 }
 
@@ -593,7 +601,9 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 }
 
 // Start starts the HTTP server
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) Start(ctx context.Context) (err error) {
+	// The quota listener must release its connection before pool shutdown.
+	defer func() { err = errors.Join(err, s.rateLimiter.Close()) }()
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.logger.Info("Starting HTTP server",
 		zap.String("addr", addr),

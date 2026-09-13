@@ -3,7 +3,9 @@ package identity
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"testing"
+	"testing/fstest"
 
 	"github.com/jackc/pgx/v5"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
@@ -211,20 +213,43 @@ func TestTeamCreationHookCoversRepositoryCreationPaths(t *testing.T) {
 }
 
 func TestGatewayMigration14RepairsProductionSlugConstraint(t *testing.T) {
-	pool, schema := newGatewayIdentityTestPool(t)
+	// Build the historical schema itself, not just its version records. Applying
+	// later migrations first leaves schema objects that cannot be applied again.
+	historicalMigrations := fstest.MapFS{}
+	names, err := fs.Glob(gatewaymigrations.FS, "*.sql")
+	if err != nil {
+		t.Fatalf("list gateway migrations: %v", err)
+	}
+	for _, name := range names {
+		if name >= "00014_" {
+			continue
+		}
+		data, err := gatewaymigrations.FS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read historical migration %s: %v", name, err)
+		}
+		historicalMigrations[name] = &fstest.MapFile{Data: data}
+	}
+	pool, schema := newGatewayIdentityTestPoolWithMigrations(t, historicalMigrations)
 	if pool == nil {
 		return
 	}
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
-		DELETE FROM goose_db_version WHERE version_id = 14;
 		INSERT INTO goose_db_version (version_id, is_applied)
 		SELECT version_id, true
 		FROM generate_series(9, 13) AS versions(version_id);
 		ALTER TABLE teams ADD CONSTRAINT teams_slug_key UNIQUE (slug);
 	`); err != nil {
 		t.Fatalf("prepare production migration state: %v", err)
+	}
+	var version int
+	if err := pool.QueryRow(ctx, `SELECT MAX(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version); err != nil {
+		t.Fatalf("query historical migration version: %v", err)
+	}
+	if version != 13 {
+		t.Fatalf("historical migration version = %d, want 13", version)
 	}
 
 	if err := migrate.Up(

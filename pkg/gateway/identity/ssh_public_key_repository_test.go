@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -151,6 +152,11 @@ func TestUserSSHPublicKeyRepositoryAllowsSameFingerprintAcrossTeams(t *testing.T
 
 func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
+	return newGatewayIdentityTestPoolWithMigrations(t, migrations.FS)
+}
+
+func newGatewayIdentityTestPoolWithMigrations(t *testing.T, migrationFS fs.FS) (*pgxpool.Pool, string) {
+	t.Helper()
 
 	ctx := context.Background()
 	dbURL := os.Getenv("INTEGRATION_DATABASE_URL")
@@ -186,7 +192,7 @@ func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 		_, _ = adminPool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
 	})
 
-	if err := migrate.Up(ctx, pool, ".", migrate.WithBaseFS(migrations.FS), migrate.WithSchema(schema)); err != nil {
+	if err := migrate.Up(ctx, pool, ".", migrate.WithBaseFS(migrationFS), migrate.WithSchema(schema)); err != nil {
 		t.Fatalf("migrate gateway schema: %v", err)
 	}
 

@@ -29,9 +29,11 @@ import (
 	"github.com/containerd/errdefs"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	sharedconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsobjectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
@@ -297,36 +299,16 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	if config == nil {
 		return nil, fmt.Errorf("nomad RootFS runtime configuration is required")
 	}
-	store, err := objectstore.Create(objectstore.Config{
-		Type: config.RootFSObjectType, Bucket: config.RootFSObjectBucket,
-		Region: config.RootFSObjectRegion, Endpoint: config.RootFSObjectEndpoint,
-		AccessKey: config.RootFSObjectAccessKey, SecretKey: config.RootFSObjectSecretKey,
-		SessionToken: config.RootFSObjectSessionToken,
-	})
+	store, err := newRuntimeObjectStore(*config, objectstore.Create)
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS object store: %w", err)
-	}
-	if config.RootFSObjectEncryptionEnabled {
-		keyPEM, err := objectstore.LoadEncryptionKey(config.RootFSObjectEncryptionKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("load RootFS object encryption key: %w", err)
-		}
-		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, config.RootFSObjectEncryptionPassphrase)
-		if err != nil {
-			return nil, fmt.Errorf("create RootFS object key encryptor: %w", err)
-		}
-		store = objectstore.Encrypting(store, objectstore.EncryptionConfig{
-			Enabled:      true,
-			Algorithm:    config.RootFSObjectEncryptionAlgorithm,
-			KeyEncryptor: keyEncryptor,
-		})
 	}
 	conditional, ok := store.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
 		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", store)
 	}
-	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "alreadyownedbyyou") {
-		return nil, fmt.Errorf("create RootFS bucket: %w", err)
+	if err := initializeRuntimeObjectStore(ctx, store); err != nil {
+		return nil, err
 	}
 	hostRuntime, err := rootfssession.NewLinuxRuntime(rootfssession.LinuxRuntimeConfig{
 		DevicePaths: config.RootFSNBDDevices,
@@ -392,6 +374,27 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),
 	}, nil
+}
+
+// newRuntimeObjectStore keeps ctld on the shared RootFS encryption contract and
+// cache defaults. Only provider creation is injectable, so this exact runtime
+// construction path can be tested without starting NBD or a privileged session.
+func newRuntimeObjectStore(config Config, createStore func(objectstore.Config) (objectstore.Store, error)) (objectstore.Store, error) {
+	store, err := createStore(objectstore.Config{
+		Type: config.RootFSObjectType, Bucket: config.RootFSObjectBucket,
+		Region: config.RootFSObjectRegion, Endpoint: config.RootFSObjectEndpoint,
+		AccessKey: config.RootFSObjectAccessKey, SecretKey: config.RootFSObjectSecretKey,
+		SessionToken: config.RootFSObjectSessionToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return rootfsobjectstore.WrapEncryption(store, sharedconfig.RootFSObjectStorageConfig{
+		ObjectEncryptionEnabled:    config.RootFSObjectEncryptionEnabled,
+		ObjectEncryptionKeyPath:    config.RootFSObjectEncryptionKeyPath,
+		ObjectEncryptionPassphrase: config.RootFSObjectEncryptionPassphrase,
+		ObjectEncryptionAlgo:       config.RootFSObjectEncryptionAlgorithm,
+	})
 }
 
 func (r *rootfsRuntime) Ensure(
@@ -850,6 +853,15 @@ func (r *rootfsRuntime) ReclaimExternallyRetired(
 	if r.authority == nil {
 		return false, fmt.Errorf("regional writer authority is required for external retirement")
 	}
+	// An already reclaimed external proof is local replay history, not a new
+	// terminal decision. Its grant and regional fallback proof may both have
+	// expired while the node was offline. Forget only an exact, expired local
+	// record whose authority-gated reclamation and physical absence are proven.
+	if forgotten, err := r.sessions.ForgetExpiredExternalTerminal(request, time.Now()); err != nil {
+		return false, fmt.Errorf("expire reclaimed external RootFS proof: %w", err)
+	} else if forgotten {
+		return true, nil
+	}
 	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
 		if errdefs.IsFailedPrecondition(err) {
 			return false, nil
@@ -874,12 +886,6 @@ func (r *rootfsRuntime) ReclaimExternallyRetired(
 	}
 	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil && !errdefs.IsNotFound(err) {
 		return false, fmt.Errorf("reclaim externally retired RootFS artifacts: %w", err)
-	}
-	if matched != nil && !matched.CrashRequestedAt.IsZero() &&
-		!time.Now().Before(matched.CrashRequestedAt.Add(rootfssession.ExternalTerminalProofRetention)) {
-		if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
-			return false, fmt.Errorf("forget expired external RootFS proof: %w", err)
-		}
 	}
 	return true, nil
 }

@@ -108,6 +108,7 @@ func (b *DurableBuilder) Build(
 		},
 		LogicalSizeBytes: spec.LogicalSizeBytes,
 		BlockOptions:     spec.BlockOptions,
+		DataLayoutPolicy: spec.DataLayoutPolicy,
 	})
 }
 

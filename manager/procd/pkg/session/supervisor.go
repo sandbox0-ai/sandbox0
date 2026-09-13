@@ -224,7 +224,7 @@ func (s *Supervisor) Activate(activation Activation) error {
 		s.mu.Unlock()
 		return nil
 	}
-	bound, err := s.store.BindSandbox(sandboxID)
+	bound, err := s.store.bindSandbox(sandboxID, !activation.ResetCopiedSessionState)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -241,8 +241,8 @@ func (s *Supervisor) Activate(activation Activation) error {
 		s.sessions = map[string]*managedSession{}
 		s.creationKeys = map[string]string{}
 	}
-	// Rootfs restore happens after the new procd process starts. Load only now,
-	// after manager has applied the checkpoint into the portal backing store.
+	// Recover sessions only after owner binding/reset so copied attempts cannot
+	// run under the target sandbox identity.
 	if err := s.loadPersistedSessionsLocked(); err != nil {
 		s.mu.Unlock()
 		return err

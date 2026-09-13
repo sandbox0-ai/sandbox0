@@ -34,6 +34,22 @@ OTEL_TRACES_SAMPLER_ARG=0.25
 Keep secrets out of resource attributes. If no trace exporter is configured,
 services use the no-op path.
 
+Procd writes its `ts` log timestamps in UTC. This avoids reading the sandbox's
+local timezone files just to format the first log record on a demand-paged
+RootFS. It does not change the sandbox's `TZ`, application timezone, or other
+services' logging configuration.
+
+Successful `Claimed Nomad sandbox` logs include `claimPhases`, an array of
+`phase`, `durationMicros`, and `succeeded` values from that claim's existing
+planner observations. `ingress_to_planner` includes routing and manager work
+before the planner; `procd_probe` includes token generation, readiness polling,
+and proof validation. Use these correlated phases to distinguish control-plane
+and readiness delays from node-side work. The planner's `node_claim` includes
+transport and response validation, while `nodeClaimDurationMicros` measures
+node-side processing. RootFS and runsc timings nest inside that node duration;
+do not add parent and child timings. These logs do not change public readiness
+timing, publication checks, or request deadlines.
+
 ## Prometheus Metrics
 
 Scrape each service's configured metrics port and both ctld HA endpoints. ctld
@@ -46,8 +62,48 @@ High-value claim metrics include:
 - `manager_runtime_slot_claim_phase_duration_seconds`;
 - HTTP request duration/error metrics at regional-gateway, scheduler,
   cluster-gateway, and manager; and
-- the signed regional-gateway-to-procd SLO report produced by the acceptance
+- the canonical regional-gateway-to-procd SLO timing recorded by the acceptance
   tool.
+
+`tools/runtime-slot-slo` report v7 keeps the canonical `command_ready`
+Server-Timing metric for authenticated procd API readiness. That boundary does
+not prove that a user shell, Node, or Codex executable has started. The tool also
+offers real CMD contexts through the public regional endpoint as independent
+diagnostics, with exit code zero, terminal state, and matching stdout for every
+configured workload step. Use `--workload none` for the sandbox-startup gate:
+no user executable runs, but all runtime/readiness publication checks remain.
+
+Read `wall` as the full public claim round trip, `first_command` as public
+claim-start-to-first-executable completion, and `workload_wall` as claim start
+through all ordered command steps. These client wall measurements are separate
+from the canonical ingress timer and exclude cleanup. Failed or missing command
+evidence fails the selected workload, not a previously successful startup. A
+later workload step is not an independent cold first command.
+
+The default workload executes a shell; `--workload coding-agent` executes Node
+then Codex startup, and `--workload-file` supplies literal argv and stdout
+expectations. `startup_passed` requires every claim's authenticated readiness and
+complete response within the one-second hard limit; failed/unattempted claims
+cannot disappear from that decision. The p50 engineering target is diagnostic.
+The optional first-command limit defaults to zero (disabled) and affects only
+workload acceptance. `passed` additionally checks cleanup and any selected
+workload's result; `workload_measured: false` supplies no executable evidence.
+Report consumers must require v7 and distinguish startup from user-process
+latency, without reinterpreting old report decisions. For the existing
+canary, explicitly set `--request-timeout 10s`; the tool's original 15-second
+default remains unchanged. Node and Codex share one 10-second command budget
+after claim, and a later-step timeout fails the workload even when the first
+command succeeded. Command contexts have bounded TTL and all known
+claimed sandboxes are deleted and checked for public absence after each batch,
+including command failures. Production-width and cold/hot scenario labels still
+require the corresponding runtime evidence.
+
+Initial RootFS publication uses a per-sandbox row lock for idempotence and
+deletion fencing. Claims of different sandboxes share a read lock on the ready
+base artifact, so template reuse does not require an exclusive artifact queue.
+Treat database errors during this phase as failed claims, even if the remaining
+guests meet the latency gate; client retries must not hide those failures in a
+high-density acceptance report.
 
 Monitor the complete capacity conjunction rather than carrier count alone:
 
@@ -82,6 +138,48 @@ Alert when a node has no synchronized standby, when boot identity changes
 without cleanup progress, when the primary cannot renew writers, or when lease
 cgroups remain occupied after termination was requested.
 
+Distinguish retained, already-reclaimed external proof history from unresolved
+writers, physical artifacts, and unreleased capacity. Quiet history is excluded
+from periodic recovery until its local expiry deadline; a node returning after
+the regional proof-retention window can expire eligible exact-binding history
+without an online lookup. Record count alone is not evidence of a capacity leak.
+See [Manager Node Authority](/docs/self-hosted/configuration#manager-node-authority)
+for the expiry and physical-absence conditions.
+
+An externally crash-fenced session with a retained branch is not quiet history.
+Its branch can hold the shared node retirement reserve and delay other
+sandboxes' cleanup. Periodic recovery checks regional terminal authority without
+waiting for the old consumer lease or attach grace; artifact deletion still
+requires exact regional authorization and local physical-absence proof. Normal
+unfenced consumers remain protected by their durable leases.
+
+Monitor carrier replacement separately from guest exit and physical cleanup.
+Nomad can report a system-job stop evaluation complete with zero queued
+allocations before it has placed the replacement carrier. Terminal reconciliation
+requests another exact-allocation evaluation after observing terminal catalog
+state, even if the direct client artifacts are already absent. An unacknowledged
+request stays in the existing slot reconciliation queue; physical absence must
+not skip it. This does not restart an old carrier, change the job's desired count,
+admit a drained node, or replace the writer and local physical-absence proofs.
+
+Distinguish task recovery failure from replacement delay. The driver persists
+normalized command/security configuration in version 2 task handles because Nomad
+does not retain its private raw driver configuration across client database
+persistence. An `unsupported persisted driver handle version` or
+`persisted driver configuration is missing` error rejects recovery; replacing it
+with default configuration or relaxing allocation/boot identity is unsafe. Plan
+upgrades to replace legacy carriers through normal lifecycle reconciliation.
+After a recovery rejection, verify new allocation readiness separately from
+terminal cleanup. Neither a successful driver recovery nor a refilled pool is
+evidence that cold claim plus the first real command meets the latency gate.
+
+Track unresolved session age and actual cleanup progress alongside retry logs
+and regional verification errors, including HTTP 403. Bounded concurrency and
+backoff can reduce attempts without resolving a writer; a nil reconciliation
+error or a renewed consumer heartbeat is not recovery progress. Retry state
+resets after restart and is not an audit record. Neither retry suppression nor
+local proof deletion demonstrates a new terminal release or an SLO pass.
+
 ### RootFS And Metering
 
 Manager exports:
@@ -97,6 +195,61 @@ Manager exports:
 Also monitor importer leases, materializer backlog bytes, dirty-tail retirement
 reserve, conditional-publication failures, S3 request rate/status, PostgreSQL
 writer readiness, database pool saturation, and local branch-disk usage.
+
+The node session owner's shared RootFS read cache admits at most eight distinct
+mapping/data source loads across its generation Readers, including coalesced
+bulk reads. Slots are held through checksum verification and cache admission;
+verified hits and callers sharing an existing flight do not consume another
+slot. Disabling cached payload storage does not disable this bound. Queued
+Readers rotate after each grant, so one generation's backlog does not monopolize
+the node. Admission and context-aware transport use the node I/O lifetime, not
+the short-lived claim request. This bounds source-load concurrency, not total
+process memory, all S3 HTTP requests, or wall-clock claim/first-command latency;
+production-width cold-node and cached-node acceptance remains necessary.
+
+Within the default 128MiB RootFS read-cache budget, recently used decoded
+mapping pages have up to 16MiB of protection from bulk data eviction. For smaller
+caches, protection is at most one eighth of their budget. This is not another
+cache or prewarming: pages enter only after demand reads and validation, and
+oversized or displaced pages use the ordinary LRU space. Mixed-image data can
+still exceed the remaining cache capacity and cause remote reads on subsequent
+claims. Measure new sandboxes with retained node caches separately from empty
+node caches; neither case alone establishes a production latency guarantee.
+
+The default durable importer still publishes format-one RootFS generations.
+The opt-in format-two block-map library stores compressed range addresses in
+authenticated mappings and retains decoded checksum verification and shared
+source admission. This implementation is not a production activation or a
+two-second startup result. Privileged lifecycle, populated-size/mapping-depth,
+and production-width claim plus first-command acceptance remain outstanding;
+do not equate a large sparse logical device with a fully populated RootFS.
+
+Incremental RootFS publication and batch materialization now rewrite only
+affected mapping paths, retaining untouched immutable child locators. Batch
+members share a bounded verified mapping cache and pack rewritten pages by
+dependency level. A small edit no longer requires expanding all base extents;
+compressed subviews also avoid downloading unchanged data merely to split a
+mapping. These are storage-path work bounds, not a claim latency or aggregate
+node memory guarantee. Full-image import and production-width populated RootFS
+tests remain separate acceptance requirements.
+
+Full-image block publication streams mapping pages instead of retaining all
+nonzero range entries. The live mapping frontier contains at most one fanout of
+child locators per level; completed page payloads are released. Each sequential
+builder reuses one compression encoder and closes it at completion, and zero
+image ranges reuse the input buffer. The immutable-object inventory still
+grows with distinct published objects, and concurrent import/checkpoint jobs
+have their own bounded buffers. Monitor total allocation, peak RSS, staging
+disk, object inventory and job concurrency separately. These implementation
+bounds do not establish populated-image or production-density startup results.
+
+RootFS object-size audits compare catalog payload bytes with content size before
+envelope encryption. The generic object-store `Head`/`List` sizes still describe
+physical stored bytes, including encryption overhead. Audits read bounded, fresh
+encryption-header metadata and do not scan whole object bodies or preload a
+tenant RootFS. A successful size check does not prove content integrity: normal
+reads still require frame authentication and expected payload checksums. Missing
+or unreadable metadata and size mismatches remain audit failures.
 
 ## Per-Sandbox Historical Data
 

@@ -199,23 +199,35 @@ type RootFSMaintenanceConfig struct {
 // RootFSImporterConfig configures the active-active digest-pinned OCI to
 // immutable block artifact worker.
 type RootFSImporterConfig struct {
-	Disabled          bool     `yaml:"disabled" json:"-"`
-	WorkerID          string   `yaml:"worker_id" json:"-"`
-	Interval          Duration `yaml:"interval" json:"-"`
-	DiscoveryInterval Duration `yaml:"discovery_interval" json:"-"`
-	DiscoveryPageSize int      `yaml:"discovery_page_size" json:"-"`
-	BuildTimeout      Duration `yaml:"build_timeout" json:"-"`
-	LeaseTTL          Duration `yaml:"lease_ttl" json:"-"`
-	LeaseRenewal      Duration `yaml:"lease_renewal" json:"-"`
-	MaxAttempts       int      `yaml:"max_attempts" json:"-"`
-	GarbageInterval   Duration `yaml:"garbage_interval" json:"-"`
-	TerminalRetention Duration `yaml:"terminal_retention" json:"-"`
-	GarbageLimit      int      `yaml:"garbage_limit" json:"-"`
-	WorkRoot          string   `yaml:"work_root" json:"-"`
-	ProcdPath         string   `yaml:"procd_path" json:"-"`
-	ProcdProtocol     string   `yaml:"procd_protocol" json:"-"`
-	ProcdDigest       string   `yaml:"procd_digest" json:"-"`
-	PlainHTTPHosts    []string `yaml:"plain_http_hosts" json:"-"`
+	// FormatGeneration selects new image artifacts, not existing snapshots.
+	// Zero preserves format 1; format 2 requires upgraded readers on all nodes.
+	FormatGeneration int `yaml:"format_generation" json:"-"`
+	// DataRangeBytes opts image imports and selection into an exact geometry.
+	// Zero preserves legacy artifact selection and the default build geometry.
+	DataRangeBytes int `yaml:"data_range_bytes" json:"-"`
+	// DataLayoutPolicy is an opt-in image-import/selection policy. Empty retains
+	// legacy segmentation; existing digest-bound generations are unaffected.
+	DataLayoutPolicy string `yaml:"data_layout_policy" json:"-"`
+	// MappingGroupPolicy opts only new image imports into bounded metadata packs.
+	// Empty preserves old imports; enable only after all managers are upgraded.
+	MappingGroupPolicy string   `yaml:"mapping_group_policy" json:"-"`
+	Disabled           bool     `yaml:"disabled" json:"-"`
+	WorkerID           string   `yaml:"worker_id" json:"-"`
+	Interval           Duration `yaml:"interval" json:"-"`
+	DiscoveryInterval  Duration `yaml:"discovery_interval" json:"-"`
+	DiscoveryPageSize  int      `yaml:"discovery_page_size" json:"-"`
+	BuildTimeout       Duration `yaml:"build_timeout" json:"-"`
+	LeaseTTL           Duration `yaml:"lease_ttl" json:"-"`
+	LeaseRenewal       Duration `yaml:"lease_renewal" json:"-"`
+	MaxAttempts        int      `yaml:"max_attempts" json:"-"`
+	GarbageInterval    Duration `yaml:"garbage_interval" json:"-"`
+	TerminalRetention  Duration `yaml:"terminal_retention" json:"-"`
+	GarbageLimit       int      `yaml:"garbage_limit" json:"-"`
+	WorkRoot           string   `yaml:"work_root" json:"-"`
+	ProcdPath          string   `yaml:"procd_path" json:"-"`
+	ProcdProtocol      string   `yaml:"procd_protocol" json:"-"`
+	ProcdDigest        string   `yaml:"procd_digest" json:"-"`
+	PlainHTTPHosts     []string `yaml:"plain_http_hosts" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {

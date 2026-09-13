@@ -3,7 +3,6 @@ package rootfsblock
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 
@@ -27,12 +26,11 @@ type BatchBuildResult struct {
 }
 
 type batchPreparedGeneration struct {
-	id          string
-	descriptor  Descriptor
-	totalBlocks uint64
-	entries     []MappingEntry
-	root        *publishedPage
-	pages       []publishedPage
+	id         string
+	descriptor Descriptor
+	entries    []MappingEntry
+	root       *publishedPage
+	plan       *mappingEditPlan
 }
 
 type batchDataItem struct {
@@ -54,6 +52,7 @@ type batchObjectBuilder struct {
 	bytes      int64
 	references map[string]ObjectReference
 	owners     []map[string]ObjectReference
+	encoder    rangeEncoder
 }
 
 // BuildIncrementalGenerationsBatch materializes multiple complete logical
@@ -73,7 +72,7 @@ func BuildIncrementalGenerationsBatch(
 	if len(inputs) == 0 {
 		return BatchBuildResult{}, fmt.Errorf("at least one incremental generation is required")
 	}
-	options, err := NormalizeBuildOptions(options)
+	options, err := inheritBuildFormat(options, inputs[0].Descriptor)
 	if err != nil {
 		return BatchBuildResult{}, err
 	}
@@ -82,10 +81,18 @@ func BuildIncrementalGenerationsBatch(
 		references: make(map[string]ObjectReference),
 		owners:     make([]map[string]ObjectReference, len(inputs)),
 	}
+	defer builder.encoder.close()
 	prepared := make([]batchPreparedGeneration, len(inputs))
+	cache, err := NewReadCache(DefaultReadCacheBytes)
+	if err != nil {
+		return BatchBuildResult{}, err
+	}
 	dirty := make([]batchDataItem, 0)
 	seenIDs := make(map[string]struct{}, len(inputs))
 	for index, input := range inputs {
+		if input.Descriptor.Version != options.formatVersion() {
+			return BatchBuildResult{}, fmt.Errorf("batch cannot mix RootFS formats")
+		}
 		if err := ctx.Err(); err != nil {
 			return BatchBuildResult{}, err
 		}
@@ -97,7 +104,7 @@ func BuildIncrementalGenerationsBatch(
 			return BatchBuildResult{}, fmt.Errorf("batch generation ID %q is duplicated", input.ID)
 		}
 		seenIDs[input.ID] = struct{}{}
-		generation, items, err := prepareBatchIncrementalGeneration(ctx, source, input, index)
+		generation, items, err := prepareBatchIncrementalGeneration(ctx, source, input, index, cache)
 		if err != nil {
 			return BatchBuildResult{}, fmt.Errorf("prepare generation %q: %w", input.ID, err)
 		}
@@ -118,10 +125,10 @@ func BuildIncrementalGenerationsBatch(
 			return BatchBuildResult{}, fmt.Errorf("generation %q has no mapping root", generation.id)
 		}
 		descriptor := Descriptor{
-			Version: DescriptorVersion, LogicalSizeBytes: generation.descriptor.LogicalSizeBytes,
+			Version: options.formatVersion(), LogicalSizeBytes: generation.descriptor.LogicalSizeBytes,
 			BlockSizeBytes: LogicalBlockSize,
 			MappingRoot: MappingRootLocator{
-				Version:    MappingPageVersion,
+				Version:    options.formatVersion(),
 				RootDigest: digest.FromBytes(generation.root.payload).String(),
 				Object:     generation.root.object,
 			},
@@ -151,6 +158,7 @@ func prepareBatchIncrementalGeneration(
 	source RangeSource,
 	input BatchIncrementalInput,
 	owner int,
+	cache *ReadCache,
 ) (batchPreparedGeneration, []batchDataItem, error) {
 	if err := input.Descriptor.Validate(); err != nil {
 		return batchPreparedGeneration{}, nil, err
@@ -160,7 +168,7 @@ func prepareBatchIncrementalGeneration(
 	}
 	base := input.Descriptor
 	base.CompositeTail = nil
-	reader, err := NewReader(source, base, DefaultReadCacheBytes)
+	reader, err := NewReaderWithCacheContext(ctx, source, base, cache)
 	if err != nil {
 		return batchPreparedGeneration{}, nil, err
 	}
@@ -174,11 +182,7 @@ func prepareBatchIncrementalGeneration(
 	for index, update := range updates {
 		blocks[index] = update.Block
 	}
-	baseEntries, err := reader.dataEntries(ctx)
-	if err != nil {
-		return batchPreparedGeneration{}, nil, err
-	}
-	unchanged, err := splitUnchangedEntries(reader, baseEntries, blocks)
+	plan, err := prepareMappingEdits(ctx, reader, blocks)
 	if err != nil {
 		return batchPreparedGeneration{}, nil, err
 	}
@@ -198,8 +202,7 @@ func prepareBatchIncrementalGeneration(
 		})
 	}
 	return batchPreparedGeneration{
-		id: input.ID, descriptor: input.Descriptor, totalBlocks: totalBlocks,
-		entries: unchanged,
+		id: input.ID, descriptor: input.Descriptor, plan: plan,
 	}, dirty, nil
 }
 
@@ -220,138 +223,66 @@ func (b *batchObjectBuilder) publishDataItems(generations []batchPreparedGenerat
 		sort.Slice(generations[index].entries, func(left, right int) bool {
 			return generations[index].entries[left].LogicalStart < generations[index].entries[right].LogicalStart
 		})
-		if len(generations[index].entries) > MaxMappingEntriesPerGeneration {
-			return fmt.Errorf("generation %q has too many mapping entries", generations[index].id)
+		if err := generations[index].plan.addData(generations[index].entries); err != nil {
+			return err
 		}
+		generations[index].entries = nil
 	}
 	return nil
 }
 
-type batchPagePlan struct {
-	owner int
-	root  bool
-	page  MappingPage
-}
-
 func (b *batchObjectBuilder) publishMappingTrees(generations []batchPreparedGeneration) error {
-	plans := make([]batchPagePlan, 0, len(generations))
-	for owner := range generations {
-		generation := &generations[owner]
-		if len(generation.entries) <= b.options.PageEntries {
-			plans = append(plans, batchPagePlan{owner: owner, root: true, page: MappingPage{
-				StartBlock: 0, BlockCount: generation.totalBlocks, Entries: generation.entries,
-			}})
-			continue
-		}
-		for start := 0; start < len(generation.entries); start += b.options.PageEntries {
-			end := min(start+b.options.PageEntries, len(generation.entries))
-			first := generation.entries[start].LogicalStart
-			last := generation.entries[end-1].LogicalStart + uint64(generation.entries[end-1].BlockCount)
-			plans = append(plans, batchPagePlan{owner: owner, page: MappingPage{
-				StartBlock: first, BlockCount: last - first, Entries: generation.entries[start:end],
-			}})
-		}
+	plans := make([]*mappingEditPlan, len(generations))
+	for index := range generations {
+		plans[index] = generations[index].plan
 	}
-	if err := b.publishPagePlans(generations, plans); err != nil {
-		return err
-	}
-	for {
-		plans = plans[:0]
-		pending := 0
-		for owner := range generations {
-			generation := &generations[owner]
-			if generation.root != nil {
-				continue
+	err := publishMappingEdits(b.ctx, plans, b.options.PageEntries, func(pages []mappingEditPage) ([]publishedPage, error) {
+		payloads := make([]batchPayload, len(pages))
+		for index, page := range pages {
+			page.page.Version = b.options.FormatVersion
+			payload, err := EncodeMappingPage(page.page)
+			if err != nil {
+				return nil, err
 			}
-			pending++
-			pages := generation.pages
-			if len(pages) == 0 {
-				return fmt.Errorf("generation %q has no mapping pages", generation.id)
-			}
-			if len(pages) <= b.options.PageEntries {
-				page, err := batchMappingParentPage(pages, pages[0].level+1, true, generation.totalBlocks)
-				if err != nil {
-					return err
-				}
-				plans = append(plans, batchPagePlan{owner: owner, root: true, page: page})
-				continue
-			}
-			for start := 0; start < len(pages); start += b.options.PageEntries {
-				end := min(start+b.options.PageEntries, len(pages))
-				page, err := batchMappingParentPage(pages[start:end], pages[start].level+1, false, generation.totalBlocks)
-				if err != nil {
-					return err
-				}
-				plans = append(plans, batchPagePlan{owner: owner, page: page})
-			}
+			payloads[index] = batchPayload{owner: page.owner, payload: payload}
 		}
-		if pending == 0 {
-			return nil
-		}
-		for index := range generations {
-			if generations[index].root == nil {
-				generations[index].pages = nil
-			}
-		}
-		if err := b.publishPagePlans(generations, plans); err != nil {
-			return err
-		}
-	}
-}
-
-func batchMappingParentPage(children []publishedPage, level uint8, root bool, totalBlocks uint64) (MappingPage, error) {
-	if len(children) == 0 || level == 0 {
-		return MappingPage{}, fmt.Errorf("mapping page children or level are invalid")
-	}
-	entries := make([]MappingEntry, 0, len(children))
-	for _, child := range children {
-		if child.count > math.MaxUint32 {
-			return MappingPage{}, fmt.Errorf("mapping child covers too many blocks")
-		}
-		entries = append(entries, MappingEntry{
-			LogicalStart: child.start, BlockCount: uint32(child.count), Kind: MappingEntryChild, Object: child.object,
-		})
-	}
-	start := children[0].start
-	count := children[len(children)-1].start + children[len(children)-1].count - start
-	if root {
-		start = 0
-		count = totalBlocks
-	}
-	return MappingPage{Level: level, StartBlock: start, BlockCount: count, Entries: entries}, nil
-}
-
-func (b *batchObjectBuilder) publishPagePlans(generations []batchPreparedGeneration, plans []batchPagePlan) error {
-	payloads := make([]batchPayload, len(plans))
-	encoded := make([][]byte, len(plans))
-	for index, plan := range plans {
-		payload, err := EncodeMappingPage(plan.page)
+		locators, err := b.publishPayloads("map-packs", ObjectKindMappingPage, payloads)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		encoded[index] = payload
-		payloads[index] = batchPayload{owner: plan.owner, payload: payload}
-	}
-	locators, err := b.publishPayloads("map-packs", ObjectKindMappingPage, payloads)
+		published := make([]publishedPage, len(pages))
+		for index, page := range pages {
+			published[index] = publishedPage{
+				start: page.page.StartBlock, count: page.page.BlockCount, level: page.page.Level,
+				object: locators[index], payload: payloads[index].payload,
+			}
+		}
+		return published, nil
+	})
 	if err != nil {
 		return err
 	}
-	for index, plan := range plans {
-		page := publishedPage{
-			start: plan.page.StartBlock, count: plan.page.BlockCount, level: plan.page.Level,
-			object: locators[index], payload: encoded[index],
-		}
-		if plan.root {
-			generations[plan.owner].root = &page
-		} else {
-			generations[plan.owner].pages = append(generations[plan.owner].pages, page)
-		}
+	for index := range generations {
+		generations[index].root = &plans[index].root.replacements[0]
 	}
 	return nil
 }
 
 func (b *batchObjectBuilder) publishPayloads(kind, objectKind string, items []batchPayload) ([]ObjectRange, error) {
 	locators := make([]ObjectRange, len(items))
+	stored := make([]batchPayload, len(items))
+	for index, item := range items {
+		stored[index] = item
+		locators[index] = ObjectRange{Length: int64(len(item.payload)), Checksum: digest.FromBytes(item.payload).String()}
+		if b.options.formatVersion() == CompressedFormatVersion {
+			var err error
+			stored[index].payload, locators[index], err = b.encoder.encode(b.ctx, item.payload)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	items = stored
 	for start := 0; start < len(items); {
 		if err := b.ctx.Err(); err != nil {
 			return nil, err
@@ -387,10 +318,7 @@ func (b *batchObjectBuilder) publishPayloads(kind, objectKind string, items []ba
 		offset := int64(0)
 		for index := start; index < end; index++ {
 			item := items[index]
-			locators[index] = ObjectRange{
-				Key: key, Offset: offset, Length: int64(len(item.payload)),
-				Checksum: digest.FromBytes(item.payload).String(),
-			}
+			locators[index].Key, locators[index].Offset = key, offset
 			b.referenceOwner(item.owner, reference)
 			offset += int64(len(item.payload))
 		}

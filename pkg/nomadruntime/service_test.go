@@ -248,13 +248,16 @@ func TestRootFSSessionReconcileSelectionUsesDurableConsumerLease(t *testing.T) {
 
 	terminal := rootfssession.RecoverySession{
 		Kind: rootfssession.RecoveryCrashAbandon, ExternalCrash: true, BranchRemoved: true,
-		CrashRequestedAt: now.Add(-runtimeSlotProofRetention),
+		CrashRequestedAt: now.Add(-rootfssession.ExternalTerminalProofRetention),
 	}
 	require.False(t, rootFSSessionNeedsReconciliation(terminal, now, true),
-		"a purged allocation must not hot-poll a retained terminal proof")
-	terminal.CrashRequestedAt = now.Add(-rootfssession.ExternalTerminalProofRetention)
+		"missing proof expiry must fail closed even for a forced scan")
+	terminal.ExternalProofExpiresAt = now.Add(time.Hour)
+	require.False(t, rootFSSessionNeedsReconciliation(terminal, now, true),
+		"an old request must not shorten retention after late physical cleanup")
+	terminal.ExternalProofExpiresAt = now
 	require.True(t, rootFSSessionNeedsReconciliation(terminal, now, false),
-		"an expired terminal proof must be verified and forgotten")
+		"an expired terminal proof must be considered for exact local retirement")
 }
 
 func TestNodeRuntimeThrottlesCompletedProofPruning(t *testing.T) {

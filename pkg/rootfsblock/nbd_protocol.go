@@ -9,6 +9,8 @@ import (
 	"net"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -30,6 +32,12 @@ const (
 	nbdReplyHeaderBytes   = 16
 	DefaultNBDMaxRequest  = 8 << 20
 
+	// Small kernel reads can all wait on one larger immutable range. A wider
+	// demand window can reach independent ranges, while separately retaining
+	// the original eight-maximum-payload budget through the complete reply.
+	nbdMaxConcurrentReads = 64
+	nbdReadBufferSlots    = 8
+
 	// NBDDeviceSectorSize is the logical sector size advertised to Linux. It
 	// is deliberately independent from LogicalBlockSize, which is the
 	// persistence mapping granularity. The canonical XFS artifacts use
@@ -37,9 +45,12 @@ const (
 	NBDDeviceSectorSize = 512
 )
 
+var errNBDRequestMagic = errors.New("invalid NBD request magic")
+
 // WritableBlockDevice is the persistence boundary exported to the Linux NBD
 // transport. Flush makes all previously completed writes durable on the
-// current node; it does not imply regional durability.
+// current node; it does not imply regional durability. ReadAt follows the
+// io.ReaderAt contract, including support for concurrent calls.
 type WritableBlockDevice interface {
 	io.ReaderAt
 	io.WriterAt
@@ -50,16 +61,21 @@ type WritableBlockDevice interface {
 }
 
 // NBDTransmissionServer serves the kernel's simple NBD transmission protocol
-// over an already-connected Unix socket. Requests are executed in wire order,
-// which provides an intentionally conservative ordering baseline for XFS.
+// over an already-connected Unix socket. Consecutive valid reads may execute
+// and reply out of order. Every other request is a barrier: earlier reads and
+// their replies finish before it executes, and its reply precedes later work.
 type NBDTransmissionServer struct {
 	Backend         WritableBlockDevice
 	MaxRequestBytes uint32
 	// OnBackendError observes the original storage error before it is reduced
-	// to an NBD errno. It must not block the transmission loop.
+	// to an NBD errno. Calls are serialized, but concurrent read errors may be
+	// observed out of wire order. It must not block the transmission loop.
 	OnBackendError func(error)
 }
 
+// Once transmission starts, Serve closes the connection on termination and
+// joins all backend calls and error observers before returning, including on
+// cancellation or socket error.
 func (s NBDTransmissionServer) Serve(ctx context.Context, connection net.Conn) error {
 	if s.Backend == nil || connection == nil {
 		return fmt.Errorf("NBD backend and connection are required")
@@ -71,27 +87,47 @@ func (s NBDTransmissionServer) Serve(ctx context.Context, connection net.Conn) e
 	if maximum < LogicalBlockSize {
 		return fmt.Errorf("NBD maximum request must be at least %d bytes", LogicalBlockSize)
 	}
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	server := nbdTransmission{
 		backend: s.Backend, connection: connection, maximum: maximum,
 		onBackendError: s.OnBackendError,
+		ctx:            runCtx, fail: cancel, readSlots: make(chan struct{}, nbdMaxConcurrentReads),
+		readBytes: semaphore.NewWeighted(int64(maximum) * nbdReadBufferSlots),
 	}
-	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	stop := context.AfterFunc(runCtx, func() { _ = connection.Close() })
 	defer stop()
+	var err error
 	for {
-		disconnect, err := server.serveOne()
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return err
-		}
-		if disconnect {
-			return nil
+		var disconnect bool
+		disconnect, err = server.serveOne()
+		if err != nil || disconnect {
+			break
 		}
 	}
+	// A reply failure cancels admission and closes the socket even if the
+	// parser is blocked reading a header or waiting for read admission. Preserve
+	// that original failure rather than the resulting closed-socket error.
+	cancel(err)
+	if err != nil {
+		err = context.Cause(runCtx)
+	}
+	_ = connection.Close()
+	// ReaderAt has no cancellation method. Returning before every call and
+	// error observer finishes would let KernelNBDDevice.Close proceed into
+	// terminal branch cleanup with backend operations still active.
+	server.reads.Wait()
+	// Closing a failed transmission wakes NBD_DO_IT, whose waiter cancels
+	// our parent lifetime while reads may still be draining. Keep an earlier
+	// transport failure; only report parent cancellation when it caused the
+	// shutdown (or followed a clean disconnect).
+	if ctxErr := ctx.Err(); ctxErr != nil && (err == nil || errors.Is(err, context.Cause(ctx))) {
+		return ctxErr
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 type nbdTransmission struct {
@@ -100,6 +136,12 @@ type nbdTransmission struct {
 	maximum        uint32
 	onBackendError func(error)
 	replyMu        sync.Mutex
+	backendErrorMu sync.Mutex
+	ctx            context.Context
+	fail           context.CancelCauseFunc
+	readSlots      chan struct{}
+	readBytes      *semaphore.Weighted
+	reads          sync.WaitGroup
 }
 
 type nbdRequest struct {
@@ -112,6 +154,47 @@ type nbdRequest struct {
 func (s *nbdTransmission) serveOne() (bool, error) {
 	request, err := readNBDRequest(s.connection)
 	if err != nil {
+		if errors.Is(err, errNBDRequestMagic) {
+			// A malformed header is still an ordering barrier. Transport errors
+			// instead abort immediately so blocked replies can be joined.
+			s.reads.Wait()
+		}
+		return false, err
+	}
+	if request.typeAndFlags == nbdCommandRead && request.length > 0 &&
+		request.length <= s.maximum && request.inRange(s.backend.Size()) {
+		select {
+		case s.readSlots <- struct{}{}:
+		case <-s.ctx.Done():
+			return false, s.ctx.Err()
+		}
+		if err := s.readBytes.Acquire(s.ctx, int64(request.length)); err != nil {
+			<-s.readSlots
+			return false, err
+		}
+		if err := s.ctx.Err(); err != nil {
+			s.readBytes.Release(int64(request.length))
+			<-s.readSlots
+			return false, err
+		}
+		s.reads.Add(1)
+		go func() {
+			defer s.reads.Done()
+			defer func() { <-s.readSlots }()
+			defer s.readBytes.Release(int64(request.length))
+			if s.ctx.Err() != nil {
+				return
+			}
+			s.serveRead(request)
+		}()
+		return false, nil
+	}
+
+	// Only valid READs bypass this barrier. In particular, an invalid READ or
+	// unknown command must not reply ahead of earlier reads or let later work
+	// pass it. WRITE payloads are not allocated or consumed until reads drain.
+	s.reads.Wait()
+	if err := s.ctx.Err(); err != nil {
 		return false, err
 	}
 	command := request.typeAndFlags & nbdCommandMask
@@ -127,7 +210,7 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 		}
 		return false, s.reply(request.handle, syscall.EINVAL, nil)
 	}
-	if request.offset > uint64(s.backend.Size()) || uint64(request.length) > uint64(s.backend.Size())-request.offset {
+	if !request.inRange(s.backend.Size()) {
 		if command == nbdCommandWrite {
 			return false, fmt.Errorf("out-of-range NBD write would desynchronize the connection")
 		}
@@ -136,21 +219,7 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 
 	switch command {
 	case nbdCommandRead:
-		if flags != 0 || request.length == 0 {
-			return false, s.reply(request.handle, syscall.EINVAL, nil)
-		}
-		payload := make([]byte, request.length)
-		n, readErr := s.backend.ReadAt(payload, int64(request.offset))
-		if readErr != nil || n != len(payload) {
-			if readErr == nil {
-				readErr = io.ErrUnexpectedEOF
-			}
-			s.observeBackendError(fmt.Errorf(
-				"read offset %d length %d: %w", request.offset, request.length, readErr,
-			))
-			return false, s.reply(request.handle, nbdErrno(readErr), nil)
-		}
-		return false, s.reply(request.handle, 0, payload)
+		return false, s.reply(request.handle, syscall.EINVAL, nil)
 
 	case nbdCommandWrite:
 		if flags & ^uint32(nbdCommandFlagFUA) != 0 || request.length == 0 {
@@ -159,6 +228,9 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 		payload := make([]byte, request.length)
 		if _, err := io.ReadFull(s.connection, payload); err != nil {
 			return false, fmt.Errorf("read NBD write payload: %w", err)
+		}
+		if err := s.ctx.Err(); err != nil {
+			return false, err
 		}
 		n, writeErr := s.backend.WriteAt(payload, int64(request.offset))
 		if writeErr == nil && n != len(payload) {
@@ -219,8 +291,32 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 	}
 }
 
+func (r nbdRequest) inRange(size int64) bool {
+	return size >= 0 && r.offset <= uint64(size) && uint64(r.length) <= uint64(size)-r.offset
+}
+
+func (s *nbdTransmission) serveRead(request nbdRequest) {
+	payload := make([]byte, request.length)
+	n, readErr := s.backend.ReadAt(payload, int64(request.offset))
+	if readErr != nil || n != len(payload) {
+		if readErr == nil {
+			readErr = io.ErrUnexpectedEOF
+		}
+		s.observeBackendError(fmt.Errorf(
+			"read offset %d length %d: %w", request.offset, request.length, readErr,
+		))
+		payload = nil
+	}
+	if s.ctx.Err() != nil {
+		return
+	}
+	_ = s.reply(request.handle, nbdErrno(readErr), payload)
+}
+
 func (s *nbdTransmission) observeBackendError(err error) {
 	if err != nil && s.onBackendError != nil {
+		s.backendErrorMu.Lock()
+		defer s.backendErrorMu.Unlock()
 		s.onBackendError(err)
 	}
 }
@@ -231,7 +327,7 @@ func readNBDRequest(reader io.Reader) (nbdRequest, error) {
 		return nbdRequest{}, err
 	}
 	if binary.BigEndian.Uint32(header[:4]) != nbdRequestMagic {
-		return nbdRequest{}, fmt.Errorf("invalid NBD request magic")
+		return nbdRequest{}, errNBDRequestMagic
 	}
 	request := nbdRequest{
 		typeAndFlags: binary.BigEndian.Uint32(header[4:8]),
@@ -242,13 +338,23 @@ func readNBDRequest(reader io.Reader) (nbdRequest, error) {
 	return request, nil
 }
 
-func (s *nbdTransmission) reply(handle [8]byte, errno syscall.Errno, payload []byte) error {
+func (s *nbdTransmission) reply(handle [8]byte, errno syscall.Errno, payload []byte) (err error) {
 	header := make([]byte, nbdReplyHeaderBytes)
 	binary.BigEndian.PutUint32(header[:4], nbdReplyMagic)
 	binary.BigEndian.PutUint32(header[4:8], uint32(errno))
 	copy(header[8:16], handle[:])
 	s.replyMu.Lock()
 	defer s.replyMu.Unlock()
+	defer func() {
+		// Cancel while still owning the frame lock so no other worker can
+		// append a reply after a partially written frame.
+		if err != nil {
+			s.fail(err)
+		}
+	}()
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	if err := writeFull(s.connection, header); err != nil {
 		return fmt.Errorf("write NBD reply: %w", err)
 	}

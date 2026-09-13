@@ -92,18 +92,21 @@ type Config struct {
 // Result describes one bounded worker pass without including remote errors,
 // credentials, or local staging paths.
 type Result struct {
-	Leased          int
-	Ready           int
-	Released        int
-	Abandoned       int
-	LeaseUncertain  int
-	Failed          int
-	RecoveredLeases int
-	PurgedReady     int
-	PurgedAbandoned int
-	EnqueuedObjects int
-	FailureCategory string
-	OperationID     string
+	Leased             int
+	Ready              int
+	Released           int
+	Abandoned          int
+	LeaseUncertain     int
+	Failed             int
+	RecoveredLeases    int
+	PurgedReady        int
+	PurgedAbandoned    int
+	EnqueuedObjects    int
+	FailureCategory    string
+	OperationID        string
+	DataLayoutPolicy   string
+	DataLayoutFallback string
+	MappingGroupPolicy string
 }
 
 const (
@@ -312,6 +315,9 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 	}
 	if firstErr == nil || err == nil {
 		result.Ready = 1
+		result.DataLayoutPolicy = built.DataLayoutPolicy
+		result.DataLayoutFallback = built.DataLayoutFallback
+		result.MappingGroupPolicy = built.MappingGroupPolicy
 		return result, nil
 	}
 	publicationErr := err

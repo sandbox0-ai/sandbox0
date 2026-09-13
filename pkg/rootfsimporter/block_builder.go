@@ -23,6 +23,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ocirootfs"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
@@ -36,6 +37,13 @@ type OCIUnpacker interface {
 // the block-map builder.
 type FilesystemImageBuilder interface {
 	Build(context.Context, string, string, int64) error
+}
+
+// FilesystemDataRangeBuilder supplies a fully unmounted image and either a
+// complete preferred plan or an explicit whole-image budget fallback. A regular
+// FilesystemImageBuilder cannot silently satisfy a file-range policy request.
+type FilesystemDataRangeBuilder interface {
+	BuildWithBoundedDataRanges(context.Context, string, string, int64, int) (rootfsartifact.XFSDataRangePlan, error)
 }
 
 // BlockBuilder turns a verified OCI root into immutable block objects. It
@@ -66,6 +74,7 @@ type BuildRequest struct {
 	Image            ocirootfs.Request
 	LogicalSizeBytes int64
 	BlockOptions     rootfsblock.BuildOptions
+	DataLayoutPolicy string
 }
 
 // MaterializedGenerationBuildRequest builds user-state output rather than a
@@ -93,13 +102,17 @@ type BuildResult struct {
 	LogicalSizeBytes int64
 	// DescriptorDigest identifies the block descriptor only. The final ready
 	// artifact identity must additionally bind platform and procd compatibility.
-	DescriptorDigest digest.Digest
-	BaseBlockRoot    digest.Digest
-	Descriptor       rootfsblock.Descriptor
-	DescriptorBytes  []byte
-	Objects          int
-	Bytes            int64
-	References       []rootfsblock.ObjectReference
+	DescriptorDigest     digest.Digest
+	BaseBlockRoot        digest.Digest
+	Descriptor           rootfsblock.Descriptor
+	DescriptorBytes      []byte
+	Objects              int
+	Bytes                int64
+	References           []rootfsblock.ObjectReference
+	DataLayoutPolicy     string
+	DataLayoutRangeBytes int
+	DataLayoutFallback   string
+	MappingGroupPolicy   string
 }
 
 // MaterializedGenerationBuildResult contains only the evidence needed to

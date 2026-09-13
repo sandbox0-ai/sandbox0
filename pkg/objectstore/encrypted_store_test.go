@@ -73,7 +73,7 @@ func TestEncryptedStorePlaintextRange(t *testing.T) {
 	}
 }
 
-func TestEncryptedStoreRangeFetchesOnlyRequiredCiphertextFrames(t *testing.T) {
+func TestEncryptedStoreRangeFetchesBoundedHeaderProbeAndRequiredCiphertextFrames(t *testing.T) {
 	base := NewMemoryStore(t.Name())
 	recording := &recordingRangeStore{ContextConditionalStore: base.(ContextConditionalStore)}
 	store := Encrypting(recording, EncryptionConfig{
@@ -114,8 +114,7 @@ func TestEncryptedStoreRangeFetchesOnlyRequiredCiphertextFrames(t *testing.T) {
 	headerEnd := prefixBytes + headerBytes
 	frameBytes := int64(4 + 8 + 16)
 	want := []rangeReadCall{
-		{off: 0, limit: prefixBytes},
-		{off: prefixBytes, limit: headerBytes},
+		{off: 0, limit: encryptedObjectHeaderProbeBytes},
 		{off: headerEnd + 4*frameBytes, limit: frameBytes},
 	}
 	if len(recording.gets) != len(want) {

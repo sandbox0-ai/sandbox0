@@ -9,8 +9,6 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const MaxMappingEntriesPerGeneration = 4 << 20
-
 // BuildIncrementalGeneration publishes a new complete mapping root by
 // structurally reusing every unchanged immutable data range and replacing
 // only the supplied final block values. It never republishes unchanged data.
@@ -77,13 +75,17 @@ func buildIncrementalGeneration(
 	if source == nil || publisher == nil {
 		return BuildResult{}, fmt.Errorf("range source and publisher are required")
 	}
-	options, err := NormalizeBuildOptions(options)
+	options, err := inheritBuildFormat(options, base)
 	if err != nil {
 		return BuildResult{}, err
 	}
 	materializedBase := base
 	materializedBase.CompositeTail = nil
-	reader, err := NewReader(source, materializedBase, DefaultReadCacheBytes)
+	cache, err := NewReadCache(0)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	reader, err := NewReaderWithCacheContext(ctx, source, materializedBase, cache)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -103,7 +105,7 @@ func buildIncrementalGeneration(
 		}
 		blocks = mergeDirtyBlocks(baseBlocks, blocks)
 	}
-	baseEntries, err := reader.dataEntries(ctx)
+	plan, err := prepareMappingEdits(ctx, reader, blocks)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -111,27 +113,33 @@ func buildIncrementalGeneration(
 		ctx: ctx, publisher: publisher, options: options,
 		references: make(map[string]ObjectReference),
 	}
-	unchanged, err := splitUnchangedEntries(reader, baseEntries, blocks)
+	defer state.encoder.close()
+	dirty, err := state.publishBlockUpdates(updates, blocks, plan.leafEnd)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	dirty, err := state.publishBlockUpdates(updates, blocks)
+	if err := plan.addData(dirty); err != nil {
+		return BuildResult{}, err
+	}
+	err = publishMappingEdits(ctx, []*mappingEditPlan{plan}, options.PageEntries, func(pages []mappingEditPage) ([]publishedPage, error) {
+		result := make([]publishedPage, len(pages))
+		for index, page := range pages {
+			var err error
+			result[index], err = state.publishPage(page.page)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	})
 	if err != nil {
 		return BuildResult{}, err
 	}
-	entries := append(unchanged, dirty...)
-	sort.Slice(entries, func(i, j int) bool { return entries[i].LogicalStart < entries[j].LogicalStart })
-	if len(entries) > MaxMappingEntriesPerGeneration {
-		return BuildResult{}, fmt.Errorf("incremental generation has too many mapping entries")
-	}
-	root, rootPayload, err := state.publishMappingTree(entries, uint64(base.LogicalSizeBytes/LogicalBlockSize))
-	if err != nil {
-		return BuildResult{}, err
-	}
+	root := plan.root.replacements[0]
 	descriptor := Descriptor{
-		Version: DescriptorVersion, LogicalSizeBytes: base.LogicalSizeBytes, BlockSizeBytes: LogicalBlockSize,
+		Version: options.formatVersion(), LogicalSizeBytes: base.LogicalSizeBytes, BlockSizeBytes: LogicalBlockSize,
 		MappingRoot: MappingRootLocator{
-			Version: MappingPageVersion, RootDigest: digest.FromBytes(rootPayload).String(), Object: root,
+			Version: options.formatVersion(), RootDigest: root.object.Checksum, Object: root.object,
 		},
 	}
 	payload, err := EncodeDescriptor(descriptor)
@@ -263,52 +271,6 @@ func mergeDirtyBlocks(first, second []uint64) []uint64 {
 	return result
 }
 
-func (r *Reader) dataEntries(ctx context.Context) ([]MappingEntry, error) {
-	entries := make([]MappingEntry, 0)
-	var collect func(MappingPage) error
-	collect = func(page MappingPage) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for _, entry := range page.Entries {
-			if entry.Kind == MappingEntryData {
-				entries = append(entries, entry)
-				if len(entries) > MaxMappingEntriesPerGeneration {
-					return fmt.Errorf("base generation has too many mapping entries")
-				}
-				continue
-			}
-			payload, err := r.readRange(entry.Object)
-			if err != nil {
-				return fmt.Errorf("read mapping child: %w", err)
-			}
-			child, err := DecodeMappingPage(payload)
-			if err != nil {
-				return fmt.Errorf("decode mapping child: %w", err)
-			}
-			if child.Level+1 != page.Level || child.StartBlock != entry.LogicalStart || child.BlockCount != uint64(entry.BlockCount) {
-				return fmt.Errorf("mapping child does not match its parent entry")
-			}
-			if err := collect(child); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := collect(r.root); err != nil {
-		return nil, err
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].LogicalStart < entries[j].LogicalStart })
-	var previousEnd uint64
-	for index, entry := range entries {
-		if index > 0 && entry.LogicalStart < previousEnd {
-			return nil, fmt.Errorf("base generation contains overlapping data entries")
-		}
-		previousEnd = entry.LogicalStart + uint64(entry.BlockCount)
-	}
-	return entries, nil
-}
-
 func splitUnchangedEntries(reader *Reader, entries []MappingEntry, dirtyBlocks []uint64) ([]MappingEntry, error) {
 	result := make([]MappingEntry, 0, len(entries))
 	dirtyIndex := 0
@@ -325,9 +287,16 @@ func splitUnchangedEntries(reader *Reader, entries []MappingEntry, dirtyBlocks [
 			result = append(result, entry)
 			continue
 		}
-		payload, err := reader.readRange(entry.Object)
-		if err != nil {
-			return nil, fmt.Errorf("read data range split by dirty blocks: %w", err)
+		if dirtyIndex-entryDirtyStart == int(entry.BlockCount) {
+			continue
+		}
+		var payload []byte
+		if entry.Object.Encoding == "" {
+			var err error
+			payload, err = reader.readRange(entry.Object)
+			if err != nil {
+				return nil, fmt.Errorf("read data range split by dirty blocks: %w", err)
+			}
 		}
 		cursor := entry.LogicalStart
 		for _, block := range dirtyBlocks[entryDirtyStart:dirtyIndex] {
@@ -346,6 +315,11 @@ func splitUnchangedEntries(reader *Reader, entries []MappingEntry, dirtyBlocks [
 func splitDataEntry(entry MappingEntry, start, end uint64, payload []byte) MappingEntry {
 	startOffset := int64(start-entry.LogicalStart) * LogicalBlockSize
 	length := int64(end-start) * LogicalBlockSize
+	if entry.Object.Encoding != "" {
+		entry.LogicalStart, entry.BlockCount = start, uint32(end-start)
+		entry.DataOffset += uint32(startOffset)
+		return entry
+	}
 	fragment := payload[startOffset : startOffset+length]
 	return MappingEntry{
 		LogicalStart: start, BlockCount: uint32(end - start), Kind: MappingEntryData,
@@ -356,7 +330,7 @@ func splitDataEntry(entry MappingEntry, start, end uint64, payload []byte) Mappi
 	}
 }
 
-func (b *generationBuilder) publishBlockUpdates(updates BlockUpdateReader, blocks []uint64) ([]MappingEntry, error) {
+func (b *generationBuilder) publishBlockUpdates(updates BlockUpdateReader, blocks []uint64, leafEnd func(uint64) uint64) ([]MappingEntry, error) {
 	pending := make([]pendingDataEntry, 0, max(1, b.options.PackBytes/b.options.DataRangeBytes))
 	pendingBytes := 0
 	result := make([]MappingEntry, 0, len(blocks))
@@ -397,10 +371,14 @@ func (b *generationBuilder) publishBlockUpdates(updates BlockUpdateReader, block
 			continue
 		}
 		start := blocks[index]
+		end := leafEnd(start)
+		if end <= start {
+			return nil, fmt.Errorf("dirty block has no edited mapping leaf")
+		}
 		payload := make([]byte, 0, b.options.DataRangeBytes)
 		payload = append(payload, data...)
 		index++
-		for index < len(blocks) && blocks[index] == start+uint64(len(payload)/LogicalBlockSize) &&
+		for index < len(blocks) && blocks[index] < end && blocks[index] == start+uint64(len(payload)/LogicalBlockSize) &&
 			len(payload)+LogicalBlockSize <= b.options.DataRangeBytes {
 			data, err = readBlock(blocks[index])
 			if err != nil {

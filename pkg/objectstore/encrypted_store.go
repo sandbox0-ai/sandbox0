@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -22,6 +24,7 @@ const (
 	encryptedObjectMagic            = "s0.object.encrypted.v1\n"
 	encryptedObjectVersion          = 1
 	maxEncryptedObjectHeaderBytes   = 1 << 20
+	encryptedObjectHeaderProbeBytes = 1 << 10
 	maxUint32                       = int64(^uint32(0))
 	maxInt64                        = int64(^uint64(0) >> 1)
 	maxInt                          = int64(^uint(0) >> 1)
@@ -39,6 +42,9 @@ type encryptedStore struct {
 	store               Store
 	cfg                 EncryptionConfig
 	allowPlaintextReads bool
+	headerCache         *encryptedHeaderCache
+	parallelReadsOnce   sync.Once
+	parallelReads       chan struct{}
 }
 
 type encryptedObjectHeader struct {
@@ -57,6 +63,22 @@ func Encrypting(store Store, cfg EncryptionConfig) Store {
 		return store
 	}
 	return &encryptedStore{store: store, cfg: cfg}
+}
+
+// EncryptingImmutable opts into bounded, on-demand header and AEAD caching.
+// The caller must guarantee that canonical keys identify immutable plaintext.
+// Recreating a deleted key with fresh envelope encryption is supported: an
+// unauthenticated first frame can trigger one header refresh before any plaintext
+// delivery. Data is retried only when the encryption header has actually changed.
+// Use conditional creates and verify collisions; plaintext digests still need
+// independent verification. Mutations through this wrapper invalidate its cache,
+// but cannot invalidate other wrappers. Generic or migration stores must use
+// Encrypting or EncryptingLegacyReadCompatible instead.
+func EncryptingImmutable(store Store, cfg EncryptionConfig, cache EncryptedHeaderCacheConfig) Store {
+	if store == nil || !cfg.enabled() {
+		return store
+	}
+	return &encryptedStore{store: store, cfg: cfg, headerCache: newEncryptedHeaderCache(cache)}
 }
 
 // EncryptingLegacyReadCompatible preserves encrypted writes but also reads
@@ -178,6 +200,10 @@ func (s *encryptedStore) put(
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return false, fmt.Errorf("seek encrypted object temp file: %w", err)
 	}
+	if s.headerCache != nil {
+		finish := s.headerCache.beginMutation(key)
+		defer finish()
+	}
 	if !conditional {
 		return true, s.store.Put(key, tmp)
 	}
@@ -221,53 +247,177 @@ func (s *encryptedStore) getContext(
 	if off < 0 {
 		return nil, fmt.Errorf("negative object read offset: %d", off)
 	}
-	header, headerEnd, encrypted, err := s.readEncryptedObjectHeader(ctx, key, requireContext)
+	// A cache hit must not invent contextual access on an unsupported provider.
+	if requireContext && !SupportsContextConditionalCreate(s.store) {
+		return nil, fmt.Errorf("underlying object store does not support contextual conditional access")
+	}
+	metadata, prefix, err := s.encryptedObjectMetadataForRange(ctx, key, off, limit, requireContext)
 	if err != nil {
 		return nil, err
 	}
-	if !encrypted {
-		if !s.allowPlaintextReads {
-			return nil, fmt.Errorf("object %q is missing the required encrypted-object header", key)
-		}
+	if metadata == nil {
 		return s.getUnderlying(ctx, key, off, limit, requireContext)
 	}
-	aead, err := s.objectAEAD(header)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	reader, startChunk, rangeEnd, err := s.openEncryptedObjectRange(ctx, key, off, limit, requireContext, metadata, prefix)
+	refreshed := false
+	if err != nil && s.headerCache != nil && ctx.Err() == nil {
+		// A changed header can also make the old ciphertext offset out of range.
+		next, refreshErr := s.refreshEncryptedObjectMetadata(ctx, key, requireContext, metadata, err)
+		refreshed = true
+		if refreshErr != nil {
+			return nil, refreshErr
+		}
+		metadata = next
+		reader, startChunk, rangeEnd, err = s.openEncryptedObjectRange(ctx, key, off, limit, requireContext, metadata, nil)
+	}
+	if err != nil {
+		s.headerCache.forget(key, metadata)
+		return nil, err
+	}
+	pr, pw := io.Pipe()
+	// Cancellation must also release a decryptor blocked on the consumer's
+	// pipe, after the independently shared header load has already completed.
+	stopCancellation := context.AfterFunc(ctx, func() { _ = pw.CloseWithError(ctx.Err()) })
+	go func() {
+		defer stopCancellation()
+		for {
+			authenticated, readErr := decryptEncryptedObjectFrames(
+				pw, key, withObjectReadContext(ctx, reader), metadata.header, metadata.aead,
+				uint64(startChunk), startChunk*metadata.header.ChunkSize, off, rangeEnd,
+			)
+			_ = reader.Close()
+			// No retry is allowed once any frame has authenticated, even if the
+			// consumer has not read its plaintext yet. Identical headers preserve
+			// the original corruption error; a second failure is always terminal.
+			if !authenticated && !refreshed && s.headerCache != nil && ctx.Err() == nil && !errors.Is(readErr, io.ErrClosedPipe) {
+				refreshed = true
+				next, refreshErr := s.refreshEncryptedObjectMetadata(ctx, key, requireContext, metadata, readErr)
+				if refreshErr != nil {
+					readErr = refreshErr
+				} else if next != nil {
+					metadata = next
+					reader, startChunk, rangeEnd, readErr = s.openEncryptedObjectRange(ctx, key, off, limit, requireContext, metadata, nil)
+					if readErr == nil {
+						continue
+					}
+				}
+			}
+			if readErr != nil && ctx.Err() == nil && !errors.Is(readErr, io.ErrClosedPipe) {
+				s.headerCache.forget(key, metadata)
+			}
+			_ = pw.CloseWithError(readErr)
+			return
+		}
+	}()
+	return pr, nil
+}
+
+func (s *encryptedStore) openEncryptedObjectRange(ctx context.Context, key string, off, limit int64, requireContext bool, metadata *encryptedObjectMetadata, prefix *encryptedObjectPrefix) (io.ReadCloser, int64, int64, error) {
+	header, headerEnd, aead := metadata.header, metadata.headerEnd, metadata.aead
 	frameBytes := int64(4) + header.ChunkSize + int64(aead.Overhead())
 	startChunk := off / header.ChunkSize
 	if startChunk > (maxInt64-headerEnd)/frameBytes {
-		return nil, fmt.Errorf("encrypted object range offset is too large: %d", off)
+		return nil, 0, 0, fmt.Errorf("encrypted object range offset is too large: %d", off)
 	}
 	cipherOffset := headerEnd + startChunk*frameBytes
 	cipherLimit := int64(-1)
 	rangeEnd := int64(-1)
 	if limit >= 0 {
 		if off > maxInt64-limit {
-			return nil, fmt.Errorf("encrypted object range overflows: offset %d limit %d", off, limit)
+			return nil, 0, 0, fmt.Errorf("encrypted object range overflows: offset %d limit %d", off, limit)
 		}
 		rangeEnd = off + limit
 		endChunk := (rangeEnd-1)/header.ChunkSize + 1
 		if endChunk < startChunk || endChunk-startChunk > maxInt64/frameBytes {
-			return nil, fmt.Errorf("encrypted object range is too large: offset %d limit %d", off, limit)
+			return nil, 0, 0, fmt.Errorf("encrypted object range is too large: offset %d limit %d", off, limit)
 		}
 		cipherLimit = (endChunk - startChunk) * frameBytes
 	}
+	if prefix != nil && prefix.metadata == metadata && startChunk == prefix.startChunk && cipherLimit > 0 {
+		payload := prefix.ciphertext
+		if int64(len(payload)) >= cipherLimit || prefix.eof || prefix.containsRange(rangeEnd) {
+			payload = payload[:min(int64(len(payload)), cipherLimit)]
+			return io.NopCloser(bytes.NewReader(payload)), startChunk, rangeEnd, nil
+		}
+		if len(payload) > 0 {
+			// Stored frame/header geometry can differ from the writer's current
+			// defaults. Continue the exact ciphertext range without re-fetching
+			// its prefix; a frame may straddle the two bodies. Authentication is
+			// still performed by the ordinary frame decryptor below.
+			reader, err := s.getUnderlying(ctx, key, cipherOffset+int64(len(payload)), cipherLimit-int64(len(payload)), requireContext)
+			if err != nil {
+				return nil, 0, 0, err
+			}
+			return &encryptedPrefixRangeReader{Reader: io.MultiReader(bytes.NewReader(payload), reader), Closer: reader}, startChunk, rangeEnd, nil
+		}
+	}
 	reader, err := s.getUnderlying(ctx, key, cipherOffset, cipherLimit, requireContext)
+	return reader, startChunk, rangeEnd, err
+}
+
+func (s *encryptedStore) encryptedObjectMetadata(ctx context.Context, key string, requireContext bool) (*encryptedObjectMetadata, error) {
+	if s.headerCache == nil {
+		return s.loadEncryptedObjectMetadata(ctx, key, requireContext)
+	}
+	return s.headerCache.get(ctx, key, func(loadCtx context.Context) (*encryptedObjectMetadata, error) {
+		return s.loadEncryptedObjectMetadata(loadCtx, key, requireContext || SupportsContextConditionalCreate(s.store))
+	})
+}
+
+// Refresh is bounded by the caller to one attempt before any authenticated frame.
+// A changed envelope is evidence of re-encryption, never evidence of plaintext
+// integrity: the replacement must authenticate and pass the caller's checksum.
+func (s *encryptedStore) refreshEncryptedObjectMetadata(ctx context.Context, key string, requireContext bool, previous *encryptedObjectMetadata, readErr error) (*encryptedObjectMetadata, error) {
+	s.headerCache.forget(key, previous)
+	next, err := s.encryptedObjectMetadata(ctx, key, requireContext)
+	if err != nil {
+		return nil, errors.Join(readErr, fmt.Errorf("refresh encrypted object header: %w", err))
+	}
+	if next.identity == previous.identity && next.headerEnd == previous.headerEnd {
+		if readErr != nil {
+			s.headerCache.forget(key, next)
+		}
+		return nil, readErr
+	}
+	return next, nil
+}
+
+func (s *encryptedStore) loadEncryptedObjectMetadata(ctx context.Context, key string, requireContext bool) (*encryptedObjectMetadata, error) {
+	return s.loadEncryptedObjectMetadataWithProbe(ctx, key, requireContext, encryptedObjectHeaderProbeBytes, nil)
+}
+
+func (s *encryptedStore) loadEncryptedObjectMetadataWithProbe(ctx context.Context, key string, requireContext bool, probeBytes int64, capture *encryptedObjectPrefix) (*encryptedObjectMetadata, error) {
+	header, headerEnd, encrypted, err := s.readEncryptedObjectHeaderWithProbe(ctx, key, requireContext, probeBytes, capture)
 	if err != nil {
 		return nil, err
 	}
-	pr, pw := io.Pipe()
-	go func() {
-		defer reader.Close()
-		err := decryptEncryptedObjectFrames(
-			pw, key, withObjectReadContext(ctx, reader), header, aead,
-			uint64(startChunk), startChunk*header.ChunkSize, off, rangeEnd,
-		)
-		_ = pw.CloseWithError(err)
-	}()
-	return pr, nil
+	if !encrypted {
+		if s.allowPlaintextReads {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("object %q is missing the required encrypted-object header", key)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	aead, err := s.objectAEAD(header)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The expanded AEAD owns its key; retaining the wrapped key is unnecessary.
+	encoded, err := json.Marshal(header)
+	if err != nil {
+		return nil, fmt.Errorf("encode encrypted object header identity: %w", err)
+	}
+	identity := sha256.Sum256(encoded)
+	header.WrappedKey = nil
+	return &encryptedObjectMetadata{header: header, headerEnd: headerEnd, aead: aead, identity: identity}, nil
 }
 
 func (s *encryptedStore) getUnderlying(
@@ -286,51 +436,82 @@ func (s *encryptedStore) getUnderlying(
 	return s.store.Get(key, off, limit)
 }
 
-// readEncryptedObjectHeader reads only the fixed prefix and bounded JSON
-// header. Data frames are fetched separately so a logical range near the end
-// of a large pack does not download and decrypt every preceding frame.
+// readEncryptedObjectHeader combines the prefix and ordinary JSON header into
+// one bounded demand read. Unusually large headers require one exact remainder
+// read. The probe may include at most 1 KiB of incidental ciphertext, which is
+// discarded, never decrypted or cached as data. A range near the end of a large
+// pack still fetches its data frames directly, not every preceding frame.
 func (s *encryptedStore) readEncryptedObjectHeader(
 	ctx context.Context,
 	key string,
 	requireContext bool,
 ) (encryptedObjectHeader, int64, bool, error) {
+	return s.readEncryptedObjectHeaderWithProbe(ctx, key, requireContext, encryptedObjectHeaderProbeBytes, nil)
+}
+
+func (s *encryptedStore) readEncryptedObjectHeaderWithProbe(
+	ctx context.Context, key string, requireContext bool, probeBytes int64, capture *encryptedObjectPrefix,
+) (encryptedObjectHeader, int64, bool, error) {
+	if probeBytes < encryptedObjectHeaderProbeBytes || probeBytes > maxEncryptedObjectHeaderBytes {
+		return encryptedObjectHeader{}, 0, false, fmt.Errorf("invalid encrypted object prefix read size %d", probeBytes)
+	}
 	prefixBytes := int64(len(encryptedObjectMagic) + 4)
-	reader, err := s.getUnderlying(ctx, key, 0, prefixBytes, requireContext)
+	reader, err := s.getUnderlying(ctx, key, 0, probeBytes, requireContext)
 	if err != nil {
 		return encryptedObjectHeader{}, 0, false, err
 	}
-	prefix, readErr := io.ReadAll(io.LimitReader(reader, prefixBytes+1))
+	probe, readErr := io.ReadAll(io.LimitReader(withObjectReadContext(ctx, reader), probeBytes+1))
 	closeErr := reader.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		return encryptedObjectHeader{}, 0, false, err
 	}
-	if len(prefix) < len(encryptedObjectMagic) || string(prefix[:len(encryptedObjectMagic)]) != encryptedObjectMagic {
+	if int64(len(probe)) > probeBytes {
+		return encryptedObjectHeader{}, 0, false, fmt.Errorf("encrypted object header probe exceeded its range")
+	}
+	if len(probe) < len(encryptedObjectMagic) || string(probe[:len(encryptedObjectMagic)]) != encryptedObjectMagic {
 		return encryptedObjectHeader{}, 0, false, nil
 	}
-	if int64(len(prefix)) != prefixBytes {
+	if int64(len(probe)) < prefixBytes {
 		return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header length: %w", io.ErrUnexpectedEOF)
 	}
-	headerBytes := int64(binary.BigEndian.Uint32(prefix[len(encryptedObjectMagic):]))
+	headerBytes := int64(binary.BigEndian.Uint32(probe[len(encryptedObjectMagic):prefixBytes]))
 	if headerBytes <= 0 || headerBytes > maxEncryptedObjectHeaderBytes {
 		return encryptedObjectHeader{}, 0, true, fmt.Errorf("invalid encrypted object header size %d", headerBytes)
 	}
-	reader, err = s.getUnderlying(ctx, key, prefixBytes, headerBytes, requireContext)
-	if err != nil {
-		return encryptedObjectHeader{}, 0, true, err
-	}
-	payload, readErr := io.ReadAll(io.LimitReader(reader, headerBytes+1))
-	closeErr = reader.Close()
-	if err := errors.Join(readErr, closeErr); err != nil {
-		return encryptedObjectHeader{}, 0, true, err
-	}
-	if int64(len(payload)) != headerBytes {
-		return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header: %w", io.ErrUnexpectedEOF)
+	headerEnd := prefixBytes + headerBytes
+	payload := probe[prefixBytes:]
+	if headerEnd > int64(len(probe)) {
+		// A short response is EOF, not permission to turn a malformed object
+		// into an unbounded sequence of small range requests.
+		if int64(len(probe)) != probeBytes {
+			return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header: %w", io.ErrUnexpectedEOF)
+		}
+		remaining := headerEnd - int64(len(probe))
+		reader, err = s.getUnderlying(ctx, key, int64(len(probe)), remaining, requireContext)
+		if err != nil {
+			return encryptedObjectHeader{}, 0, true, err
+		}
+		remainder, readErr := io.ReadAll(io.LimitReader(withObjectReadContext(ctx, reader), remaining+1))
+		closeErr = reader.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return encryptedObjectHeader{}, 0, true, err
+		}
+		if int64(len(remainder)) != remaining {
+			return encryptedObjectHeader{}, 0, true, fmt.Errorf("read encrypted object header remainder: %w", io.ErrUnexpectedEOF)
+		}
+		payload = append(payload, remainder...)
+	} else {
+		payload = payload[:headerBytes]
 	}
 	var header encryptedObjectHeader
 	if err := json.Unmarshal(payload, &header); err != nil {
 		return encryptedObjectHeader{}, 0, true, fmt.Errorf("unmarshal encrypted object header: %w", err)
 	}
-	return header, prefixBytes + headerBytes, true, nil
+	if capture != nil && headerEnd <= int64(len(probe)) {
+		capture.ciphertext = probe[headerEnd:]
+		capture.eof = int64(len(probe)) < probeBytes
+	}
+	return header, headerEnd, true, nil
 }
 
 func (s *encryptedStore) objectAEAD(header encryptedObjectHeader) (cipher.AEAD, error) {
@@ -358,6 +539,10 @@ func (s *encryptedStore) objectAEAD(header encryptedObjectHeader) (cipher.AEAD, 
 }
 
 func (s *encryptedStore) Delete(key string) error {
+	if s.headerCache != nil {
+		finish := s.headerCache.beginMutation(key)
+		defer finish()
+	}
 	return s.store.Delete(key)
 }
 
@@ -438,37 +623,38 @@ func decryptEncryptedObjectFrames(
 	aead cipher.AEAD,
 	startChunk uint64,
 	plainOffset, rangeStart, rangeEnd int64,
-) error {
+) (authenticated bool, err error) {
 	for chunkIndex := startChunk; ; chunkIndex++ {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(in, lenBuf[:]); err != nil {
 			if err == io.EOF {
-				return nil
+				return authenticated, nil
 			}
-			return err
+			return authenticated, err
 		}
 		cipherLen := binary.BigEndian.Uint32(lenBuf[:])
 		if cipherLen == 0 || int64(cipherLen) > header.ChunkSize+int64(aead.Overhead()) {
-			return fmt.Errorf("invalid encrypted object chunk size %d", cipherLen)
+			return authenticated, fmt.Errorf("invalid encrypted object chunk size %d", cipherLen)
 		}
 		ciphertext := make([]byte, cipherLen)
 		if _, err := io.ReadFull(in, ciphertext); err != nil {
-			return err
+			return authenticated, err
 		}
 		nonce := encryptedObjectNonce(aead.NonceSize(), header.NoncePrefix, chunkIndex)
 		plaintext, err := aead.Open(nil, nonce, ciphertext, encryptedObjectChunkAAD(key, chunkIndex, header.Algorithm))
 		if err != nil {
-			return fmt.Errorf("decrypt object chunk %d: %w", chunkIndex, err)
+			return authenticated, fmt.Errorf("decrypt object chunk %d: %w", chunkIndex, err)
 		}
+		authenticated = true
 		if err := writeRangeChunk(out, plaintext, plainOffset, rangeStart, rangeEnd); err != nil {
-			return err
+			return authenticated, err
 		}
 		plainOffset += int64(len(plaintext))
 		if rangeEnd >= 0 && plainOffset >= rangeEnd {
-			return nil
+			return authenticated, nil
 		}
 		if int64(len(plaintext)) < header.ChunkSize {
-			return nil
+			return authenticated, nil
 		}
 	}
 }

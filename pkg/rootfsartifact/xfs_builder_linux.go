@@ -53,7 +53,59 @@ type XFSBuilder struct {
 }
 
 // Build writes a sparse, reflink-capable XFS image containing sourceRoot under lower/.
-func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, logicalSize int64) (resultErr error) {
+func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, logicalSize int64) error {
+	return b.build(ctx, sourceRoot, destination, logicalSize, nil)
+}
+
+// BuildWithDataRanges optionally discovers file-relative ranges on the frozen
+// image. No plan is returned until clean unmount and verification have succeeded.
+// The existing Build/default import path intentionally does not enable this.
+func (b XFSBuilder) BuildWithDataRanges(ctx context.Context, sourceRoot, destination string, logicalSize int64, rangeBytes int) (XFSDataRangePlan, error) {
+	return b.buildWithDataRanges(ctx, sourceRoot, destination, logicalSize, rangeBytes, false)
+}
+
+// BuildWithBoundedDataRanges preserves input support when metadata optimization
+// exceeds its fixed budget: it discards all preferred spans and reports an
+// explicit whole-image global-grid fallback. Unsafe metadata and I/O errors
+// still fail. Callers must attest Fallback and must not claim optimization hits.
+func (b XFSBuilder) BuildWithBoundedDataRanges(ctx context.Context, sourceRoot, destination string, logicalSize int64, rangeBytes int) (XFSDataRangePlan, error) {
+	return b.buildWithDataRanges(ctx, sourceRoot, destination, logicalSize, rangeBytes, true)
+}
+
+func (b XFSBuilder) buildWithDataRanges(ctx context.Context, sourceRoot, destination string, logicalSize int64, rangeBytes int, allowBudgetFallback bool) (XFSDataRangePlan, error) {
+	if _, err := rootfsblock.NewDataRangeLayout(logicalSize, rangeBytes, nil); err != nil {
+		return XFSDataRangePlan{}, err
+	}
+	var plan XFSDataRangePlan
+	err := b.build(ctx, sourceRoot, destination, logicalSize, func(ctx context.Context, lower string) error {
+		var err error
+		plan, err = CollectReadOnlyXFSDataRanges(ctx, lower, logicalSize, rangeBytes)
+		if err != nil && allowBudgetFallback {
+			plan, err = xfsDataRangeFallback(ctx, logicalSize, rangeBytes, err)
+		}
+		return err
+	})
+	if err != nil {
+		return XFSDataRangePlan{}, err
+	}
+	return plan, nil
+}
+
+func xfsDataRangeFallback(ctx context.Context, logicalSize int64, rangeBytes int, scanErr error) (XFSDataRangePlan, error) {
+	if err := ctx.Err(); err != nil {
+		return XFSDataRangePlan{}, err
+	}
+	if !errors.Is(scanErr, ErrXFSDataRangeLimit) {
+		return XFSDataRangePlan{}, scanErr
+	}
+	layout, err := rootfsblock.NewDataRangeLayout(logicalSize, rangeBytes, nil)
+	if err != nil {
+		return XFSDataRangePlan{}, err
+	}
+	return XFSDataRangePlan{Layout: layout, Fallback: XFSDataRangeBudgetFallback}, nil
+}
+
+func (b XFSBuilder) build(ctx context.Context, sourceRoot, destination string, logicalSize int64, inspect func(context.Context, string) error) (resultErr error) {
 	if err := validateXFSBuildPaths(sourceRoot, destination); err != nil {
 		return err
 	}
@@ -141,6 +193,14 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 	closeErr := unix.Close(rootFD)
 	if syncErr != nil || closeErr != nil {
 		return fmt.Errorf("sync XFS image: %w", errors.Join(syncErr, closeErr))
+	}
+	if inspect != nil {
+		if err := runner.Run(ctx, "mount", "-o", "remount,ro", mountRoot); err != nil {
+			return fmt.Errorf("freeze XFS build image: %w", err)
+		}
+		if err := inspect(ctx, lower); err != nil {
+			return fmt.Errorf("inspect read-only XFS build image: %w", err)
+		}
 	}
 	if err := runner.Run(ctx, "umount", mountRoot); err != nil {
 		return fmt.Errorf("cleanly unmount XFS image: %w", err)

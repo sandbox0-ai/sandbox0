@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	DescriptorVersion   = 1
-	MappingPageVersion  = 1
-	LogicalBlockSize    = 4096
-	MaxDescriptorBytes  = 64 << 10
-	MaxMappingRootBytes = 8 << 20
+	DescriptorVersion       = 1
+	MappingPageVersion      = 1
+	CompressedFormatVersion = 2
+	LogicalBlockSize        = 4096
+	MaxDescriptorBytes      = 64 << 10
+	MaxMappingRootBytes     = 8 << 20
 	// MaxCompositeTailBytes leaves room for JSON/base64 envelope metadata so
 	// the complete descriptor remains within MaxDescriptorBytes.
 	MaxCompositeTailBytes  = 46 << 10
@@ -53,6 +54,27 @@ type ObjectRange struct {
 	Offset   int64  `json:"offset"`
 	Length   int64  `json:"length"`
 	Checksum string `json:"checksum"`
+	// Length and Checksum describe decoded bytes. Offset and StoredLength()
+	// address bytes in the immutable object, before envelope encryption.
+	Encoding      string `json:"encoding,omitempty"`
+	EncodedLength int64  `json:"encoded_length,omitempty"`
+}
+
+func (r ObjectRange) StoredLength() int64 {
+	if r.Encoding != "" {
+		return r.EncodedLength
+	}
+	return r.Length
+}
+
+// ValidateFormatBinding prevents compressed descriptors from entering legacy
+// runtime/import lanes. Existing non-compressed generation identities retain
+// their previous compatibility contract; generation two requires format two.
+func ValidateFormatBinding(formatGeneration, descriptorVersion int) error {
+	if (descriptorVersion == CompressedFormatVersion || formatGeneration == CompressedFormatVersion) && descriptorVersion != formatGeneration {
+		return fmt.Errorf("compressed block descriptor must match the admitted format generation")
+	}
+	return nil
 }
 
 type CompositeTail struct {
@@ -96,7 +118,7 @@ func EncodeDescriptor(descriptor Descriptor) ([]byte, error) {
 }
 
 func (d Descriptor) Validate() error {
-	if d.Version != DescriptorVersion {
+	if d.Version != DescriptorVersion && d.Version != CompressedFormatVersion {
 		return fmt.Errorf("unsupported block descriptor version %d", d.Version)
 	}
 	if d.BlockSizeBytes != LogicalBlockSize || d.LogicalSizeBytes <= 0 || d.LogicalSizeBytes%d.BlockSizeBytes != 0 {
@@ -104,6 +126,9 @@ func (d Descriptor) Validate() error {
 	}
 	if err := d.MappingRoot.Validate(); err != nil {
 		return fmt.Errorf("mapping_root: %w", err)
+	}
+	if d.MappingRoot.Version != d.Version {
+		return fmt.Errorf("descriptor and mapping format versions differ")
 	}
 	if d.CompositeTail != nil {
 		if err := d.CompositeTail.Validate(); err != nil {
@@ -117,8 +142,11 @@ func (d Descriptor) Validate() error {
 }
 
 func (l MappingRootLocator) Validate() error {
-	if l.Version != MappingPageVersion {
+	if l.Version != MappingPageVersion && l.Version != CompressedFormatVersion {
 		return fmt.Errorf("unsupported mapping page version %d", l.Version)
+	}
+	if l.Version == MappingPageVersion && l.Object.Encoding != "" {
+		return fmt.Errorf("legacy mapping root cannot contain encoded ranges")
 	}
 	if err := validateDigest("root_digest", l.RootDigest); err != nil {
 		return err
@@ -134,7 +162,17 @@ func (r ObjectRange) Validate(maxLength int64) error {
 		path.Clean(r.Key) != r.Key || r.Key == "." || strings.HasPrefix(r.Key, "../") {
 		return fmt.Errorf("object key is not a canonical relative key")
 	}
-	if r.Offset < 0 || r.Length <= 0 || r.Length > maxLength || r.Offset > math.MaxInt64-r.Length {
+	if r.Offset < 0 || r.Length <= 0 || r.Length > maxLength {
+		return fmt.Errorf("object range offset or length is invalid")
+	}
+	if r.Encoding == "" {
+		if r.EncodedLength != 0 {
+			return fmt.Errorf("raw range has encoded length")
+		}
+	} else if r.Encoding != RangeEncodingZstd || r.EncodedLength <= 0 || r.EncodedLength >= r.Length {
+		return fmt.Errorf("encoded object range is invalid")
+	}
+	if r.Offset > math.MaxInt64-r.StoredLength() {
 		return fmt.Errorf("object range offset or length is invalid")
 	}
 	return validateDigest("object checksum", r.Checksum)

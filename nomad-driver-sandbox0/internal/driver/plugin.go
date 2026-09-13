@@ -40,7 +40,7 @@ import (
 const (
 	PluginName                   = "sandbox0-gvisor"
 	PluginVersion                = "0.1.0"
-	taskHandleVersion            = 1
+	taskHandleVersion            = 2
 	fingerprintPeriod            = 30 * time.Second
 	defaultRunscOperationTimeout = 30 * time.Second
 	maxRunscOperationTimeout     = 2 * time.Minute
@@ -480,25 +480,15 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	if handle == nil || handle.Config == nil {
 		return errors.New("task handle and config are required")
 	}
-	if _, exists := p.tasks.Get(handle.Config.ID); exists {
-		return nil
-	}
-	var state PersistedState
-	if err := handle.GetDriverState(&state); err != nil {
-		return fmt.Errorf("decode persisted driver state: %w", err)
-	}
-	if state.TaskConfig == nil || state.ContainerID == "" || state.BundleDir == "" || state.RootMount == "" {
-		return errors.New("persisted driver state is incomplete")
-	}
-	var taskConfig TaskConfig
-	if err := handle.Config.DecodeDriverConfig(&taskConfig); err != nil {
-		return fmt.Errorf("decode recovered task config: %w", err)
-	}
-	if err := normalizeRuntimeSlotTaskConfig(p.config, &taskConfig); err != nil {
+	state, err := recoveredDriverState(p.config, handle)
+	if err != nil {
 		return err
 	}
-	if state.TaskConfig.ID != handle.Config.ID || state.TaskConfig.AllocID != handle.Config.AllocID {
-		return errors.New("persisted task identity does not match the Nomad task handle")
+	if existing, exists := p.tasks.Get(handle.Config.ID); exists {
+		if !sameRecoveryIdentity(existing.PersistedState(), state) {
+			return errors.New("persisted task identity does not match the recovered task")
+		}
+		return nil
 	}
 	state.TaskConfig = handle.Config
 
@@ -517,7 +507,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	}
 	recovered := newTaskHandle(taskHandleOptions{
 		taskConfig:                    state.TaskConfig,
-		driverConfig:                  taskConfig,
+		driverConfig:                  *state.DriverConfig,
 		bundleDir:                     state.BundleDir,
 		containerID:                   state.ContainerID,
 		rootMount:                     state.RootMount,

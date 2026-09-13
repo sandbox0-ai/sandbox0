@@ -76,6 +76,9 @@ func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templa
 }
 
 type fakeClaimStore struct {
+	artifactRequirements       []sandboxstore.ReadyRootFSArtifactRequirements
+	digestArtifactRequirements []sandboxstore.ReadyRootFSArtifactRequirements
+
 	records                  map[string]*sandboxstore.SandboxRecord
 	operations               map[string]string
 	claimPhases              map[string]string
@@ -757,7 +760,12 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(
 	platform sandboxstore.RootFSArtifactPlatform,
 	requirements sandboxstore.ReadyRootFSArtifactRequirements,
 ) (*sandboxstore.RootFSBaseArtifact, error) {
+	f.artifactRequirements = append(f.artifactRequirements, requirements)
 	if f.artifact == nil || f.artifact.SourceOCIDigest != source || f.artifact.Platform != platform ||
+		requirements.ImportDataLayoutPolicy != f.artifact.ImportDataLayoutPolicy ||
+		requirements.ImportMappingGroupPolicy != f.artifact.ImportMappingGroupPolicy ||
+		(requirements.SourceOCIRef != "" && requirements.SourceOCIRef != f.artifact.SourceOCIRef) ||
+		(requirements.ImportDataRangeBytes != 0 && (f.artifact.ImportDataRangeBytes == nil || *f.artifact.ImportDataRangeBytes != requirements.ImportDataRangeBytes)) ||
 		f.artifact.FormatGeneration != requirements.FormatGeneration ||
 		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
 		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
@@ -774,6 +782,10 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifactByDigest(
 	platform sandboxstore.RootFSArtifactPlatform,
 	requirements sandboxstore.ReadyRootFSArtifactRequirements,
 ) (*sandboxstore.RootFSBaseArtifact, error) {
+	f.digestArtifactRequirements = append(f.digestArtifactRequirements, requirements)
+	if requirements.ImportDataRangeBytes != 0 || requirements.SourceOCIRef != "" || requirements.ImportDataLayoutPolicy != "" || requirements.ImportMappingGroupPolicy != "" {
+		return nil, errors.New("digest-bound artifact lookup rejects image-import selection filters")
+	}
 	if f.artifact == nil || f.artifact.ArtifactDigest != digest || f.artifact.Platform != platform ||
 		f.artifact.FormatGeneration != requirements.FormatGeneration ||
 		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
@@ -1675,7 +1687,7 @@ func TestServiceRejectsBaseArtifactFromDifferentPlatform(t *testing.T) {
 }
 
 func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
-	fixture := newClaimServiceFixture(t)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: "snapshot-1", FilesystemID: "snapshot-filesystem", TeamID: "team-1",
 		HeadGenerationID:   "snapshot-generation",
@@ -1710,7 +1722,7 @@ func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 }
 
 func TestServiceRestoresAttestedTemplateRootFSBeforeClaim(t *testing.T) {
-	fixture := newClaimServiceFixture(t)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
 	tpl := fixture.service.templates.(*fakeTemplateStore).template
 	tpl.RootFS = &templatepkg.RootFSTemplateSource{
 		StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
@@ -1820,7 +1832,7 @@ func TestServiceRejectsTemplateSnapshotGenerationFilesystemMismatch(t *testing.T
 }
 
 func TestServiceCapturesPausedNomadTemplateAsBlockGeneration(t *testing.T) {
-	fixture := newClaimServiceFixture(t)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
 	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
 	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
 		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
@@ -2933,6 +2945,7 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 }
 
 type claimServiceFixture struct {
+	config        Config
 	service       *Service
 	store         *fakeClaimStore
 	planner       *fakePlanner
@@ -3117,7 +3130,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	}}
 	quotaLimits := &fakeQuotaLimitStore{}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
-	claimService, err := New(Config{
+	claimConfig := Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{runtimeClass}}, Planner: planner, Allocation: allocation,
 		PlannedRetire:          plannedRetire,
@@ -3131,11 +3144,13 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		RootFSProcdDigest:      "sha256:" + strings.Repeat("f", 64),
 		ClaimTTL:               15 * time.Second,
 		DefaultTTL:             time.Hour, Now: func() time.Time { return now }, Logger: zap.NewNop(),
-	})
+	}
+	claimService, err := New(claimConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return claimServiceFixture{
+		config:  claimConfig,
 		service: claimService, store: store, planner: planner, allocation: allocation,
 		plannedRetire: plannedRetire, runningFork: runningFork,
 		pausedRebase: pausedRebase,

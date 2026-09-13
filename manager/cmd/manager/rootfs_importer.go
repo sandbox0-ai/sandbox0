@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ocirootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 )
@@ -21,7 +22,7 @@ import (
 func configureRootFSImportDiscovery(
 	cfg *config.ManagerConfig,
 	sources templatestore.ImageSourceStore,
-	store *sandboxstore.PGSandboxStore,
+	store rootfsimportdiscovery.ImportStore,
 	platforms []sandboxstore.RootFSArtifactPlatform,
 ) (*rootfsimportdiscovery.Worker, error) {
 	if cfg == nil {
@@ -29,9 +30,11 @@ func configureRootFSImportDiscovery(
 	}
 	worker, err := rootfsimportdiscovery.New(rootfsimportdiscovery.Config{
 		Sources: sources, Imports: store, Platforms: platforms,
-		FormatGeneration: rootfsblock.DescriptorVersion,
+		FormatGeneration: cfg.RootFSImporter.FormatGeneration,
 		ProcdProtocol:    cfg.RootFSImporter.ProcdProtocol,
 		ProcdDigest:      cfg.RootFSImporter.ProcdDigest,
+		BlockOptions:     rootfsblock.BuildOptions{DataRangeBytes: cfg.RootFSImporter.DataRangeBytes, MappingGroupPolicy: cfg.RootFSImporter.MappingGroupPolicy},
+		DataLayoutPolicy: cfg.RootFSImporter.DataLayoutPolicy,
 		Interval:         cfg.RootFSImporter.DiscoveryInterval.Duration,
 		PageSize:         cfg.RootFSImporter.DiscoveryPageSize,
 	})
@@ -48,6 +51,16 @@ func configureRootFSImportWorker(
 ) (*rootfsimportworker.Worker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
+	}
+	format, err := rootfsimporter.ImageImportFormat(cfg.RootFSImporter.FormatGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("RootFS importer: %w", err)
+	}
+	if _, err := rootfsimporter.NormalizeBlockOptions(format, rootfsblock.BuildOptions{DataRangeBytes: cfg.RootFSImporter.DataRangeBytes, MappingGroupPolicy: cfg.RootFSImporter.MappingGroupPolicy}); err != nil {
+		return nil, fmt.Errorf("RootFS importer data_range_bytes: %w", err)
+	}
+	if err := rootfsimporter.ValidateDataLayoutPolicy(cfg.RootFSImporter.DataLayoutPolicy, format, rootfsblock.BuildOptions{DataRangeBytes: cfg.RootFSImporter.DataRangeBytes}); err != nil {
+		return nil, err
 	}
 	if cfg.RootFSImporter.Disabled {
 		return nil, fmt.Errorf("nomad sandbox runtime requires the durable RootFS importer")
@@ -126,6 +139,8 @@ func logRootFSImportWorkerPass(logger *zap.Logger, result rootfsimportworker.Res
 	}
 	fields := []zap.Field{
 		zap.String("operationID", result.OperationID), zap.String("failureCategory", result.FailureCategory),
+		zap.String("dataLayoutPolicy", result.DataLayoutPolicy), zap.String("dataLayoutFallback", result.DataLayoutFallback),
+		zap.String("mappingGroupPolicy", result.MappingGroupPolicy),
 		zap.Int("leased", result.Leased), zap.Int("ready", result.Ready),
 		zap.Int("released", result.Released), zap.Int("abandoned", result.Abandoned),
 		zap.Int("leaseUncertain", result.LeaseUncertain), zap.Int("failed", result.Failed),

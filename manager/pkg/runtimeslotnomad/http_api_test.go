@@ -99,9 +99,11 @@ func TestHTTPAPIControllerConvergesStopClientGCAndAbsence(t *testing.T) {
 	before, err := controller.Observe(t.Context(), testTarget())
 	require.NoError(t, err)
 	require.True(t, before.PhysicalPresent)
-	require.NoError(t, controller.Purge(t.Context(), runtimeslotreconciler.AllocationPurgeRequest{
+	request := runtimeslotreconciler.AllocationPurgeRequest{
 		OperationID: "purge-operation", Target: testTarget(),
-	}))
+	}
+	require.ErrorIs(t, controller.Purge(t.Context(), request), runtimeslotreconciler.ErrAllocationStillPresent)
+	require.NoError(t, controller.Purge(t.Context(), request))
 	after, err := controller.Observe(t.Context(), testTarget())
 	require.NoError(t, err)
 	require.False(t, after.PhysicalPresent)

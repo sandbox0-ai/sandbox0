@@ -451,11 +451,16 @@ func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.
 	require.NoError(t, err)
 	require.Empty(t, recovery, "retained external proof must leave the hot recovery scan")
 
-	stored.CrashFence.RequestedAt = time.Now().Add(-ExternalTerminalProofRetention - time.Minute).UTC().Format(time.RFC3339Nano)
-	require.NoError(t, manager.save(stored))
+	past := time.Now().Add(-2*ExternalTerminalProofRetention - time.Minute).UTC().Format(time.RFC3339Nano)
+	mutateExpiryRecord(t, manager, request.Parent, func(stored *record) {
+		stored.CrashFence.RequestedAt = past
+		stored.CrashFence.Result.ObservedAt = past
+		stored.UpdatedAt = past
+	})
+	require.NoError(t, manager.rebuildRecoveryIndex())
 	recovery, err = manager.RecoverySessions()
 	require.NoError(t, err)
-	require.Len(t, recovery, 1, "expired external proof must re-enter recovery for final verification")
+	require.Len(t, recovery, 1, "expired external proof must re-enter recovery for local history expiry")
 	require.True(t, recovery[0].ExternalCrash)
 	require.Equal(t, "regional-crash-operation", recovery[0].CrashOperationID)
 
@@ -472,6 +477,9 @@ func TestManagerExternalCrashFenceReplacesUnpublishedLocalRetirement(t *testing.
 	recovery, err = restarted.RecoverySessions()
 	require.NoError(t, err)
 	require.Len(t, recovery, 1, "restart must rebuild the due-proof recovery index")
+	forgotten, err := restarted.ForgetExpiredExternalTerminal(request.WithoutWriterGrantToken(), time.Now())
+	require.NoError(t, err)
+	require.True(t, forgotten, "a restart beyond regional proof retention must still expire already reclaimed history")
 }
 
 func TestManagerExternalCrashFenceRepairsLegacyPlannedTombstoneWithoutDetachProof(t *testing.T) {

@@ -2,6 +2,7 @@ package nodepoolautoscaler
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -136,6 +137,102 @@ func TestClaimedFixedCarrierStillCountsTowardBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, decision.TargetElastic)
 	require.Empty(t, cloud.sets)
+}
+
+func TestPartialFixedCapacityCreditsResourcesAndExactUsableSlots(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		fixedSlots   int
+		activeLeases int
+		demandSlots  int
+		usedCPU      int64
+		demandCPU    int64
+		usedMemory   int64
+		demandMemory int64
+		wantElastic  int
+		wantRequired int
+	}{
+		{name: "one retiring carrier does not erase the fixed node", fixedSlots: 7, activeLeases: 5, wantRequired: 1},
+		{name: "remaining slots include exact headroom", fixedSlots: 7, activeLeases: 5, demandSlots: 1, wantRequired: 1},
+		{name: "missing slot is not ready capacity", fixedSlots: 7, activeLeases: 5, demandSlots: 2, wantElastic: 1, wantRequired: 2},
+		{name: "one elastic node cannot cover the remaining slot deficit", fixedSlots: 7, activeLeases: 5, demandSlots: 10, wantElastic: 2, wantRequired: 3},
+		{name: "fixed CPU fits exactly with demand and headroom", fixedSlots: 7, usedCPU: 12000, demandCPU: 1000, wantRequired: 1},
+		{name: "CPU deficit still adds an elastic node", fixedSlots: 7, usedCPU: 12000, demandCPU: 1001, wantElastic: 1, wantRequired: 2},
+		{name: "fixed memory fits exactly with demand and headroom", fixedSlots: 7, usedMemory: 54 << 30, demandMemory: 1 << 30, wantRequired: 1},
+		{name: "memory deficit still adds an elastic node", fixedSlots: 7, usedMemory: 54 << 30, demandMemory: (1 << 30) + 1, wantElastic: 1, wantRequired: 2},
+		{name: "unavailable fixed node receives no resource credit", wantElastic: 1, wantRequired: 1},
+		{name: "extra slots cannot credit a second fixed node", fixedSlots: 16, demandCPU: 14000, wantElastic: 1, wantRequired: 2},
+		{name: "extra slots cannot exceed configured fixed slot capacity", fixedSlots: 16, demandSlots: 8, wantElastic: 1, wantRequired: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cloud := &fakeStore{}, &fakeCloud{}
+			store.snapshot = sandboxstore.RuntimeNodePoolSnapshot{
+				ClusterFixedUsableSlots: tc.fixedSlots,
+				ClusterActiveLeases:     tc.activeLeases, DemandSlots: tc.demandSlots,
+				ClusterUsedCPU: tc.usedCPU, DemandCPUMillicores: tc.demandCPU,
+				ClusterUsedMemory: tc.usedMemory, DemandMemoryBytes: tc.demandMemory,
+			}
+			decision, err := testWorker(t, store, cloud).Reconcile(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRequired, decision.RequiredNodes)
+			require.Equal(t, tc.wantElastic, decision.TargetElastic)
+			if tc.wantElastic == 0 {
+				require.Empty(t, cloud.sets)
+			} else {
+				require.Equal(t, "scale_out", decision.Action)
+				require.Equal(t, []int{tc.wantElastic}, cloud.sets)
+			}
+		})
+	}
+}
+
+func TestPartialFixedCapacityTargetIsMinimumSufficientCapacity(t *testing.T) {
+	worker := testWorker(t, &fakeStore{}, &fakeCloud{})
+	for fixedSlots := 0; fixedSlots <= 8; fixedSlots++ {
+		for demandSlots := 0; demandSlots <= 24; demandSlots++ {
+			for _, demandCPU := range []int64{0, 13000, 13001, 28000} {
+				for _, demandMemory := range []int64{0, 55 << 30, (55 << 30) + 1, 112 << 30} {
+					snapshot := &sandboxstore.RuntimeNodePoolSnapshot{
+						ClusterFixedUsableSlots: fixedSlots, DemandSlots: demandSlots,
+						DemandCPUMillicores: demandCPU, DemandMemoryBytes: demandMemory,
+					}
+					liveFixed := 0
+					if fixedSlots > 0 {
+						liveFixed = 1
+					}
+					// Enumerate capacity rather than duplicating the target's rounding arithmetic.
+					want := 0
+					for int64(liveFixed+want)*14000 < demandCPU+1000 ||
+						int64(liveFixed+want)*(56<<30) < demandMemory+(1<<30) ||
+						fixedSlots+want*8 < demandSlots+1 {
+						want++
+					}
+					elastic, required := worker.target(snapshot)
+					label := fmt.Sprintf("fixedSlots=%d demandSlots=%d CPU=%d memory=%d", fixedSlots, demandSlots, demandCPU, demandMemory)
+					require.Equal(t, want, elastic, label)
+					require.Equal(t, liveFixed+want, required, label)
+				}
+			}
+		}
+	}
+}
+
+func TestPartialFixedCapacityStillRequiresStableScaleIn(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 1}
+	store.snapshot.ClusterFixedUsableSlots = 7
+	store.snapshot.ClusterActiveLeases = 5
+	worker := testWorker(t, store, cloud)
+	decision, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, decision.TargetElastic)
+	require.Equal(t, "scale_in_stabilizing", decision.Action)
+	require.Empty(t, cloud.sets)
+
+	store.state.LowPressureSince = testNow.Add(-11 * time.Minute)
+	decision, err = worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_in", decision.Action)
+	require.Equal(t, []int{0}, cloud.sets)
 }
 
 func TestRejectsAnyTopologyOtherThanOnePlusZeroTo299(t *testing.T) {

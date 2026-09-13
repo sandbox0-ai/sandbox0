@@ -11,7 +11,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
@@ -64,7 +63,17 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 	if err != nil {
 		return nil, fmt.Errorf("create Nomad runtime slot claim planner: %w", err)
 	}
-	claimer, err := nomadclaim.New(nomadclaim.Config{
+	claimer, err := nomadclaim.New(sandboxRuntimeClaimConfig(cfg, deps, planner))
+	if err != nil {
+		return nil, fmt.Errorf("create Nomad sandbox claimer: %w", err)
+	}
+	return claimer, nil
+}
+
+// sandboxRuntimeClaimConfig keeps image-import policy in the logical claimer,
+// separate from the immutable warm-slot runtime class catalog.
+func sandboxRuntimeClaimConfig(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies, planner *runtimeslotclaim.Planner) nomadclaim.Config {
+	return nomadclaim.Config{
 		Store: deps.store, Templates: deps.templates, RuntimeClasses: deps.runtimeClasses, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
 		PlannedRetire:   deps.nodeAuthority,
@@ -72,16 +81,15 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		PausedRebase:    deps.nodeAuthority,
 		QuotaLimits:     deps.quotaLimits,
 		NetworkPolicies: deps.networkPolicies, ResourcePolicy: deps.resourcePolicy,
-		RootFSFormatGeneration: rootfsblock.DescriptorVersion,
-		RootFSProcdProtocol:    cfg.RootFSImporter.ProcdProtocol,
-		RootFSProcdDigest:      cfg.RootFSImporter.ProcdDigest,
-		ClaimTTL:               claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,
+		RootFSFormatGeneration:         cfg.RootFSImporter.FormatGeneration,
+		RootFSProcdProtocol:            cfg.RootFSImporter.ProcdProtocol,
+		RootFSProcdDigest:              cfg.RootFSImporter.ProcdDigest,
+		RootFSImportDataRangeBytes:     cfg.RootFSImporter.DataRangeBytes,
+		RootFSImportDataLayoutPolicy:   cfg.RootFSImporter.DataLayoutPolicy,
+		RootFSImportMappingGroupPolicy: cfg.RootFSImporter.MappingGroupPolicy,
+		ClaimTTL:                       cfg.NodeAuthority.Claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,
 		Now: deps.now, Logger: deps.logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create Nomad sandbox claimer: %w", err)
 	}
-	return claimer, nil
 }
 
 func demandPoolID(cfg *config.ManagerConfig) string {

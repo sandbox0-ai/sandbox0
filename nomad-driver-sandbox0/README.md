@@ -88,6 +88,15 @@ boot may clean an old boot only for the same authenticated node UID and only
 after independently proving old runsc, mounts, network state, writer, and
 lease cgroup absent.
 
+Driver task handles use version 2 and persist the normalized command and security
+class inside the opaque driver state. Nomad's public task handle does not retain
+its private driver configuration across client database persistence. Recovery
+rejects version 1/unknown handles, missing configuration, and identity or local
+state conflicts; it never fills missing security inputs from defaults. Plan
+upgrades through the normal one-shot carrier replacement lifecycle, not seamless
+recovery of old handles. Regional fencing and replacement proofs remain required;
+this state-format change does not preserve processes across a node reboot.
+
 ## Build And Test
 
 The driver is a separate Go module so Nomad dependencies do not enter every
@@ -207,7 +216,7 @@ Build one fixed harness artifact:
 
 ```sh
 go build -buildvcs=false -trimpath -o /tmp/runtime-slot-slo \
-  ./tools/runtime-slot-slo
+    ./tools/runtime-slot-slo
 sha256sum /tmp/runtime-slot-slo
 ```
 
@@ -215,35 +224,62 @@ Serial gate:
 
 ```sh
 SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
-  --url https://region.example.com/api/v1/sandboxes \
-  --template default \
-  --batches 1000 \
-  --concurrency 1 \
-  --p50-target 500ms \
-  --hard-limit 1s \
-  --cleanup-timeout 2m \
-  --cleanup-poll 100ms \
-  --output serial-1000.json
+    --url https://region.example.com/api/v1/sandboxes \
+    --template default \
+    --batches 1000 \
+    --concurrency 1 \
+    --p50-target 500ms \
+    --hard-limit 1s \
+    --workload none \
+    --request-timeout 10s \
+    --cleanup-timeout 2m \
+    --cleanup-poll 100ms \
+    --output serial-1000.json
 ```
 
 Synchronized production-width gate:
 
 ```sh
 SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
-  --url https://region.example.com/api/v1/sandboxes \
-  --template default \
-  --batches 100 \
-  --concurrency 8 \
-  --batch-settle 5s \
-  --cleanup-timeout 2m \
-  --cleanup-poll 100ms \
-  --output concurrency-8.json
+    --url https://region.example.com/api/v1/sandboxes \
+    --template default \
+    --batches 100 \
+    --concurrency 8 \
+    --workload none \
+    --request-timeout 10s \
+    --batch-settle 5s \
+    --cleanup-timeout 2m \
+    --cleanup-poll 100ms \
+    --output concurrency-8.json
 ```
 
-The harness requires signed `Server-Timing` and SLO headers, performs no hidden
-claim retries, rejects redirects/proxies, deletes every successful claim, and
-waits for public `404` terminal convergence. The command-ready p50 target is
-500 ms; command-ready and public round-trip p99 hard limits are one second.
+The harness retains the canonical ingress-to-procd `Server-Timing` and SLO
+headers. The one-second sandbox-startup hard limit ends at authenticated readiness
+and the complete public claim round trip, not completion of a user executable.
+The 500 ms p50 target is diagnostic. `--workload none` dispatches no user program;
+it does not weaken launch, RootFS/network/resource binding, or readiness proof.
+
+Report v7 exposes `startup_passed` independently of optional `first_command`,
+`workload_wall`, workload identity, and per-step exit/stdout/timing evidence.
+Use `--workload coding-agent` for Node followed by Codex executable startup, or
+`--workload-file` for explicit argv and stdout expectations. Only the first step
+is the first executable; subsequent steps may benefit from earlier reads.
+See [the acceptance tool guide](../tools/runtime-slot-slo/README.md) for exact
+metric boundaries, configuration, and v7 verifier migration requirements.
+The optional `--first-command-hard-limit` defaults to zero (disabled), and any
+explicit limit affects workload acceptance only. A slow Node/Codex process does
+not fail a successful one-second sandbox start. Selected workloads still require
+valid exit/stdout evidence; `passed` also includes cleanup and workload results.
+
+The examples explicitly preserve the existing canary's 10-second request budget;
+the tool's original 15-second default is unchanged. All sequential command steps,
+including Node and Codex, share one 10-second budget after claim. A later-step
+timeout fails the workload even if the first command succeeded. The harness
+performs no claim or command POST retries, rejects redirects/proxies, bounds
+context TTL, and deletes every known claimed sandbox even after a failed or
+timed-out command. Cleanup waits
+for canonical public `404` terminal convergence before the next batch. Failed
+or missing command evidence and cleanup errors independently fail acceptance.
 
 Production width requires eight ready carriers, eight genuinely dedicated CPU
 cores, sufficient non-oversubscribed memory, at least eight usable ctld NBD
@@ -251,6 +287,10 @@ devices, quota headroom, and replacement capacity. A narrower machine may run
 only its truthful width and must not label that report as concurrency eight.
 Cold S3, refill, unclean recovery, and full-cold-node reports remain separate
 from the hot distribution.
+Test logical RootFS size and actual stored data volume independently, including
+mapping depth and file count; do not use a large empty sparse filesystem as the
+sole large-RootFS case. No tenant RootFS contents may be prewarmed. The supported
+size matrix must pass the same startup boundary without relaxing the hard limit.
 
 ## Running Fork Diagnostic
 

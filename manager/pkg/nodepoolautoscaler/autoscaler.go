@@ -216,17 +216,24 @@ func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, in
 	requiredCPU := snapshot.ClusterUsedCPU + snapshot.DemandCPUMillicores + w.config.HeadroomCPUMillicores
 	requiredMemory := snapshot.ClusterUsedMemory + snapshot.DemandMemoryBytes + w.config.HeadroomMemoryBytes
 	requiredSlots := snapshot.ClusterActiveLeases + snapshot.DemandSlots + w.config.HeadroomSlots
-	requiredNodes := max(
+	requiredResourceNodes := max(
 		ceilDiv(requiredCPU, w.config.NodeCPUMillicores),
 		ceilDiv(requiredMemory, w.config.NodeMemoryBytes),
-		ceilDiv(int64(requiredSlots), int64(w.config.WarmSlotsPerNode)),
 		w.config.FixedNodes,
 	)
-	readyFixedNodes := min(
-		w.config.FixedNodes,
-		snapshot.ClusterFixedUsableSlots/w.config.WarmSlotsPerNode,
+	// With the supported single fixed worker, any usable carrier proves a live
+	// fixed node. A retiring carrier must not erase that node's CPU/memory credit,
+	// but only its actual usable carriers can cover the slot requirement.
+	fixedUsableSlots := min(max(snapshot.ClusterFixedUsableSlots, 0), w.config.WarmSlotsPerNode)
+	liveFixedNodes := 0
+	if fixedUsableSlots > 0 {
+		liveFixedNodes = 1
+	}
+	elastic := max(
+		requiredResourceNodes-liveFixedNodes,
+		ceilDiv(int64(requiredSlots)-int64(fixedUsableSlots), int64(w.config.WarmSlotsPerNode)),
 	)
-	elastic := requiredNodes - readyFixedNodes
+	requiredNodes := liveFixedNodes + elastic
 	elastic = min(max(elastic, w.config.MinElasticNodes), w.config.MaxElasticNodes)
 	return elastic, requiredNodes
 }

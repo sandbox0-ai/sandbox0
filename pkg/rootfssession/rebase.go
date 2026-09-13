@@ -235,7 +235,7 @@ func (m *Manager) ExecuteRebase(
 	}
 	for index := range current.Resources {
 		resource := &current.Resources[index]
-		reader, err := rootfsblock.NewReaderWithCache(m.source, descriptors[resource.Role], m.readCache)
+		reader, err := rootfsblock.NewReaderWithCacheContext(m.lifetime, m.source, descriptors[resource.Role], m.readCache)
 		if err != nil {
 			return result, fmt.Errorf("open %s rebase generation: %w", resource.Role, err)
 		}

@@ -41,10 +41,7 @@ func main() {
 	}
 
 	// Initialize logger
-	logger, err := coreobs.NewLogger(coreobs.LoggerConfig{
-		ServiceName: "procd",
-		Level:       cfg.LogLevel,
-	})
+	logger, err := newProcdLogger(cfg.LogLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)

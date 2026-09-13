@@ -394,17 +394,18 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 	}
 
-	if allocationObservation.PhysicalPresent {
-		if err := r.allocation.Purge(ctx, AllocationPurgeRequest{OperationID: ids.purge, Target: target}); err != nil {
-			return false, fmt.Errorf("purge Nomad allocation: %w", err)
-		}
-		allocationObservation, err = r.allocation.Observe(ctx, target)
-		if err != nil {
-			return false, fmt.Errorf("confirm Nomad allocation purge: %w", err)
-		}
-		if err := validateAllocationObservation(allocationObservation, target); err != nil {
-			return false, err
-		}
+	// Physical absence alone cannot acknowledge the post-stop scheduling
+	// notification. A response-lost purge must converge again before the slot
+	// becomes terminal and leaves this durable reconciliation queue.
+	if err := r.allocation.Purge(ctx, AllocationPurgeRequest{OperationID: ids.purge, Target: target}); err != nil {
+		return false, fmt.Errorf("purge Nomad allocation: %w", err)
+	}
+	allocationObservation, err = r.allocation.Observe(ctx, target)
+	if err != nil {
+		return false, fmt.Errorf("confirm Nomad allocation purge: %w", err)
+	}
+	if err := validateAllocationObservation(allocationObservation, target); err != nil {
+		return false, err
 	}
 	if allocationObservation.PhysicalPresent {
 		return false, ErrAllocationStillPresent

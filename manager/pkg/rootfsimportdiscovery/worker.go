@@ -45,6 +45,7 @@ type Config struct {
 	ProcdProtocol    string
 	ProcdDigest      string
 	BlockOptions     rootfsblock.BuildOptions
+	DataLayoutPolicy string
 	Interval         time.Duration
 	PageSize         int
 }
@@ -71,8 +72,18 @@ func New(config Config) (*Worker, error) {
 	if config.Sources == nil || config.Imports == nil {
 		return nil, fmt.Errorf("template image sources and RootFS import store are required")
 	}
-	if config.FormatGeneration <= 0 {
-		return nil, fmt.Errorf("RootFS format generation must be positive")
+	format, err := rootfsimporter.ImageImportFormat(config.FormatGeneration)
+	if err != nil {
+		return nil, err
+	}
+	config.FormatGeneration = format
+	// Validate without replacing the raw options: zero is the legacy lookup
+	// policy. Only the durable operation below receives normalized defaults.
+	if _, err := rootfsimporter.NormalizeBlockOptions(format, config.BlockOptions); err != nil {
+		return nil, fmt.Errorf("RootFS import discovery block options: %w", err)
+	}
+	if err := rootfsimporter.ValidateDataLayoutPolicy(config.DataLayoutPolicy, format, config.BlockOptions); err != nil {
+		return nil, err
 	}
 	if config.Interval == 0 {
 		config.Interval = DefaultInterval
@@ -187,16 +198,21 @@ func (w *Worker) ensureSource(
 	var failures []error
 	for _, platform := range w.config.Platforms {
 		result.Requirements++
+		requirements := sandboxstore.ReadyRootFSArtifactRequirements{
+			FormatGeneration:         w.config.FormatGeneration,
+			LogicalSizeBytes:         logicalSize,
+			ProcdProtocol:            w.config.ProcdProtocol,
+			ProcdDigest:              w.config.ProcdDigest,
+			ImportDataRangeBytes:     w.config.BlockOptions.DataRangeBytes,
+			ImportDataLayoutPolicy:   w.config.DataLayoutPolicy,
+			ImportMappingGroupPolicy: w.config.BlockOptions.MappingGroupPolicy,
+			SourceOCIRef:             source.Image,
+		}
 		artifact, readyErr := w.config.Imports.GetReadyRootFSBaseArtifact(
 			ctx,
 			sourceDigest.String(),
 			platform,
-			sandboxstore.ReadyRootFSArtifactRequirements{
-				FormatGeneration: w.config.FormatGeneration,
-				LogicalSizeBytes: logicalSize,
-				ProcdProtocol:    w.config.ProcdProtocol,
-				ProcdDigest:      w.config.ProcdDigest,
-			},
+			requirements,
 		)
 		if readyErr == nil && artifact != nil {
 			result.Ready++
@@ -218,6 +234,7 @@ func (w *Worker) ensureSource(
 			ProcdDigest:      w.config.ProcdDigest,
 			LogicalSizeBytes: logicalSize,
 			BlockOptions:     w.config.BlockOptions,
+			DataLayoutPolicy: w.config.DataLayoutPolicy,
 		}
 		operationID, normalized, operationErr := rootfsimporter.DeterministicOperation(operationSpec)
 		if operationErr != nil {
@@ -243,6 +260,18 @@ func (w *Worker) ensureSource(
 		case sandboxstore.RootFSImportStatePending, sandboxstore.RootFSImportStateBuilding:
 			result.Ensured++
 		case sandboxstore.RootFSImportStateReady:
+			// An old publisher may have completed this deterministic operation
+			// without recording geometry provenance. Operation state alone does
+			// not establish that today's source selector can consume its result.
+			artifact, readyErr := w.config.Imports.GetReadyRootFSBaseArtifact(ctx, sourceDigest.String(), platform, requirements)
+			if readyErr != nil || artifact == nil {
+				if readyErr == nil {
+					readyErr = sandboxstore.ErrRootFSBaseArtifactNotFound
+				}
+				failures = append(failures, fmt.Errorf("%s/%s/%s ready import %s has no selectable artifact: %w",
+					platform.OS, platform.Architecture, platform.Variant, operation.ID, readyErr))
+				continue
+			}
 			result.Ready++
 		case sandboxstore.RootFSImportStateAbandoned:
 			failures = append(failures, fmt.Errorf("%s/%s/%s import %s is abandoned: %s",

@@ -70,10 +70,16 @@ func (s *FileStore) Load() ([]Session, error) {
 	return sessions, nil
 }
 
-// BindSandbox binds persisted sessions to one sandbox identity. Legacy stores
-// without an identity are adopted in place. A copied store is cleared before
-// it is rebound so a fork cannot execute the source sandbox's sessions.
+// BindSandbox binds persisted sessions to one sandbox identity, adopting legacy
+// stores without an owner. Existing foreign owners are left unchanged.
 func (s *FileStore) BindSandbox(sandboxID string) (bool, error) {
+	return s.bindSandbox(sandboxID, true)
+}
+
+// bindSandbox must not adopt an unowned store when the runtime assignment says
+// its sessions were copied. Leave the owner unpublished until reset succeeds,
+// otherwise a retry could recover copied sessions as target-owned state.
+func (s *FileStore) bindSandbox(sandboxID string, allowLegacyAdoption bool) (bool, error) {
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" || strings.ContainsAny(sandboxID, "\r\n") {
 		return false, errors.New("sandbox id is required")
@@ -87,6 +93,9 @@ func (s *FileStore) BindSandbox(sandboxID string) (bool, error) {
 		}
 		return false, nil
 	case errors.Is(err, fs.ErrNotExist):
+		if !allowLegacyAdoption {
+			return false, nil
+		}
 		if err := writeFileAtomic(path, []byte(sandboxID+"\n"), 0o600); err != nil {
 			return false, fmt.Errorf("persist sandbox identity: %w", err)
 		}
@@ -103,7 +112,7 @@ func (s *FileStore) ResetForSandbox(sandboxID string) error {
 		return errors.New("sandbox id is required")
 	}
 	entries, err := os.ReadDir(s.root)
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read session state directory: %w", err)
 	}
 	for _, entry := range entries {

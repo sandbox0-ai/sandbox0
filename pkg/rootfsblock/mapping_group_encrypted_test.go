@@ -60,7 +60,7 @@ func TestMappingGroupEncryptedDelivery(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, body.Close())
 					ciphertext[len(ciphertext)-1] ^= 1
-					require.NoError(t, raw.ContextConditionalStore.Put(pack, bytes.NewReader(ciphertext)))
+					require.NoError(t, raw.Put(pack, bytes.NewReader(ciphertext)))
 				}
 				// Match current RootFS crypto policy, with a cold wrapper per cohort.
 				encrypted := objectstore.EncryptingImmutable(raw, cfg, objectstore.EncryptedHeaderCacheConfig{MaxEntries: 1024, MaxBytes: 8 << 20, MaxPrefixBytes: 256 << 10, MaxParallelReadBytes: 256 << 10})

@@ -29,7 +29,7 @@ func (s *canceledEditSource) GetContext(ctx context.Context, key string, offset,
 		s.cancel()
 		return nil, ctx.Err()
 	}
-	return s.RangeSource.Get(key, offset, length)
+	return s.Get(key, offset, length)
 }
 
 type editRecordingPublisher struct {

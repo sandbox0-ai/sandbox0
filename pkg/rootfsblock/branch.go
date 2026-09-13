@@ -810,7 +810,7 @@ func (b *Branch) readAtLocked(target []byte, offset int64) (int, error) {
 			}
 			n, err := b.base.ReadAt(target[written:written+length], absolute)
 			written += n
-			if err != nil && !(err == io.EOF && n == length) {
+			if err != nil && (err != io.EOF || n != length) {
 				return written, err
 			}
 			if n != length {

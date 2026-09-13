@@ -26,7 +26,7 @@ func TestReaderLifetimeRejectsMissingOrCanceledContext(t *testing.T) {
 	base, _, descriptor, _ := adaptiveFixture(t, bulkReadThreshold, 1024)
 	cache, err := NewReadCache(DefaultReadCacheBytes)
 	require.NoError(t, err)
-	_, err = NewReaderWithCacheContext(nil, base, descriptor, cache)
+	_, err = NewReaderWithCacheContext(nil, base, descriptor, cache) //nolint:staticcheck // SA1012: verify the explicit lifetime API rejects an invalid nil context.
 	require.ErrorContains(t, err, "lifetime is required")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

@@ -80,8 +80,8 @@ func TestCredentialPreparationPreservesProviderFailureAndCancellation(t *testing
 	require.ErrorIs(t, PrepareCredentials(ctx, base), context.Canceled)
 	require.ErrorIs(t, base.PrepareCredentials(ctx), context.Canceled)
 	require.EqualValues(t, 1, calls.Load(), "canceled preparation must not retrieve credentials")
-	require.Error(t, PrepareCredentials(nil, base))
-	require.Error(t, base.PrepareCredentials(nil))
+	require.Error(t, PrepareCredentials(nil, base)) //nolint:staticcheck // SA1012: verify the wrapper rejects an invalid nil context.
+	require.Error(t, base.PrepareCredentials(nil))  //nolint:staticcheck // SA1012: verify the concrete store also rejects an invalid nil context.
 }
 
 type preparationContextKey struct{}

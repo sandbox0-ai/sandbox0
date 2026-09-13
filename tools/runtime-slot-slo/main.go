@@ -398,7 +398,7 @@ batches:
 		result.Cleanup.Count == len(result.Samples) && (!result.WorkloadMeasured || result.WorkloadPassed)
 	if !result.Passed {
 		return result, fmt.Errorf(
-			"Acceptance failed: startup_passed=%t workload_measured=%t workload_passed=%t samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s first_command_errors=%d first_command_misses=%d first_command_max=%s",
+			"acceptance failed: startup_passed=%t workload_measured=%t workload_passed=%t samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s first_command_errors=%d first_command_misses=%d first_command_max=%s",
 			result.StartupPassed, result.WorkloadMeasured, result.WorkloadPassed, len(result.Samples), result.Errors, result.SLOMisses, result.WallMisses, result.CleanupErrors,
 			result.CommandReady.P50, result.CommandReady.P99, result.CommandReady.Max,
 			result.Wall.P99, result.Wall.Max, result.FirstCommandErrors, result.FirstCommandMisses, result.FirstCommand.Max,

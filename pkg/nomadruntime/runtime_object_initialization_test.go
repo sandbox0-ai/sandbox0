@@ -63,7 +63,7 @@ func TestRuntimeObjectInitializationFailsClosedBeforeBucketAccess(t *testing.T) 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.ErrorIs(t, initializeRuntimeObjectStore(ctx, store), context.Canceled)
-	require.Error(t, initializeRuntimeObjectStore(nil, store))
+	require.Error(t, initializeRuntimeObjectStore(nil, store)) //nolint:staticcheck // SA1012: verify an invalid nil context fails closed before bucket access.
 	require.Error(t, initializeRuntimeObjectStore(t.Context(), nil))
 }
 

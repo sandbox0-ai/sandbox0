@@ -46,7 +46,7 @@ func NewReader(source RangeSource, descriptor Descriptor, cacheBytes int64) (*Re
 // This constructor retains the legacy Get transport contract; mounted node
 // readers should explicitly bind their I/O lifetime with the context variant.
 func NewReaderWithCache(source RangeSource, descriptor Descriptor, cache *ReadCache) (*Reader, error) {
-	return newReaderWithCache(nil, source, descriptor, cache)
+	return newReaderWithCache(nil, source, descriptor, cache) //nolint:staticcheck // SA1012: nil deliberately selects legacy Get instead of the context-aware transport.
 }
 
 // NewReaderWithCacheContext binds source admission and context-aware transport

@@ -119,6 +119,10 @@ the exact Go template fields enforced by the builder. The archive may contain
 only the documented `/etc/sandbox0`, Nomad driver, and CNI config paths. It is
 never assembled by copying a live worker.
 
+Set `SANDBOX0_NOMAD_ADDRESS=https://{{.PrivateIP}}:4646` in `ctld.env.tmpl`.
+The bootstrapper checks this exact node address; loopback and control-server
+addresses are not valid replacements.
+
 ## Manager authority files
 
 Provision these root-owned inputs on the current control host (and identically

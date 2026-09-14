@@ -166,6 +166,7 @@ func TestNodeRuntimeTemplateBuilderProducesExactIdentityArchive(t *testing.T) {
 		"etc/sandbox0/ctld.env.tmpl": strings.Join([]string{
 			"SANDBOX0_NODE_NAME={{.NodeName}}",
 			"SANDBOX0_NOMAD_NODE_ID={{.NodeID}}",
+			"SANDBOX0_NOMAD_ADDRESS=https://{{.PrivateIP}}:4646",
 			"SANDBOX0_NODE_UID={{.NodeUID}}",
 			"SANDBOX0_REGION_ID={{.RegionID}}",
 			"SANDBOX0_CLUSTER_ID={{.ClusterID}}",
@@ -209,6 +210,18 @@ func TestNodeRuntimeTemplateBuilderProducesExactIdentityArchive(t *testing.T) {
 	}
 	if len(rendered) == 0 {
 		t.Fatal("rendered runtime archive is empty")
+	}
+	for _, address := range []string{"https://127.0.0.1:4646", "https://10.0.0.1:4646", "http://{{.PrivateIP}}:4646", "https://{{.PrivateIP}}:4646\nSANDBOX0_NOMAD_ADDRESS=https://127.0.0.1:4646"} {
+		t.Run(address, func(t *testing.T) {
+			payload := strings.ReplaceAll(files["etc/sandbox0/ctld.env.tmpl"], "https://{{.PrivateIP}}:4646", address)
+			if err := os.WriteFile(filepath.Join(source, "etc/sandbox0/ctld.env.tmpl"), []byte(payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("bash", "control/build-node-runtime-template.sh", "--source", source, "--output", output)
+			if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "must bind SANDBOX0_NOMAD_ADDRESS") {
+				t.Fatalf("invalid address was not rejected: %v: %s", err, output)
+			}
+		})
 	}
 }
 

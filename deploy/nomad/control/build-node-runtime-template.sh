@@ -37,6 +37,7 @@ import gzip
 import io
 import os
 import pathlib
+import shlex
 import stat
 import sys
 import tarfile
@@ -100,6 +101,18 @@ for output_name, markers in {
     source_name, payload = by_output[output_name]
     if not source_name.endswith(".tmpl") or any(marker not in payload for marker in markers):
         raise SystemExit("identity-bearing template is missing exact markers: %s" % output_name)
+
+# A loopback or control-server address passes marker-only validation but fails
+# the node's exact private-IP binding after cloud identity has been finalized.
+_, environment_payload = by_output["etc/sandbox0/ctld.env"]
+address_values = []
+for line in environment_payload.decode().splitlines():
+    parts = shlex.split(line, comments=True)
+    for assignment in parts:
+        if assignment.startswith("SANDBOX0_NOMAD_ADDRESS="):
+            address_values.append(assignment.split("=", 1)[1])
+if address_values != ["https://{{.PrivateIP}}:4646"]:
+    raise SystemExit("ctld template must bind SANDBOX0_NOMAD_ADDRESS to https://{{.PrivateIP}}:4646 exactly once")
 
 buffer = io.BytesIO()
 with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed:

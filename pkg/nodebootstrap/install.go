@@ -58,7 +58,22 @@ func (b *Bootstrapper) validateRuntimeRelease(artifact nodeenrollment.RuntimeArt
 			return "", fmt.Errorf("runtime release executable %s is invalid", executable)
 		}
 	}
+	for _, asset := range []string{
+		"ctld/install-node.sh", "host/sandbox0-nomad-agent", "host/nomad.service",
+		"host/sandbox0-node-bootstrap.service", "host/sandbox0-node-bootstrap.timer",
+	} {
+		info, err := os.Lstat(runtimeDeploymentPath(release, asset))
+		if err != nil || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("runtime release deployment asset %s is invalid", asset)
+		}
+	}
 	return release, nil
+}
+
+// runtimeDeploymentPath matches the immutable bundle layout shared with fixed
+// node installation. The source deploy/nomad directory is published as deploy.
+func runtimeDeploymentPath(release, asset string) string {
+	return filepath.Join(release, "share/sandbox0/deploy", asset)
 }
 
 func (b *Bootstrapper) prepareNomadHost(ctx context.Context, release string) error {
@@ -96,7 +111,7 @@ func (b *Bootstrapper) prepareNomadHost(ctx context.Context, release string) err
 			return err
 		}
 	}
-	hostAssets := filepath.Join(release, "share/sandbox0/deploy/nomad/host")
+	hostAssets := runtimeDeploymentPath(release, "host")
 	for _, asset := range []struct {
 		source, destination string
 		mode                fs.FileMode
@@ -204,7 +219,7 @@ func (b *Bootstrapper) installCTLD(
 	release string,
 	staged *stagedRuntimeConfig,
 ) error {
-	installer := filepath.Join(release, "share/sandbox0/deploy/nomad/ctld/install-node.sh")
+	installer := runtimeDeploymentPath(release, "ctld/install-node.sh")
 	args := []string{
 		"--ctld", filepath.Join(release, "bin/ctld"),
 		"--driver", filepath.Join(release, "bin/sandbox0-gvisor"),
@@ -219,7 +234,7 @@ func (b *Bootstrapper) installCTLD(
 }
 
 func (b *Bootstrapper) installRenewalTimer(ctx context.Context, release string) error {
-	hostAssets := filepath.Join(release, "share/sandbox0/deploy/nomad/host")
+	hostAssets := runtimeDeploymentPath(release, "host")
 	for _, name := range []string{"sandbox0-node-bootstrap.service", "sandbox0-node-bootstrap.timer"} {
 		if err := copyRegularFile(filepath.Join(hostAssets, name), filepath.Join("/etc/systemd/system", name), 0o644); err != nil {
 			return err

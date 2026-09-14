@@ -21,6 +21,19 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	store := NewPGSandboxStore(pool)
 	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-slot", "claim-operation-a")
 	registration := runtimeSlotTestRegistration("slot-a", "allocation-a")
+	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", registration.ClusterID)
+	require.NoError(t, err)
+	assertPoolDemand := func(workloadSlots int) {
+		t.Helper()
+		snapshot, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+		require.NoError(t, err)
+		require.Equal(t, 1, snapshot.ClusterActiveLeases, "physical cleanup remains required")
+		require.Positive(t, snapshot.ClusterUsedCPU)
+		require.Positive(t, snapshot.ClusterUsedMemory)
+		require.Equal(t, workloadSlots, snapshot.ClusterWorkloadSlots)
+		require.Equal(t, snapshot.ClusterUsedCPU*int64(workloadSlots), snapshot.ClusterWorkloadCPU)
+		require.Equal(t, snapshot.ClusterUsedMemory*int64(workloadSlots), snapshot.ClusterWorkloadMemory)
+	}
 
 	registered, err := registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
@@ -32,6 +45,10 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	changed.NodeBootID = "different-boot"
 	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, &changed)
 	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
+	// The conflict helper also publishes capacity. Restore the accepted boot's
+	// heartbeat so the pool snapshot observes the incarnation serving the claim.
+	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
+	require.NoError(t, err)
 
 	proof := bytes.Repeat([]byte{0x31}, 32)
 	ready, err := store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
@@ -56,6 +73,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateClaiming, claimed.State)
 	require.Equal(t, registration.AllocationID, claimed.AllocationID)
+	assertPoolDemand(1)
 	claimRetry, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
 	require.Equal(t, claimed.ID, claimRetry.ID)
@@ -116,6 +134,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateStarting, started.State)
+	assertPoolDemand(1)
 	commandReady := &MarkRuntimeSlotCommandReadyRequest{
 		SlotID: claimed.ID, AllocationID: registration.AllocationID,
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
@@ -126,6 +145,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	active, err := store.MarkRuntimeSlotCommandReady(ctx, commandReady)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateActive, active.State)
+	assertPoolDemand(1)
 	require.Equal(t, "http://192.0.2.2:49983", active.ProcdAddress)
 	_, err = pool.Exec(ctx, `
 		UPDATE manager.runtime_slots
@@ -154,6 +174,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+	assertPoolDemand(0)
 	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
@@ -167,6 +188,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateOrphaned, orphaned.State)
+	assertPoolDemand(0)
 	require.Equal(t, issued.Grant.ID, orphaned.WriterGrantID)
 	require.Equal(t, "runsc-a", orphaned.RunscContainerID)
 	require.Equal(t, observation, orphaned.OrphanObservationDigest)

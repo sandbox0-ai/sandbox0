@@ -99,7 +99,12 @@ type RuntimeNodePoolSnapshot struct {
 	ClusterActiveLeases     int
 	ClusterReadySlots       int
 	ClusterFixedUsableSlots int
-	AuthorityObservedAt     time.Time
+	// Workload demand excludes retiring slots. Their resource leases remain
+	// fully accounted above and continue to prevent physical node removal.
+	ClusterWorkloadCPU    int64
+	ClusterWorkloadMemory int64
+	ClusterWorkloadSlots  int
+	AuthorityObservedAt   time.Time
 }
 
 type RuntimeNodeDrainStatus struct {
@@ -394,6 +399,15 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			COALESCE(SUM(lease.cpu_millicores), 0)::bigint,
 			COALESCE(SUM(lease.memory_bytes), 0)::bigint,
 			COUNT(lease.lease_id)::integer,
+			COALESCE(SUM(lease.cpu_millicores) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			), 0)::bigint,
+			COALESCE(SUM(lease.memory_bytes) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			), 0)::bigint,
+			COUNT(lease.lease_id) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			)::integer,
 			(
 				SELECT COUNT(*)::integer
 				FROM manager.runtime_slots AS slot
@@ -439,9 +453,14 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			AND lease.node_uid = capacity.node_uid
 			AND lease.node_boot_id = capacity.node_boot_id
 			AND lease.lease_state = 'active'
+		LEFT JOIN manager.runtime_slots AS workload_slot
+			ON workload_slot.resource_lease_id = lease.lease_id
+			AND workload_slot.slot_id = lease.slot_id
 	`, state.ClusterID).Scan(
 		&snapshot.ClusterUsedCPU, &snapshot.ClusterUsedMemory,
-		&snapshot.ClusterActiveLeases, &snapshot.ClusterReadySlots,
+		&snapshot.ClusterActiveLeases, &snapshot.ClusterWorkloadCPU,
+		&snapshot.ClusterWorkloadMemory, &snapshot.ClusterWorkloadSlots,
+		&snapshot.ClusterReadySlots,
 		&snapshot.ClusterFixedUsableSlots,
 	); err != nil {
 		return nil, fmt.Errorf("query runtime node pool cluster usage: %w", err)

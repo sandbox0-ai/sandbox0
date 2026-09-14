@@ -312,13 +312,22 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 			return fmt.Errorf("allocation route in %s has an unexpected next hop", routeTableID)
 		}
 		remove := vpc.CreateDeleteRouteEntryRequest()
-		remove.RouteTableId = routeTableID
+		if entry.Status == "Deleting" {
+			return ErrAllocationRoutesPending
+		}
+		if entry.Status != "Available" {
+			return fmt.Errorf("allocation route in %s is not available for deletion", routeTableID)
+		}
+		// Aliyun accepts either the immutable entry ID or table/CIDR/next-hop
+		// selectors. Combining both makes every scale-in fail validation.
 		remove.RouteEntryId = entry.RouteEntryId
-		remove.DestinationCidrBlock = allocationCIDR
-		remove.NextHopId = instanceID
 		if _, err := c.vpc.DeleteRouteEntry(remove); err != nil {
 			return err
 		}
+		// Deletion is asynchronous, and the provider forbids concurrent route
+		// deletes in a VPC. Observe absence on a later pass before releasing the
+		// node's identity and subnet or deleting another route for this node.
+		return ErrAllocationRoutesPending
 	}
 	return nil
 }

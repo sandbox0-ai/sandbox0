@@ -214,9 +214,12 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 }
 
 func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, int) {
-	requiredCPU := snapshot.ClusterUsedCPU + snapshot.DemandCPUMillicores + w.config.HeadroomCPUMillicores
-	requiredMemory := snapshot.ClusterUsedMemory + snapshot.DemandMemoryBytes + w.config.HeadroomMemoryBytes
-	requiredSlots := snapshot.ClusterActiveLeases + snapshot.DemandSlots + w.config.HeadroomSlots
+	// Retiring leases still fence node removal and consume physical admission,
+	// but replacing their carriers is not new workload demand. Counting cleanup
+	// backlog here can scale out indefinitely while the old nodes cannot drain.
+	requiredCPU := snapshot.ClusterWorkloadCPU + snapshot.DemandCPUMillicores + w.config.HeadroomCPUMillicores
+	requiredMemory := snapshot.ClusterWorkloadMemory + snapshot.DemandMemoryBytes + w.config.HeadroomMemoryBytes
+	requiredSlots := snapshot.ClusterWorkloadSlots + snapshot.DemandSlots + w.config.HeadroomSlots
 	requiredResourceNodes := max(
 		ceilDiv(requiredCPU, w.config.NodeCPUMillicores),
 		ceilDiv(requiredMemory, w.config.NodeMemoryBytes),

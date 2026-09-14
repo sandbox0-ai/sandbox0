@@ -26,6 +26,10 @@ type Action struct {
 	InstanceIDs []string
 }
 
+// ErrAllocationRoutesPending keeps node identity and CIDR ownership fenced
+// until asynchronous cloud route deletion is observed complete.
+var ErrAllocationRoutesPending = errors.New("allocation route deletion is pending")
+
 type Cloud interface {
 	ListPendingLifecycleActions(context.Context) ([]Action, error)
 	HeartbeatLifecycleAction(context.Context, Action, time.Duration) error
@@ -348,6 +352,9 @@ func (w *Worker) abandonScaleOut(ctx context.Context, action Action) (bool, erro
 		switch status.Instance.State {
 		case sandboxstore.RuntimeNodeInstanceEnrolling:
 			if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+				if errors.Is(err, ErrAllocationRoutesPending) {
+					return false, nil
+				}
 				return false, err
 			}
 			if err := w.store.AbandonRuntimeNodeEnrollment(ctx, w.config.PoolID, instanceID); err != nil {
@@ -410,6 +417,9 @@ func (w *Worker) abandonScaleOut(ctx context.Context, action Action) (bool, erro
 			return false, err
 		}
 		if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+			if errors.Is(err, ErrAllocationRoutesPending) {
+				return false, nil
+			}
 			return false, err
 		}
 		if err := w.nomad.PurgeNode(ctx, status.Instance.NodeID); err != nil {
@@ -486,6 +496,9 @@ func (w *Worker) reconcileScaleIn(ctx context.Context, action Action) (bool, boo
 
 	for instanceID, status := range statuses {
 		if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+			if errors.Is(err, ErrAllocationRoutesPending) {
+				return false, false, nil
+			}
 			return false, false, err
 		}
 		if err := w.nomad.PurgeNode(ctx, status.Instance.NodeID); err != nil {

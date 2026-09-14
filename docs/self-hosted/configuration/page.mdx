@@ -531,6 +531,16 @@ Each carrier is one-shot. Nomad replaces the allocation after consumption.
 Pool width, node capacity, and NBD count are independent constraints and should
 be monitored together.
 
+Autoscaler workload demand counts resource leases for claiming, starting, and
+active slots. Quiescing and orphaned slots retain their resource leases until
+physical cleanup is proven, but do not create replacement workload demand.
+Cleanup backlog therefore cannot by itself purchase additional worker capacity.
+Unsatisfied claims and configured headroom still contribute to scale-out demand;
+scale-in still requires the normal stabilization and node drain protocol.
+Aliyun route cleanup deletes only the verified immutable route entry ID and
+waits for route absence before releasing node identity or the allocation subnet.
+An accepted asynchronous delete request alone does not complete scale-in.
+
 Autoscaled clients must start with `sandbox0_admitted=false`. After exact node
 identity and a live ctld capacity heartbeat are established, bootstrap may set
 it to `true` so the system job creates carriers. PostgreSQL must retain a

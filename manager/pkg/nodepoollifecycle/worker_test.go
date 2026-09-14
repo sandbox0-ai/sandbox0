@@ -105,6 +105,7 @@ type fakeCloud struct {
 	protectionError             error
 	heartbeatCountsAtProtection []int
 	completionErrors            map[string]error
+	routeDeletionError          error
 }
 
 func (c *fakeCloud) ElasticInstancesInService(_ context.Context, ids []string) (map[string]bool, error) {
@@ -203,7 +204,7 @@ func (c *fakeCloud) SetInstancesProtection(_ context.Context, ids []string, prot
 
 func (c *fakeCloud) DeleteAllocationRoutes(_ context.Context, instanceID, _ string) error {
 	c.deleted = append(c.deleted, instanceID)
-	return nil
+	return c.routeDeletionError
 }
 
 type fakeNomad struct {
@@ -467,6 +468,31 @@ func TestIdleScaleInFencesDrainsRevokesThenContinues(t *testing.T) {
 	require.Equal(t, []string{"node-1"}, nomad.fenced)
 	require.Equal(t, []string{"node-1"}, nomad.purged)
 	require.Equal(t, []string{"i-1"}, cloud.deleted)
+	require.Equal(t, LifecycleContinue, cloud.completed["token"])
+	require.NotContains(t, store.nodes, "i-1")
+}
+
+func TestScaleInRetainsIdentityUntilRoutesAreAbsent(t *testing.T) {
+	store := &fakeStore{nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+		"i-1": {ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic,
+			State: sandboxstore.RuntimeNodeInstanceActive, NodeID: "node-1", NodeUID: "uid-1",
+			AllocationCIDR: "172.27.0.0/26", NonterminalSlots: 8},
+	}}
+	cloud := &fakeCloud{actions: []Action{{Token: "token", HookID: "in", InstanceIDs: []string{"i-1"}}}, routeDeletionError: ErrAllocationRoutesPending}
+	worker, nomad := testWorker(t, store, cloud)
+	result, err := worker.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, result.Completed)
+	require.Empty(t, nomad.purged)
+	require.Empty(t, cloud.completed)
+	require.Equal(t, sandboxstore.RuntimeNodeInstanceDraining, store.nodes["i-1"].State)
+	require.Equal(t, "172.27.0.0/26", store.nodes["i-1"].AllocationCIDR)
+
+	cloud.routeDeletionError = nil
+	result, err = worker.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+	require.Equal(t, []string{"node-1"}, nomad.purged)
 	require.Equal(t, LifecycleContinue, cloud.completed["token"])
 	require.NotContains(t, store.nodes, "i-1")
 }

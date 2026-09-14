@@ -131,7 +131,7 @@ func TestUnavailableFixedNodeIsReplacedByElasticCapacity(t *testing.T) {
 
 func TestClaimedFixedCarrierStillCountsTowardBaseline(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{}
-	store.snapshot.ClusterActiveLeases = 1
+	store.snapshot.ClusterWorkloadSlots = 1
 	store.snapshot.ClusterFixedUsableSlots = 8
 	decision, err := testWorker(t, store, cloud).Reconcile(context.Background())
 	require.NoError(t, err)
@@ -168,9 +168,9 @@ func TestPartialFixedCapacityCreditsResourcesAndExactUsableSlots(t *testing.T) {
 			store, cloud := &fakeStore{}, &fakeCloud{}
 			store.snapshot = sandboxstore.RuntimeNodePoolSnapshot{
 				ClusterFixedUsableSlots: tc.fixedSlots,
-				ClusterActiveLeases:     tc.activeLeases, DemandSlots: tc.demandSlots,
-				ClusterUsedCPU: tc.usedCPU, DemandCPUMillicores: tc.demandCPU,
-				ClusterUsedMemory: tc.usedMemory, DemandMemoryBytes: tc.demandMemory,
+				ClusterWorkloadSlots:    tc.activeLeases, DemandSlots: tc.demandSlots,
+				ClusterWorkloadCPU: tc.usedCPU, DemandCPUMillicores: tc.demandCPU,
+				ClusterWorkloadMemory: tc.usedMemory, DemandMemoryBytes: tc.demandMemory,
 			}
 			decision, err := testWorker(t, store, cloud).Reconcile(context.Background())
 			require.NoError(t, err)
@@ -220,7 +220,7 @@ func TestPartialFixedCapacityTargetIsMinimumSufficientCapacity(t *testing.T) {
 func TestPartialFixedCapacityStillRequiresStableScaleIn(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{desired: 1}
 	store.snapshot.ClusterFixedUsableSlots = 7
-	store.snapshot.ClusterActiveLeases = 5
+	store.snapshot.ClusterWorkloadSlots = 5
 	worker := testWorker(t, store, cloud)
 	decision, err := worker.Reconcile(context.Background())
 	require.NoError(t, err)
@@ -284,4 +284,26 @@ func TestOperatorPolicyRejectsInvalidElasticBounds(t *testing.T) {
 		_, err := New(&fakeStore{}, &fakeCloud{}, config)
 		require.ErrorContains(t, err, "0 <= min <= max <= 299")
 	}
+}
+
+func TestRetiringLeaseBacklogDoesNotCreateReplacementDemand(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 3}
+	store.snapshot = sandboxstore.RuntimeNodePoolSnapshot{
+		ClusterFixedUsableSlots: 8,
+		ClusterActiveLeases:     84, ClusterUsedCPU: 6229, ClusterUsedMemory: 13287555072,
+	}
+	worker := testWorker(t, store, cloud)
+	decision, err := worker.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, decision.TargetElastic)
+	require.Equal(t, "scale_in_stabilizing", decision.Action)
+	require.Empty(t, cloud.sets)
+	require.Equal(t, 84, store.snapshot.ClusterActiveLeases, "cleanup authority remains unchanged")
+
+	// A real unsatisfied claim still creates demand while those leases drain.
+	store.snapshot.DemandSlots = 8
+	decision, err = worker.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, decision.TargetElastic)
+	require.Equal(t, 84, store.snapshot.ClusterActiveLeases)
 }

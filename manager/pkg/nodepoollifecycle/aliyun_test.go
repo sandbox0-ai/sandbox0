@@ -256,11 +256,15 @@ func (v *allocationRouteVPCStub) DeleteRouteEntry(request *vpc.DeleteRouteEntryR
 }
 
 func TestDeleteAllocationRoutesRequiresExactCustomRoute(t *testing.T) {
-	for _, name := range []string{"absent", "exact", "other instance", "missing identity", "multiple hops", "other type", "incomplete page", "missing route ID"} {
+	for _, name := range []string{"absent", "exact", "deleting", "unknown status", "other instance", "missing identity", "multiple hops", "other type", "incomplete page", "missing route ID"} {
 		t.Run(name, func(t *testing.T) {
 			response := vpc.CreateDescribeRouteEntryListResponse()
-			entry := vpc.RouteEntry{RouteEntryId: "rte-1", RouteTableId: "rt-1", DestinationCidrBlock: "172.28.0.0/23", Type: "Custom", InstanceId: "i-1"}
+			entry := vpc.RouteEntry{RouteEntryId: "rte-1", RouteTableId: "rt-1", DestinationCidrBlock: "172.28.0.0/23", Type: "Custom", InstanceId: "i-1", Status: "Available"}
 			switch name {
+			case "deleting":
+				entry.Status = "Deleting"
+			case "unknown status":
+				entry.Status = ""
 			case "other instance":
 				entry.InstanceId = "i-other"
 			case "missing identity":
@@ -282,10 +286,17 @@ func TestDeleteAllocationRoutesRequiresExactCustomRoute(t *testing.T) {
 			require.NoError(t, err)
 			err = cloud.DeleteAllocationRoutes(context.Background(), "i-1", "172.28.0.0/23")
 			if name == "exact" {
-				require.NoError(t, err)
+				require.ErrorIs(t, err, ErrAllocationRoutesPending)
 				require.Len(t, client.deleted, 1)
 				require.Equal(t, "rte-1", client.deleted[0].RouteEntryId)
-				require.Equal(t, "i-1", client.deleted[0].NextHopId)
+				require.Empty(t, client.deleted[0].RouteTableId)
+				require.Empty(t, client.deleted[0].DestinationCidrBlock)
+				require.Empty(t, client.deleted[0].NextHopId)
+				response.RouteEntrys.RouteEntry[0].Status = "Deleting"
+				require.ErrorIs(t, cloud.DeleteAllocationRoutes(t.Context(), "i-1", "172.28.0.0/23"), ErrAllocationRoutesPending)
+				require.Len(t, client.deleted, 1, "pending deletion must not be submitted twice")
+				response.RouteEntrys.RouteEntry = nil
+				require.NoError(t, cloud.DeleteAllocationRoutes(t.Context(), "i-1", "172.28.0.0/23"))
 			} else {
 				if name == "absent" {
 					require.NoError(t, err)

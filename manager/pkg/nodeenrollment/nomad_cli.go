@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -72,7 +74,7 @@ func (n *NomadCLI) ValidateRegisteredNode(
 	var node struct {
 		ID                    string            `json:"ID"`
 		Name                  string            `json:"Name"`
-		Address               string            `json:"Address"`
+		HTTPAddr              string            `json:"HTTPAddr"`
 		NodePool              string            `json:"NodePool"`
 		Status                string            `json:"Status"`
 		SchedulingEligibility string            `json:"SchedulingEligibility"`
@@ -82,7 +84,7 @@ func (n *NomadCLI) ValidateRegisteredNode(
 		return err
 	}
 	admitted := node.Meta["sandbox0_admitted"]
-	if node.ID != nodeID || node.Name != nodeName || node.Address != privateIP ||
+	if node.ID != nodeID || node.Name != nodeName || !nomadNodeAddressMatches(node.HTTPAddr, privateIP) ||
 		node.NodePool != n.cli.NodePool || node.Status != "ready" ||
 		(!alreadyAdmitted && admitted != "false") ||
 		(alreadyAdmitted && admitted != "false" && admitted != "true") {
@@ -109,7 +111,7 @@ func (n *NomadCLI) AdmitRegisteredNode(
 	var node struct {
 		ID                    string            `json:"ID"`
 		Name                  string            `json:"Name"`
-		Address               string            `json:"Address"`
+		HTTPAddr              string            `json:"HTTPAddr"`
 		NodePool              string            `json:"NodePool"`
 		Status                string            `json:"Status"`
 		SchedulingEligibility string            `json:"SchedulingEligibility"`
@@ -118,7 +120,7 @@ func (n *NomadCLI) AdmitRegisteredNode(
 	if err := json.Unmarshal(payload, &node); err != nil {
 		return err
 	}
-	if node.ID != nodeID || node.Name != nodeName || node.Address != privateIP ||
+	if node.ID != nodeID || node.Name != nodeName || !nomadNodeAddressMatches(node.HTTPAddr, privateIP) ||
 		node.NodePool != n.cli.NodePool || node.Status != "ready" ||
 		node.SchedulingEligibility != "ineligible" || node.Meta["sandbox0_admitted"] != "true" {
 		return errors.New("nomad node does not present its exact admitted metadata while fenced")
@@ -177,4 +179,15 @@ func (n *NomadCLI) run(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, errors.New("nomad enrollment response is too large")
 	}
 	return stdout.Bytes(), nil
+}
+
+// Nomad node detail responses expose HTTPAddr (host:port), whereas node lists
+// expose Address. Compare the advertised host to the verified ECS private IP.
+func nomadNodeAddressMatches(httpAddress, privateIP string) bool {
+	host, port, err := net.SplitHostPort(httpAddress)
+	if err != nil || host != privateIP {
+		return false
+	}
+	value, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && value > 0
 }

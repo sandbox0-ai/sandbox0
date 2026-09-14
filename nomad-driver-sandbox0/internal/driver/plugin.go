@@ -126,6 +126,10 @@ var (
 		FSIsolation:         fsisolation.Image,
 		NetIsolationModes:   []drivers.NetIsolationMode{drivers.NetIsolationModeGroup},
 		MustInitiateNetwork: false,
+		// Carrier tasks never write Nomad's stdout/stderr FIFOs. Guest output
+		// flows through procd; runtime failures use the existing driver logger.
+		// Avoid a separate, idle logmon process for every resident carrier.
+		DisableLogCollection: true,
 	}
 )
 

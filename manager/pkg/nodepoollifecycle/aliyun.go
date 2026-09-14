@@ -321,6 +321,7 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 		// Aliyun accepts either the immutable entry ID or table/CIDR/next-hop
 		// selectors. Combining both makes every scale-in fail validation.
 		remove.RouteEntryId = entry.RouteEntryId
+		remove.NextHopId = instanceID
 		if _, err := c.vpc.DeleteRouteEntry(remove); err != nil {
 			return err
 		}

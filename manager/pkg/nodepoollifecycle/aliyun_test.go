@@ -291,7 +291,7 @@ func TestDeleteAllocationRoutesRequiresExactCustomRoute(t *testing.T) {
 				require.Equal(t, "rte-1", client.deleted[0].RouteEntryId)
 				require.Empty(t, client.deleted[0].RouteTableId)
 				require.Empty(t, client.deleted[0].DestinationCidrBlock)
-				require.Empty(t, client.deleted[0].NextHopId)
+				require.Equal(t, "i-1", client.deleted[0].NextHopId)
 				response.RouteEntrys.RouteEntry[0].Status = "Deleting"
 				require.ErrorIs(t, cloud.DeleteAllocationRoutes(t.Context(), "i-1", "172.28.0.0/23"), ErrAllocationRoutesPending)
 				require.Len(t, client.deleted, 1, "pending deletion must not be submitted twice")

@@ -543,6 +543,10 @@ func (r *rootfsRuntime) RecoverySessions() ([]rootfssession.RecoverySession, err
 	return r.sessions.RecoverySessions()
 }
 
+func (r *rootfsRuntime) RecoverySession(parent string) (rootfssession.RecoverySession, error) {
+	return r.sessions.RecoverySession(parent)
+}
+
 func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {
 	if strings.TrimSpace(operationID) == "" {
 		return rootfssession.RetireResult{}, fmt.Errorf("retire operation ID is required")

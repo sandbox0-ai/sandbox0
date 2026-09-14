@@ -185,6 +185,7 @@ type nodeRuntime struct {
 	resourceCgroups    runtimeResourceCgroup
 	journal            *runtimeSlotJournal
 	lastJournalPrune   time.Time
+	metricTargets      map[string]runtimeMetricBinding
 	clusterID          string
 	nodeID             string
 	nodeUID            string

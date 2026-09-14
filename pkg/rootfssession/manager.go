@@ -893,6 +893,34 @@ func buildBranchCheckpoint(
 	return sealed, payload, durability, nil
 }
 
+// RecoverySession reads one exact durable binding without enumerating the
+// node. Consumers must revalidate it after an external observation; Live is a
+// process-local ownership snapshot, not a replacement for regional authority.
+func (m *Manager) RecoverySession(parent string) (RecoverySession, error) {
+	m.mu.Lock()
+	_, live := m.live[parent]
+	m.mu.Unlock()
+	var result RecoverySession
+	err := m.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(sessionBucket)
+		if bucket == nil {
+			return errdefs.ErrUnavailable
+		}
+		payload := bucket.Get([]byte(parent))
+		if payload == nil {
+			return errdefs.ErrNotFound
+		}
+		var current record
+		if err := json.Unmarshal(payload, &current); err != nil {
+			return fmt.Errorf("decode exact RootFS recovery record: %w", err)
+		}
+		var err error
+		result, err = recoverySessionFromRecord(parent, current, live)
+		return err
+	})
+	return result, err
+}
+
 // RecoverySessions enumerates every durable session currently needing an
 // independent node reconciler. A completed external proof stays queryable by
 // exact parent but leaves the hot recovery index until its bounded retention

@@ -49,6 +49,24 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	require.Equal(t, stateTombstoned, stored.State)
 }
 
+func TestManagerExactRecoverySessionUsesDurableBindingAcrossRelease(t *testing.T) {
+	manager, _, request := newTestManager(t, "exact-recovery")
+	_, err := manager.RecoverySession(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	before, err := manager.RecoverySession(request.Parent)
+	require.NoError(t, err)
+	require.True(t, before.Live)
+	require.Equal(t, request.WithoutWriterGrantToken(), before.Stage)
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	after, err := manager.RecoverySession(request.Parent)
+	require.NoError(t, err)
+	require.False(t, after.Live)
+	require.Equal(t, stateTombstoned, after.State)
+	require.Equal(t, before.Stage, after.Stage)
+}
+
 func TestManagerEnsureWithTimingReportsPhysicalStages(t *testing.T) {
 	manager, runtime, request := newTestManager(t, "ensure-timing")
 	runtime.beforeAttach = func(_, _ string) {

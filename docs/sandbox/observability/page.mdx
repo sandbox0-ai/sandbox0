@@ -23,6 +23,8 @@ Per-sandbox historical data is separate from [platform telemetry](/docs/sandbox/
 
 The metrics endpoint returns bounded, server-downsampled series ready for charts. The default query covers the last hour and requests CPU utilization, memory utilization, and network I/O. A query cannot span more than 30 days.
 
+On Nomad nodes, ctld samples stock `runsc` only after matching the current writer and carrier journals to the immutable OCI assignment. CPU and memory limits come from the applied sandbox resources. Each sample is revalidated against the same runtime identity after collection; retiring instances and expired consumer leases are excluded. A pause, resume, or new runtime generation starts a separate counter series.
+
 ### Query Parameters
 
 | Parameter | Type | Description |
@@ -54,8 +56,8 @@ The metrics endpoint returns bounded, server-downsampled series ready for charts
 | `sandbox.network.io` | counter | bytes | Receive or transmit bytes, selected by the `direction` dimension; `auto` returns bytes per second |
 | `sandbox.network.errors` | counter | count | Receive or transmit errors, selected by the `direction` dimension; `auto` returns errors per second |
 | `sandbox.process.count` | gauge | count | Current sandbox process count |
-| `sandbox.rootfs.writable.usage` | gauge | bytes | Main runtime container writable-layer usage when the CRI reports it |
-| `sandbox.rootfs.writable.inodes` | gauge | count | Main runtime container writable-layer inodes when the CRI reports them |
+| `sandbox.rootfs.writable.usage` | gauge | bytes | Writable-layer usage when supported by the runtime; omitted when stock `runsc` does not report it |
+| `sandbox.rootfs.writable.inodes` | gauge | count | Writable-layer inodes when supported by the runtime; omitted when stock `runsc` does not report them |
 
 Each series contains zero or more continuous `segments`:
 

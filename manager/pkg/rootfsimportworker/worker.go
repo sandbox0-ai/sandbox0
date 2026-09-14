@@ -44,7 +44,7 @@ const (
 // Store is the region-authoritative operation, lease, object journal, and
 // ready-artifact boundary used by active-active workers.
 type Store interface {
-	LeaseNextRootFSImport(context.Context, string, time.Duration) (*sandboxstore.RootFSImportOperation, error)
+	LeaseNextCompatibleRootFSImport(context.Context, string, time.Duration, string, string) (*sandboxstore.RootFSImportOperation, error)
 	RenewRootFSImportLease(context.Context, sandboxstore.RootFSImportLease, time.Duration) (sandboxstore.RootFSImportLease, error)
 	ReleaseRootFSImportLease(context.Context, sandboxstore.RootFSImportLease) error
 	AbandonRootFSImport(context.Context, sandboxstore.RootFSImportLease, string) error
@@ -244,7 +244,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 		return result, fmt.Errorf("reconcile rootfs import garbage: %w", err)
 	}
 	applyGarbage(&result, garbage)
-	operation, err := w.store.LeaseNextRootFSImport(ctx, w.workerID, w.leaseTTL)
+	operation, err := w.store.LeaseNextCompatibleRootFSImport(ctx, w.workerID, w.leaseTTL, w.procdProtocol, w.procdDigest)
 	if err != nil {
 		return result, fmt.Errorf("lease rootfs import operation: %w", err)
 	}

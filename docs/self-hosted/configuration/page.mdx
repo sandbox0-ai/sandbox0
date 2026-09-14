@@ -167,6 +167,15 @@ provide active-active ownership and retry safety. The importer identity includes
 the image digest, OCI platform, block format, exact RootFS size, and pinned
 `procd` protocol and digest.
 
+Before changing `rootfs_importer.procd_path` and `procd_digest`, upgrade every
+manager to executable-filtered import leasing. Older workers can otherwise
+abandon a new version's pending import. Prepare matching ready artifacts for
+all image templates before switching claim selection; installing host binaries
+alone neither updates importer configuration nor replaces embedded `/procd`.
+Snapshots and captured templates keep the executable bound by their immutable
+artifact, provided its procd protocol remains compatible. Updating the importer
+digest does not rewrite existing sandbox generations or snapshots.
+
 `rootfs_importer.format_generation` selects the durable format for new image
 imports and image-based claims. Omitted or `0` selects format `1`; `2` opts into
 independently compressed, directly addressed data and mapping ranges. Other

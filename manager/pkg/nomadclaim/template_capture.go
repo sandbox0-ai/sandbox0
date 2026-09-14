@@ -256,6 +256,7 @@ func (s *Service) nomadTemplateCaptureMetadata(
 	if err != nil {
 		return nil, err
 	}
+	requirements.PreserveCommittedProcd = true
 	artifact, err := store.GetReadyRootFSBaseArtifactByDigest(
 		ctx, generation.BaseArtifactDigest, runtimeClass.ArtifactPlatform, requirements,
 	)

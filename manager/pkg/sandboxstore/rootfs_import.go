@@ -254,6 +254,28 @@ func (s *PGSandboxStore) LeaseNextRootFSImport(
 	workerID string,
 	leaseTTL time.Duration,
 ) (*RootFSImportOperation, error) {
+	return s.leaseNextRootFSImport(ctx, workerID, leaseTTL, "", "")
+}
+
+// LeaseNextCompatibleRootFSImport filters before acquiring a lease, so rolling
+// workers cannot abandon another executable version's pending or expired work.
+// All old unfiltered workers must be upgraded before staging a new contract.
+func (s *PGSandboxStore) LeaseNextCompatibleRootFSImport(
+	ctx context.Context, workerID string, leaseTTL time.Duration, protocol, procdDigest string,
+) (*RootFSImportOperation, error) {
+	if err := rootfsimporter.ValidateProcdProtocol(protocol); err != nil {
+		return nil, err
+	}
+	parsed, err := digest.Parse(procdDigest)
+	if err != nil || rootfsimporter.ValidateArtifactSHA256Digest(parsed) != nil {
+		return nil, fmt.Errorf("procd_digest must be canonical SHA-256")
+	}
+	return s.leaseNextRootFSImport(ctx, workerID, leaseTTL, protocol, procdDigest)
+}
+
+func (s *PGSandboxStore) leaseNextRootFSImport(
+	ctx context.Context, workerID string, leaseTTL time.Duration, protocol, procdDigest string,
+) (*RootFSImportOperation, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("rootfs import store is not configured")
 	}
@@ -272,8 +294,9 @@ func (s *PGSandboxStore) LeaseNextRootFSImport(
 		WITH candidate AS (
 			SELECT operation_id
 			FROM manager.rootfs_import_operations
-			WHERE state = 'pending'
-				OR (state = 'building' AND lease_expires_at <= clock_timestamp())
+			WHERE (state = 'pending'
+				OR (state = 'building' AND lease_expires_at <= clock_timestamp()))
+				AND ($4::text = '' OR (procd_protocol = $4 AND procd_digest = $5))
 			ORDER BY CASE WHEN state = 'building' THEN 0 ELSE 1 END,
 				created_at, operation_id
 			FOR UPDATE SKIP LOCKED
@@ -286,7 +309,7 @@ func (s *PGSandboxStore) LeaseNextRootFSImport(
 		FROM candidate
 		WHERE operation.operation_id = candidate.operation_id
 		RETURNING `+rootFSImportOperationReturningColumns("operation"),
-		workerID, leaseToken, leaseTTL.Milliseconds()))
+		workerID, leaseToken, leaseTTL.Milliseconds(), protocol, procdDigest))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

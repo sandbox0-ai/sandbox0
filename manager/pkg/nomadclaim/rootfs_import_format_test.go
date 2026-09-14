@@ -2,6 +2,7 @@ package nomadclaim
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -92,6 +93,9 @@ func TestClaimImportFormatPreservesCommittedSources(t *testing.T) {
 		for _, source := range []string{"snapshot", "captured-template", "capture-metadata"} {
 			t.Run(fmt.Sprintf("format-%d-%s", persisted, source), func(t *testing.T) {
 				fixture := committedFormatFixture(t, persisted)
+				// A host/importer upgrade must not invalidate the executable already
+				// authenticated by a snapshot's immutable base artifact.
+				fixture.config.RootFSProcdDigest = "sha256:" + strings.Repeat("e", 64)
 				setClaimImportFormat(t, &fixture, 3-persisted)
 				tpl := fixture.config.Templates.(*fakeTemplateStore).template
 				if source == "capture-metadata" {
@@ -124,6 +128,7 @@ func TestClaimImportFormatPreservesCommittedSources(t *testing.T) {
 				require.Empty(t, fixture.store.artifactRequirements)
 				require.Len(t, fixture.store.digestArtifactRequirements, 1)
 				lookup := fixture.store.digestArtifactRequirements[0]
+				require.True(t, lookup.PreserveCommittedProcd)
 				require.Equal(t, persisted, lookup.FormatGeneration)
 				require.Zero(t, lookup.ImportDataRangeBytes)
 				require.Empty(t, lookup.SourceOCIRef)
@@ -140,6 +145,7 @@ func TestClaimImportFormatPreservesResumeAcrossPolicyChanges(t *testing.T) {
 			fixture.store.artifact.FormatGeneration = persisted
 			sandboxID := preparePausedNomadResume(t, fixture)
 			expectedGeneration := fixture.store.resumeCandidate.SourceGenerationID
+			fixture.config.RootFSProcdDigest = "sha256:" + strings.Repeat("e", 64)
 			setClaimImportFormat(t, &fixture, 3-persisted)
 			fixture.store.artifactRequirements = nil
 			fixture.store.digestArtifactRequirements = nil

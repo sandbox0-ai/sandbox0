@@ -209,6 +209,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 		"etc/nomad.d/30-sandbox0-gvisor.hcl",
 		"usr/local/libexec/sandbox0/ctld-host-check",
 		"usr/local/libexec/sandbox0/ctld-resource-cgroup-setup",
+		"usr/local/libexec/sandbox0/ctld-resource-cgroup-budget",
 		"usr/local/libexec/sandbox0/ctld-rollout-node",
 		"etc/systemd/system/sandbox0-ctld@.service",
 		"etc/systemd/system/nomad.service.d/20-sandbox0-ctld.conf",
@@ -241,6 +242,14 @@ func TestShellAssetsParse(t *testing.T) {
 		if output, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
 			t.Fatalf("sh -n %s: %v\n%s", path, err, output)
 		}
+	}
+}
+
+func TestPhysicalBudgetHostGuards(t *testing.T) {
+	command := exec.Command("python3", "resource_cgroup_budget_test.py")
+	command.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("physical cgroup budget guards: %v\n%s", err, output)
 	}
 }
 

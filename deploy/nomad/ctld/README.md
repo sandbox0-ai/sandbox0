@@ -69,6 +69,16 @@ lease children are preserved across A/B restarts. Installation fails instead of 
 module when it was already loaded with fewer than the required devices; drain and reboot
 that node to apply the installed module option. The driver still performs a
 synchronous ctld socket fingerprint before advertising a warm slot.
+
+For an explicit high-density profile, set
+`SANDBOX0_ENFORCE_PHYSICAL_CGROUP_BUDGET=true` in the ctld environment and
+install Python 3 with PyYAML. The prestart helper reads the physical CPU and
+memory from `nomad_runtime` in `CONFIG_PATH`; admission totals never set the
+parent limit. It sets `cpu.max`, `memory.max`, and disables swap only when the
+resource subtree has no processes or lease children. Identical limits are
+verified without mutation during A/B restarts. A profile change therefore
+requires the normal durable pause, PostgreSQL fence, and physical drain first.
+Returning to physical-only admission retains the physical parent protection.
 For a full node reboot, the authenticated new boot may execute cleanup for an
 old boot only through the plugin-independent path. The durable slot journal
 must match the old incarnation, and cleanup must independently observe the old

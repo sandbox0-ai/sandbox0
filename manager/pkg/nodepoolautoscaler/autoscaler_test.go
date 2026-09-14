@@ -243,3 +243,45 @@ func TestRejectsAnyTopologyOtherThanOnePlusZeroTo299(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "exactly one fixed")
 }
+
+func TestOperatorPolicyBoundsElasticCapacityWithinFleetLimit(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		minimum, maximum int
+		demand           int64
+		expected         int
+	}{
+		{"idle-floor", 1, 1, 0, 1},
+		{"bounded-under-pressure", 1, 1, 9_000_000, 1},
+		{"scale-to-zero", 0, 1, 0, 0},
+		{"small-fleet", 0, 3, 9_000_000, 3},
+		{"disabled-growth", 0, 0, 9_000_000, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, cloud := &fakeStore{}, &fakeCloud{}
+			config := testWorker(t, store, cloud).config
+			config.MinElasticNodes, config.MaxElasticNodes = test.minimum, test.maximum
+			worker, err := New(store, cloud, config)
+			require.NoError(t, err)
+			store.snapshot.ClusterFixedUsableSlots = 8
+			store.snapshot.DemandCPUMillicores = test.demand
+			decision, err := worker.Reconcile(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, test.expected, decision.TargetElastic)
+			require.Equal(t, test.expected, cloud.desired)
+			for _, requested := range cloud.sets {
+				require.GreaterOrEqual(t, requested, test.minimum)
+				require.LessOrEqual(t, requested, test.maximum)
+			}
+		})
+	}
+}
+
+func TestOperatorPolicyRejectsInvalidElasticBounds(t *testing.T) {
+	config := testWorker(t, &fakeStore{}, &fakeCloud{}).config
+	for _, bounds := range [][2]int{{-1, 1}, {2, 1}, {0, 300}, {0, -1}} {
+		config.MinElasticNodes, config.MaxElasticNodes = bounds[0], bounds[1]
+		_, err := New(&fakeStore{}, &fakeCloud{}, config)
+		require.ErrorContains(t, err, "0 <= min <= max <= 299")
+	}
+}

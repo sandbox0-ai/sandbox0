@@ -47,6 +47,11 @@ bounded elastic pool with minimum zero and maximum 299. The fixed worker keeps
 the ordinary warm claim path available; it is not a stopped standby. Elastic
 workers are fresh ECS instances created by the provider only when manager's
 PostgreSQL-backed pressure controller raises desired capacity.
+Operators may configure a narrower `min_elastic_nodes..max_elastic_nodes`
+range inside `0..299`, including `1..1` for one retained worker or `0..0` to
+disable new elastic capacity. The provider fleet's outer boundary stays
+unchanged. Density-profile trials must bound this policy before enrollment is
+enabled; a smaller node subnet does not itself limit cloud scale-out.
 If the fixed worker loses its live carrier set, the same controller temporarily
 requests one elastic worker even without user pressure; it scales that
 replacement back to zero only after the fixed baseline has recovered and the

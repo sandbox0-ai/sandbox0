@@ -88,8 +88,8 @@ func New(store Store, cloud Cloud, config Config) (*Worker, error) {
 	if config.FixedNodes != 1 {
 		return nil, errors.New("node pool autoscaler currently requires exactly one fixed worker")
 	}
-	if config.MinElasticNodes != 0 || config.MaxElasticNodes != 299 {
-		return nil, errors.New("node pool autoscaler bounds must be exactly 0..299")
+	if config.MinElasticNodes < 0 || config.MaxElasticNodes < config.MinElasticNodes || config.MaxElasticNodes > 299 {
+		return nil, errors.New("node pool autoscaler bounds must satisfy 0 <= min <= max <= 299")
 	}
 	if config.NodeCPUMillicores <= 0 || config.NodeMemoryBytes <= 0 || config.WarmSlotsPerNode <= 0 {
 		return nil, errors.New("positive per-node CPU, memory, and warm-slot capacity are required")

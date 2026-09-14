@@ -21,6 +21,8 @@ node_pool_autoscaler:
   scale_out_hook_id: replace-with-ess-scale-out-hook-id
   scale_in_hook_id: replace-with-ess-scale-in-hook-id
   fixed_nodes: 1
+  # Operator policy may narrow the ESS fleet's 0..299 safety boundary.
+  # A 1..1 range retains one elastic worker while evaluating a density profile.
   min_elastic_nodes: 0
   max_elastic_nodes: 299
   node_cpu_millicores: 14000

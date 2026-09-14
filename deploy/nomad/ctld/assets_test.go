@@ -177,7 +177,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	config := write("ctld.yaml", "nomad_runtime:\n  enabled: true\n", 0o600)
 	network := write("network.yaml", "node_name: node-1\n", 0o600)
 	nomadConfig := write("nomad.hcl", "plugin \"sandbox0-gvisor\" {}\n", 0o600)
-	environment := write("ctld.env", "SANDBOX0_NODE_NAME=node-1\n", 0o600)
+	environment := write("ctld.env", "SANDBOX0_NODE_NAME=node-1\nSANDBOX0_ROOTFS_NBD_DEVICES=/dev/nbd0,/dev/nbd511\n", 0o600)
 	staleDrivers := []string{
 		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0"),
 		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0-gvisor"),
@@ -197,6 +197,10 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("staged install: %v\n%s", err, output)
+	}
+	moduleConfig, err := os.ReadFile(filepath.Join(root, "etc/modprobe.d/sandbox0-nbd.conf"))
+	if err != nil || string(moduleConfig) != "options nbd nbds_max=512 max_part=0\n" {
+		t.Fatalf("NBD provisioning must cover the configured highest device: %q, %v", moduleConfig, err)
 	}
 	for _, path := range []string{
 		"usr/local/bin/ctld",

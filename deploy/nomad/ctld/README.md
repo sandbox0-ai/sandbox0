@@ -57,7 +57,8 @@ observed runsc duration. A larger value is a diagnostic accommodation for
 software-emulated nodes, not an SLO relaxation.
 
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
-64-device NBD pool, applies required networking sysctls, installs tmpfiles
+NBD pool covering the highest configured device index (at least 64 devices),
+applies required networking sysctls, installs tmpfiles
 rules for the reboot-volatile runtime directories, and places the task driver
 in `/opt/nomad/plugins`. Before each ctld start it provisions the root-owned
 `/sys/fs/cgroup/sandbox0` cgroup-v2 subtree, initializes its cpuset from the
@@ -65,7 +66,7 @@ parent's effective confinement, and enables `cpu`, `cpuset`, `memory`, and
 `pids` for per-lease children. Startup fails if those controllers are not
 available/delegated or the root itself contains processes; existing active
 lease children are preserved across A/B restarts. Installation fails instead of reloading an in-use NBD
-module when it was already loaded with fewer than 64 devices; drain and reboot
+module when it was already loaded with fewer than the required devices; drain and reboot
 that node to apply the installed module option. The driver still performs a
 synchronous ctld socket fingerprint before advertising a warm slot.
 For a full node reboot, the authenticated new boot may execute cleanup for an
@@ -100,7 +101,9 @@ The configured `nomad_runtime.nbd_devices` list, not only the kernel
 `nbds_max`, is the usable RootFS concurrency bound. Keep that list at least as
 wide as the largest synchronized claim batch plus operational replacement
 headroom. The supplied environment example configures 16 devices, while the
-production acceptance warm job reserves eight slots.
+default warm job reserves eight slots. A density profile must expand both this
+list and the kernel device pool before admission; increasing carrier count alone
+does not increase RootFS concurrency.
 
 For an existing node, replace the binaries and run `rollout-node.sh`. It
 restarts slot B and then A, waiting for each instance to become primary-ready

@@ -31,54 +31,8 @@ import (
 
 const minimumAcceptanceWidth = 8
 
-func TestAcceptanceExamplesUseDedicatedResourceNeutralWarmCarriers(t *testing.T) {
-	warmJob := readAsset(t, "../../nomad-driver-sandbox0/example/warm-slot.nomad")
-	if !regexp.MustCompile(`(?m)^variable\s+"datacenter"\s*\{$`).MatchString(warmJob) ||
-		!regexp.MustCompile(`(?m)^\s*datacenters\s*=\s*\[var\.datacenter\]\s*$`).MatchString(warmJob) {
-		t.Fatal("warm carriers must accept the deployment region's Nomad datacenter")
-	}
-	groups := regexp.MustCompile(`(?m)^\s*group\s+"warm-[0-7]"\s*\{$`).FindAllString(warmJob, -1)
-	if len(groups) != minimumAcceptanceWidth {
-		t.Fatalf("warm-slot system groups = %d, want exactly %d", len(groups), minimumAcceptanceWidth)
-	}
-	if !regexp.MustCompile(`(?m)^\s*type\s*=\s*"system"\s*$`).MatchString(warmJob) {
-		t.Fatal("warm carriers must run once per group on every admitted node")
-	}
-	if standard, privileged := strings.Count(warmJob, `security_class = "standard"`),
-		strings.Count(warmJob, `security_class = "privileged"`); standard != 6 || privileged != 2 {
-		t.Fatalf("warm carrier security classes = standard %d privileged %d, want 6/2", standard, privileged)
-	}
-	if regexp.MustCompile(`(?m)^\s*cores\s*=`).MatchString(warmJob) {
-		t.Fatal("warm carriers must not encode sandbox CPU as Nomad dedicated cores")
-	}
-	if cpu, memory := strings.Count(warmJob, "cpu    = 50"), strings.Count(warmJob, "memory = 64"); cpu != minimumAcceptanceWidth || memory != minimumAcceptanceWidth {
-		t.Fatalf("warm carrier overhead records = cpu %d memory %d, want %d each", cpu, memory, minimumAcceptanceWidth)
-	}
-	if networks := strings.Count(warmJob, `mode = "cni/sandbox0"`); networks != minimumAcceptanceWidth {
-		t.Fatalf("warm carrier Sandbox0 CNI networks = %d, want %d", networks, minimumAcceptanceWidth)
-	}
-	if regexp.MustCompile(`(?m)^\s*mode\s*=\s*"bridge"\s*$`).MatchString(warmJob) {
-		t.Fatal("warm carriers must not use Nomad's built-in shared bridge network")
-	}
-	if !strings.Contains(warmJob, `attribute = "${meta.sandbox0_dedicated}"`) ||
-		!strings.Contains(warmJob, `attribute = "${meta.sandbox0_admitted}"`) ||
-		!strings.Contains(warmJob, `value     = "true"`) {
-		t.Fatal("warm carriers must require dedicated and admitted Sandbox0 nodes")
-	}
-	if !regexp.MustCompile(`(?m)^\s*node_pool\s*=\s*"sandbox0"\s*$`).MatchString(warmJob) {
-		t.Fatal("warm carriers must target the sandbox0 Nomad node pool")
-	}
-	restartBlocks := regexp.MustCompile(`(?s)restart\s*\{.*?\}`).FindAllString(warmJob, -1)
-	if len(restartBlocks) != minimumAcceptanceWidth {
-		t.Fatalf("restart blocks = %d, want %d", len(restartBlocks), minimumAcceptanceWidth)
-	}
-	for index, restartBlock := range restartBlocks {
-		if !regexp.MustCompile(`(?m)^\s*attempts\s*=\s*0\s*$`).MatchString(restartBlock) ||
-			!regexp.MustCompile(`(?m)^\s*mode\s*=\s*"fail"\s*$`).MatchString(restartBlock) {
-			t.Fatalf("warm carrier %d does not disable same-allocation restarts", index)
-		}
-	}
-
+// The driver module validates the rendered warm job with Nomad's HCL parser.
+func TestExampleNBDInventoryCoversDefaultWarmCarriers(t *testing.T) {
 	environment := readAsset(t, "ctld/ctld.env.example")
 	var devices []string
 	for _, line := range strings.Split(environment, "\n") {

@@ -415,10 +415,21 @@ enrolled runtime profile.
 
 ## NBD And Local Disk
 
+The canonical warm job has configurable `standard_slots` and `privileged_slots`
+bounds, defaulting to 6 and 2. Additional groups are eligible only on nodes with
+matching `sandbox0_standard_carriers` or `sandbox0_privileged_carriers` Nomad
+metadata. Expanding the job leaves unconfigured nodes at their original width.
+Keep the node profile, usable private IPs, and RootFS devices consistent; drain
+affected carriers before reducing either bound.
+
 `nomad_runtime.nbd_devices` is the actual concurrent RootFS attachment bound.
 The kernel's `nbds_max` alone does not make devices available to ctld. Keep the
 configured list wider than the largest synchronized claim batch plus
 replacement/retirement headroom.
+The host installer derives the NBD module device count from the configured
+`SANDBOX0_ROOTFS_NBD_DEVICES` inventory, with a floor of 64 devices. It refuses
+to reload an in-use module to grow the pool; apply a larger pool on a fresh or
+drained, rebooted node.
 
 Each NBD connection admits up to 64 independent read requests, with a separate
 byte budget of eight maximum-sized responses. This wider small-read window

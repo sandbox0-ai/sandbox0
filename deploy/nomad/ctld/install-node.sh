@@ -45,6 +45,27 @@ case "$root" in /*) ;; *) echo "--root must be absolute" >&2; exit 1 ;; esac
 asset_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 dest() { printf '%s%s' "$root" "$1"; }
 
+# Derive module provisioning from the host-check inventory without sourcing an
+# environment file or printing credentials. Keep the historical 64-device floor.
+required_nbd_devices=$(awk '
+  BEGIN { maximum = 63 }
+  /^[[:space:]]*SANDBOX0_ROOTFS_NBD_DEVICES=/ {
+    if (seen++) { invalid = 1; exit 1 }
+    value = $0
+    sub(/^[[:space:]]*SANDBOX0_ROOTFS_NBD_DEVICES=/, "", value)
+    gsub(/^["\047]|["\047]$/, "", value)
+    if (value == "") { invalid = 1; exit 1 }
+    count = split(value, devices, ",")
+    for (entry = 1; entry <= count; entry++) {
+      if (devices[entry] !~ /^\/dev\/nbd[0-9]+$/) { invalid = 1; exit 1 }
+      device = substr(devices[entry], 9) + 0
+      if (device >= 4096 || seen_device[device]++) { invalid = 1; exit 1 }
+      if (device > maximum) maximum = device
+    }
+  }
+  END { if (!invalid) print maximum + 1 }
+' "$environment") || { echo "invalid configured NBD inventory (maximum index 4095)" >&2; exit 1; }
+
 install -d -m 0755 "$(dest /usr/local/bin)" "$(dest /usr/local/libexec/sandbox0)"
 install -d -m 0755 "$(dest /opt/nomad/plugins)" "$(dest /etc/nomad.d)" "$(dest /etc/systemd/system/nomad.service.d)"
 install -d -m 0755 "$(dest /etc/modules-load.d)" "$(dest /etc/modprobe.d)" "$(dest /etc/sysctl.d)" "$(dest /etc/tmpfiles.d)"
@@ -70,7 +91,8 @@ install -m 0644 "$asset_dir/sandbox0-ctld@.service" "$(dest /etc/systemd/system/
 install -m 0644 "$asset_dir/sandbox0-ctld.target" "$(dest /etc/systemd/system/sandbox0-ctld.target)"
 install -m 0644 "$asset_dir/nomad.service.d/20-sandbox0-ctld.conf" "$(dest /etc/systemd/system/nomad.service.d/20-sandbox0-ctld.conf)"
 install -m 0644 "$asset_dir/modules-load.d/sandbox0-ctld.conf" "$(dest /etc/modules-load.d/sandbox0-ctld.conf)"
-install -m 0644 "$asset_dir/modprobe.d/sandbox0-nbd.conf" "$(dest /etc/modprobe.d/sandbox0-nbd.conf)"
+printf 'options nbd nbds_max=%s max_part=0\n' "$required_nbd_devices" >"$(dest /etc/modprobe.d/sandbox0-nbd.conf)"
+chmod 0644 "$(dest /etc/modprobe.d/sandbox0-nbd.conf)"
 install -m 0644 "$asset_dir/sysctl.d/90-sandbox0-ctld.conf" "$(dest /etc/sysctl.d/90-sandbox0-ctld.conf)"
 install -m 0644 "$asset_dir/tmpfiles.d/sandbox0-ctld.conf" "$(dest /etc/tmpfiles.d/sandbox0-ctld.conf)"
 
@@ -81,8 +103,8 @@ if [ "$start" -eq 1 ]; then
   done
   configured_nbd_devices=$(cat /sys/module/nbd/parameters/nbds_max)
   case "$configured_nbd_devices" in ''|*[!0-9]*) echo "invalid nbd nbds_max: $configured_nbd_devices" >&2; exit 1 ;; esac
-  [ "$configured_nbd_devices" -ge 64 ] || {
-    echo "nbd is already loaded with nbds_max=$configured_nbd_devices; drain and reboot the node to apply nbds_max=64" >&2
+  [ "$configured_nbd_devices" -ge "$required_nbd_devices" ] || {
+    echo "nbd is already loaded with nbds_max=$configured_nbd_devices; drain and reboot the node to apply nbds_max=$required_nbd_devices" >&2
     exit 1
   }
   systemd-tmpfiles --create /etc/tmpfiles.d/sandbox0-ctld.conf

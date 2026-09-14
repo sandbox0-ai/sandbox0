@@ -67,6 +67,18 @@ budgets. Carrier count, NBD device count, address space, quotas, and actual
 memory pressure are separate bounds. Increasing admission alone does not prove
 500 resident sandboxes or improve a 100-way startup burst.
 
+The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6)
+and `privileged_slots` (default 2). Existing `warm-0` through `warm-7` names and
+classes remain stable when increasing these bounds. Extra carriers require
+the target node's `sandbox0_standard_carriers` or
+`sandbox0_privileged_carriers` metadata to include their ordinal. For example,
+`standard_slots=500` plus `sandbox0_standard_carriers=500` permits 500 standard
+carriers on an explicitly configured node; unconfigured nodes retain their
+original six. Metadata is an operator-owned capacity profile, not a workload or
+benchmark selector. Provision enough NBD devices, private addresses, and host
+overhead first, and use `nomad job plan` to verify placement. Decreasing counts
+or node metadata requires draining the affected carriers.
+
 ## Ownership
 
 | Owner | State |

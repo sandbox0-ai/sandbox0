@@ -762,7 +762,7 @@ func (s *PGSandboxStore) ActivateRuntimeNode(
 }
 
 // MarkRuntimeNodeProviderReady removes only the warming claim fence after the
-// provider has continued scale-out. Capacity and all eight warm slots are
+// provider has continued scale-out. Capacity and the configured warm slots are
 // rechecked in the same transaction so a stale lifecycle observation cannot
 // expose an incomplete node to the claim hot path.
 func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
@@ -770,7 +770,7 @@ func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
 	poolID, providerInstanceID string,
 	warmSlots int,
 ) error {
-	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(providerInstanceID) == "" || warmSlots != 8 {
+	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(providerInstanceID) == "" || warmSlots <= 0 {
 		return fmt.Errorf("runtime node provider admission identity is invalid")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})

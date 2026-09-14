@@ -10,6 +10,15 @@ import (
 )
 
 func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
+	for _, slots := range []int{8, 502} {
+		t.Run(fmt.Sprintf("carriers_%d", slots), func(t *testing.T) {
+			testRuntimeNodePoolWarmingFenceAndSnapshot(t, slots)
+		})
+	}
+}
+
+func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
+	t.Helper()
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
@@ -63,7 +72,7 @@ func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
 	require.False(t, snapshot.Nodes[0].CapacityLive)
 	require.Equal(t, 8, snapshot.ClusterFixedUsableSlots)
 
-	_, err = pool.Exec(ctx, `
+	_, err = pool.Exec(ctx, fmt.Sprintf(`
 		INSERT INTO manager.runtime_node_capacities (
 			cluster_id, node_id, node_uid, node_boot_id,
 			cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems,
@@ -84,11 +93,27 @@ func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
 			'sha256:' || repeat('a', 64), 'fastpath_ready',
 			decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'),
 			decode(repeat('03', 32), 'hex'), NOW() + INTERVAL '1 minute', NOW()
-		FROM generate_series(1, 8) AS value;
-	`)
+		FROM generate_series(1, %d) AS value;
+	`, warmSlots))
 	require.NoError(t, err)
-	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", 8))
-	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", 8))
+	for _, invalid := range []int{-1, 0} {
+		require.ErrorContains(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", invalid), "identity is invalid")
+	}
+	// A stale final carrier must keep the node fenced despite the total row count.
+	lastSlot := fmt.Sprintf("elastic-slot-%d", warmSlots)
+	_, err = pool.Exec(ctx, `UPDATE manager.runtime_slots SET heartbeat_expires_at = NOW() - INTERVAL '1 minute' WHERE slot_id = $1`, lastSlot)
+	require.NoError(t, err)
+	require.ErrorContains(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots), "admission is not ready")
+	snapshot, err = store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.False(t, snapshot.Nodes[0].ProviderReady)
+	var fences int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.runtime_node_fences WHERE state = 'warming'`).Scan(&fences))
+	require.Equal(t, 1, fences)
+	_, err = pool.Exec(ctx, `UPDATE manager.runtime_slots SET heartbeat_expires_at = NOW() + INTERVAL '1 minute' WHERE slot_id = $1`, lastSlot)
+	require.NoError(t, err)
+	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots))
+	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots))
 	require.NoError(t, store.CompleteReadyRuntimeNodeScaleOutActions(ctx, "elastic"))
 	action, err := store.ObserveRuntimeNodeLifecycleAction(ctx, actionRequest)
 	require.NoError(t, err)

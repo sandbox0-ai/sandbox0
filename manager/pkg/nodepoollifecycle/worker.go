@@ -96,7 +96,7 @@ func New(store Store, cloud Cloud, nomad Nomad, config Config) (*Worker, error) 
 	}
 	if store == nil || cloud == nil || nomad == nil || config.PoolID == "" ||
 		config.ScaleOutHookID == "" || config.ScaleInHookID == "" ||
-		config.ScaleOutHookID == config.ScaleInHookID || config.WarmSlotsPerNode != 8 ||
+		config.ScaleOutHookID == config.ScaleInHookID || config.WarmSlotsPerNode <= 0 ||
 		config.Interval < time.Second || config.Interval > time.Minute ||
 		config.HeartbeatTimeout < 30*time.Second || config.HeartbeatTimeout > 10*time.Minute ||
 		config.ScaleOutEnrollmentTimeout < 5*time.Minute ||

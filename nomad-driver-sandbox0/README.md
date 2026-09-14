@@ -79,6 +79,11 @@ benchmark selector. Provision enough NBD devices, private addresses, and host
 overhead first, and use `nomad job plan` to verify placement. Decreasing counts
 or node metadata requires draining the affected carriers.
 
+Set the elastic pool's `warm_slots_per_node` to the total standard and
+privileged inventory (502 for 500 plus 2). Lifecycle admission waits for that
+many live, ready carriers and a current capacity heartbeat; the database
+rechecks both before removing the node's warming fence.
+
 ## Ownership
 
 | Owner | State |

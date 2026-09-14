@@ -15,6 +15,7 @@ type fakeStore struct {
 	firstObservedAt time.Time
 	actionState     string
 	finished        map[string]string
+	admissionSlots  []int
 }
 
 func (s *fakeStore) GetRuntimeNodePoolSnapshot(context.Context, string) (*sandboxstore.RuntimeNodePoolSnapshot, error) {
@@ -45,7 +46,8 @@ func (s *fakeStore) RevokeRuntimeNode(_ context.Context, _, instanceID, _ string
 	return nil
 }
 
-func (s *fakeStore) MarkRuntimeNodeProviderReady(_ context.Context, _, instanceID string, _ int) error {
+func (s *fakeStore) MarkRuntimeNodeProviderReady(_ context.Context, _, instanceID string, slots int) error {
+	s.admissionSlots = append(s.admissionSlots, slots)
 	node := s.nodes[instanceID]
 	node.ProviderReady = true
 	s.nodes[instanceID] = node
@@ -191,6 +193,43 @@ func TestScaleOutCompletesOnlyAfterCapacityAndAllWarmSlots(t *testing.T) {
 	require.Equal(t, LifecycleContinue, cloud.completed["token"])
 	require.Equal(t, "completed", store.finished["token"])
 	require.True(t, store.nodes["i-1"].ProviderReady)
+}
+
+func TestHighDensityScaleOutWaitsForConfiguredCarrierInventory(t *testing.T) {
+	store := &fakeStore{nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+		"i-1": {ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic,
+			State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true},
+	}}
+	cloud := &fakeCloud{actions: []Action{{Token: "token", HookID: "out", InstanceIDs: []string{"i-1"}}}}
+	config := Config{
+		PoolID: "elastic", ScaleOutHookID: "out", ScaleInHookID: "in",
+		WarmSlotsPerNode: 502, Interval: time.Second, HeartbeatTimeout: 30 * time.Second,
+	}
+	worker, err := New(store, cloud, &fakeNomad{store: store}, config)
+	require.NoError(t, err)
+	for _, ready := range []int{0, 8, 501} {
+		node := store.nodes["i-1"]
+		node.ReadySlots = ready
+		store.nodes["i-1"] = node
+		result, err := worker.Reconcile(context.Background())
+		require.NoError(t, err)
+		require.Zero(t, result.Completed)
+		require.Empty(t, cloud.completed)
+		require.Empty(t, store.admissionSlots)
+	}
+	node := store.nodes["i-1"]
+	node.ReadySlots = 502
+	store.nodes["i-1"] = node
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+	require.Equal(t, LifecycleContinue, cloud.completed["token"])
+	require.Equal(t, []int{502}, store.admissionSlots)
+	for _, invalid := range []int{-1, 0} {
+		config.WarmSlotsPerNode = invalid
+		_, err := New(store, cloud, &fakeNomad{store: store}, config)
+		require.Error(t, err)
+	}
 }
 
 func TestScaleOutWaitsForEnrollmentBeforeTimeout(t *testing.T) {

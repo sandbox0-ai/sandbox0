@@ -78,7 +78,14 @@ parent limit. It sets `cpu.max`, `memory.max`, and disables swap only when the
 resource subtree has no processes or lease children. Identical limits are
 verified without mutation during A/B restarts. A profile change therefore
 requires the normal durable pause, PostgreSQL fence, and physical drain first.
-Returning to physical-only admission retains the physical parent protection.
+Physical capacity, CPU confinement, and the effective admission budget are
+immutable within one kernel boot in PostgreSQL. Changing any of these values
+requires a controlled host reboot after the drain; restarting ctld A/B alone
+cannot register the new shape. Keep the node fenced until the new boot has
+registered the expected capacity over its authenticated manager channel. Local
+ctld readiness and Nomad carrier health do not prove that registration succeeded.
+Returning to physical-only admission also requires this boot transition and
+retains the physical parent protection.
 For a full node reboot, the authenticated new boot may execute cleanup for an
 old boot only through the plugin-independent path. The durable slot journal
 must match the old incarnation, and cleanup must independently observe the old

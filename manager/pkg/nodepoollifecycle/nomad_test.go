@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -70,7 +71,7 @@ func TestNomadInventoryReadsEverySummaryPageBeforeStopping(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			end := min(start+nomadAllocationPageSize, total)
+			end := min(start+nomadinventory.PageSize, total)
 			if end < total {
 				w.Header().Set("X-Nomad-NextToken", strconv.Itoa(end))
 			}
@@ -142,7 +143,7 @@ func TestNomadInventoryFailsClosedBeforeStopping(t *testing.T) {
 						_, _ = w.Write([]byte(`[{"ID":`))
 						return
 					case "oversized-page":
-						batch = make([]nomadAllocation, nomadAllocationPageSize+1)
+						batch = make([]nomadAllocation, nomadinventory.PageSize+1)
 					case "page-limit":
 						w.Header().Set("X-Nomad-NextToken", fmt.Sprintf("next-%d", pages))
 					}

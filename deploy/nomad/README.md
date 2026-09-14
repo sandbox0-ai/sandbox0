@@ -33,7 +33,14 @@ cluster may publish one `standard` and one `privileged` class; template
 `mainContainer.securityClass` selects between them. Zero or multiple matches
 for the same cluster and security class fail closed.
 
-Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers.
+Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers. Node recovery and lifecycle inventory use
+bounded, paginated allocation summaries with exact node checks. Avoid the
+node-specific full allocation endpoint in operational tooling: it embeds the
+complete Job in every allocation and can exhaust control-plane memory at high
+carrier counts. Catalog truncation or pagination errors must block reclamation;
+completed/stopping allocations remain present until physical cleanup is proven.
+
+
 Manager atomically leases exact CPU and memory from ctld-reported node capacity;
 ctld creates `/sys/fs/cgroup/sandbox0/<lease>` and the driver writes that lease
 into the OCI spec. Carrier allocation resources are overhead, not sandbox

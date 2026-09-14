@@ -37,6 +37,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -1847,12 +1848,13 @@ func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 }
 
 type httpNomadAllocationSource struct {
-	allocationURL string
-	visibilityURL string
-	namespace     string
-	jobID         string
-	tokenFile     string
-	http          *http.Client
+	allocationBase *url.URL
+	nodeID         string
+	visibilityURL  string
+	namespace      string
+	jobID          string
+	tokenFile      string
+	http           *http.Client
 }
 
 func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSource, error) {
@@ -1872,8 +1874,7 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		return nil, fmt.Errorf("nomad address must be an HTTP(S) origin")
 	}
 	basePath := strings.TrimSuffix(parsed.Path, "/")
-	parsed.Path = basePath + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
-	allocationURL := parsed.String()
+	allocationBase := *parsed
 	parsed.Path = basePath + "/v1/job/" + url.PathEscape(jobID)
 	query := parsed.Query()
 	query.Set("namespace", namespace)
@@ -1907,7 +1908,7 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		transport.TLSClientConfig = tlsConfig
 	}
 	return &httpNomadAllocationSource{
-		allocationURL: allocationURL, visibilityURL: visibilityURL,
+		allocationBase: &allocationBase, nodeID: nodeID, visibilityURL: visibilityURL,
 		namespace: namespace, jobID: jobID, tokenFile: strings.TrimSpace(config.TokenFile),
 		http: &http.Client{Timeout: 2 * time.Second, Transport: transport},
 	}, nil
@@ -1954,28 +1955,13 @@ func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[
 		return nil, errors.New("nomad allocation catalog visibility anchor does not match configured job")
 	}
 
-	request, err = http.NewRequestWithContext(ctx, http.MethodGet, s.allocationURL, nil)
-	if err != nil {
-		return nil, err
-	}
+	headers := http.Header{}
 	if token != "" {
-		request.Header.Set("X-Nomad-Token", token)
+		headers.Set("X-Nomad-Token", token)
 	}
-	response, err = s.http.Do(request)
+	records, err := nomadinventory.List(ctx, s.http, s.allocationBase, s.nodeID, s.namespace, headers)
 	if err != nil {
 		return nil, fmt.Errorf("list Nomad node allocations: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		payload, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
-		return nil, fmt.Errorf("list Nomad node allocations: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(payload)))
-	}
-	var records []struct {
-		ID string `json:"ID"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, nomadAllocationResponseMaxBytes))
-	if err := decoder.Decode(&records); err != nil {
-		return nil, fmt.Errorf("decode Nomad node allocations: %w", err)
 	}
 	active := make(map[string]bool, len(records))
 	for _, record := range records {

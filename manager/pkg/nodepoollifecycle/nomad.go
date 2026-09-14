@@ -13,9 +13,10 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 )
 
 type NomadConfig struct {
@@ -126,14 +127,7 @@ func (n *NomadClient) PurgeNode(ctx context.Context, nodeID string) error {
 	return n.request(ctx, http.MethodPut, "/v1/node/"+url.PathEscape(nodeID)+"/purge", nil, nil)
 }
 
-type nomadAllocation struct {
-	NodeID        string `json:"NodeID"`
-	ID            string `json:"ID"`
-	JobID         string `json:"JobID"`
-	Namespace     string `json:"Namespace"`
-	ClientStatus  string `json:"ClientStatus"`
-	DesiredStatus string `json:"DesiredStatus"`
-}
+type nomadAllocation nomadinventory.Allocation
 
 func (a nomadAllocation) terminal() bool {
 	// ClientStatus is Nomad's execution-state truth. A one-shot warm carrier
@@ -142,59 +136,22 @@ func (a nomadAllocation) terminal() bool {
 	return a.ClientStatus == "complete" || a.ClientStatus == "failed" || a.ClientStatus == "lost"
 }
 
-const (
-	nomadAllocationPageSize = 64
-	nomadAllocationMaxPages = 128
-)
-
-// allocations reads bounded summaries. The node-specific allocations endpoint
-// embeds the complete Job in every result, amplifying large warm-carrier jobs
-// across both the Nomad server and this client before any cleanup can proceed.
 func (n *NomadClient) allocations(ctx context.Context, nodeID string) ([]nomadAllocation, error) {
-	if nodeID == "" || strings.TrimSpace(nodeID) != nodeID {
-		return nil, errors.New("Nomad allocation inventory requires an exact node ID")
+	tokenBytes, err := os.ReadFile(n.tokenFile)
+	token := strings.TrimSpace(string(tokenBytes))
+	if err != nil || token == "" || len(tokenBytes) > 64<<10 || len(strings.Fields(token)) != 1 {
+		return nil, errors.New("nomad lifecycle token file is invalid")
 	}
-	query := url.Values{
-		"filter":    {"NodeID == " + strconv.Quote(nodeID)},
-		"namespace": {"*"}, "per_page": {strconv.Itoa(nomadAllocationPageSize)},
-		"resources": {"false"}, "task_states": {"false"},
+	headers := http.Header{"X-Nomad-Token": {token}, "X-Nomad-Region": {n.region}}
+	records, err := nomadinventory.List(ctx, n.http, n.baseURL, nodeID, "*", headers)
+	if err != nil {
+		return nil, err
 	}
-	var allocations []nomadAllocation
-	seenIDs := make(map[string]struct{})
-	seenTokens := make(map[string]struct{})
-	for page := 0; page < nomadAllocationMaxPages; page++ {
-		var batch []nomadAllocation
-		headers, err := n.requestQuery(ctx, http.MethodGet, "/v1/allocations", query, nil, &batch)
-		if err != nil {
-			return nil, err
-		}
-		if len(batch) > nomadAllocationPageSize {
-			return nil, errors.New("Nomad allocation inventory exceeded its page bound")
-		}
-		for _, allocation := range batch {
-			if allocation.NodeID != nodeID || strings.TrimSpace(allocation.ID) == "" {
-				return nil, errors.New("Nomad allocation inventory returned an inexact identity")
-			}
-			if _, exists := seenIDs[allocation.ID]; exists {
-				return nil, errors.New("Nomad allocation inventory repeated an allocation")
-			}
-			seenIDs[allocation.ID] = struct{}{}
-			allocations = append(allocations, allocation)
-		}
-		next := headers.Get("X-Nomad-NextToken")
-		if next == "" {
-			return allocations, nil
-		}
-		if len(next) > 4096 {
-			return nil, errors.New("Nomad allocation inventory token exceeded its bound")
-		}
-		if _, exists := seenTokens[next]; exists {
-			return nil, errors.New("Nomad allocation inventory repeated a page token")
-		}
-		seenTokens[next] = struct{}{}
-		query.Set("next_token", next)
+	result := make([]nomadAllocation, len(records))
+	for i, record := range records {
+		result[i] = nomadAllocation(record)
 	}
-	return nil, errors.New("Nomad allocation inventory exceeded its page count bound")
+	return result, nil
 }
 
 func (n *NomadClient) request(
@@ -202,35 +159,24 @@ func (n *NomadClient) request(
 	method, requestPath string,
 	requestBody, responseBody any,
 ) error {
-	_, err := n.requestQuery(ctx, method, requestPath, nil, requestBody, responseBody)
-	return err
-}
-
-func (n *NomadClient) requestQuery(
-	ctx context.Context,
-	method, requestPath string,
-	query url.Values,
-	requestBody, responseBody any,
-) (http.Header, error) {
 	tokenBytes, err := os.ReadFile(n.tokenFile)
 	token := strings.TrimSpace(string(tokenBytes))
 	if err != nil || token == "" || len(tokenBytes) > 64<<10 || len(strings.Fields(token)) != 1 {
-		return nil, errors.New("nomad lifecycle token file is invalid")
+		return errors.New("nomad lifecycle token file is invalid")
 	}
 	var body io.Reader
 	if requestBody != nil {
 		payload, err := json.Marshal(requestBody)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		body = bytes.NewReader(payload)
 	}
 	target := *n.baseURL
 	target.Path = path.Join(target.Path, requestPath)
-	target.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	request.Header.Set("X-Nomad-Token", token)
 	request.Header.Set("X-Nomad-Region", n.region)
@@ -239,22 +185,19 @@ func (n *NomadClient) requestQuery(
 	}
 	response, err := n.http.Do(request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, 2<<20)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		payload, _ := io.ReadAll(limited)
-		return nil, fmt.Errorf("nomad returned %s: %s", response.Status,
+		return fmt.Errorf("nomad returned %s: %s", response.Status,
 			strings.TrimSpace(string(payload)))
 	}
 	if responseBody == nil {
 		_, err = io.Copy(io.Discard, limited)
-		return nil, err
+		return err
 	}
 	decoder := json.NewDecoder(limited)
-	if err := decoder.Decode(responseBody); err != nil {
-		return nil, err
-	}
-	return response.Header, nil
+	return decoder.Decode(responseBody)
 }

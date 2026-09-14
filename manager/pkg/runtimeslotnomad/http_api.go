@@ -1,11 +1,9 @@
 package runtimeslotnomad
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 )
 
 const (
@@ -77,26 +76,26 @@ func (a *HTTPAPI) ServerAllocation(
 	if err != nil {
 		return nil, err
 	}
-	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodGet,
-		allocationPath(target.AllocationID), namespaceQuery(target.AllocationNamespace), true)
+	client, baseURL, err := newNomadHTTPClient(endpoint)
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusNotFound {
+	token, err := readNomadToken(endpoint.TokenFile)
+	if err != nil {
+		return nil, err
+	}
+	allocation, err := nomadinventory.Get(ctx, client, baseURL, target.AllocationID, target.NodeID, target.AllocationNamespace, http.Header{"X-Nomad-Token": {token}})
+	if err != nil {
+		var responseError *nomadinventory.HTTPError
+		if errors.As(err, &responseError) {
+			return nil, nomadResponseError("read server allocation summary", responseError.StatusCode, nil)
+		}
+		return nil, fmt.Errorf("read Nomad server allocation summary: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	if allocation == nil {
 		return nil, nil
 	}
-	if status/100 != 2 {
-		return nil, nomadResponseError("read server allocation", status, payload)
-	}
-	var allocation Allocation
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	if err := decoder.Decode(&allocation); err != nil {
-		return nil, fmt.Errorf("decode Nomad server allocation: %w: %w", err, errdefs.ErrUnavailable)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("nomad server allocation contains trailing data: %w", errdefs.ErrUnavailable)
-	}
-	return &allocation, nil
+	return &Allocation{ID: allocation.ID, Namespace: allocation.Namespace, NodeID: allocation.NodeID, DesiredStatus: allocation.DesiredStatus, ClientStatus: allocation.ClientStatus}, nil
 }
 
 func (a *HTTPAPI) ClientAllocationPresent(

@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Allocation retains only identity and scheduling state needed by runtime recovery.
@@ -29,6 +31,54 @@ const (
 	// MaxPages bounds work even when the server never completes pagination.
 	MaxPages = 128
 )
+
+// Get reads one exact allocation through Nomad's indexed summary catalog.
+// Reading /v1/allocation/:id embeds the complete job, so terminal recovery of a
+// dense carrier pool otherwise repeatedly serializes every task group. An
+// incomplete or unauthorized catalog response must never prove absence.
+func Get(ctx context.Context, client *http.Client, baseURL *url.URL, allocationID, nodeID, namespace string, headers http.Header) (*Allocation, error) {
+	parsedID, err := uuid.Parse(allocationID)
+	if err != nil || parsedID.String() != allocationID || client == nil || baseURL == nil ||
+		nodeID == "" || strings.TrimSpace(nodeID) != nodeID || namespace == "" || namespace == "*" || strings.TrimSpace(namespace) != namespace {
+		return nil, errors.New("nomad allocation lookup requires an exact UUID, node and namespace")
+	}
+	query := url.Values{
+		// The full hexadecimal prefix uses Nomad's ID index rather than
+		// scanning all historical allocations for every terminal lease.
+		"prefix":    {strings.ReplaceAll(allocationID, "-", "")},
+		"filter":    {"ID == " + strconv.Quote(allocationID)},
+		"namespace": {namespace}, "per_page": {"2"},
+		"resources": {"false"}, "task_states": {"false"},
+	}
+	target := *baseURL
+	target.Path = strings.TrimSuffix(target.Path, "/") + "/v1/allocations"
+	target.RawQuery = query.Encode()
+	var batch []Allocation
+	next, err := readPage(ctx, client, target.String(), headers, &batch)
+	if err != nil {
+		return nil, err
+	}
+	if next != "" || len(batch) > 1 {
+		return nil, errors.New("nomad allocation lookup returned an incomplete or ambiguous result")
+	}
+	if len(batch) == 0 {
+		return nil, nil
+	}
+	allocation := batch[0]
+	if allocation.ID != allocationID || allocation.NodeID != nodeID || allocation.Namespace != namespace {
+		return nil, errors.New("nomad allocation lookup returned an inexact identity")
+	}
+	return &allocation, nil
+}
+
+// HTTPError preserves authorization failures without exposing response bodies.
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("nomad allocation inventory returned HTTP %d", e.StatusCode)
+}
 
 // List reads bounded summaries. The node-specific allocations endpoint
 // embeds the complete Job in every result, amplifying large warm-carrier jobs
@@ -96,7 +146,10 @@ func readPage(ctx context.Context, client *http.Client, target string, headers h
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("nomad allocation inventory returned HTTP %d", response.StatusCode)
+		return "", &HTTPError{StatusCode: response.StatusCode}
+	}
+	if value := response.Header.Get("X-Nomad-Results-Filtered-By-ACLs"); len(response.Header.Values("X-Nomad-Results-Filtered-By-ACLs")) > 1 || (value != "" && value != "false") {
+		return "", errors.New("nomad allocation inventory was filtered by ACLs")
 	}
 	const maxBytes = 2 << 20
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))

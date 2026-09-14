@@ -91,6 +91,12 @@ stops and purges warm allocations, revokes the node identity, releases its
 subnet, and completes the whole ESS action with `ABANDON`. A node with an
 unexpected active sandbox lease is protected and fails closed instead.
 
+Aliyun permits only twenty heartbeat extensions per lifecycle action. Manager
+reserves renewal attempts atomically in PostgreSQL, independently of readiness
+polling, and retains the count across replicas and restarts. Renewal timing
+covers the enrollment deadline while reserving attempts for cleanup. Ambiguous
+provider calls consume an attempt; the controller does not replay them freely.
+
 Exact node certificates are short-lived. `sandbox0-node-bootstrap.timer`
 renews them before expiry. Nomad temporarily marks the node ineligible for new
 carrier allocations; certificate reload and the B-then-A ctld rollout preserve

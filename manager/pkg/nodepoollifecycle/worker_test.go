@@ -10,12 +10,20 @@ import (
 )
 
 type fakeStore struct {
-	nodes           map[string]sandboxstore.RuntimeNodePoolNodeUsage
-	observed        int
-	firstObservedAt time.Time
-	actionState     string
-	finished        map[string]string
-	admissionSlots  []int
+	nodes                map[string]sandboxstore.RuntimeNodePoolNodeUsage
+	observed             int
+	firstObservedAt      time.Time
+	actionState          string
+	finished             map[string]string
+	admissionSlots       []int
+	heartbeatReservation func(time.Duration) bool
+}
+
+func (s *fakeStore) ReserveRuntimeNodeLifecycleHeartbeat(_ context.Context, _, _ string, interval time.Duration) (bool, error) {
+	if s.heartbeatReservation != nil {
+		return s.heartbeatReservation(interval), nil
+	}
+	return true, nil
 }
 
 func (s *fakeStore) GetRuntimeNodePoolSnapshot(context.Context, string) (*sandboxstore.RuntimeNodePoolSnapshot, error) {
@@ -86,12 +94,13 @@ func (s *fakeStore) CompleteRuntimeNodeLifecycleAction(_ context.Context, token,
 }
 
 type fakeCloud struct {
-	actions    []Action
-	completed  map[string]string
-	heartbeats int
-	protected  map[string]bool
-	deleted    []string
-	inService  map[string]bool
+	actions           []Action
+	completed         map[string]string
+	heartbeats        int
+	protected         map[string]bool
+	deleted           []string
+	inService         map[string]bool
+	heartbeatTimeouts []time.Duration
 }
 
 func (c *fakeCloud) ElasticInstancesInService(_ context.Context, ids []string) (map[string]bool, error) {
@@ -106,9 +115,61 @@ func (c *fakeCloud) ListPendingLifecycleActions(context.Context) ([]Action, erro
 	return c.actions, nil
 }
 
-func (c *fakeCloud) HeartbeatLifecycleAction(context.Context, Action, time.Duration) error {
+func (c *fakeCloud) HeartbeatLifecycleAction(_ context.Context, _ Action, timeout time.Duration) error {
 	c.heartbeats++
+	c.heartbeatTimeouts = append(c.heartbeatTimeouts, timeout)
 	return nil
+}
+
+func TestLifecyclePollingDoesNotExhaustProviderHeartbeatBudgetAcrossRestarts(t *testing.T) {
+	for _, deadline := range []time.Duration{20 * time.Minute, 50 * time.Minute} {
+		t.Run(deadline.String(), func(t *testing.T) {
+			start := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+			now, nextRenewal := start, start
+			store := &fakeStore{firstObservedAt: start}
+			store.heartbeatReservation = func(interval time.Duration) bool {
+				if now.Before(nextRenewal) {
+					return false
+				}
+				nextRenewal = now.Add(interval)
+				return true
+			}
+			cloud := &fakeCloud{actions: []Action{{Token: "token", HookID: "out", InstanceIDs: []string{"i-1"}}}}
+			var expiresAt time.Time
+			for elapsed := time.Duration(0); elapsed <= deadline; elapsed += 10 * time.Second {
+				now = start.Add(elapsed)
+				// A new worker each pass cannot reset the durable renewal schedule.
+				worker, err := New(store, cloud, &fakeNomad{store: store}, Config{
+					PoolID: "elastic", ScaleOutHookID: "out", ScaleInHookID: "in", WarmSlotsPerNode: 502,
+					ScaleOutEnrollmentTimeout: deadline, Now: func() time.Time { return now },
+				})
+				require.NoError(t, err)
+				before := cloud.heartbeats
+				_, err = worker.Reconcile(context.Background())
+				require.NoError(t, err)
+				if cloud.heartbeats != before {
+					expiresAt = now.Add(cloud.heartbeatTimeouts[len(cloud.heartbeatTimeouts)-1])
+				}
+				require.True(t, now.Before(expiresAt), "provider wait expired at %s", elapsed)
+			}
+			require.LessOrEqual(t, cloud.heartbeats, sandboxstore.RuntimeNodeLifecycleHeartbeatMaxAttempts-3)
+			require.Equal(t, LifecycleAbandon, cloud.completed["token"])
+		})
+	}
+}
+
+func TestLifecycleReadyNodeCompletesWhileHeartbeatIsNotDue(t *testing.T) {
+	store := &fakeStore{nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+		"i-1": {ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic,
+			State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true, ReadySlots: 8},
+	}, heartbeatReservation: func(time.Duration) bool { return false }}
+	cloud := &fakeCloud{actions: []Action{{Token: "token", HookID: "out", InstanceIDs: []string{"i-1"}}}}
+	worker, _ := testWorker(t, store, cloud)
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+	require.Zero(t, cloud.heartbeats)
+	require.Equal(t, LifecycleContinue, cloud.completed["token"])
 }
 
 func (c *fakeCloud) CompleteLifecycleAction(_ context.Context, action Action, result string) error {

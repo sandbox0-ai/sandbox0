@@ -50,6 +50,7 @@ type Store interface {
 	CompleteReadyRuntimeNodeScaleOutActions(context.Context, string) error
 	AbandonRuntimeNodeEnrollment(context.Context, string, string) error
 	ObserveRuntimeNodeLifecycleAction(context.Context, *sandboxstore.ObserveRuntimeNodeLifecycleActionRequest) (*sandboxstore.RuntimeNodeLifecycleAction, error)
+	ReserveRuntimeNodeLifecycleHeartbeat(context.Context, string, string, time.Duration) (bool, error)
 	BeginRuntimeNodeLifecycleActionCleanup(context.Context, string) error
 	CompleteRuntimeNodeLifecycleAction(context.Context, string, string) error
 }
@@ -149,8 +150,15 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 		if err != nil {
 			return result, err
 		}
-		if err := w.cloud.HeartbeatLifecycleAction(ctx, action, w.config.HeartbeatTimeout); err != nil {
+		interval, timeout := w.heartbeatSchedule()
+		reserved, err := w.store.ReserveRuntimeNodeLifecycleHeartbeat(ctx, w.config.PoolID, action.Token, interval)
+		if err != nil {
 			return result, err
+		}
+		if reserved {
+			if err := w.cloud.HeartbeatLifecycleAction(ctx, action, timeout); err != nil {
+				return result, err
+			}
 		}
 		var completed, rolledBack bool
 		switch transition {
@@ -170,6 +178,17 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 		}
 	}
 	return result, nil
+}
+
+// heartbeatSchedule leaves four of Aliyun's twenty extensions for cleanup and
+// retries. Provider renewal is independent of frequent readiness polling; the
+// requested timeout covers two renewal intervals, including a polling margin.
+func (w *Worker) heartbeatSchedule() (interval, timeout time.Duration) {
+	const plannedAttempts = sandboxstore.RuntimeNodeLifecycleHeartbeatMaxAttempts - 4
+	interval = max(w.config.HeartbeatTimeout/2, w.config.ScaleOutEnrollmentTimeout/plannedAttempts)
+	interval = (interval + time.Second - 1) / time.Second * time.Second
+	timeout = max(w.config.HeartbeatTimeout, 2*interval+2*w.config.Interval)
+	return interval, timeout
 }
 
 func (w *Worker) reconcileProviderReadiness(ctx context.Context) error {

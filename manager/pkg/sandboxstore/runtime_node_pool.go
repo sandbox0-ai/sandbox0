@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	// Aliyun permits at most twenty extensions for one lifecycle action.
+	RuntimeNodeLifecycleHeartbeatMaxAttempts = 20
+
 	RuntimeNodePoolKindFixed   = "fixed"
 	RuntimeNodePoolKindElastic = "elastic"
 
@@ -1240,6 +1243,32 @@ func (s *PGSandboxStore) ObserveRuntimeNodeLifecycleAction(
 		return nil, err
 	}
 	return action, nil
+}
+
+// ReserveRuntimeNodeLifecycleHeartbeat consumes one provider attempt before the
+// call. A single row update coordinates replicas and survives ambiguous calls
+// and process restarts without spending the provider budget again.
+func (s *PGSandboxStore) ReserveRuntimeNodeLifecycleHeartbeat(
+	ctx context.Context,
+	poolID, token string,
+	interval time.Duration,
+) (bool, error) {
+	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(token) == "" ||
+		interval < time.Second || interval > 10*time.Minute {
+		return false, errors.New("runtime node lifecycle heartbeat reservation is invalid")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE manager.runtime_node_lifecycle_actions
+		SET heartbeat_attempts = heartbeat_attempts + 1,
+			heartbeat_not_before = NOW() + $3 * INTERVAL '1 millisecond'
+		WHERE pool_id = $1 AND lifecycle_action_token = $2
+			AND state IN ('pending', 'draining') AND heartbeat_attempts < $4
+			AND (heartbeat_not_before IS NULL OR heartbeat_not_before <= NOW())
+	`, poolID, token, interval.Milliseconds(), RuntimeNodeLifecycleHeartbeatMaxAttempts)
+	if err != nil {
+		return false, fmt.Errorf("reserve runtime node lifecycle heartbeat: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *PGSandboxStore) CompleteRuntimeNodeLifecycleAction(

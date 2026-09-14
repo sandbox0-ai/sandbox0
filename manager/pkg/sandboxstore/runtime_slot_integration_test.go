@@ -316,7 +316,8 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 func testRuntimeSlotAdmissionBudget(t *testing.T, admissionCPU, admissionMemory int64, admitted int) {
 	t.Helper()
 	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
+	// This fixture also exercises migration 56's drain-before-rollback contract.
+	pool := newSandboxStoreIntegrationPoolAt(t, 56)
 	store := NewPGSandboxStore(pool)
 	registration := runtimeSlotTestRegistration("unused", "unused")
 	_, err := store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{

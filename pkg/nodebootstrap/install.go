@@ -314,44 +314,9 @@ func installCNIPlugins(release string) error {
 		return err
 	}
 	defer gzipReader.Close()
-	approved := map[string]bool{
-		"bandwidth": true, "bridge": true, "dhcp": true, "dummy": true,
-		"firewall": true, "host-device": true, "host-local": true, "ipvlan": true,
-		"loopback": true, "macvlan": true, "portmap": true, "ptp": true,
-		"sbr": true, "static": true, "tap": true, "tuning": true,
-		"vlan": true, "vrf": true, "LICENSE": false, "README.md": false,
-	}
-	contents := make(map[string][]byte, len(approved))
-	archive := tar.NewReader(gzipReader)
-	for {
-		header, err := archive.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		name := strings.TrimPrefix(header.Name, "./")
-		if name == "." && header.Typeflag == tar.TypeDir {
-			continue
-		}
-		executable, exists := approved[name]
-		if !exists || header.Typeflag != tar.TypeReg || strings.Contains(name, "/") ||
-			header.Size <= 0 || header.Size > 64<<20 {
-			return fmt.Errorf("CNI archive contains an unexpected member %q", header.Name)
-		}
-		payload, err := io.ReadAll(io.LimitReader(archive, header.Size+1))
-		if err != nil || int64(len(payload)) != header.Size {
-			return errors.New("CNI archive member is truncated")
-		}
-		if executable {
-			contents[name] = payload
-		} else {
-			contents[name] = nil
-		}
-	}
-	if len(contents) != len(approved) {
-		return errors.New("CNI archive inventory differs from the approved release")
+	contents, err := readCNIPlugins(gzipReader)
+	if err != nil {
+		return err
 	}
 	if err := ensureCanonicalDirectory("/opt/cni/bin", 0o755); err != nil {
 		return err
@@ -382,4 +347,54 @@ func installCNIPlugins(release string) error {
 		}
 	}
 	return nil
+}
+
+// readCNIPlugins validates the complete official inventory before host files are changed.
+func readCNIPlugins(reader io.Reader) (map[string][]byte, error) {
+	approved := map[string]bool{
+		"bandwidth": true, "bridge": true, "dhcp": true, "dummy": true,
+		"firewall": true, "host-device": true, "host-local": true, "ipvlan": true,
+		"loopback": true, "macvlan": true, "portmap": true, "ptp": true,
+		"sbr": true, "static": true, "tap": true, "tuning": true,
+		"vlan": true, "vrf": true, "LICENSE": false, "README.md": false,
+	}
+	contents := make(map[string][]byte, len(approved))
+	archive := tar.NewReader(reader)
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := header.Name
+		for strings.HasPrefix(name, "./") {
+			name = strings.TrimPrefix(name, "./")
+		}
+		if (name == "" || name == ".") && header.Typeflag == tar.TypeDir {
+			continue
+		}
+		executable, exists := approved[name]
+		if !exists || header.Typeflag != tar.TypeReg || strings.Contains(name, "/") ||
+			header.Size <= 0 || header.Size > 64<<20 {
+			return nil, fmt.Errorf("CNI archive contains an unexpected member %q", header.Name)
+		}
+		if _, duplicate := contents[name]; duplicate {
+			return nil, fmt.Errorf("CNI archive contains duplicate member %q", header.Name)
+		}
+		payload, err := io.ReadAll(io.LimitReader(archive, header.Size+1))
+		if err != nil || int64(len(payload)) != header.Size {
+			return nil, errors.New("CNI archive member is truncated")
+		}
+		if executable {
+			contents[name] = payload
+		} else {
+			contents[name] = nil
+		}
+	}
+	if len(contents) != len(approved) {
+		return nil, errors.New("CNI archive inventory differs from the approved release")
+	}
+	return contents, nil
 }

@@ -50,8 +50,9 @@ PostgreSQL-backed pressure controller raises desired capacity.
 Operators may configure a narrower `min_elastic_nodes..max_elastic_nodes`
 range inside `0..299`, including `1..1` for one retained worker or `0..0` to
 disable new elastic capacity. The provider fleet's outer boundary stays
-unchanged. Density-profile trials must bound this policy before enrollment is
-enabled; a smaller node subnet does not itself limit cloud scale-out.
+unchanged. Density-profile trials must account for the configured fleet bound
+before enrollment is enabled; a smaller node subnet does not itself limit
+cloud scale-out.
 If the fixed worker loses its live carrier set, the same controller temporarily
 requests one elastic worker even without user pressure; it scales that
 replacement back to zero only after the fixed baseline has recovered and the
@@ -68,8 +69,10 @@ An elastic node is admitted in three stages:
 1. Cloud-init starts a post-cloud-final unit. It uses Alibaba IMDSv2 to obtain
    a signed instance identity, receives a one-time manager challenge, and is
    checked against the exact ESS group, account, image, instance type, source
-   address, and region.
-2. Manager atomically reserves a `/26`, prepares its routes, returns one
+   address, and region. ECS signatures may omit their certificate; verification
+   resolves the single signer against the pinned official Alibaba certificate
+   and still verifies the exact document and challenge.
+2. Manager atomically reserves the configured node subnet (default `/26`), prepares its routes, returns one
    content-addressed runtime bundle, a short Nomad certificate, and a scoped
    introduction JWT. The client registers with
    `sandbox0_admitted=false`; no warm carrier can land on it.
@@ -77,7 +80,7 @@ An elastic node is admitted in three stages:
    UID. The node installs ctld A/B and its exact rendered config. Only after a
    live ctld capacity heartbeat does the node present
    `sandbox0_admitted=true`, and manager enables Nomad scheduling. The ESS
-   scale-out lifecycle action continues only after all eight warm carriers are
+   scale-out lifecycle action continues only after all configured warm carriers are
    ready. A PostgreSQL `warming` fence still excludes those carriers from the
    claim transaction until ESS has accepted `CONTINUE`, so Nomad readiness
    alone cannot expose a half-admitted node.
@@ -85,7 +88,7 @@ An elastic node is admitted in three stages:
 Scale-out enrollment has a durable 20-minute deadline by default. On timeout,
 manager first blocks late bootstrap retries, then removes allocation routes,
 stops and purges warm allocations, revokes the node identity, releases its
-`/26`, and completes the whole ESS action with `ABANDON`. A node with an
+subnet, and completes the whole ESS action with `ABANDON`. A node with an
 unexpected active sandbox lease is protected and fails closed instead.
 
 Exact node certificates are short-lived. `sandbox0-node-bootstrap.timer`

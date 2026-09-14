@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
@@ -41,15 +43,16 @@ func NewAliyunCloud(
 	region, scalingGroupID string,
 	routeTableIDs []string,
 ) (*AliyunCloud, error) {
-	essClient, err := ess.NewClientWithProvider(region)
+	credential := aliyunclient.Credentials()
+	essClient, err := ess.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
-	ecsClient, err := ecs.NewClientWithProvider(region)
+	ecsClient, err := ecs.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
-	vpcClient, err := vpc.NewClientWithProvider(region)
+	vpcClient, err := vpc.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}

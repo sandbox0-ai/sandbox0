@@ -84,6 +84,12 @@ privileged inventory (502 for 500 plus 2). Lifecycle admission waits for that
 many live, ready carriers and a current capacity heartbeat; the database
 rechecks both before removing the node's warming fence.
 
+Alibaba Cloud node-pool clients use the refreshable SDK credential chain over
+HTTPS. ECS hosts can discover their attached RAM role through IMDSv2 without
+static keys or a role-name environment variable. Set
+`ALIBABA_CLOUD_IMDSV1_DISABLED=true` to require metadata tokens; the SDK refreshes
+temporary role credentials before expiration.
+
 ## Ownership
 
 | Owner | State |

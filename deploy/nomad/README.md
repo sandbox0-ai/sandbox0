@@ -165,7 +165,11 @@ mutually authenticated.
    the Nomad client. This A/B process pair is not a stopped ECS standby node.
    Elastic nodes execute the signed enrollment flow automatically.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad` with
-   `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. Keep
+   `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. The
+   default eight carriers fit in shard zero. Larger pools require every
+   nonempty `warm_shard` from 0 through 17 with identical standard/privileged
+   counts; each job is bounded to 32 groups. Migrate an existing unsharded pool
+   only after fencing claims and draining every affected node. Keep
    `restart { attempts = 0 }`: a consumed slot gets a fresh allocation and
    network namespace, never a task restart in the same allocation. Keep the
    task groups on `cni/sandbox0`; Nomad's built-in `bridge` network does not

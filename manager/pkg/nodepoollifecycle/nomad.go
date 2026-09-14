@@ -90,7 +90,7 @@ func (n *NomadClient) FenceAndStopWarmAllocations(ctx context.Context, nodeID st
 		if allocation.terminal() {
 			continue
 		}
-		if allocation.JobID != n.warmJobID ||
+		if !nomadinventory.IsWarmJob(n.warmJobID, allocation.JobID) ||
 			(allocation.Namespace != "" && allocation.Namespace != "default") {
 			return fmt.Errorf("nomad node %s has non-warm allocation %s from job %s",
 				nodeID, allocation.ID, allocation.JobID)

@@ -67,12 +67,20 @@ budgets. Carrier count, NBD device count, address space, quotas, and actual
 memory pressure are separate bounds. Increasing admission alone does not prove
 500 resident sandboxes or improve a 100-way startup burst.
 
-The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6)
-and `privileged_slots` (default 2). Existing `warm-0` through `warm-7` names and
-classes remain stable when increasing these bounds. Extra carriers require
+The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6),
+`privileged_slots` (default 2), and `warm_shard` (default 0). Each job contains
+at most 32 task groups because Nomad embeds the full job in every allocation.
+For a larger inventory, render shards 0 through 17 with the same counts and
+register each nonempty job. Shard zero retains `sandbox0-warm-slots`; additional
+IDs are `sandbox0-warm-slots-shard-01` through `-17`. Existing `warm-0` through
+`warm-7` names, classes, and shard placement remain stable as counts grow.
+Moving an existing unsharded pool requires claim fencing and physical drain on
+every affected node before registering additional jobs and shrinking shard zero.
+Extra carriers require
 the target node's `sandbox0_standard_carriers` or
 `sandbox0_privileged_carriers` metadata to include their ordinal. For example,
-`standard_slots=500` plus `sandbox0_standard_carriers=500` permits 500 standard
+`standard_slots=500` across its nonempty shards plus
+`sandbox0_standard_carriers=500` permits 500 standard
 carriers on an explicitly configured node; unconfigured nodes retain their
 original six. Metadata is an operator-owned capacity profile, not a workload or
 benchmark selector. Provision enough NBD devices, private addresses, and host

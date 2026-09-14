@@ -24,7 +24,19 @@ variable "privileged_slots" {
   }
 }
 
+variable "warm_shard" {
+  type        = number
+  description = "Render one bounded carrier job; register each nonempty shard from 0 through 17"
+  default     = 0
+  validation {
+    condition     = var.warm_shard >= 0 && var.warm_shard <= 17 && floor(var.warm_shard) == var.warm_shard
+    error_message = "Warm shard must be an integer from 0 through 17."
+  }
+}
+
 job "sandbox0-warm-slots" {
+  id          = var.warm_shard == 0 ? "sandbox0-warm-slots" : format("sandbox0-warm-slots-shard-%02d", var.warm_shard)
+  name        = var.warm_shard == 0 ? "sandbox0-warm-slots" : format("sandbox0-warm-slots-shard-%02d", var.warm_shard)
   datacenters = [var.datacenter]
   node_pool   = "sandbox0"
   type        = "system"
@@ -44,11 +56,13 @@ job "sandbox0-warm-slots" {
 
   # Carrier identities remain stable when counts change. The default retains
   # warm-0..5 as standard and warm-6..7 as privileged; added standard carriers
-  # start at warm-8. Scale only after validating node memory, NBD and IP capacity.
+  # start at warm-8. Nomad embeds the entire job in every allocation, so each
+  # shard has at most 32 groups. Keep a carrier's shard independent of the
+  # requested pool size. Scale only after validating memory, NBD and IP capacity.
   dynamic "group" {
     for_each = merge(
-      { for index in range(var.standard_slots) : format("warm-%d", index < 6 ? index : index + 2) => { security_class = "standard", index = index } },
-      { for index in range(var.privileged_slots) : (index < 2 ? format("warm-%d", index + 6) : format("privileged-%d", index)) => { security_class = "privileged", index = index } }
+      { for index in range(var.standard_slots) : format("warm-%d", index < 6 ? index : index + 2) => { security_class = "standard", index = index } if floor((index < 6 ? index : index + 2) / 32) == var.warm_shard },
+      { for index in range(var.privileged_slots) : (index < 2 ? format("warm-%d", index + 6) : format("privileged-%d", index)) => { security_class = "privileged", index = index } if floor((index < 2 ? index + 6 : 512 + index) / 32) == var.warm_shard }
     )
     labels = [group.key]
     content {

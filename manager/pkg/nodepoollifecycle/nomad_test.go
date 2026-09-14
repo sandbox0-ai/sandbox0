@@ -77,7 +77,11 @@ func TestNomadInventoryReadsEverySummaryPageBeforeStopping(t *testing.T) {
 			}
 			batch := make([]nomadAllocation, 0, end-start)
 			for i := start; i < end; i++ {
-				batch = append(batch, nomadAllocation{ID: fmt.Sprintf("alloc-%d", i), NodeID: "node", JobID: "warm", Namespace: "default", ClientStatus: "running"})
+				jobID, err := nomadinventory.WarmJobID("warm", i%nomadinventory.WarmJobShardCount)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch = append(batch, nomadAllocation{ID: fmt.Sprintf("alloc-%d", i), NodeID: "node", JobID: jobID, Namespace: "default", ClientStatus: "running"})
 			}
 			pages++
 			if err := json.NewEncoder(w).Encode(batch); err != nil {
@@ -103,7 +107,7 @@ func TestNomadInventoryReadsEverySummaryPageBeforeStopping(t *testing.T) {
 }
 
 func TestNomadInventoryFailsClosedBeforeStopping(t *testing.T) {
-	for _, scenario := range []string{"other-node", "missing-id", "duplicate-id", "repeated-token", "foreign-job", "foreign-namespace", "truncated-page", "oversized-page", "page-limit"} {
+	for _, scenario := range []string{"other-node", "missing-id", "duplicate-id", "repeated-token", "foreign-job", "foreign-shard", "foreign-namespace", "truncated-page", "oversized-page", "page-limit"} {
 		t.Run(scenario, func(t *testing.T) {
 			pages, stopped := 0, 0
 			client := newInventoryTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +141,8 @@ func TestNomadInventoryFailsClosedBeforeStopping(t *testing.T) {
 						w.Header().Set("X-Nomad-NextToken", "next")
 					case "foreign-job":
 						batch[0].JobID = "customer"
+					case "foreign-shard":
+						batch[0].JobID = "warm-shard-01-customer"
 					case "foreign-namespace":
 						batch[0].Namespace = "customer"
 					case "truncated-page":

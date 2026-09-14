@@ -321,8 +321,12 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		MountRoot: config.RootFSMountRoot, MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
 		MaxNodeDirtyTailBytes:           config.RootFSMaxNodeDirtyTailBytes,
 		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,
-		Source:                          conditional,
-		Publisher:                       rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
+		ReadCacheBytes:                  config.RootFSReadCacheBytes,
+		ReadDiskCache: rootfsblock.DiskCacheConfig{
+			Directory: config.RootFSReadCacheDirectory, MaxBytes: config.RootFSReadDiskCacheBytes,
+		},
+		Source:    conditional,
+		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)

@@ -127,6 +127,8 @@ type Config struct {
 	MaxDirtyTailBytes               int64
 	MaxNodeDirtyTailBytes           int64
 	DirtyTailRetirementReserveBytes int64
+	ReadCacheBytes                  int64
+	ReadDiskCache                   rootfsblock.DiskCacheConfig
 	Source                          rootfsblock.RangeSource
 	Publisher                       rootfsblock.ImmutableObjectPublisher
 	Runtime                         HostRuntime
@@ -384,7 +386,11 @@ func New(config Config) (*Manager, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialize RootFS session journal: %w", err)
 	}
-	readCache, err := rootfsblock.NewReadCache(rootfsblock.DefaultReadCacheBytes)
+	cacheBytes := config.ReadCacheBytes
+	if cacheBytes == 0 {
+		cacheBytes = rootfsblock.DefaultReadCacheBytes
+	}
+	readCache, err := rootfsblock.NewReadCacheWithDisk(cacheBytes, config.ReadDiskCache)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize RootFS read cache: %w", err)
@@ -406,6 +412,8 @@ func New(config Config) (*Manager, error) {
 		recoveryParents: make(map[string]struct{}), quietExternal: make(map[string]time.Time),
 	}
 	if err := manager.rebuildRecoveryIndex(); err != nil {
+		_ = readCache.Close()
+		cancel()
 		_ = db.Close()
 		return nil, fmt.Errorf("index RootFS recovery sessions: %w", err)
 	}
@@ -2215,8 +2223,11 @@ func (m *Manager) Close() error {
 	for _, session := range live {
 		result = errors.Join(result, session.device.Close(), session.branch.Close())
 	}
-	return errors.Join(result, m.db.Close())
+	return errors.Join(result, m.readCache.Close(), m.db.Close())
 }
+
+// ReadCacheStats reports node-wide immutable range reuse across all sessions.
+func (m *Manager) ReadCacheStats() rootfsblock.ReadCacheStats { return m.readCache.Stats() }
 
 // NodeDirtyTailUsage reports aggregate branch occupancy, including journals
 // recovered at startup but not currently opened by a live session.

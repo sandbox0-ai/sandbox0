@@ -148,3 +148,30 @@ func TestNewServicePerformsStaticValidationWithoutOpeningNodeResources(t *testin
 		t.Fatal("service is ready before acquiring the ctld HA primary lease")
 	}
 }
+
+func TestNodeReadCacheConfigurationIsExplicitAndValidated(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Config)
+		valid  bool
+	}{
+		{"disabled", func(*Config) {}, true},
+		{"enabled", func(c *Config) {
+			c.RootFSReadCacheDirectory = "/var/lib/sandbox0/read-cache-v1"
+			c.RootFSReadDiskCacheBytes = 8 << 30
+		}, true},
+		{"negative-memory", func(c *Config) { c.RootFSReadCacheBytes = -1 }, false},
+		{"negative-disk", func(c *Config) { c.RootFSReadDiskCacheBytes = -1 }, false},
+		{"missing-directory", func(c *Config) { c.RootFSReadDiskCacheBytes = 8 << 30 }, false},
+		{"missing-budget", func(c *Config) { c.RootFSReadCacheDirectory = "/var/lib/sandbox0/read-cache-v1" }, false},
+		{"relative-directory", func(c *Config) { c.RootFSReadCacheDirectory = "cache"; c.RootFSReadDiskCacheBytes = 8 << 30 }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := validNodeRuntimeConfig()
+			test.mutate(&config)
+			if err := config.Validate(); (err == nil) != test.valid {
+				t.Fatalf("configuration error = %v, valid = %v", err, test.valid)
+			}
+		})
+	}
+}

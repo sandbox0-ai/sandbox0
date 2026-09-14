@@ -51,6 +51,9 @@ type CtldNomadRuntimeConfig struct {
 	ResourceMemoryBytes   int64  `yaml:"resource_memory_bytes" json:"-"`
 	ResourceCPUSetCPUs    string `yaml:"resource_cpuset_cpus" json:"-"`
 	ResourceCPUSetMems    string `yaml:"resource_cpuset_mems" json:"-"`
+	ReadCacheBytes        int64  `yaml:"read_cache_bytes" json:"-"`
+	ReadCacheDirectory    string `yaml:"read_cache_directory" json:"-"`
+	ReadDiskCacheBytes    int64  `yaml:"read_disk_cache_bytes" json:"-"`
 
 	StatePath                       string   `yaml:"state_path" json:"-"`
 	BranchRoot                      string   `yaml:"branch_root" json:"-"`

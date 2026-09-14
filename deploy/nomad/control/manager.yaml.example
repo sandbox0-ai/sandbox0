@@ -46,6 +46,9 @@ node_pool_autoscaler:
     instance_types:
       - replace-with-primary-instance-type
     allocation_supernet: 172.27.0.0/17
+    # /20 through /30; /23 accommodates the addresses for 500 residents.
+    # Size the supernet for max_elastic_nodes plus replacement headroom and
+    # check that it does not overlap fixed allocations or VPC routes.
     allocation_prefix: 26
     route_table_ids:
       - replace-with-route-table-id

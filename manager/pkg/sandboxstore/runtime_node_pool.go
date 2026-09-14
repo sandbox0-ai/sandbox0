@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -490,6 +491,33 @@ func (s *PGSandboxStore) ReserveRuntimeNode(
 	if err != nil {
 		return nil, err
 	}
+	// A serializable snapshot can precede the advisory-lock wait. Retry the
+	// complete database-only transaction when a competing enrollment commits.
+	for attempt := 0; ; attempt++ {
+		reservation, err := s.reserveRuntimeNodeAttempt(ctx, normalized, supernet)
+		var pgErr *pgconn.PgError
+		retryableConflict := errors.As(err, &pgErr) &&
+			(pgErr.Code == "40001" || pgErr.Code == "23505" &&
+				(pgErr.ConstraintName == "idx_runtime_node_instances_live_cidr" ||
+					pgErr.ConstraintName == "runtime_node_instances_pkey"))
+		if !retryableConflict || attempt == 7 {
+			return reservation, err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *PGSandboxStore) reserveRuntimeNodeAttempt(
+	ctx context.Context,
+	normalized *ReserveRuntimeNodeRequest,
+	supernet netip.Prefix,
+) (*RuntimeNodePoolNodeUsage, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin runtime node reservation: %w", err)
@@ -588,6 +616,9 @@ func (s *PGSandboxStore) ReserveRuntimeNode(
 		allocated[prefix] = struct{}{}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read allocated runtime node subnets: %w", err)
+	}
 	cidr, ok := firstFreeRuntimeNodePrefix(supernet, normalized.AllocationPrefix, allocated)
 	if !ok {
 		return nil, fmt.Errorf("runtime node allocation supernet is exhausted")
@@ -1291,7 +1322,16 @@ func firstFreeRuntimeNodePrefix(
 		value := base + uint32(index)*step
 		addr := netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)})
 		candidate := netip.PrefixFrom(addr, prefixBits)
-		if _, exists := allocated[candidate]; !exists {
+		// Density profiles may change while earlier nodes retain smaller or
+		// larger subnets. Exact-prefix equality would reuse their addresses.
+		overlaps := false
+		for existing := range allocated {
+			if candidate.Overlaps(existing) {
+				overlaps = true
+				break
+			}
+		}
+		if !overlaps {
 			return candidate, true
 		}
 	}

@@ -2,6 +2,8 @@ package sandboxstore
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -146,4 +148,49 @@ func TestAbandonedScaleOutBlocksLateEnrollmentAndReleasesCIDRIntegration(t *test
 	replacementReservation, err := store.ReserveRuntimeNode(ctx, &replacement)
 	require.NoError(t, err)
 	require.Equal(t, reservation.AllocationCIDR, replacementReservation.AllocationCIDR)
+}
+
+func TestRuntimeNodeReservationsPreserveNetworksAcrossDensityProfilesIntegration(t *testing.T) {
+	ctx := context.Background()
+	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
+	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", "nomad")
+	require.NoError(t, err)
+	request := func(index, bits int) *ReserveRuntimeNodeRequest {
+		return &ReserveRuntimeNodeRequest{
+			PoolID: "elastic", ProviderInstanceID: fmt.Sprintf("i-%d", index), PoolKind: RuntimeNodePoolKindElastic,
+			ClusterID: "nomad", NodeName: fmt.Sprintf("s0-i-%d", index), NodeUID: fmt.Sprintf("ecs/us-east-1/i-%d", index),
+			PrivateIP: fmt.Sprintf("10.0.1.%d", index+10), AllocationSupernet: "172.27.0.0/17", AllocationPrefix: bits,
+		}
+	}
+	original, err := store.ReserveRuntimeNode(ctx, request(0, 26))
+	require.NoError(t, err)
+	require.Equal(t, "172.27.0.0/26", original.AllocationCIDR)
+	type result struct {
+		reservation *RuntimeNodePoolNodeUsage
+		err         error
+	}
+	results := make(chan result, 8)
+	for index := 1; index <= 8; index++ {
+		go func() {
+			bits := 23
+			if index%2 == 0 {
+				bits = 26
+			}
+			reservation, err := store.ReserveRuntimeNode(ctx, request(index, bits))
+			results <- result{reservation, err}
+		}()
+	}
+	allocated := []netip.Prefix{netip.MustParsePrefix(original.AllocationCIDR)}
+	for range 8 {
+		outcome := <-results
+		require.NoError(t, outcome.err)
+		prefix := netip.MustParsePrefix(outcome.reservation.AllocationCIDR)
+		for _, existing := range allocated {
+			require.False(t, prefix.Overlaps(existing))
+		}
+		allocated = append(allocated, prefix)
+	}
+	retry, err := store.ReserveRuntimeNode(ctx, request(0, 23))
+	require.NoError(t, err)
+	require.Equal(t, original.AllocationCIDR, retry.AllocationCIDR, "retries retain the enrolled node network")
 }

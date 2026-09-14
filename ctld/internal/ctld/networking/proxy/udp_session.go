@@ -14,6 +14,7 @@ import (
 )
 
 type udpSessionKey struct {
+	Binding  policy.RuntimeBinding
 	SrcIP    string
 	SrcPort  int
 	DestIP   string
@@ -54,7 +55,12 @@ func newUDPSessionKey(req *adapterRequest) (udpSessionKey, error) {
 	if req == nil || req.UDPSource == nil || req.DestIP == nil || req.DestPort <= 0 {
 		return udpSessionKey{}, fmt.Errorf("udp session requires source and destination")
 	}
+	binding := policy.RuntimeBinding{}
+	if req.Compiled != nil {
+		binding = req.Compiled.RuntimeBinding
+	}
 	return udpSessionKey{
+		Binding:  binding,
 		SrcIP:    req.UDPSource.IP.String(),
 		SrcPort:  req.UDPSource.Port,
 		DestIP:   req.DestIP.String(),
@@ -90,17 +96,43 @@ func (s *Server) ensureUDPSession(req *adapterRequest) (*udpSession, error) {
 		return nil, err
 	}
 	s.udpSessionMu.Lock()
+	if s.closing.Load() || (s.store != nil && !s.store.IsCurrentBinding(req.SrcIP, req.Compiled)) {
+		s.udpSessionMu.Unlock()
+		return nil, errFlowRetired
+	}
 	if s.udpSessions == nil {
 		s.udpSessions = make(map[udpSessionKey]*udpSession)
 	}
 	session := s.udpSessions[key]
 	if session == nil || session.isClosed() {
+		if len(s.udpSessions) >= 65536 {
+			s.udpSessionMu.Unlock()
+			return nil, errors.New("proxy UDP session limit exceeded")
+		}
 		session = newUDPSession(s, key, req)
 		s.udpSessions[key] = session
 	}
 	s.udpSessionMu.Unlock()
 	session.update(req)
 	return session, nil
+}
+
+// Reconciliation closes exact old sessions before the network revision is
+// acknowledged. The key includes the policy binding, so IP/port reuse cannot
+// transfer an upstream socket or late response to another runtime.
+func (s *Server) reconcileUDPSessions() {
+	s.udpSessionMu.Lock()
+	stale := make([]*udpSession, 0)
+	for _, session := range s.udpSessions {
+		compiled, _ := session.auditSnapshot()
+		if !s.store.IsCurrentBinding(session.key.SrcIP, compiled) {
+			stale = append(stale, session)
+		}
+	}
+	s.udpSessionMu.Unlock()
+	for _, session := range stale {
+		session.closeWithError(errFlowRetired)
+	}
 }
 
 func (s *Server) removeUDPSession(session *udpSession) {
@@ -253,10 +285,10 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 		}
 		payload := append([]byte(nil), buf[:n]...)
 		session.touch()
-		if session.destinationPort() == 53 {
-			session.server.observeDNSResponse(session.key.SrcIP, payload)
-		}
 		compiled, audit := session.auditSnapshot()
+		if session.destinationPort() == 53 {
+			session.server.observePolicyDNSResponse(session.key.SrcIP, compiled, payload)
+		}
 		if session.server != nil {
 			if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthIngress, len(payload)); err != nil {
 				session.closeWithError(err)

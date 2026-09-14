@@ -31,6 +31,7 @@ const (
 )
 
 type adapterRequest struct {
+	Flow           *tcpFlow
 	Server         *Server
 	Compiled       *policy.CompiledPolicy
 	Audit          *flowAudit

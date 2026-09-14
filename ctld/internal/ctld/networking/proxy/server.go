@@ -24,6 +24,11 @@ import (
 )
 
 type Server struct {
+	flowMu            sync.Mutex
+	tcpFlows          map[*tcpFlow]struct{}
+	closing           atomic.Bool
+	shutdownOnce      sync.Once
+	shutdownErr       error
 	cfg               *config.NetworkRuntimeConfig
 	store             *policy.Store
 	tracker           *conntrack.Tracker
@@ -231,6 +236,13 @@ func (s *Server) Start(ctx context.Context) {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdownErr = s.shutdown(ctx) })
+	return s.shutdownErr
+}
+
+func (s *Server) shutdown(_ context.Context) error {
+	s.closeTCPFlows()
+	s.closeUDPSessions()
 	var err error
 	if s.httpListener != nil {
 		if closeErr := s.httpListener.Close(); closeErr != nil {
@@ -262,7 +274,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			err = closeErr
 		}
 	}
-	s.closeUDPSessions()
 	return err
 }
 
@@ -336,6 +347,11 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 
 	srcIP := remoteIP(conn.RemoteAddr())
 	p := s.store.GetByIP(srcIP)
+	flow, err := s.beginTCPFlow(srcIP, p, conn)
+	if err != nil {
+		return
+	}
+	defer s.endTCPFlow(flow)
 	ctx := &tcpClassifyContext{
 		Compiled:    p,
 		SrcIP:       srcIP,
@@ -350,6 +366,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 	req := &adapterRequest{
+		Flow:     flow,
 		Server:   s,
 		Compiled: p,
 		SrcIP:    srcIP,
@@ -836,7 +853,7 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 		return err
 	}
 
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)
+	upstream, err := s.dialDirectTCPForRequest(req)
 	if err != nil {
 		return err
 	}

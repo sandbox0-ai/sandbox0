@@ -55,3 +55,28 @@ func testSandboxInfo(namespace, name, sourceIP, hash string) *model.SandboxInfo 
 		NetworkPolicyHash: hash,
 	}
 }
+
+func TestCurrentBindingRejectsRemovedOrReusedSourceIP(t *testing.T) {
+	store := NewStore(nil)
+	info := testSandboxInfo("runtime-slot", "slot", "10.0.0.2", "hash")
+	info.IncarnationID, info.Revision = "allocation-a", "1"
+	store.ReconcileSandboxes([]*model.SandboxInfo{info})
+	old := store.GetByIP(info.SourceIP)
+	if !store.IsCurrentBinding(info.SourceIP, old) {
+		t.Fatal("current binding rejected")
+	}
+	store.ReconcileSandboxes([]*model.SandboxInfo{info})
+	if !store.IsCurrentBinding(info.SourceIP, old) {
+		t.Fatal("unchanged reconcile revoked a live binding")
+	}
+	info.IncarnationID = "allocation-b"
+	store.ReconcileSandboxes([]*model.SandboxInfo{info})
+	if store.IsCurrentBinding(info.SourceIP, old) {
+		t.Fatal("reused IP accepted an old allocation")
+	}
+	current := store.GetByIP(info.SourceIP)
+	store.ReconcileSandboxes(nil)
+	if store.IsCurrentBinding(info.SourceIP, current) {
+		t.Fatal("removed policy remains authorized")
+	}
+}

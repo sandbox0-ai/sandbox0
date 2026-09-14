@@ -56,6 +56,12 @@ func (t *Tracker) Record(flow FlowKey) {
 }
 
 func (t *Tracker) PopBySrc(srcIP string) []FlowKey {
+	return t.PopBySrcMatching(srcIP, func(FlowKey) bool { return true })
+}
+
+// PopBySrcMatching removes only matching flows, preserving other timestamps so
+// a later policy update or terminal cleanup can still revoke allowed traffic.
+func (t *Tracker) PopBySrcMatching(srcIP string, matches func(FlowKey) bool) []FlowKey {
 	srcAddr, err := netip.ParseAddr(srcIP)
 	if err != nil || !srcAddr.IsValid() {
 		return nil
@@ -68,10 +74,15 @@ func (t *Tracker) PopBySrc(srcIP string) []FlowKey {
 	}
 	out := make([]FlowKey, 0, len(perSrc))
 	for flow := range perSrc {
-		out = append(out, flow)
+		if matches(flow) {
+			out = append(out, flow)
+			delete(perSrc, flow)
+		}
 	}
-	t.totalSize -= len(perSrc)
-	delete(t.bySrc, srcIP)
+	t.totalSize -= len(out)
+	if len(perSrc) == 0 {
+		delete(t.bySrc, srcIP)
+	}
 	return out
 }
 

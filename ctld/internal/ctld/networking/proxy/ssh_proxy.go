@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -111,11 +112,18 @@ func (s *Server) dialUpstreamSSH(req *adapterRequest, material *resolvedSSHProxy
 	}
 
 	addr := net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort))
-	client, err := ssh.Dial("tcp", addr, cfg)
+	raw, err := s.dialDirectTCPForRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream ssh: %w", err)
 	}
-	return client, nil
+	_ = raw.SetDeadline(time.Now().Add(cfg.Timeout))
+	clientConn, channels, requests, err := ssh.NewClientConn(raw, addr, cfg)
+	if err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("handshake upstream ssh: %w", err)
+	}
+	_ = raw.SetDeadline(time.Time{})
+	return ssh.NewClient(clientConn, channels, requests), nil
 }
 
 func proxySSHChannels(req *adapterRequest, downstreamChannels <-chan ssh.NewChannel, upstream *ssh.Client) error {

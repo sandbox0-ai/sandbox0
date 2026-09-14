@@ -109,7 +109,17 @@ type CompiledHTTPValueMatch struct {
 	Present bool
 }
 
+// RuntimeBinding identifies the exact registry policy that authorized a flow.
+// It changes on allocation replacement or policy update, even when an IP is reused.
+type RuntimeBinding struct {
+	Key           string
+	IncarnationID string
+	Revision      string
+	PolicyHash    string
+}
+
 type CompiledPolicy struct {
+	RuntimeBinding          RuntimeBinding
 	SandboxID               string
 	TeamID                  string
 	CredentialBindingDigest string

@@ -234,3 +234,66 @@ func TestAliyunProtectionExcludesPendingRemovingAndMissingInstances(t *testing.T
 	require.NoError(t, cloud.SetInstancesProtection(context.Background(), []string{"pending", "missing", "removing"}, true))
 	require.Len(t, client.protectionRequests, 2)
 }
+
+type allocationRouteVPCStub struct {
+	t        *testing.T
+	response *vpc.DescribeRouteEntryListResponse
+	deleted  []*vpc.DeleteRouteEntryRequest
+}
+
+func (v *allocationRouteVPCStub) DescribeRouteEntryList(request *vpc.DescribeRouteEntryListRequest) (*vpc.DescribeRouteEntryListResponse, error) {
+	require.Equal(v.t, "Custom", request.RouteEntryType)
+	require.Equal(v.t, "rt-1", request.RouteTableId)
+	require.Equal(v.t, "172.28.0.0/23", request.DestinationCidrBlock)
+	require.Equal(v.t, "Instance", request.NextHopType)
+	require.Equal(v.t, "i-1", request.NextHopId)
+	return v.response, nil
+}
+
+func (v *allocationRouteVPCStub) DeleteRouteEntry(request *vpc.DeleteRouteEntryRequest) (*vpc.DeleteRouteEntryResponse, error) {
+	v.deleted = append(v.deleted, request)
+	return vpc.CreateDeleteRouteEntryResponse(), nil
+}
+
+func TestDeleteAllocationRoutesRequiresExactCustomRoute(t *testing.T) {
+	for _, name := range []string{"absent", "exact", "other instance", "missing identity", "multiple hops", "other type", "incomplete page", "missing route ID"} {
+		t.Run(name, func(t *testing.T) {
+			response := vpc.CreateDescribeRouteEntryListResponse()
+			entry := vpc.RouteEntry{RouteEntryId: "rte-1", RouteTableId: "rt-1", DestinationCidrBlock: "172.28.0.0/23", Type: "Custom", InstanceId: "i-1"}
+			switch name {
+			case "other instance":
+				entry.InstanceId = "i-other"
+			case "missing identity":
+				entry.InstanceId = ""
+			case "multiple hops":
+				entry.NextHops.NextHop = []vpc.NextHop{{NextHopId: "i-1", NextHopType: "Instance"}, {NextHopId: "i-other", NextHopType: "Instance"}}
+			case "other type":
+				entry.Type = "System"
+			case "incomplete page":
+				response.NextToken = "next"
+			case "missing route ID":
+				entry.RouteEntryId = ""
+			}
+			if name != "absent" {
+				response.RouteEntrys.RouteEntry = []vpc.RouteEntry{entry}
+			}
+			client := &allocationRouteVPCStub{t: t, response: response}
+			cloud, err := newAliyunCloud(&lifecycleESSStub{}, client, "asg-1", []string{"rt-1"})
+			require.NoError(t, err)
+			err = cloud.DeleteAllocationRoutes(context.Background(), "i-1", "172.28.0.0/23")
+			if name == "exact" {
+				require.NoError(t, err)
+				require.Len(t, client.deleted, 1)
+				require.Equal(t, "rte-1", client.deleted[0].RouteEntryId)
+				require.Equal(t, "i-1", client.deleted[0].NextHopId)
+			} else {
+				if name == "absent" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+				require.Empty(t, client.deleted)
+			}
+		})
+	}
+}

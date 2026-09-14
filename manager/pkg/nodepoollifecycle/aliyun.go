@@ -280,6 +280,8 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 		}
 		describe := vpc.CreateDescribeRouteEntryListRequest()
 		describe.RouteTableId = routeTableID
+		// Aliyun only permits next-hop filters for custom routes.
+		describe.RouteEntryType = "Custom"
 		describe.DestinationCidrBlock = allocationCIDR
 		describe.NextHopId = instanceID
 		describe.NextHopType = "Instance"
@@ -289,21 +291,24 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 			return err
 		}
 		entries := response.RouteEntrys.RouteEntry
+		if response.NextToken != "" {
+			return fmt.Errorf("allocation route lookup in %s is incomplete", routeTableID)
+		}
 		if len(entries) == 0 {
 			continue
 		}
 		if len(entries) != 1 || entries[0].RouteTableId != routeTableID ||
-			entries[0].DestinationCidrBlock != allocationCIDR {
+			entries[0].DestinationCidrBlock != allocationCIDR ||
+			entries[0].Type != "Custom" || entries[0].RouteEntryId == "" {
 			return fmt.Errorf("allocation route lookup in %s is not exact", routeTableID)
 		}
 		entry := entries[0]
 		if entry.InstanceId != "" && entry.InstanceId != instanceID {
 			return fmt.Errorf("allocation route in %s belongs to another instance", routeTableID)
 		}
-		if len(entry.NextHops.NextHop) > 0 &&
-			!slices.ContainsFunc(entry.NextHops.NextHop, func(hop vpc.NextHop) bool {
-				return hop.NextHopId == instanceID && hop.NextHopType == "Instance"
-			}) {
+		hops := entry.NextHops.NextHop
+		if (len(hops) == 0 && entry.InstanceId != instanceID) || len(hops) > 1 ||
+			(len(hops) == 1 && (hops[0].NextHopId != instanceID || hops[0].NextHopType != "Instance")) {
 			return fmt.Errorf("allocation route in %s has an unexpected next hop", routeTableID)
 		}
 		remove := vpc.CreateDeleteRouteEntryRequest()

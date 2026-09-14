@@ -89,6 +89,10 @@ HTTPS. ECS hosts can discover their attached RAM role through IMDSv2 without
 static keys or a role-name environment variable. Set
 `ALIBABA_CLOUD_IMDSV1_DISABLED=true` to require metadata tokens; the SDK refreshes
 temporary role credentials before expiration.
+Lifecycle reconciliation requires `ess:DescribeScalingActivities` for the
+configured group, then queries each in-progress activity's pending hooks in
+pages of at most 50. Enrollment accepts scale-out `Pending:Wait`; protected
+instances remain eligible for identity renewal while serving existing work.
 
 ## Ownership
 

@@ -10,10 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type enrollmentESSClientStub struct{}
+type enrollmentESSClientStub struct{ lifecycleState string }
 
-func (enrollmentESSClientStub) DescribeScalingInstances(*ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error) {
-	return ess.CreateDescribeScalingInstancesResponse(), nil
+func (s enrollmentESSClientStub) DescribeScalingInstances(*ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error) {
+	response := ess.CreateDescribeScalingInstancesResponse()
+	response.ScalingInstances.ScalingInstance = []ess.ScalingInstance{{
+		ScalingGroupId: "asg-1", InstanceId: "i-1", PrivateIpAddress: "10.0.1.10",
+		InstanceType: "ecs.test", LifecycleState: s.lifecycleState,
+	}}
+	return response, nil
+}
+
+func TestValidateElasticInstanceAllowsEnrollmentWaitAndProtectedRenewal(t *testing.T) {
+	for _, state := range []string{"Pending", "Pending:Wait", "InService", "Protected", "Removing", "Removing:Wait", "Standby", "Stopped"} {
+		t.Run(state, func(t *testing.T) {
+			cloud, err := newAliyunCloud(enrollmentESSClientStub{state}, enrollmentECSClientStub{},
+				&enrollmentVPCClientStub{}, "asg-1", []string{"rt-1"})
+			require.NoError(t, err)
+			err = cloud.ValidateElasticInstance(context.Background(), AliyunInstanceIdentity{
+				InstanceID: "i-1", PrivateIPv4: "10.0.1.10", InstanceType: "ecs.test",
+			})
+			if state == "Pending" || state == "Pending:Wait" || state == "InService" || state == "Protected" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "membership differs")
+			}
+		})
+	}
 }
 
 type enrollmentECSClientStub struct{}

@@ -18,6 +18,7 @@ import (
 )
 
 type aliyunLifecycleESS interface {
+	DescribeScalingActivities(*ess.DescribeScalingActivitiesRequest) (*ess.DescribeScalingActivitiesResponse, error)
 	DescribeScalingInstances(*ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error)
 	DescribeLifecycleActions(*ess.DescribeLifecycleActionsRequest) (*ess.DescribeLifecycleActionsResponse, error)
 	RecordLifecycleActionHeartbeat(*ess.RecordLifecycleActionHeartbeatRequest) (*ess.RecordLifecycleActionHeartbeatResponse, error)
@@ -49,7 +50,7 @@ func (c *AliyunCloud) ElasticInstancesInService(
 			if instance.ScalingGroupId != c.scalingGroupID || !slices.Contains(chunk, instance.InstanceId) {
 				return nil, errors.New("aliyun returned an unexpected elastic instance")
 			}
-			result[instance.InstanceId] = instance.LifecycleState == "InService"
+			result[instance.InstanceId] = instance.LifecycleState == "InService" || instance.LifecycleState == "Protected"
 		}
 	}
 	return result, nil
@@ -104,16 +105,69 @@ func newAliyunCloud(
 		scalingGroupID: scalingGroupID, routeTableIDs: cleanRoutes}, nil
 }
 
+// ListPendingLifecycleActions resolves current scaling activities for this exact
+// group before querying their hooks. Instance creation activity IDs cannot be
+// reused here because scale-in has a different activity.
 func (c *AliyunCloud) ListPendingLifecycleActions(ctx context.Context) ([]Action, error) {
+	activityIDs, err := c.inProgressScalingActivities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var actions []Action
+	for _, activityID := range activityIDs {
+		observed, err := c.pendingActivityActions(ctx, activityID)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, observed...)
+	}
+	return actions, nil
+}
+
+func (c *AliyunCloud) inProgressScalingActivities(ctx context.Context) ([]string, error) {
+	var ids []string
+	seen := make(map[string]bool)
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		request := ess.CreateDescribeScalingActivitiesRequest()
+		request.ScalingGroupId = c.scalingGroupID
+		request.StatusCode = "InProgress"
+		request.PageNumber = requests.NewInteger(page)
+		request.PageSize = requests.NewInteger(50)
+		response, err := c.ess.DescribeScalingActivities(request)
+		if err != nil {
+			return nil, err
+		}
+		for _, activity := range response.ScalingActivities.ScalingActivity {
+			if activity.ScalingGroupId != c.scalingGroupID || strings.TrimSpace(activity.ScalingActivityId) == "" {
+				return nil, errors.New("aliyun returned an unexpected scaling activity")
+			}
+			if activity.StatusCode == "InProgress" && !seen[activity.ScalingActivityId] {
+				seen[activity.ScalingActivityId] = true
+				ids = append(ids, activity.ScalingActivityId)
+			}
+		}
+		if len(response.ScalingActivities.ScalingActivity) == 0 || page*50 >= response.TotalCount {
+			break
+		}
+	}
+	return ids, nil
+}
+
+func (c *AliyunCloud) pendingActivityActions(ctx context.Context, activityID string) ([]Action, error) {
 	var actions []Action
 	var nextToken string
+	seenTokens := make(map[string]bool)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		request := ess.CreateDescribeLifecycleActionsRequest()
+		request.ScalingActivityId = activityID
 		request.LifecycleActionStatus = "Pending"
-		request.MaxResults = requests.NewInteger(100)
+		request.MaxResults = requests.NewInteger(50)
 		request.NextToken = nextToken
 		response, err := c.ess.DescribeLifecycleActions(request)
 		if err != nil {
@@ -136,6 +190,10 @@ func (c *AliyunCloud) ListPendingLifecycleActions(ctx context.Context) ([]Action
 		if nextToken == "" {
 			break
 		}
+		if seenTokens[nextToken] {
+			return nil, errors.New("aliyun repeated a lifecycle action pagination token")
+		}
+		seenTokens[nextToken] = true
 	}
 	return actions, nil
 }

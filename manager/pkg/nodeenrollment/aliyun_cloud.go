@@ -107,7 +107,8 @@ func (c *AliyunCloud) ValidateElasticInstance(ctx context.Context, identity Aliy
 	instance := instances[0]
 	if instance.InstanceId != identity.InstanceID || instance.ScalingGroupId != c.scalingGroupID ||
 		instance.PrivateIpAddress != identity.PrivateIPv4 || instance.InstanceType != identity.InstanceType ||
-		(instance.LifecycleState != "InService" && instance.LifecycleState != "Pending") {
+		(instance.LifecycleState != "InService" && instance.LifecycleState != "Protected" &&
+			instance.LifecycleState != "Pending" && instance.LifecycleState != "Pending:Wait") {
 		return errors.New("ESS instance membership differs from signed identity")
 	}
 	return nil

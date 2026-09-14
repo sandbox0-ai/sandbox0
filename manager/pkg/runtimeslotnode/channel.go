@@ -208,8 +208,10 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 				ClusterID: hello.ClusterID, NodeID: hello.NodeID, NodeUID: hello.NodeUID,
 				NodeBootID: hello.NodeBootID, CPUMillicores: hello.Capacity.CPUMillicores,
 				MemoryBytes: hello.Capacity.MemoryBytes, CPUSetCPUs: hello.Capacity.CPUSetCPUs,
-				CPUSetMems: hello.Capacity.CPUSetMems,
-				TTL:        time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
+				AdmissionCPUMillicores: hello.Capacity.AdmissionCPUMillicores,
+				AdmissionMemoryBytes:   hello.Capacity.AdmissionMemoryBytes,
+				CPUSetMems:             hello.Capacity.CPUSetMems,
+				TTL:                    time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
 			})
 	} else {
 		err = h.capacityStore.ExpireRuntimeNodeCapacity(request.Context(),

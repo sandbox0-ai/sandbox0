@@ -35,6 +35,38 @@ continue through the driver/ctld logs. `nomad alloc logs` is not a guest-output
 API. Apply this change through normal carrier replacement when upgrading a node;
 changing capabilities does not retroactively reclaim existing logmon processes.
 
+### Light-load admission
+
+ctld can opt a dedicated node into higher-density admission without changing
+any sandbox's CPU quota, memory maximum, cpuset, PIDs limit, or metering lease.
+The physical capacity remains `resource_cpu_millicores` / `resource_memory_bytes`.
+Optional `admission_cpu_millicores` / `admission_memory_bytes` bound the sum of
+claimed sandbox limits. Omitted or zero values retain physical-capacity
+admission. CPU admission is bounded to 16 times physical capacity and memory
+admission to twice physical capacity; these are validation ceilings, not
+recommended operating ratios or proven density.
+
+For example, a 14-core / 56GiB sandbox budget can explicitly advertise 35000
+millicores and 70GiB for light-load admission. That changes scheduling only:
+every individual request must still fit the physical node, and PostgreSQL
+serializes concurrent claims against the admission budget. Capacity cannot be
+resized within a node boot, including reconnects. Resource reservations remain
+charged until the existing physical cgroup absence proof releases the lease.
+
+Overcommitted nodes require a predelegated parent cgroup with `cpu.max` equal
+to the physical CPU budget using a 100000-microsecond period, `memory.max`
+equal to the physical memory budget, and `memory.swap.max=0`. ctld rejects an
+unbounded parent rather than silently enabling overcommit. The memory guard
+rejects new cgroups when current usage reaches 90% of that budget or a request
+exceeds remaining physical headroom. Exact retries of existing cgroups still
+work. These checks do not guarantee simultaneous peak usage can fit: the parent
+hard limit is the final boundary if running guests grow after admission.
+
+The node-pool autoscaler's per-node resource values must match these admission
+budgets. Carrier count, NBD device count, address space, quotas, and actual
+memory pressure are separate bounds. Increasing admission alone does not prove
+500 resident sandboxes or improve a 100-way startup burst.
+
 ## Ownership
 
 | Owner | State |

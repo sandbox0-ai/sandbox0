@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -454,6 +455,8 @@ type NomadAllocationConfig struct {
 	RuntimeSlotCtldNetworkSocket  string
 	RuntimeResourceCPUMillicores  int64
 	RuntimeResourceMemoryBytes    int64
+	RuntimeAdmissionCPUMillicores int64
+	RuntimeAdmissionMemoryBytes   int64
 	RuntimeResourceCPUSetCPUs     string
 	RuntimeResourceCPUSetMems     string
 }
@@ -538,6 +541,11 @@ func run(
 		return err
 	}
 	defer runtime.Close()
+	unregisterCacheMetrics, err := registerReadCacheMetrics(prometheus.DefaultRegisterer, runtime.sessions.ReadCacheStats)
+	if err != nil {
+		return fmt.Errorf("register node RootFS cache metrics: %w", err)
+	}
+	defer unregisterCacheMetrics()
 	resourceCgroups, err := newRuntimeResourceCgroup(
 		config.RuntimeResourceCgroupRoot,
 		runtimeNodeCapacity(nomadConfig),
@@ -654,11 +662,13 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 
 func runtimeNodeCapacity(config NomadAllocationConfig) protocol.NodeChannelCapacity {
 	return protocol.NodeChannelCapacity{
-		CPUMillicores:   config.RuntimeResourceCPUMillicores,
-		MemoryBytes:     config.RuntimeResourceMemoryBytes,
-		CPUSetCPUs:      config.RuntimeResourceCPUSetCPUs,
-		CPUSetMems:      config.RuntimeResourceCPUSetMems,
-		TTLMilliseconds: protocol.DefaultNodeChannelCapacityTTLMilliseconds,
+		CPUMillicores:          config.RuntimeResourceCPUMillicores,
+		MemoryBytes:            config.RuntimeResourceMemoryBytes,
+		AdmissionCPUMillicores: config.RuntimeAdmissionCPUMillicores,
+		AdmissionMemoryBytes:   config.RuntimeAdmissionMemoryBytes,
+		CPUSetCPUs:             config.RuntimeResourceCPUSetCPUs,
+		CPUSetMems:             config.RuntimeResourceCPUSetMems,
+		TTLMilliseconds:        protocol.DefaultNodeChannelCapacityTTLMilliseconds,
 	}
 }
 

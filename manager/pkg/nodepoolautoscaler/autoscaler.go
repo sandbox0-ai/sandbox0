@@ -34,8 +34,9 @@ type Cloud interface {
 }
 
 // Config defines a homogeneous elastic pool and its fixed baseline. Resource
-// values are schedulable capacity after host reservations, not ECS marketing
-// values.
+// values are per-node admission budgets after host reservations, not ECS
+// marketing values. Overcommitted pools must use the same admission budgets as
+// their ctld enrollment profile; physical resource enforcement stays on ctld.
 type Config struct {
 	PoolID                string
 	ClusterID             string

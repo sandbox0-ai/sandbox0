@@ -390,6 +390,29 @@ small overhead reservations and must not be copied into these values.
 lease children survive ctld A/B restart. A lease returns to capacity only after
 its cgroup and all other runtime state are physically absent.
 
+Lightly loaded pools can opt into admission budgets larger than physical
+capacity using `nomad_runtime.admission_cpu_millicores` and
+`nomad_runtime.admission_memory_bytes`. Omitted or zero values preserve physical
+capacity admission. These budgets bound the sum of individual sandbox limits;
+they do not change a sandbox's CPU quota, memory limit, metering, or isolation.
+Each individual request must still fit the physical node. CPU budgets are
+bounded to 16 times physical capacity and memory budgets to twice physical
+capacity; these are validation ceilings, not recommended operating ratios.
+
+Before enabling overcommit, provision the parent resource cgroup with
+`cpu.max` equal to the physical CPU budget over a 100000-microsecond period,
+`memory.max` equal to the physical memory budget, and `memory.swap.max=0`.
+ctld rejects an unbounded parent. With memory overcommit, new cgroups are
+rejected when current aggregate usage reaches 90% of the physical budget or
+the requested memory limit exceeds remaining physical headroom. Exact retries
+of existing cgroups remain available. Guest growth after admission can still
+reach the aggregate limit, so simultaneous peak usage is not guaranteed by an
+overcommitted profile. Validate resident workload memory and tail latency
+before increasing density. Admission budgets cannot change within the same
+node boot. Drain expanded-budget nodes before rolling back the database
+migration, and keep autoscaler per-node admission budgets consistent with the
+enrolled runtime profile.
+
 ## NBD And Local Disk
 
 `nomad_runtime.nbd_devices` is the actual concurrent RootFS attachment bound.
@@ -424,6 +447,23 @@ regional cleanup is not held behind this speculative retry budget. Retry
 scheduling is disposable boot-local/process-local state, rebuilt after restart
 or an observed recovery transition, not durable ownership or terminal truth.
 The durable journal and regional authority remain the recovery inputs.
+
+An optional node-wide disk tier reuses verified immutable RootFS ranges across
+sandboxes, memory-cache eviction, and ctld process replacement. Configure both
+`nomad_runtime.read_cache_directory` and `nomad_runtime.read_disk_cache_bytes`;
+`nomad_runtime.read_cache_bytes` controls the memory tier and defaults to
+128 MiB. Use a dedicated node-private local directory. The disk cache contains
+decoded plaintext, validates every hit against its content checksum, and never
+caches a sandbox's private writable branch. Missing or corrupt entries fall
+back to object storage. Bounded asynchronous fills and eviction keep cache
+failures off the source-read success path. This cache is disposable and does
+not replace durable branch state or object storage.
+
+The primary ctld metrics endpoint exposes `ctld_rootfs_read_cache_disk_*` hit,
+miss, fill, error, drop, and occupancy metrics, plus
+`ctld_rootfs_read_cache_queued_write_bytes`. Compare these with object-storage
+reads and end-to-end command readiness. A new sandbox on a cached node does
+not represent an empty-node-cache start.
 
 ## Network Runtime
 

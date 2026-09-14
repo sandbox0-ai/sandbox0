@@ -95,6 +95,8 @@ func configuredNomadRuntimeFactory(
 		RuntimeSlotCtldNetworkSocket:  networkSocket,
 		RuntimeResourceCPUMillicores:  source.ResourceCPUMillicores,
 		RuntimeResourceMemoryBytes:    source.ResourceMemoryBytes,
+		RuntimeAdmissionCPUMillicores: source.AdmissionCPUMillicores,
+		RuntimeAdmissionMemoryBytes:   source.AdmissionMemoryBytes,
 		RuntimeResourceCPUSetCPUs:     source.ResourceCPUSetCPUs,
 		RuntimeResourceCPUSetMems:     source.ResourceCPUSetMems,
 	}

@@ -45,6 +45,7 @@ type channelTrackingCapacityStore struct {
 	mu            sync.Mutex
 	registrations int
 	expirations   int
+	lastCapacity  sandboxstore.RegisterRuntimeNodeCapacityRequest
 }
 
 func (channelTestCapacityStore) RegisterRuntimeNodeCapacity(
@@ -72,6 +73,7 @@ func (s *channelTrackingCapacityStore) RegisterRuntimeNodeCapacity(
 ) (*sandboxstore.RuntimeNodeCapacity, error) {
 	s.mu.Lock()
 	s.registrations++
+	s.lastCapacity = *request
 	s.mu.Unlock()
 	return &sandboxstore.RuntimeNodeCapacity{
 		ClusterID: request.ClusterID, NodeID: request.NodeID, NodeUID: request.NodeUID,
@@ -219,7 +221,8 @@ func TestNodeChannelHubDoesNotAdmitClaimsWithoutPlannedRetire(t *testing.T) {
 }
 
 func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
-	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
+	capacityStore := &channelTrackingCapacityStore{}
+	hub, err := NewChannelHub(channelTestVerifier{}, capacityStore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,13 +251,16 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	executor := &channelTestExecutor{}
+	capacity := channelTestCapacity()
+	capacity.AdmissionCPUMillicores = 8000
+	capacity.AdmissionMemoryBytes = 12 << 30
 	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
 		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
 		PlannedRetireExecutor: executor,
-		Capacity:              channelTestCapacity(),
+		Capacity:              capacity,
 		ReconnectMin:          time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
@@ -265,6 +271,13 @@ func TestNodeChannelHubWaitsForAuthenticatedReconnect(t *testing.T) {
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(agentCtx) }()
 	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-1")
+	capacityStore.mu.Lock()
+	registered := capacityStore.lastCapacity
+	capacityStore.mu.Unlock()
+	if registered.CPUMillicores != capacity.CPUMillicores || registered.MemoryBytes != capacity.MemoryBytes ||
+		registered.AdmissionCPUMillicores != capacity.AdmissionCPUMillicores || registered.AdmissionMemoryBytes != capacity.AdmissionMemoryBytes {
+		t.Fatalf("authenticated capacity registration lost physical/admission bounds: %+v", registered)
+	}
 	select {
 	case completed := <-result:
 		if completed.err != nil || completed.response.Phase != string(protocol.StateActive) {

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
 
@@ -298,6 +300,21 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 }
 
 func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupProofIntegration(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		cpu, memory int64
+		admitted    int
+	}{
+		{"physical", 0, 0, 2},
+		{"light-cpu-bound", 3000, 4 << 30, 3},
+		{"light-memory-bound", 4000, 3 << 30, 3},
+	} {
+		t.Run(test.name, func(t *testing.T) { testRuntimeSlotAdmissionBudget(t, test.cpu, test.memory, test.admitted) })
+	}
+}
+
+func testRuntimeSlotAdmissionBudget(t *testing.T, admissionCPU, admissionMemory int64, admitted int) {
+	t.Helper()
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
@@ -306,6 +323,7 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 		ClusterID: registration.ClusterID, NodeID: registration.NodeID,
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
 		CPUMillicores: 2_000, MemoryBytes: 2 << 30,
+		AdmissionCPUMillicores: admissionCPU, AdmissionMemoryBytes: admissionMemory,
 		CPUSetCPUs: "0-1", CPUSetMems: "0", TTL: time.Minute,
 	})
 	require.NoError(t, err)
@@ -315,7 +333,7 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 		slot    *RuntimeSlot
 		err     error
 	}
-	fixtures := make([]fixture, 3)
+	fixtures := make([]fixture, admitted+1)
 	for index := range fixtures {
 		suffix := fmt.Sprintf("capacity-%d", index)
 		slotRegistration := runtimeSlotTestRegistration("slot-"+suffix, "allocation-"+suffix)
@@ -341,6 +359,17 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 		}
 	}
 
+	// An individual sandbox must still fit the physical node even when the
+	// sum of many lightweight sandboxes may exceed physical capacity.
+	oversized := *fixtures[0].request
+	oversized.Resources.CPUMillicores = 2001
+	_, err = store.AcquireRuntimeSlot(ctx, &oversized)
+	require.ErrorIs(t, err, ErrRuntimeSlotUnavailable)
+	oversized = *fixtures[0].request
+	oversized.Resources.MemoryBytes = (2 << 30) + 1
+	_, err = store.AcquireRuntimeSlot(ctx, &oversized)
+	require.ErrorIs(t, err, ErrRuntimeSlotUnavailable)
+
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for index := range fixtures {
@@ -365,10 +394,12 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 			t.Fatalf("claim %d failed unexpectedly: %v", index, fixtures[index].err)
 		}
 	}
-	require.Len(t, successful, 2)
+	require.Len(t, successful, admitted)
 	require.Len(t, unavailable, 1)
 
 	first := &fixtures[successful[0]]
+	require.Equal(t, int64(100_000), first.slot.ResourceLease.CPUQuotaMicros)
+	require.Equal(t, int64(1<<30), first.slot.ResourceLease.MemoryBytes)
 	retried, err := store.AcquireRuntimeSlot(ctx, first.request)
 	require.NoError(t, err)
 	require.Equal(t, first.slot.ResourceLease, retried.ResourceLease)
@@ -404,8 +435,43 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 		SELECT COALESCE(SUM(cpu_millicores), 0), COALESCE(SUM(memory_bytes), 0)
 		FROM manager.runtime_resource_leases WHERE lease_state = $1
 	`, RuntimeResourceLeaseActive).Scan(&activeCPU, &activeMemory))
-	require.Equal(t, int64(2_000), activeCPU)
-	require.Equal(t, int64(2<<30), activeMemory)
+	require.Equal(t, int64(admitted*1000), activeCPU)
+	require.Equal(t, int64(admitted)<<30, activeMemory)
+	capacity, err := store.GetRuntimeNodeCapacity(ctx, registration.ClusterID, registration.NodeID, registration.NodeUID, registration.NodeBootID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2000), capacity.CPUMillicores)
+	require.Equal(t, int64(2<<30), capacity.MemoryBytes)
+	_, err = store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: registration.ClusterID, NodeID: registration.NodeID, NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		CPUMillicores: 2000, MemoryBytes: 2 << 30, CPUSetCPUs: "0-1", CPUSetMems: "0", TTL: time.Minute,
+		AdmissionCPUMillicores: capacity.AdmissionCPUMillicores + 1000, AdmissionMemoryBytes: capacity.AdmissionMemoryBytes,
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict, "a reconnect must not resize admission within the same boot")
+	if admissionCPU > 0 || admissionMemory > 0 {
+		down := func() error {
+			return migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
+		}
+		require.ErrorContains(t, down(), "Drain overcommitted nodes", "rollback must preserve active admission leases")
+		for index := range fixtures {
+			if index == successful[0] {
+				continue // Already finalized above.
+			}
+			item := &fixtures[index]
+			_, err := store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
+				SlotID: item.slot.ID, OperationID: item.request.OperationID, ClaimID: item.request.ClaimID,
+				Reason: "prelaunch_abort", ProofDigest: bytes.Repeat([]byte{0xa5}, 32),
+				ResourceLeaseID: item.slot.ResourceLease.LeaseID, ResourceLeaseDigest: item.slot.ResourceLeaseDigest,
+				ResourceCgroupAbsent: true,
+			})
+			require.NoError(t, err)
+		}
+		require.NoError(t, down(), "fully drained nodes permit rollback")
+		applySandboxStoreMigrationsThrough(t, pool, 56)
+		restored, err := store.GetRuntimeNodeCapacity(ctx, registration.ClusterID, registration.NodeID, registration.NodeUID, registration.NodeBootID)
+		require.NoError(t, err)
+		require.Equal(t, restored.CPUMillicores, restored.AdmissionCPUMillicores)
+		require.Equal(t, restored.MemoryBytes, restored.AdmissionMemoryBytes)
+	}
 }
 
 func TestRuntimeNodeCapacityExpiryPreservesExactBootRowIntegration(t *testing.T) {

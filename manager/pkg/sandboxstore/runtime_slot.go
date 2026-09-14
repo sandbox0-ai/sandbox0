@@ -586,7 +586,8 @@ func selectRuntimeSlotResourceLease(
 						AND capacity.node_uid = runtime_slots.node_uid
 						AND capacity.node_boot_id = runtime_slots.node_boot_id
 						AND capacity.heartbeat_expires_at > NOW()
-						AND capacity.cpu_millicores >= $4 + COALESCE((
+						AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
+						AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE((
 							SELECT SUM(lease.cpu_millicores)
 							FROM manager.runtime_resource_leases AS lease
 							WHERE lease.cluster_id = capacity.cluster_id
@@ -595,7 +596,7 @@ func selectRuntimeSlotResourceLease(
 								AND lease.node_boot_id = capacity.node_boot_id
 								AND lease.lease_state = 'active'
 						), 0)
-						AND capacity.memory_bytes >= $5 + COALESCE((
+						AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE((
 							SELECT SUM(lease.memory_bytes)
 							FROM manager.runtime_resource_leases AS lease
 							WHERE lease.cluster_id = capacity.cluster_id
@@ -619,15 +620,18 @@ func selectRuntimeSlotResourceLease(
 		excludedSlots = append(excludedSlots, slot.ID)
 
 		var capacityCPU, capacityMemory int64
+		var physicalCPU, physicalMemory int64
 		var cpusetCPUs, cpusetMems string
 		err = tx.QueryRow(ctx, `
-			SELECT cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems
+			SELECT cpu_millicores, memory_bytes,
+				COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
+				COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes), cpuset_cpus, cpuset_mems
 			FROM manager.runtime_node_capacities
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND heartbeat_expires_at > NOW()
 			FOR UPDATE
 		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(
-			&capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
+			&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
@@ -644,7 +648,8 @@ func selectRuntimeSlotResourceLease(
 		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(&usedCPU, &usedMemory); err != nil {
 			return nil, protocol.RuntimeResourceLease{}, nil, err
 		}
-		if capacityCPU-usedCPU < request.Resources.CPUMillicores ||
+		if physicalCPU < request.Resources.CPUMillicores || physicalMemory < request.Resources.MemoryBytes ||
+			capacityCPU-usedCPU < request.Resources.CPUMillicores ||
 			capacityMemory-usedMemory < request.Resources.MemoryBytes {
 			continue
 		}

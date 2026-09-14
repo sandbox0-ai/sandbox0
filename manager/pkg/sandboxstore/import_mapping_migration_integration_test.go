@@ -12,7 +12,7 @@ import (
 
 func TestRootFSImportMappingMigrationRollbackAndCombinedLayoutIntegration(t *testing.T) {
 	ctx := t.Context()
-	pool := newSandboxStoreIntegrationPool(t)
+	pool := newSandboxStoreIntegrationPoolAt(t, 55)
 	down := func() error {
 		return migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
 	}
@@ -26,7 +26,7 @@ func TestRootFSImportMappingMigrationRollbackAndCombinedLayoutIntegration(t *tes
 	query := `SELECT count(*) FROM information_schema.columns WHERE table_schema='manager' AND column_name='mapping_group_policy'`
 	require.NoError(t, pool.QueryRow(ctx, query).Scan(&columns))
 	require.Zero(t, columns)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	applySandboxStoreMigrationsThrough(t, pool, 55)
 	reloaded, err := store.GetRootFSImportOperation(ctx, legacyBegin.OperationID)
 	require.NoError(t, err)
 	require.Equal(t, legacyBegin.Spec, reloaded.Spec)

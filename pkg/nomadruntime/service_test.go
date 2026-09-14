@@ -410,8 +410,13 @@ func TestNodeRuntimeReclaimsMatchingInternalCrashTerminal(t *testing.T) {
 	testNodeRuntimeCleansExactRuntimeSlot(t, true)
 }
 
-func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) {
+func TestNodeRuntimeFinishesMatchingInternalCrashBeforeSlotCleanup(t *testing.T) {
+	testNodeRuntimeCleansExactRuntimeSlot(t, true, true)
+}
+
+func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool, pending ...bool) {
 	t.Helper()
+	internalPending := len(pending) == 1 && pending[0]
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
@@ -478,6 +483,9 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 		recovery:          []rootfssession.RecoverySession{recovery},
 		proof:             localProof,
 	}
+	if internalPending {
+		runtime.reclaimError = errdefs.ErrFailedPrecondition
+	}
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
 	network := newFakeCtldNetwork(t)
@@ -519,7 +527,14 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	require.NoError(t, err)
 	require.True(t, reflect.DeepEqual(first, second), "retry changed proof: %#v != %#v", first, second)
 	if internalTerminal {
-		require.Equal(t, 1, runtime.reclaimCalls)
+		if internalPending {
+			require.Equal(t, 2, runtime.reclaimCalls)
+			require.Equal(t, 1, runtime.crashCalls)
+			require.Equal(t, request.WriterOperationID, runtime.lastOperation)
+		} else {
+			require.Equal(t, 1, runtime.reclaimCalls)
+			require.Zero(t, runtime.crashCalls)
+		}
 		require.Zero(t, runtime.localCalls)
 		require.Equal(t, request.WriterAuthorityDigest, first.RootFSProofDigest)
 	} else {
@@ -967,6 +982,7 @@ type cleanupRootFSRuntime struct {
 	localCalls   int
 	retireCalls  int
 	reclaimCalls int
+	reclaimError error
 }
 
 func (r *cleanupRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
@@ -1075,6 +1091,9 @@ func (r *cleanupRootFSRuntime) ReclaimVerifiedTerminal(
 	rootfshandoff.StageRequest,
 ) error {
 	r.reclaimCalls++
+	if r.reclaimError != nil && r.crashCalls == 0 {
+		return r.reclaimError
+	}
 	r.recovery = nil
 	return nil
 }

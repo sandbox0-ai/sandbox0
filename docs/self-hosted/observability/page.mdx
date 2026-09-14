@@ -120,6 +120,14 @@ waiting for the old consumer lease or attach grace; artifact deletion still
 requires exact regional authorization and local physical-absence proof. Normal
 unfenced consumers remain protected by their durable leases.
 
+Node recovery and regional slot cleanup use the same crash operation for each
+writer incarnation. If node cleanup takes over an unfinished local crash, it
+finishes that operation before returning physical cleanup proof. The manager
+preserves any RootFS retirement proof already committed by the node and still
+requires allocation, network, mount, and resource-cgroup absence before releasing
+the lease. Repeated ownership conflicts are a recovery failure, not evidence that
+more node capacity is needed.
+
 Monitor carrier replacement separately from guest exit and physical cleanup.
 Nomad can report a system-job stop evaluation complete with zero queued
 allocations before it has placed the replacement carrier. Terminal reconciliation

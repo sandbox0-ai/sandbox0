@@ -997,7 +997,18 @@ func (d *nodeRuntime) cleanupWriterRuntimeSlot(
 				return protocol.NodeCleanupControlProof{}, fmt.Errorf("terminal RootFS crash proof cannot satisfy %s retirement: %w", request.WriterRetireKind, errdefs.ErrFailedPrecondition)
 			}
 			if reclaimErr := d.runtime.ReclaimVerifiedTerminal(ctx, matched.Stage); reclaimErr != nil {
-				return protocol.NodeCleanupControlProof{}, fmt.Errorf("reclaim verified terminal RootFS session: %w", reclaimErr)
+				if !errdefs.IsFailedPrecondition(reclaimErr) {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("reclaim verified terminal RootFS session: %w", reclaimErr)
+				}
+				// BeginCleanup suppresses the background recovery worker for this
+				// slot. Finish its exact already-started crash here, or the slot
+				// would wait forever for the worker it has fenced out.
+				if _, finishErr := d.runtime.CrashFence(ctx, matched.Stage, request.WriterOperationID, observation); finishErr != nil {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("finish owned RootFS crash retirement: %w", finishErr)
+				}
+				if reclaimErr := d.runtime.ReclaimVerifiedTerminal(ctx, matched.Stage); reclaimErr != nil {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("verify completed RootFS crash retirement: %w", reclaimErr)
+				}
 			}
 			rootFSProofDigest = request.WriterAuthorityDigest
 		} else {
@@ -2022,9 +2033,7 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 }
 
 func crashOperationID(stage rootfshandoff.StageRequest) string {
-	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
-	sum := sha256.Sum256([]byte(payload))
-	return "nomad-crash-" + hex.EncodeToString(sum[:16])
+	return rootfshandoff.CrashRetireOperationID(stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
 }
 
 func (d *nodeRuntime) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {

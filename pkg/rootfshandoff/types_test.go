@@ -132,6 +132,15 @@ func TestPlannedRetireOperationIDIsStableAndIncarnationBound(t *testing.T) {
 	require.NotEqual(t, first, PlannedRetireOperationID("gate-1", "grant-1", 8))
 }
 
+func TestCrashRetireOperationIDPreservesNodeRecoveryIdentity(t *testing.T) {
+	first := CrashRetireOperationID("gate-1", "grant-1", 7)
+	require.Equal(t, "nomad-crash-773cffa77ad442a7369d214c52e200bb", first)
+	require.Equal(t, first, CrashRetireOperationID("gate-1", "grant-1", 7))
+	require.NotEqual(t, first, CrashRetireOperationID("gate-2", "grant-1", 7))
+	require.NotEqual(t, first, CrashRetireOperationID("gate-1", "grant-2", 7))
+	require.NotEqual(t, first, CrashRetireOperationID("gate-1", "grant-1", 8))
+}
+
 func TestRunningForkCheckpointProofBindsSequenceAndDescriptor(t *testing.T) {
 	binding := sha256.Sum256([]byte("running-fork-binding"))
 	proof := RunningForkCheckpointProof{

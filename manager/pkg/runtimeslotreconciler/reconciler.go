@@ -313,6 +313,7 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	var writerProof WriterFinalizeProof
 	writerRetireKind := ""
 	writerAlreadyTerminal := false
+	writerNodeOwned := false
 	if slot.WriterGrantID != "" {
 		grant, err = r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
 		if err != nil {
@@ -320,6 +321,17 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 		if err := validateWriterGrant(grant, slot); err != nil {
 			return false, err
+		}
+		if grant.GateParent != "" {
+			canonical := rootfshandoff.CrashRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+			// Preserve legacy region-owned retirements across rolling upgrades.
+			// A node-owned operation may only be the exact shared incarnation ID;
+			// the writer controller also validates its locked lifecycle binding.
+			if grant.RetireOperationID == "" || grant.RetireOperationID == canonical {
+				ids.writer = canonical
+				writerNodeOwned = grant.State == sandboxstore.RootFSWriterGrantStateConsumed ||
+					grant.RetireOperationID == canonical && grant.RetireKind == sandboxstore.RootFSWriterRetireKindCrashAbandon
+			}
 		}
 		if terminalWriterNeedsDirectCleanup(grant, ids.writer) {
 			writerFence, writerProof, writerRetireKind, err = terminalWriterProofs(grant)
@@ -397,6 +409,26 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	}
 	if err := validateNodeCleanupProof(cleanupProof, slot, ids.cleanup); err != nil {
 		return false, err
+	}
+	if writerNodeOwned && !writerAlreadyTerminal {
+		// The node may finish its durable local crash while answering cleanup.
+		// Keep that committed RootFS proof; never overwrite it with the broader
+		// runtime-slot proof or release the lease before both are verified.
+		storedGrant, err := r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
+		if err != nil {
+			return false, fmt.Errorf("reload node-owned writer retirement: %w", err)
+		}
+		if err := validateWriterGrant(storedGrant, slot); err != nil || !writerGrantIdentityEqual(storedGrant, grant) ||
+			storedGrant.RetireOperationID != ids.writer || storedGrant.RetireKind != sandboxstore.RootFSWriterRetireKindCrashAbandon {
+			return false, errors.New("node-owned writer retirement changed during cleanup")
+		}
+		if storedGrant.State == sandboxstore.RootFSWriterGrantStateRetired {
+			writerFence, writerProof, writerRetireKind, err = terminalWriterProofs(storedGrant)
+			if err != nil {
+				return false, err
+			}
+			writerAlreadyTerminal = true
+		}
 	}
 
 	if slot.WriterGrantID != "" && !writerAlreadyTerminal {

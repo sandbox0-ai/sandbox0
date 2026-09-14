@@ -207,6 +207,15 @@ func PlannedRetireOperationID(parent, writerGrantID string, writerEpoch int64) s
 	return "nomad-retire-" + hex.EncodeToString(sum[:16])
 }
 
+// CrashRetireOperationID binds node recovery and regional slot cleanup to the
+// same unexpected retirement. A competing observer must resume this operation
+// rather than establish a second owner for the same writer incarnation.
+func CrashRetireOperationID(parent, writerGrantID string, writerEpoch int64) string {
+	payload := fmt.Sprintf("%s\x00%s\x00%d", parent, writerGrantID, writerEpoch)
+	sum := sha256.Sum256([]byte(payload))
+	return "nomad-crash-" + hex.EncodeToString(sum[:16])
+}
+
 func (r RetireRequest) Validate() error {
 	if strings.TrimSpace(r.Parent) == "" || strings.TrimSpace(r.OperationID) == "" {
 		return fmt.Errorf("parent and operation_id are required")

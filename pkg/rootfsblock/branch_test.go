@@ -563,6 +563,33 @@ func TestNodeDirtyTailSerializesUnrelatedRetirementsUntilArtifactReclaim(t *test
 	require.NoError(t, second.BeginRetirement())
 }
 
+func TestNodeDirtyTailReopenedRetirementReleasesReserveAfterReclaim(t *testing.T) {
+	budget, err := NewDirtyTailBudgetWithReserve(4*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, budget.attach("first", 0, "retire-first"))
+	require.NoError(t, budget.attach("peer", 0, "retire-first"))
+	require.NoError(t, budget.attach("second", 0, "retire-second"))
+	require.NoError(t, budget.beginRetirement("first"))
+	require.NoError(t, budget.beginRetirement("peer"))
+	require.NoError(t, budget.detach("first"))
+	require.NoError(t, budget.detach("peer"))
+
+	// Recovery may reopen and inspect the WAL without granting that handle
+	// retirement write privileges again. Reclamation must still transfer the
+	// reserve only after every journal charged to the old group is gone.
+	require.ErrorContains(t, budget.attach("first", 0, "another-group"), "retirement group cannot change")
+	require.NoError(t, budget.attach("first", 0, "retire-first"))
+	require.ErrorIs(t, budget.reserve("first", 4*LogicalBlockSize), syscall.ENOSPC,
+		"reopening alone must not grant retirement write headroom")
+	require.NoError(t, budget.detach("first"))
+	require.NoError(t, budget.attach("peer", 0, "retire-first"))
+	require.NoError(t, budget.detach("peer"))
+	require.NoError(t, budget.ReleaseOwner("first"))
+	require.ErrorIs(t, budget.beginRetirement("second"), syscall.EBUSY)
+	require.NoError(t, budget.ReleaseOwner("peer"))
+	require.NoError(t, budget.beginRetirement("second"))
+}
+
 func TestNodeDirtyTailRecoveryHeadroomShrinksAfterRecoveredOwnerReclaim(t *testing.T) {
 	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
 	require.NoError(t, err)

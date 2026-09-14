@@ -138,6 +138,9 @@ disk headroom. The regional composite-tail backlog is bounded: an S3 outage
 must apply backpressure instead of growing unbounded local or PostgreSQL data.
 Do not release a writer or delete its local branch before immutable publication
 or an explicit crash-abandon terminal transaction.
+The shared retirement reserve remains charged to its writer group across WAL
+close and reopen, until every charged journal is reclaimed. Reopening a journal
+alone does not authorize retirement writes or enlarge ordinary write admission.
 
 ## Durable OCI Importer
 

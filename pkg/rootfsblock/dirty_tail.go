@@ -23,6 +23,9 @@ type dirtyTailOwner struct {
 	retirementGroup string
 	attached        bool
 	retiring        bool
+	// Reservation ownership outlives a handle's retirement write privilege.
+	// Reopening a WAL must not strand or prematurely release its shared reserve.
+	retirementHeld bool
 }
 
 // DirtyTailBudget atomically limits unpublished branch payload across every
@@ -107,7 +110,7 @@ func (b *DirtyTailBudget) ReleaseOwner(owner string) error {
 	b.used -= current.usedBytes
 	b.recovered -= current.recoveredBytes
 	delete(b.owners, owner)
-	if current.retiring && current.retirementGroup == b.retirementGroup && !b.hasRetirementGroupLocked(current.retirementGroup) {
+	if current.retirementHeld && current.retirementGroup == b.retirementGroup && !b.hasRetirementGroupLocked(current.retirementGroup) {
 		b.retirementGroup = ""
 	}
 	return nil
@@ -151,6 +154,9 @@ func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64, retirementG
 	current, preloaded := b.owners[owner]
 	if current.attached {
 		return fmt.Errorf("dirty tail owner %q already has an open branch", owner)
+	}
+	if current.retirementHeld && current.retirementGroup != retirementGroup {
+		return fmt.Errorf("dirty tail owner %q retirement group cannot change before reclamation", owner)
 	}
 	normalLimit := b.normalLimitLocked()
 	if !preloaded && (b.used > normalLimit || recoveredBytes > normalLimit-b.used) {
@@ -205,6 +211,7 @@ func (b *DirtyTailBudget) beginRetirement(owner string) error {
 	}
 	b.retirementGroup = group
 	current.retiring = true
+	current.retirementHeld = true
 	b.owners[owner] = current
 	return nil
 }
@@ -214,7 +221,7 @@ func (b *DirtyTailBudget) hasRetirementGroupLocked(group string) bool {
 		return false
 	}
 	for _, owner := range b.owners {
-		if owner.retiring && owner.retirementGroup == group {
+		if owner.retirementHeld && owner.retirementGroup == group {
 			return true
 		}
 	}

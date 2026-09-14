@@ -96,6 +96,10 @@ reserves renewal attempts atomically in PostgreSQL, independently of readiness
 polling, and retains the count across replicas and restarts. Renewal timing
 covers the enrollment deadline while reserving attempts for cleanup. Ambiguous
 provider calls consume an attempt; the controller does not replay them freely.
+Pending hooks are renewed before independent readiness and protection work.
+Protection changes apply only to ESS `InService` or `Protected` instances;
+waiting instances remain under their lifecycle hook. One failed action does
+not prevent other pending actions from renewing or completing.
 
 Exact node certificates are short-lived. `sandbox0-node-bootstrap.timer`
 renews them before expiry. Nomad temporarily marks the node ineligible for new

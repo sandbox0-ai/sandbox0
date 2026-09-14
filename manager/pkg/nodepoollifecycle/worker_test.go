@@ -2,6 +2,7 @@ package nodepoollifecycle
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -94,13 +95,16 @@ func (s *fakeStore) CompleteRuntimeNodeLifecycleAction(_ context.Context, token,
 }
 
 type fakeCloud struct {
-	actions           []Action
-	completed         map[string]string
-	heartbeats        int
-	protected         map[string]bool
-	deleted           []string
-	inService         map[string]bool
-	heartbeatTimeouts []time.Duration
+	actions                     []Action
+	completed                   map[string]string
+	heartbeats                  int
+	protected                   map[string]bool
+	deleted                     []string
+	inService                   map[string]bool
+	heartbeatTimeouts           []time.Duration
+	protectionError             error
+	heartbeatCountsAtProtection []int
+	completionErrors            map[string]error
 }
 
 func (c *fakeCloud) ElasticInstancesInService(_ context.Context, ids []string) (map[string]bool, error) {
@@ -173,6 +177,9 @@ func TestLifecycleReadyNodeCompletesWhileHeartbeatIsNotDue(t *testing.T) {
 }
 
 func (c *fakeCloud) CompleteLifecycleAction(_ context.Context, action Action, result string) error {
+	if err := c.completionErrors[action.Token]; err != nil {
+		return err
+	}
 	if c.completed == nil {
 		c.completed = make(map[string]string)
 	}
@@ -181,6 +188,10 @@ func (c *fakeCloud) CompleteLifecycleAction(_ context.Context, action Action, re
 }
 
 func (c *fakeCloud) SetInstancesProtection(_ context.Context, ids []string, protected bool) error {
+	c.heartbeatCountsAtProtection = append(c.heartbeatCountsAtProtection, c.heartbeats)
+	if c.protectionError != nil {
+		return c.protectionError
+	}
 	if c.protected == nil {
 		c.protected = make(map[string]bool)
 	}
@@ -458,4 +469,33 @@ func TestIdleScaleInFencesDrainsRevokesThenContinues(t *testing.T) {
 	require.Equal(t, []string{"i-1"}, cloud.deleted)
 	require.Equal(t, LifecycleContinue, cloud.completed["token"])
 	require.NotContains(t, store.nodes, "i-1")
+}
+
+func TestLifecycleProtectionFailureDoesNotStarvePendingHooks(t *testing.T) {
+	store := &fakeStore{nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+		"i-1": {ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true, ReadySlots: 8},
+		"i-2": {ProviderInstanceID: "i-2", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true, ReadySlots: 8},
+	}}
+	cloud := &fakeCloud{actions: []Action{{Token: "one", HookID: "out", InstanceIDs: []string{"i-1"}}, {Token: "two", HookID: "out", InstanceIDs: []string{"i-2"}}}, protectionError: errors.New("IncorrectScalingGroupStatus")}
+	worker, _ := testWorker(t, store, cloud)
+	result, err := worker.Reconcile(context.Background())
+	require.ErrorContains(t, err, "IncorrectScalingGroupStatus")
+	require.Equal(t, 2, cloud.heartbeats)
+	require.Equal(t, []int{2}, cloud.heartbeatCountsAtProtection)
+	require.Equal(t, 2, result.Completed)
+	require.Equal(t, LifecycleContinue, cloud.completed["two"])
+}
+
+func TestLifecycleActionFailureDoesNotStarveAnotherHook(t *testing.T) {
+	store := &fakeStore{nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+		"i-1": {ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true, ReadySlots: 8},
+		"i-2": {ProviderInstanceID: "i-2", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, CapacityLive: true, ReadySlots: 8},
+	}}
+	cloud := &fakeCloud{actions: []Action{{Token: "one", HookID: "out", InstanceIDs: []string{"i-1"}}, {Token: "two", HookID: "out", InstanceIDs: []string{"i-2"}}}, completionErrors: map[string]error{"one": errors.New("provider unavailable")}}
+	worker, _ := testWorker(t, store, cloud)
+	result, err := worker.Reconcile(context.Background())
+	require.ErrorContains(t, err, "provider unavailable")
+	require.Equal(t, 2, cloud.heartbeats)
+	require.Equal(t, 1, result.Completed)
+	require.Equal(t, LifecycleContinue, cloud.completed["two"])
 }

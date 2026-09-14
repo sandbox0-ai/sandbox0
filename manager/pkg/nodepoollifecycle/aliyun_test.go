@@ -15,6 +15,7 @@ type lifecycleESSStub struct {
 	describeActions    func(*ess.DescribeLifecycleActionsRequest) (*ess.DescribeLifecycleActionsResponse, error)
 	describeNodes      func(*ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error)
 	completed          *ess.CompleteLifecycleActionRequest
+	protectionRequests []*ess.SetInstancesProtectionRequest
 }
 
 func (s *lifecycleESSStub) DescribeScalingActivities(request *ess.DescribeScalingActivitiesRequest) (*ess.DescribeScalingActivitiesResponse, error) {
@@ -38,7 +39,8 @@ func (s *lifecycleESSStub) CompleteLifecycleAction(request *ess.CompleteLifecycl
 	return ess.CreateCompleteLifecycleActionResponse(), nil
 }
 
-func (*lifecycleESSStub) SetInstancesProtection(*ess.SetInstancesProtectionRequest) (*ess.SetInstancesProtectionResponse, error) {
+func (s *lifecycleESSStub) SetInstancesProtection(request *ess.SetInstancesProtectionRequest) (*ess.SetInstancesProtectionResponse, error) {
+	s.protectionRequests = append(s.protectionRequests, request)
 	return ess.CreateSetInstancesProtectionResponse(), nil
 }
 
@@ -209,4 +211,26 @@ func TestAliyunLifecycleRejectsRepeatedActionPaginationTokens(t *testing.T) {
 	_, err = cloud.ListPendingLifecycleActions(context.Background())
 	require.ErrorContains(t, err, "repeated a lifecycle action pagination token")
 	require.Equal(t, 2, requests)
+}
+
+func TestAliyunProtectionExcludesPendingRemovingAndMissingInstances(t *testing.T) {
+	client := &lifecycleESSStub{describeNodes: func(request *ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error) {
+		response := ess.CreateDescribeScalingInstancesResponse()
+		for _, id := range *request.InstanceId {
+			state := map[string]string{"pending": "Pending:Wait", "removing": "Removing:Wait", "ready": "InService", "protected": "Protected"}[id]
+			if state != "" {
+				response.ScalingInstances.ScalingInstance = append(response.ScalingInstances.ScalingInstance, ess.ScalingInstance{InstanceId: id, ScalingGroupId: "asg-1", LifecycleState: state})
+			}
+		}
+		return response, nil
+	}}
+	cloud, err := newAliyunCloud(client, lifecycleVPCStub{}, "asg-1", []string{"rt-1"})
+	require.NoError(t, err)
+	for _, protected := range []bool{true, false} {
+		require.NoError(t, cloud.SetInstancesProtection(context.Background(), []string{"pending", "ready", "missing", "protected", "removing"}, protected))
+		require.Equal(t, []string{"ready", "protected"}, *client.protectionRequests[len(client.protectionRequests)-1].InstanceId)
+	}
+	require.Len(t, client.protectionRequests, 2)
+	require.NoError(t, cloud.SetInstancesProtection(context.Background(), []string{"pending", "missing", "removing"}, true))
+	require.Len(t, client.protectionRequests, 2)
 }

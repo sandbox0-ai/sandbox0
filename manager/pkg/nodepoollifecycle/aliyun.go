@@ -240,6 +240,19 @@ func (c *AliyunCloud) SetInstancesProtection(
 	instanceIDs []string,
 	protected bool,
 ) error {
+	// Pending and removing instances are governed by their lifecycle hook and
+	// cannot enter the ESS Protected state. Missing instances are omitted too.
+	inService, err := c.ElasticInstancesInService(ctx, instanceIDs)
+	if err != nil {
+		return err
+	}
+	eligible := make([]string, 0, len(instanceIDs))
+	for _, id := range instanceIDs {
+		if inService[id] {
+			eligible = append(eligible, id)
+		}
+	}
+	instanceIDs = eligible
 	for start := 0; start < len(instanceIDs); start += 20 {
 		if err := ctx.Err(); err != nil {
 			return err

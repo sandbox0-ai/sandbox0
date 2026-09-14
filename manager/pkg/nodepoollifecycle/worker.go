@@ -123,17 +123,19 @@ func (w *Worker) Run(ctx context.Context, report func(Result, error)) {
 	}
 }
 
+// Reconcile renews pending hooks before independent readiness and protection
+// work. A failed provider operation must not starve another action's deadline.
 func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 	var result Result
-	if err := w.reconcileProviderReadiness(ctx); err != nil {
-		return result, err
+	var failures []error
+	type pendingAction struct {
+		action   Action
+		observed *sandboxstore.RuntimeNodeLifecycleAction
 	}
-	if err := w.reconcileProtection(ctx); err != nil {
-		return result, err
-	}
+	var pending []pendingAction
 	actions, err := w.cloud.ListPendingLifecycleActions(ctx)
 	if err != nil {
-		return result, err
+		failures = append(failures, err)
 	}
 	for _, action := range actions {
 		transition, ok := w.transitionForHook(action.HookID)
@@ -148,27 +150,41 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 				ProviderInstanceIDs: action.InstanceIDs, Transition: transition,
 			})
 		if err != nil {
-			return result, err
+			failures = append(failures, err)
+			continue
 		}
 		interval, timeout := w.heartbeatSchedule()
 		reserved, err := w.store.ReserveRuntimeNodeLifecycleHeartbeat(ctx, w.config.PoolID, action.Token, interval)
 		if err != nil {
-			return result, err
+			failures = append(failures, err)
+			continue
 		}
 		if reserved {
 			if err := w.cloud.HeartbeatLifecycleAction(ctx, action, timeout); err != nil {
-				return result, err
+				failures = append(failures, err)
+				continue
 			}
 		}
+		pending = append(pending, pendingAction{action: action, observed: observed})
+	}
+	if err := w.reconcileProviderReadiness(ctx); err != nil {
+		failures = append(failures, err)
+	}
+	if err := w.reconcileProtection(ctx); err != nil {
+		failures = append(failures, err)
+	}
+	for _, item := range pending {
 		var completed, rolledBack bool
-		switch transition {
+		var err error
+		switch item.action.Transition {
 		case TransitionScaleOut:
-			completed, err = w.reconcileScaleOut(ctx, action, observed)
+			completed, err = w.reconcileScaleOut(ctx, item.action, item.observed)
 		case TransitionScaleIn:
-			completed, rolledBack, err = w.reconcileScaleIn(ctx, action)
+			completed, rolledBack, err = w.reconcileScaleIn(ctx, item.action)
 		}
 		if err != nil {
-			return result, err
+			failures = append(failures, err)
+			continue
 		}
 		if completed {
 			result.Completed++
@@ -177,7 +193,7 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 			result.RolledBack++
 		}
 	}
-	return result, nil
+	return result, errors.Join(failures...)
 }
 
 // heartbeatSchedule leaves four of Aliyun's twenty extensions for cleanup and

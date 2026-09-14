@@ -281,13 +281,17 @@ func validateRuntimeResourceCgroupCapacity(root string, capacity protocol.NodeCh
 		}
 	}
 	limits := map[string]string{
-		"cpu.max": "max 100000", "memory.max": "max", "memory.swap.max": "max", "pids.max": "max",
+		"cpu.max":         strconv.FormatInt(capacity.CPUMillicores*100, 10) + " 100000",
+		"memory.max":      strconv.FormatInt(capacity.MemoryBytes, 10),
+		"memory.swap.max": "0", "pids.max": "max",
 	}
 	admissionCPU, admissionMemory := capacity.AdmissionLimits()
-	if admissionCPU > capacity.CPUMillicores || admissionMemory > capacity.MemoryBytes {
-		limits["cpu.max"] = strconv.FormatInt(capacity.CPUMillicores*100, 10) + " 100000"
-		limits["memory.max"] = strconv.FormatInt(capacity.MemoryBytes, 10)
-		limits["memory.swap.max"] = "0"
+	overcommit := admissionCPU > capacity.CPUMillicores || admissionMemory > capacity.MemoryBytes
+	// A physical parent bound remains valid after aggregate admission is reduced.
+	// Legacy unbounded roots are allowed only when PostgreSQL admission cannot
+	// exceed physical capacity; overcommit always requires the exact host bounds.
+	legacyLimits := map[string]string{
+		"cpu.max": "max 100000", "memory.max": "max", "memory.swap.max": "max",
 	}
 	for name, want := range limits {
 		actual, err := readCgroupValue(filepath.Join(root, name))
@@ -295,6 +299,9 @@ func validateRuntimeResourceCgroupCapacity(root string, capacity protocol.NodeCh
 			return fmt.Errorf("read runtime cgroup %s: %w", name, err)
 		}
 		if actual != want {
+			if legacy, ok := legacyLimits[name]; !overcommit && ok && actual == legacy {
+				continue
+			}
 			return fmt.Errorf("runtime resource root %s must be %q, got %q: %w",
 				name, want, actual, errdefs.ErrFailedPrecondition)
 		}

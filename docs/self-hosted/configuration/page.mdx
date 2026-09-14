@@ -402,7 +402,9 @@ capacity; these are validation ceilings, not recommended operating ratios.
 Before enabling overcommit, provision the parent resource cgroup with
 `cpu.max` equal to the physical CPU budget over a 100000-microsecond period,
 `memory.max` equal to the physical memory budget, and `memory.swap.max=0`.
-ctld rejects an unbounded parent. With memory overcommit, new cgroups are
+ctld rejects an unbounded parent when overcommit is enabled. These exact
+physical bounds are also accepted without overcommit and can remain in place
+when a node reboots with reduced admission budgets. With memory overcommit, new cgroups are
 rejected when current aggregate usage reaches 90% of the physical budget or
 the requested memory limit exceeds remaining physical headroom. Exact retries
 of existing cgroups remain available. Guest growth after admission can still

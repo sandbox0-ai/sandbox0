@@ -38,6 +38,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -1000,6 +1001,15 @@ func (d *nodeRuntime) cleanupWriterRuntimeSlot(
 			rootFSProofDigest = request.WriterAuthorityDigest
 		} else {
 			crashProof, fenceErr := d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+			var busy *rootfsblock.DirtyTailRetirementBusyError
+			if errors.As(fenceErr, &busy) && busy.ActiveGroup != matched.Stage.Parent {
+				reclaimed, reclaimErr := d.reclaimRetirementReserve(ctx, busy.ActiveGroup)
+				if reclaimErr != nil {
+					fenceErr = errors.Join(fenceErr, fmt.Errorf("reclaim blocking retirement: %w", reclaimErr))
+				} else if reclaimed {
+					crashProof, fenceErr = d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+				}
+			}
 			if fenceErr != nil {
 				return protocol.NodeCleanupControlProof{}, fenceErr
 			}

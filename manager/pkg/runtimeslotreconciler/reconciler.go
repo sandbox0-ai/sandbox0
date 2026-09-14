@@ -24,6 +24,11 @@ const defaultLimit = 100
 // has not disappeared yet. A later pass must retry observation.
 var ErrAllocationStillPresent = errors.New("runtime slot allocation remains physically present")
 
+// ErrAllocationNodeUnavailable means no trustworthy direct-client observation
+// was possible. Other slots on that exact node incarnation may be deferred for
+// this pass; it never constitutes evidence that their physical state is gone.
+var ErrAllocationNodeUnavailable = errors.New("runtime slot allocation node is unavailable")
+
 // Store is the durable region authority used by the terminal reconciler.
 type Store interface {
 	ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error)
@@ -211,11 +216,31 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 	}
 	result := Result{Candidates: len(candidates)}
 	errs := make([]error, 0)
+	// An unreachable retired node can contribute hundreds of old carriers. One
+	// failed observation must not consume the pass deadline once per carrier and
+	// delay healthy nodes' cleanup. Retry every node on the next pass, without
+	// persisting an availability assumption or changing any slot authority.
+	type nodeIncarnation struct{ cluster, node, uid, boot string }
+	unavailable := make(map[nodeIncarnation]bool)
 	for index := range candidates {
+		if err := ctx.Err(); err != nil {
+			result.Skipped += len(candidates) - index
+			errs = append(errs, err)
+			break
+		}
+		candidate := candidates[index]
+		node := nodeIncarnation{candidate.ClusterID, candidate.NodeID, candidate.NodeUID, candidate.NodeBootID}
+		if unavailable[node] {
+			result.Skipped++
+			continue
+		}
 		completed, err := r.reconcile(ctx, candidates[index].ID)
 		if err != nil {
 			result.Failed++
 			errs = append(errs, fmt.Errorf("reconcile runtime slot %s: %w", candidates[index].ID, err))
+			if errors.Is(err, ErrAllocationNodeUnavailable) {
+				unavailable[node] = true
+			}
 			continue
 		}
 		if completed {

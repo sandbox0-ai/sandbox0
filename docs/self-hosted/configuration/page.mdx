@@ -321,6 +321,13 @@ The terminal worker must remain independent of the task-driver process. It
 owns exact Nomad stop and client GC, node cleanup requests, physical absence
 observation, RootFS fencing, and the final PostgreSQL capacity release.
 
+Direct-client allocation observations have a five-second upper bound, even
+when the endpoint permits longer cleanup requests. If an observation fails,
+the worker defers other slots on that exact node incarnation until its next
+pass. Their leases and physical cleanup requirements remain intact. This
+prevents a retired node's carrier inventory from repeatedly consuming the
+same pass deadline while healthy nodes wait for capacity to be reclaimed.
+
 Compact external-crash proofs are replay history for exact writer bindings
 already verified terminal regionally and reclaimed on the node. Local expiry
 requires the matching durable binding and physical proof, `BranchRemoved`,

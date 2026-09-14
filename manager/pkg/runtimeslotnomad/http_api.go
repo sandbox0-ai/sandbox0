@@ -103,6 +103,11 @@ func (a *HTTPAPI) ClientAllocationPresent(
 	ctx context.Context,
 	target runtimeslotreconciler.AllocationTarget,
 ) (bool, error) {
+	// This is a small read-only liveness observation, not a cleanup operation.
+	// Bound unavailable-node probes independently of longer operator-configured
+	// mutation timeouts so retired nodes cannot monopolize terminal passes.
+	ctx, cancel := context.WithTimeout(ctx, defaultNomadTimeout)
+	defer cancel()
 	if err := validateTarget(target); err != nil {
 		return false, err
 	}

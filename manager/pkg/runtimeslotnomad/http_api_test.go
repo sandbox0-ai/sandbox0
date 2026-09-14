@@ -85,6 +85,30 @@ func TestHTTPAPICallsServerAndExactClientOverMTLS(t *testing.T) {
 	require.NoError(t, api.StopAllocation(t.Context(), target, "purge-operation"))
 }
 
+func TestHTTPAPIClientObservationBoundsUnresponsiveNode(t *testing.T) {
+	state := &nomadTestServerState{token: "token"}
+	server, resolver, _ := newNomadMTLSTestServer(t, state)
+	defer server.Close()
+	server.Config.Handler = http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	})
+	resolver.client.Timeout = time.Minute
+	api, err := NewHTTPAPI(resolver)
+	require.NoError(t, err)
+
+	started := time.Now()
+	_, err = api.ClientAllocationPresent(t.Context(), testTarget())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 10*time.Second, "a longer mutation timeout must not delay node observations")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started = time.Now()
+	_, err = api.ClientAllocationPresent(ctx, testTarget())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), time.Second, "the pass deadline must remain authoritative")
+}
+
 func TestHTTPAPIControllerConvergesStopClientGCAndAbsence(t *testing.T) {
 	state := &nomadTestServerState{
 		token: "token", desiredStatus: "run", serverPresent: true, clientPresent: true,

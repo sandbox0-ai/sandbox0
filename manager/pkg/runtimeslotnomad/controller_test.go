@@ -103,6 +103,26 @@ func TestControllerObservesServerAndDirectClientOwnership(t *testing.T) {
 	}
 }
 
+func TestControllerClassifiesOnlyDirectClientObservationFailureAsNodeUnavailable(t *testing.T) {
+	api := &fakeAPI{allocation: testAllocation(), clientErr: errdefs.ErrUnavailable}
+	controller, err := New(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := controller.Observe(t.Context(), testTarget())
+	if !errors.Is(err, runtimeslotreconciler.ErrAllocationNodeUnavailable) || !errors.Is(err, errdefs.ErrUnavailable) {
+		t.Fatalf("client observation error = %v", err)
+	}
+	if len(observation.ProofDigest) != 0 || api.gcCalls != 0 || len(api.stopCalls) != 0 {
+		t.Fatal("an unavailable node produced cleanup or absence evidence")
+	}
+	api.serverErr = errdefs.ErrUnavailable
+	_, err = controller.Observe(t.Context(), testTarget())
+	if errors.Is(err, runtimeslotreconciler.ErrAllocationNodeUnavailable) || !errors.Is(err, errdefs.ErrUnavailable) {
+		t.Fatalf("server catalog error was attributed to one node: %v", err)
+	}
+}
+
 func TestControllerObservesTerminalClientAllocationAsPhysicallyAbsent(t *testing.T) {
 	target := testTarget()
 	for _, status := range []string{"complete", "failed", "lost"} {

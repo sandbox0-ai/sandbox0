@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -31,7 +32,7 @@ var ErrAllocationNodeUnavailable = errors.New("runtime slot allocation node is u
 
 // Store is the durable region authority used by the terminal reconciler.
 type Store interface {
-	ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error)
+	ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
 	FenceRuntimeSlotForReconcile(context.Context, *sandboxstore.FenceRuntimeSlotForReconcileRequest) (*sandboxstore.RuntimeSlot, error)
@@ -182,6 +183,8 @@ type Result struct {
 
 // Reconciler executes plugin-independent terminal cleanup.
 type Reconciler struct {
+	mu         sync.Mutex
+	after      *sandboxstore.RuntimeSlot
 	store      Store
 	allocation AllocationController
 	node       NodeCleaner
@@ -210,11 +213,22 @@ func New(config Config) (*Reconciler, error) {
 // RunOnce processes a bounded candidate batch. One failed slot does not block
 // independent slots; the returned error joins every per-slot failure.
 func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
-	candidates, err := r.store.ListRuntimeSlotsForReconcile(ctx, r.limit)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	candidates, err := r.store.ListRuntimeSlotsForReconcileAfter(ctx, r.limit, r.after)
 	if err != nil {
 		return Result{}, fmt.Errorf("list runtime slots for reconcile: %w", err)
 	}
 	result := Result{Candidates: len(candidates)}
+	// Traverse beyond an unresolved full batch, then wrap for retries. This is
+	// local scheduling state only: each candidate is re-read and fenced below.
+	// A canceled pass must leave its unprocessed suffix eligible next time.
+	processed := 0
+	defer func() {
+		if processed == len(candidates) && len(candidates) < r.limit {
+			r.after = nil
+		}
+	}()
 	errs := make([]error, 0)
 	// An unreachable retired node can contribute hundreds of old carriers. One
 	// failed observation must not consume the pass deadline once per carrier and
@@ -229,6 +243,9 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 			break
 		}
 		candidate := candidates[index]
+		cursor := candidate
+		r.after = &cursor
+		processed++
 		node := nodeIncarnation{candidate.ClusterID, candidate.NodeID, candidate.NodeUID, candidate.NodeBootID}
 		if unavailable[node] {
 			result.Skipped++

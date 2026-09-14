@@ -327,6 +327,10 @@ the worker defers other slots on that exact node incarnation until its next
 pass. Their leases and physical cleanup requirements remain intact. This
 prevents a retired node's carrier inventory from repeatedly consuming the
 same pass deadline while healthy nodes wait for capacity to be reclaimed.
+The worker resumes each bounded batch after the previous candidate and wraps
+for retries at the end of the traversal. This in-memory cursor prevents an
+unresolved full batch from permanently hiding later cleanup work; it does not
+change the required authority checks or physical absence proofs.
 
 Compact external-crash proofs are replay history for exact writer bindings
 already verified terminal regionally and reclaimed on the node. Local expiry

@@ -25,7 +25,7 @@ type fakeStore struct {
 	lifecycle     *sandboxstore.SandboxLifecycleTxn
 }
 
-func (f *fakeStore) ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error) {
+func (f *fakeStore) ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error) {
 	f.record("list")
 	if f.slot.State == sandboxstore.RuntimeSlotStateTerminal {
 		return nil, nil

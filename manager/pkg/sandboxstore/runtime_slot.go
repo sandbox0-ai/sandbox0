@@ -1197,11 +1197,30 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 // physical incarnations before lease-expired or authority-revoked candidates
 // without deleting their durable claim and writer identities.
 func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit int) ([]RuntimeSlot, error) {
+	return s.ListRuntimeSlotsForReconcileAfter(ctx, limit, nil)
+}
+
+// ListRuntimeSlotsForReconcileAfter resumes a read-only candidate traversal.
+// The cursor uses the observed ordering values, even if that slot has since
+// changed state or disappeared. It grants no cleanup or resource authority.
+func (s *PGSandboxStore) ListRuntimeSlotsForReconcileAfter(ctx context.Context, limit int, after *RuntimeSlot) ([]RuntimeSlot, error) {
 	if limit <= 0 || limit > MaxRuntimeSlotReconcileLimit {
 		return nil, fmt.Errorf("runtime slot reconcile limit must be between 1 and %d", MaxRuntimeSlotReconcileLimit)
 	}
+	priority, heartbeat, id := 0, time.Time{}, ""
+	if after != nil {
+		id, heartbeat = after.ID, after.HeartbeatExpiresAt
+		switch after.State {
+		case RuntimeSlotStateOrphaned:
+			priority = 0
+		case RuntimeSlotStateQuiescing:
+			priority = 1
+		default:
+			priority = 2
+		}
+	}
 	rows, err := s.pool.Query(ctx, runtimeSlotSelectSQL()+`
-		WHERE state IN ($1, $2)
+		WHERE (state IN ($1, $2)
 			OR (state <> $3 AND heartbeat_expires_at <= NOW())
 			OR (state IN ($4, $5) AND claim_lease_expires_at <= NOW())
 			OR (state <> $3 AND EXISTS (
@@ -1211,14 +1230,18 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 					AND lifecycle.sandbox_id = runtime_slots.sandbox_id
 					AND lifecycle.kind = $6 AND lifecycle.source = $7
 					AND lifecycle.phase = $8
-			))
+			)))
+			AND ($10 = '' OR (
+				CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
+				heartbeat_expires_at, slot_id
+			) > ($11, $12, $10))
 		ORDER BY
 			CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
 			heartbeat_expires_at, slot_id
 		LIMIT $9
 	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
 		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
-		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit)
+		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit, id, priority, heartbeat)
 	if err != nil {
 		return nil, err
 	}

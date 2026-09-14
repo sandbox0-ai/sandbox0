@@ -35,7 +35,7 @@ const (
 // across both the Nomad server and this client before any cleanup can proceed.
 func List(ctx context.Context, client *http.Client, baseURL *url.URL, nodeID, namespace string, headers http.Header) ([]Allocation, error) {
 	if client == nil || baseURL == nil || nodeID == "" || strings.TrimSpace(nodeID) != nodeID || namespace == "" {
-		return nil, errors.New("Nomad allocation inventory requires an exact node ID")
+		return nil, errors.New("nomad allocation inventory requires an exact node ID")
 	}
 	query := url.Values{
 		"filter":    {"NodeID == " + strconv.Quote(nodeID)},
@@ -55,14 +55,14 @@ func List(ctx context.Context, client *http.Client, baseURL *url.URL, nodeID, na
 			return nil, err
 		}
 		if len(batch) > PageSize {
-			return nil, errors.New("Nomad allocation inventory exceeded its page bound")
+			return nil, errors.New("nomad allocation inventory exceeded its page bound")
 		}
 		for _, allocation := range batch {
 			if allocation.NodeID != nodeID || allocation.ID == "" || strings.TrimSpace(allocation.ID) != allocation.ID {
-				return nil, errors.New("Nomad allocation inventory returned an inexact identity")
+				return nil, errors.New("nomad allocation inventory returned an inexact identity")
 			}
 			if _, exists := seenIDs[allocation.ID]; exists {
-				return nil, errors.New("Nomad allocation inventory repeated an allocation")
+				return nil, errors.New("nomad allocation inventory repeated an allocation")
 			}
 			seenIDs[allocation.ID] = struct{}{}
 			allocations = append(allocations, allocation)
@@ -71,15 +71,15 @@ func List(ctx context.Context, client *http.Client, baseURL *url.URL, nodeID, na
 			return allocations, nil
 		}
 		if len(next) > 4096 {
-			return nil, errors.New("Nomad allocation inventory token exceeded its bound")
+			return nil, errors.New("nomad allocation inventory token exceeded its bound")
 		}
 		if _, exists := seenTokens[next]; exists {
-			return nil, errors.New("Nomad allocation inventory repeated a page token")
+			return nil, errors.New("nomad allocation inventory repeated a page token")
 		}
 		seenTokens[next] = struct{}{}
 		query.Set("next_token", next)
 	}
-	return nil, errors.New("Nomad allocation inventory exceeded its page count bound")
+	return nil, errors.New("nomad allocation inventory exceeded its page count bound")
 }
 
 // readPage rejects oversized and truncated responses before exposing an absence
@@ -96,7 +96,7 @@ func readPage(ctx context.Context, client *http.Client, target string, headers h
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("Nomad allocation inventory returned HTTP %d", response.StatusCode)
+		return "", fmt.Errorf("nomad allocation inventory returned HTTP %d", response.StatusCode)
 	}
 	const maxBytes = 2 << 20
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
@@ -104,13 +104,13 @@ func readPage(ctx context.Context, client *http.Client, target string, headers h
 		return "", err
 	}
 	if len(payload) > maxBytes {
-		return "", errors.New("Nomad allocation inventory response exceeded its bound")
+		return "", errors.New("nomad allocation inventory response exceeded its bound")
 	}
 	if err := json.Unmarshal(payload, batch); err != nil {
 		return "", err
 	}
 	if len(response.Header.Values("X-Nomad-NextToken")) > 1 {
-		return "", errors.New("Nomad allocation inventory returned ambiguous page tokens")
+		return "", errors.New("nomad allocation inventory returned ambiguous page tokens")
 	}
 	return response.Header.Get("X-Nomad-NextToken"), nil
 }

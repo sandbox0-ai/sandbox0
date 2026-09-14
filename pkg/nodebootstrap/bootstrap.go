@@ -172,7 +172,13 @@ func (b *Bootstrapper) Initial(ctx context.Context, responseFile string) error {
 	if err := b.runner.Run(ctx, "systemctl", "daemon-reload"); err != nil {
 		return err
 	}
-	if err := b.runner.Run(ctx, "systemctl", "enable", "--now", "nomad.service"); err != nil {
+	if err := b.runner.Run(ctx, "systemctl", "enable", "nomad.service"); err != nil {
+		return err
+	}
+	// A retry may find Nomad still running with admitted metadata from the
+	// previous attempt. Load the freshly written bootstrap identity and false
+	// metadata before finalization verifies the exact enrollment fence.
+	if err := b.runner.Run(ctx, "systemctl", "restart", "nomad.service"); err != nil {
 		return err
 	}
 	nodeID, err := waitForNomadNodeID(ctx, initialRegistrationTimeout)

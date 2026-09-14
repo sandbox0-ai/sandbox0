@@ -106,6 +106,7 @@ list and the kernel device pool before admission; increasing carrier count alone
 does not increase RootFS concurrency.
 
 For an existing node, replace the binaries and run `rollout-node.sh`. It
+starts any missing instance left by an interrupted installation, then
 restarts slot B and then A, waiting for each instance to become primary-ready
 or synchronized-standby-ready before touching its peer. Drain and roll nodes
 one at a time for changes that alter the runsc compatibility digest, RootFS

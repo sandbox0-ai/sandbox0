@@ -263,9 +263,18 @@ func TestRolloutWaitsForBothRolesAfterEveryRestart(t *testing.T) {
 	}
 	writeExecutable("id", `echo 0
 `)
-	writeExecutable("sleep", `exit 0
+	writeExecutable("sleep", `
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@a.service" ]
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@b.service" ]
 `)
 	writeExecutable("systemctl", `
+if [ "$1" = start ]; then
+  shift
+  for unit do
+    : >"$ROLLOUT_STATE.$unit"
+  done
+  exit 0
+fi
 echo "restart:$2" >>"$ROLLOUT_LOG"
 case "$2" in
   sandbox0-ctld@b.service) echo b >"$ROLLOUT_STATE" ;;
@@ -282,6 +291,9 @@ for argument do
 done
 state=$(cat "$ROLLOUT_STATE")
 echo "probe:$state:$slot" >>"$ROLLOUT_LOG"
+# A missing peer cannot report synchronized readiness. Fail immediately in
+# this fixture so a broken rollout cannot wait out the production timeout.
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@$slot.service" ] || exit 2
 if [ "$state:$slot" = a:b ] && [ ! -f "$ROLLOUT_RETRY" ]; then
   : >"$ROLLOUT_RETRY"
   exit 1

@@ -366,7 +366,9 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 // expired heartbeat is retained so a reconciler crash remains immediately
 // discoverable, and later node heartbeats cannot revive the fenced slot. A
 // consumed writer is locked and must also be past its renewal grace so a
-// queued renewal cannot revive it after this transaction commits.
+// queued renewal cannot revive it after this transaction commits. A terminal
+// writer is independently due even if its resource-neutral carrier still
+// heartbeats; carrier liveness cannot restore retired RootFS authority.
 func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 	ctx context.Context,
 	request *FenceRuntimeSlotForReconcileRequest,
@@ -392,9 +394,6 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 		}
 		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) ||
 			runtimeSlotPreCommandReadyClaimExpired(slot) || resumeAuthorityAborted
-		if !due {
-			return nil, ErrRuntimeSlotNotDue
-		}
 		if slot.WriterGrantID != "" {
 			var grantState string
 			var leaseExpiresAt *time.Time
@@ -412,8 +411,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 				return nil, err
 			}
 			switch grantState {
-			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring,
-				RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
+			case RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
+				due = true
+			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring:
 			case RootFSWriterGrantStateConsumed:
 				if !resumeAuthorityAborted &&
 					(leaseExpiresAt == nil || leaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(authorityObservedAt)) {
@@ -422,6 +422,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 			default:
 				return nil, fmt.Errorf("%w: runtime slot writer grant is in invalid state %s", ErrRuntimeSlotInvalid, grantState)
 			}
+		}
+		if !due {
+			return nil, ErrRuntimeSlotNotDue
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
@@ -1224,6 +1227,12 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcileAfter(ctx context.Context, 
 			OR (state <> $3 AND heartbeat_expires_at <= NOW())
 			OR (state IN ($4, $5) AND claim_lease_expires_at <= NOW())
 			OR (state <> $3 AND EXISTS (
+				SELECT 1 FROM manager.rootfs_writer_grants AS writer
+				WHERE writer.grant_id = runtime_slots.writer_grant_id
+					AND writer.slot_id = runtime_slots.slot_id
+					AND writer.state IN ($13, $14)
+			))
+			OR (state <> $3 AND EXISTS (
 				SELECT 1
 				FROM manager.sandbox_lifecycle_txns AS lifecycle
 				WHERE lifecycle.txn_id = runtime_slots.claim_operation_id
@@ -1241,7 +1250,8 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcileAfter(ctx context.Context, 
 		LIMIT $9
 	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
 		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
-		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit, id, priority, heartbeat)
+		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit, id, priority, heartbeat,
+		RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled)
 	if err != nil {
 		return nil, err
 	}

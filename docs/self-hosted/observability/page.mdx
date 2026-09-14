@@ -84,6 +84,13 @@ Monitor the complete capacity conjunction rather than carrier count alone:
 
 ### ctld A/B
 
+An unchanged carrier allocation set does not prove that guests survived a
+primary restart. The current primary owns the NBD server; its exit disconnects
+live RootFS devices and shuts down their mounted XFS filesystems. Planned
+updates require regional claim fencing and durable pause/drain before B/A
+replacement. Verify resumed sandboxes with actual user commands. After an
+unplanned loss, recovery uses the last committed RootFS generation.
+
 Group HA alerts by node:
 
 - `ctld_ha_primary`: alert when `sum by (node) (ctld_ha_primary) != 1` persists;

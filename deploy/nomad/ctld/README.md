@@ -11,10 +11,16 @@ control sockets, and per-lease cgroups. Do not add systemd filesystem isolation 
 create a private mount/device namespace and break the exact mount namespace
 shared with the Nomad task driver.
 
-The A/B pair protects node-local runtime availability during a process crash or
-certificate rollout. It does not make the ECS worker stateful and it is not a
-stopped standby server. Both processes run on the same disposable node; all
-durable sandbox truth remains in PostgreSQL and S3.
+The A/B pair elects one node-local runtime owner and recovers its durable
+journal. It does not preserve running guest filesystems across primary exit:
+the current NBD server belongs to that process, and disconnecting it shuts down
+the mounted XFS filesystem. An unchanged Nomad allocation set is not proof of
+guest continuity. Before planned ctld updates, fence regional claims, durably
+pause the explicitly authorized sandboxes, and drain their physical runtimes;
+then update B before A and resume from the committed RootFS heads. An unplanned
+primary loss recovers from the last committed generation and may lose the dirty
+tail. Both processes run on the same node; durable sandbox truth remains in
+PostgreSQL and S3.
 
 Build the three pinned binaries, provision the files referenced by
 `ctld.yaml` under `/etc/sandbox0/pki` and `/etc/sandbox0/tokens`, copy the

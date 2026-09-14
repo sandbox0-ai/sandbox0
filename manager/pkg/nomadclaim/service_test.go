@@ -790,7 +790,7 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifactByDigest(
 		f.artifact.FormatGeneration != requirements.FormatGeneration ||
 		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
 		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
-		f.artifact.ProcdDigest != requirements.ProcdDigest {
+		(!requirements.PreserveCommittedProcd && f.artifact.ProcdDigest != requirements.ProcdDigest) {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
 	}
 	copy := *f.artifact

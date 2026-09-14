@@ -138,6 +138,10 @@ type ReadyRootFSArtifactRequirements struct {
 	LogicalSizeBytes int64
 	ProcdProtocol    string
 	ProcdDigest      string
+	// PreserveCommittedProcd is allowed only for an exact, authorized artifact
+	// digest. Its immutable attestation already binds the executable; the protocol,
+	// platform, format and logical size must still match. Image lookup forbids it.
+	PreserveCommittedProcd bool
 	// Source-only selection policy. Exact-digest lookups must leave these unset
 	// so a new import policy cannot invalidate existing generations or snapshots.
 	ImportDataRangeBytes int
@@ -184,6 +188,9 @@ func (r ReadyRootFSArtifactRequirements) Validate() error {
 }
 
 func (r ReadyRootFSArtifactRequirements) validateSourceLookup(sourceOCIDigest string) error {
+	if r.PreserveCommittedProcd {
+		return fmt.Errorf("committed procd selection requires an exact artifact digest")
+	}
 	if err := r.Validate(); err != nil {
 		return err
 	}
@@ -489,10 +496,10 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 			AND format_generation = $6
 			AND logical_size_bytes = $7
 			AND procd_protocol = $8
-			AND procd_digest = $9
+			AND ($10::boolean OR procd_digest = $9)
 	`, artifactDigest, RootFSBaseArtifactStateReady, platform.OS,
 		platform.Architecture, platform.Variant, requirements.FormatGeneration,
-		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest))
+		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest, requirements.PreserveCommittedProcd))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: artifact %s for %s/%s/%s", ErrRootFSBaseArtifactNotFound,
 			artifactDigest, platform.OS, platform.Architecture, platform.Variant)

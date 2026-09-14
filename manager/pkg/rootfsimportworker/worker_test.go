@@ -38,9 +38,12 @@ type fakeStore struct {
 	prepareRefs    []rootfsblock.ObjectReference
 	publishedRefs  []rootfsblock.ObjectReference
 	garbageCalls   int
+	leaseProtocol  string
+	leaseDigest    string
 }
 
-func (s *fakeStore) LeaseNextRootFSImport(context.Context, string, time.Duration) (*sandboxstore.RootFSImportOperation, error) {
+func (s *fakeStore) LeaseNextCompatibleRootFSImport(_ context.Context, _ string, _ time.Duration, protocol, procdDigest string) (*sandboxstore.RootFSImportOperation, error) {
+	s.leaseProtocol, s.leaseDigest = protocol, procdDigest
 	return s.operation, s.leaseErr
 }
 
@@ -277,6 +280,9 @@ func TestWorkerAbandonsIncompatibleExecutableBeforeBuild(t *testing.T) {
 		return rootfsimporter.BuildResult{}, nil
 	})
 	result, err := newTestWorker(t, store, builder, nil).RunOnce(context.Background())
+	if store.leaseProtocol != testProcdProtocol || store.leaseDigest != testProcdDigest {
+		t.Fatal("worker must bind its executable contract in the atomic lease request")
+	}
 	if err == nil || called || result.Abandoned != 1 || result.FailureCategory != failureIncompatible {
 		t.Fatalf("called=%v result=%#v err=%v", called, result, err)
 	}

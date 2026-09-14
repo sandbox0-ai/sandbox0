@@ -1166,6 +1166,7 @@ func (s *Service) prepareRootFS(
 		if err != nil {
 			return rootFSPlan{}, err
 		}
+		requirements.PreserveCommittedProcd = true
 		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
 			ctx, snapshot.BaseArtifactDigest, platform, requirements,
 		)
@@ -1218,6 +1219,7 @@ func (s *Service) prepareRootFS(
 		if err != nil {
 			return rootFSPlan{}, err
 		}
+		requirements.PreserveCommittedProcd = true
 		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(
 			ctx, source.BaseArtifactDigest, platform, requirements,
 		)

@@ -17,12 +17,13 @@ import (
 
 // Allocation retains only identity and scheduling state needed by runtime recovery.
 type Allocation struct {
-	NodeID        string `json:"NodeID"`
-	ID            string `json:"ID"`
-	JobID         string `json:"JobID"`
-	Namespace     string `json:"Namespace"`
-	ClientStatus  string `json:"ClientStatus"`
-	DesiredStatus string `json:"DesiredStatus"`
+	NodeID         string `json:"NodeID"`
+	ID             string `json:"ID"`
+	JobID          string `json:"JobID"`
+	Namespace      string `json:"Namespace"`
+	ClientStatus   string `json:"ClientStatus"`
+	DesiredStatus  string `json:"DesiredStatus"`
+	NextAllocation string `json:"NextAllocation"`
 }
 
 const (

@@ -6,6 +6,8 @@ import (
 )
 
 const (
+	// DefaultWarmJobID is the deployment-owned one-shot carrier job family.
+	DefaultWarmJobID = "sandbox0-warm-slots"
 	// WarmJobShardCount bounds the 512 standard and 64 privileged carriers.
 	WarmJobShardCount = 18
 	// WarmJobMaxGroups bounds the full job embedded in every Nomad allocation.

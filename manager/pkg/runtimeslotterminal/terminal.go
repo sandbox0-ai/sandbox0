@@ -95,7 +95,10 @@ func NewWithAllocation(
 		return nil, nil, fmt.Errorf("create runtime slot terminal reconciler: %w", err)
 	}
 	worker, err := runtimeslotreconciler.NewWorker(runtimeslotreconciler.WorkerConfig{
-		Runner: reconciler, Interval: config.Interval, PassTimeout: config.PassTimeout,
+		Runner: &terminalAndRefill{
+			terminal: reconciler, refiller: nomadAPI, clusters: staticResolver.ServerClusterIDs(),
+			cursors: make(map[string]string), now: time.Now,
+		}, Interval: config.Interval, PassTimeout: config.PassTimeout,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create runtime slot terminal worker: %w", err)

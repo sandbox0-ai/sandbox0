@@ -175,10 +175,11 @@ type Config struct {
 
 // Result summarizes one bounded reconciliation pass.
 type Result struct {
-	Candidates int
-	Completed  int
-	Skipped    int
-	Failed     int
+	Candidates      int
+	Completed       int
+	Skipped         int
+	Failed          int
+	RefillRequested int
 }
 
 // Reconciler executes plugin-independent terminal cleanup.

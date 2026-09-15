@@ -40,6 +40,15 @@ complete Job in every allocation and can exhaust control-plane memory at high
 carrier counts. Catalog truncation or pagination errors must block reclamation;
 completed/stopping allocations remain present until physical cleanup is proven.
 
+With terminal reconciliation enabled, manager also checks failed allocations in
+the default `sandbox0-warm-slots` job family, including its bounded shards.
+Startup can fail before regional registration, leaving no PostgreSQL slot for
+the terminal worker to discover. After terminal work, at most once every 30
+seconds, manager visits one configured Nomad cluster and up to eight failed
+carriers, with a five-second request budget. It revalidates each exact allocation
+before requesting a fresh carrier through an idempotent stop operation. This
+scheduling repair does not release regional leases, garbage-collect client
+state, or discard node journals; physical retirement remains a separate proof.
 
 Manager atomically leases exact CPU and memory from ctld-reported node capacity;
 ctld creates `/sys/fs/cgroup/sandbox0/<lease>` and the driver writes that lease

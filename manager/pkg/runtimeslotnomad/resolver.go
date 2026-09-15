@@ -3,6 +3,7 @@ package runtimeslotnomad
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/containerd/errdefs"
@@ -14,6 +15,16 @@ import (
 type StaticEndpointResolver struct {
 	servers map[string]Endpoint
 	clients map[string]Endpoint
+}
+
+// ServerClusterIDs returns a deterministic copy of deployment-owned clusters.
+func (r *StaticEndpointResolver) ServerClusterIDs() []string {
+	ids := make([]string, 0, len(r.servers))
+	for id := range r.servers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // NewStaticEndpointResolver validates and indexes an immutable endpoint set.

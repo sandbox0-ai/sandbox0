@@ -19,7 +19,7 @@ import (
 )
 
 func TestClientRoundTripsAuthenticatedRegistrationAndHeartbeat(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 	server := httptest.NewTLSServer(handler)
@@ -28,7 +28,7 @@ func TestClientRoundTripsAuthenticatedRegistrationAndHeartbeat(t *testing.T) {
 
 	registration := protocol.RegistrationRequest{
 		ClusterID: "cluster", AllocationID: "allocation", AllocationNamespace: "default",
-		NodeID: "node", NodeBootID: "boot", NetNSIdentity: "netns",
+		NodeID: "nomad-node", NodeBootID: "boot", NetNSIdentity: "netns",
 		ControlEndpoint:      "unix:///run/sandbox0/slot.sock",
 		RuntimeCompatibility: digest.FromString("amd64/runsc/directfs").String(),
 	}
@@ -49,7 +49,7 @@ func TestClientRoundTripsAuthenticatedRegistrationAndHeartbeat(t *testing.T) {
 func TestClientMapsStableConflictAndValidatesBeforeNetwork(t *testing.T) {
 	store := &fakeStore{slot: testSlot(), transitionErr: sandboxstore.ErrRuntimeSlotConflict}
 	server := httptest.NewTLSServer(testHandler(t,
-		&fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}, store,
+		&fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}, store,
 	))
 	defer server.Close()
 	client := testClient(t, server)
@@ -75,7 +75,7 @@ func TestClientRejectsObservationForAnotherSlot(t *testing.T) {
 	store := &fakeStore{slot: testSlot()}
 	store.slot.ID = "different-slot"
 	server := httptest.NewTLSServer(testHandler(t,
-		&fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}, store,
+		&fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}, store,
 	))
 	defer server.Close()
 	client := testClient(t, server)

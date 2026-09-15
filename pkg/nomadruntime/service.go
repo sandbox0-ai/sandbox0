@@ -172,26 +172,28 @@ type nodeRuntime struct {
 	config  Config
 	logger  logger
 
-	mu                 sync.Mutex
-	wg                 sync.WaitGroup
-	inflight           map[string]*reconciliationState
-	preempting         map[string]int
-	scanMu             sync.Mutex
-	recoveryRetries    map[string]*recoveryRetry
-	recoverySequence   uint64
-	periodicRecovery   int
-	periodicProofs     int
-	urgentRecovery     int
-	trigger            chan string
-	allocations        nomadAllocationSource
-	runtimeSlotNetwork runtimeSlotNetworkControl
-	resourceCgroups    runtimeResourceCgroup
-	journal            *runtimeSlotJournal
-	lastJournalPrune   time.Time
-	metricTargets      map[string]runtimeMetricBinding
-	clusterID          string
-	nodeID             string
-	nodeUID            string
+	mu                    sync.Mutex
+	wg                    sync.WaitGroup
+	inflight              map[string]*reconciliationState
+	preempting            map[string]int
+	scanMu                sync.Mutex
+	recoveryRetries       map[string]*recoveryRetry
+	recoverySequence      uint64
+	periodicRecovery      int
+	periodicProofs        int
+	urgentRecovery        int
+	trigger               chan string
+	allocations           nomadAllocationSource
+	runtimeSlotNetwork    runtimeSlotNetworkControl
+	resourceCgroups       runtimeResourceCgroup
+	journal               *runtimeSlotJournal
+	registrationAuthority registrationAbortAuthority
+	registrationAfter     string
+	lastJournalPrune      time.Time
+	metricTargets         map[string]runtimeMetricBinding
+	clusterID             string
+	nodeID                string
+	nodeUID               string
 }
 
 type reconciliationState struct {
@@ -580,6 +582,11 @@ func run(
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
+	registrationAuthority, err := newRegistrationAbortAuthority(config)
+	if err != nil {
+		return fmt.Errorf("create registration recovery authority: %w", err)
+	}
+	daemon.registrationAuthority = registrationAuthority
 	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork, resourceCgroups)
 	if err != nil {
 		return err
@@ -588,6 +595,11 @@ func run(
 	go func() {
 		defer daemon.wg.Done()
 		daemon.reconcileLoop(daemonCtx)
+	}()
+	daemon.wg.Add(1)
+	go func() {
+		defer daemon.wg.Done()
+		daemon.reconcileRegistrationLoop(daemonCtx)
 	}()
 	var nodeChannelErr <-chan error
 	if nodeChannelAgent != nil {
@@ -1236,6 +1248,22 @@ func (d *nodeRuntime) cleanupGrantlessRuntimeSlot(
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
 ) (protocol.NodeCleanupControlProof, error) {
+	if strings.HasPrefix(request.OperationID, protocol.RegistrationAbortOperationPrefix) {
+		// A registration fence cannot authorize discarding an unexpected local
+		// writer, including legacy state missing from the regional slot catalog.
+		// Inspect under the same per-slot physical-operation gate as cleanup.
+		if d.runtime == nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("registration abort requires the local writer journal: %w", errdefs.ErrUnavailable)
+		}
+		sessions, err := d.runtime.RecoverySessions()
+		if err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
+		matched, err := matchRuntimeSlotCleanupSession(sessions, request)
+		if err != nil || matched != nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("registration abort conflicts with local writer state: %w", errdefs.ErrFailedPrecondition)
+		}
+	}
 	return d.cleanupJournaledRuntimeSlot(ctx, request, record, "")
 }
 

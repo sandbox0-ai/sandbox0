@@ -46,9 +46,27 @@ Startup can fail before regional registration, leaving no PostgreSQL slot for
 the terminal worker to discover. After terminal work, at most once every 30
 seconds, manager visits one configured Nomad cluster and up to eight failed
 carriers, with a five-second request budget. It revalidates each exact allocation
-before requesting a fresh carrier through an idempotent stop operation. This
+before requesting replacement of that exact failed allocation. Retries recheck
+whether it already has a replacement. This
 scheduling repair does not release regional leases, garbage-collect client
 state, or discard node journals; physical retirement remains a separate proof.
+
+ctld also reconciles registrations left only in its durable journal. Every ten
+seconds, one bounded pass scans at most 256 records and processes up to eight
+candidates older than two minutes, within a twenty-second budget. An existing
+regional slot stays with its normal lifecycle coordinator. For an absent slot,
+PostgreSQL first persists a registration-abort fence; database triggers exclude
+late registration even from an older manager binary during a rolling update.
+Only that exact authenticated fence permits the existing grantless physical
+cleanup. ctld preserves an unacknowledged cleanup proof until the region confirms
+it. These fences are retained after cleanup and cannot be removed by migration
+rollback. They do not create resource leases or declare a running guest terminal.
+
+Runtime-slot authority credentials must resolve to the exact cluster ID, Nomad
+node ID, and durable node UID. Registration rejects another placement before
+writing PostgreSQL. A successor boot of the same authenticated node may finish
+an older journal incarnation; its exact network and mount identity checks remain
+required.
 
 Manager atomically leases exact CPU and memory from ctld-reported node capacity;
 ctld creates `/sys/fs/cgroup/sandbox0/<lease>` and the driver writes that lease

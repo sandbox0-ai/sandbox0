@@ -75,7 +75,7 @@ func (f *fakeStore) MarkRuntimeSlotCommandReady(_ context.Context, request *sand
 }
 
 func TestRegisterDerivesNodeIdentityAndReturnsAuthorityTime(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid", AgentUID: "agent-instance"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid", AgentUID: "agent-instance"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 	body := protocol.RegistrationRequest{
@@ -99,7 +99,7 @@ func TestRegisterDerivesNodeIdentityAndReturnsAuthorityTime(t *testing.T) {
 
 func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 	proof := strings.Repeat("ab", 32)
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 
@@ -143,7 +143,7 @@ func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 }
 
 func TestTransitionRejectsWrongAuthenticatedNodeBeforeMutation(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "other-node"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "other-node"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 	body := protocol.HeartbeatRequest{AllocationID: "allocation", NodeBootID: "boot"}
@@ -154,7 +154,7 @@ func TestTransitionRejectsWrongAuthenticatedNodeBeforeMutation(t *testing.T) {
 }
 
 func TestTransitionRejectsChangedPhysicalIncarnation(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 	body := protocol.HeartbeatRequest{AllocationID: "allocation", NodeBootID: "other-boot"}
@@ -165,7 +165,7 @@ func TestTransitionRejectsChangedPhysicalIncarnation(t *testing.T) {
 }
 
 func TestHandlerRequiresBearerStrictJSONAndPUT(t *testing.T) {
-	verifier := &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}
+	verifier := &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}
 	store := &fakeStore{slot: testSlot()}
 	handler := testHandler(t, verifier, store)
 
@@ -201,7 +201,7 @@ func TestStoreErrorsHaveStableClasses(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.code, func(t *testing.T) {
 			handler := testHandler(t,
-				&fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}},
+				&fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}},
 				&fakeStore{getErr: test.err},
 			)
 			response := doRequest(t, handler, http.MethodGet, protocol.SlotPath("slot"), nil, "token", "")
@@ -214,7 +214,7 @@ func TestStoreErrorsHaveStableClasses(t *testing.T) {
 func TestRouteUsesCanonicalEscapedOpaqueSlotID(t *testing.T) {
 	store := &fakeStore{slot: testSlot()}
 	store.slot.ID = "slot/with space"
-	handler := testHandler(t, &fakeVerifier{identity: nodeauth.Identity{NodeUID: "node-uid"}}, store)
+	handler := testHandler(t, &fakeVerifier{identity: nodeauth.Identity{ClusterID: "cluster", NodeID: "nomad-node", NodeUID: "node-uid"}}, store)
 	response := doRequest(t, handler, http.MethodGet, protocol.SlotPath(store.slot.ID), nil, "token", "")
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, []string{store.slot.ID}, store.getIDs)
@@ -230,7 +230,7 @@ func testHandler(t *testing.T, verifier nodeauth.Verifier, store Store) http.Han
 func testSlot() *sandboxstore.RuntimeSlot {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	return &sandboxstore.RuntimeSlot{
-		ID: "slot", AllocationID: "allocation", NodeUID: "node-uid", NodeBootID: "boot",
+		ID: "slot", ClusterID: "cluster", NodeID: "nomad-node", AllocationID: "allocation", NodeUID: "node-uid", NodeBootID: "boot",
 		State: sandboxstore.RuntimeSlotStateRegistered, Revision: 1,
 		HeartbeatExpiresAt: now.Add(time.Minute), AuthorityObservedAt: now,
 	}

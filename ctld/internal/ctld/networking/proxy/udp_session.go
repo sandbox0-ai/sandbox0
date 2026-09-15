@@ -42,6 +42,9 @@ type udpSession struct {
 
 	lastSeenUnixNano int64
 	closeOnce        sync.Once
+	io               sync.WaitGroup
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type udpReplyConn interface {
@@ -83,6 +86,7 @@ func newUDPSession(server *Server, key udpSessionKey, req *adapterRequest) *udpS
 		destIP:     cloneIP(req.DestIP),
 		destPort:   req.DestPort,
 	}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
 	session.touch()
 	return session
 }
@@ -203,15 +207,19 @@ func (session *udpSession) Forward(payload []byte) error {
 	session.touch()
 	_ = upstream.SetWriteDeadline(time.Now().Add(session.server.udpSessionIdleTimeout()))
 	if session.server != nil {
-		if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthEgress, len(payload)); err != nil {
+		if err := session.server.waitDatagramBandwidth(session.ioContext(), compiled, bandwidthEgress, len(payload)); err != nil {
 			session.closeWithError(err)
 			return err
 		}
+	}
+	if !session.beginIO() {
+		return net.ErrClosed
 	}
 	n, err := upstream.Write(payload)
 	if n > 0 && session.server != nil {
 		session.server.recordEgressBytes(compiled, int64(n), audit)
 	}
+	session.io.Done()
 	if err != nil {
 		session.closeWithError(err)
 	}
@@ -290,12 +298,12 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 			session.server.observePolicyDNSResponse(session.key.SrcIP, compiled, payload)
 		}
 		if session.server != nil {
-			if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthIngress, len(payload)); err != nil {
+			if err := session.server.waitDatagramBandwidth(session.ioContext(), compiled, bandwidthIngress, len(payload)); err != nil {
 				session.closeWithError(err)
 				return
 			}
 		}
-		written, writeErr := session.replyToClient(payload)
+		_, writeErr := session.forwardReply(payload, compiled, audit)
 		if writeErr != nil {
 			if !errors.Is(writeErr, net.ErrClosed) {
 				session.server.logger.Warn("UDP session reply write failed", zap.Error(writeErr))
@@ -303,10 +311,39 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 			session.closeWithError(writeErr)
 			return
 		}
-		if session.server != nil && written > 0 {
-			session.server.recordIngressBytes(compiled, int64(written), audit)
-		}
 	}
+}
+
+// Register writes under the same lock that closes admission to the session.
+// Socket closure interrupts in-flight writes; final audit waits until their
+// successful byte counts are recorded, including partial writes with errors.
+func (session *udpSession) beginIO() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return false
+	}
+	session.io.Add(1)
+	return true
+}
+
+func (session *udpSession) ioContext() context.Context {
+	if session.ctx != nil {
+		return session.ctx
+	}
+	return context.Background()
+}
+
+func (session *udpSession) forwardReply(payload []byte, compiled *policy.CompiledPolicy, audit *flowAudit) (int, error) {
+	if !session.beginIO() {
+		return 0, net.ErrClosed
+	}
+	defer session.io.Done()
+	written, err := session.replyToClient(payload)
+	if session.server != nil && written > 0 {
+		session.server.recordIngressBytes(compiled, int64(written), audit)
+	}
+	return written, err
 }
 
 func (session *udpSession) replyToClient(payload []byte) (int, error) {
@@ -419,12 +456,16 @@ func (session *udpSession) closeWithError(err error) {
 		session.upstream = nil
 		session.downstream = nil
 		session.mu.Unlock()
+		if session.cancel != nil {
+			session.cancel()
+		}
 		if upstream != nil {
 			_ = upstream.Close()
 		}
 		if downstream != nil {
 			_ = downstream.Close()
 		}
+		session.io.Wait()
 		if session.server != nil {
 			session.server.removeUDPSession(session)
 			if auditReq != nil {

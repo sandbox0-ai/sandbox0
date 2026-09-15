@@ -62,6 +62,17 @@ The driver-level `runsc_operation_timeout_seconds` separately bounds each
 observed runsc duration. A larger value is a diagnostic accommodation for
 software-emulated nodes, not an SLO relaxation.
 
+Writer grant consumption retries an uncertain transport outcome at most three
+times using the same token and binding. The regional authority rechecks the
+writer epoch and claim fence; a replay does not extend the original lease.
+Ctld coalesces writer renewals for up to 250 milliseconds, with at most 256
+grants per request, two concurrent requests, and 512 queued renewals. Each
+writer retains its own expiry and cleanup obligation. Queue and network time
+count against that expiry, and a late success cannot revive an expired writer.
+An unavailable authority therefore causes bounded retries followed by fenced
+retirement, rather than indefinite local write authority. Runtime cleanup and
+resource release still require the existing physical absence proofs.
+
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
 NBD pool covering the highest configured device index (at least 64 devices),
 applies required networking sysctls, installs tmpfiles

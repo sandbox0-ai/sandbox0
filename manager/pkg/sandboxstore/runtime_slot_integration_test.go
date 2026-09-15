@@ -791,6 +791,12 @@ func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *t
 	require.Len(t, batchRenewal, 1)
 	require.ErrorIs(t, batchRenewal[0].Err, ErrRootFSWriterGrantInvalidState)
 	require.Nil(t, batchRenewal[0].Grant)
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID, ConsumerAgentUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
+	})
+	require.ErrorIs(t, err, ErrRootFSWriterGrantInvalidState, "consume replay must not restart an expired claim")
 	writerAfterRejectedRenewal, err := store.GetRootFSWriterGrant(ctx, issued.Grant.ID)
 	require.NoError(t, err)
 	require.Equal(t, renewedBeforeClaimExpiry.LeaseExpiresAt, writerAfterRejectedRenewal.LeaseExpiresAt,

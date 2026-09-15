@@ -667,9 +667,16 @@ func consumeRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *
 			AND g.consume_expires_at > NOW()
 			AND filesystem.filesystem_id = g.filesystem_id
 			AND filesystem.writer_epoch = g.writer_epoch
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.runtime_slots AS slot
+				WHERE slot.slot_id = g.slot_id AND slot.writer_grant_id = g.grant_id
+					AND ((slot.state IN ($11, $12) AND slot.claim_lease_expires_at <= NOW())
+						OR slot.state IN ($13, $14, $15))
+			)
 	`, normalized.GrantID, RootFSWriterGrantStateConsumed, normalized.ConsumerNodeUID,
 		normalized.ConsumerAgentUID, normalized.LeaseTTL.Milliseconds(), RootFSWriterGrantStateIssued,
-		normalized.WriterEpoch, tokenDigest[:], normalized.BindingDigest, normalized.BindingVersion)
+		normalized.WriterEpoch, tokenDigest[:], normalized.BindingDigest, normalized.BindingVersion,
+		RuntimeSlotStateClaiming, RuntimeSlotStateStarting, RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal)
 	if err != nil {
 		return nil, fmt.Errorf("consume rootfs writer grant: %w", err)
 	}
@@ -689,6 +696,30 @@ func consumeRootFSWriterGrant(ctx context.Context, db rootFSWriterGrantDB, req *
 	if record.State == RootFSWriterGrantStateConsumed && record.ConsumerNodeUID == normalized.ConsumerNodeUID {
 		if !record.LeaseExpiresAt.After(record.databaseNow) {
 			return nil, fmt.Errorf("%w: %s", ErrRootFSWriterLeaseExpired, normalized.GrantID)
+		}
+		// The token proves the original consume, not continuing authority. An
+		// exact retry after response loss must still honor epoch and claim fences.
+		currentEpoch, err := getRootFSWriterEpoch(ctx, db, record.FilesystemID)
+		if err != nil {
+			return nil, err
+		}
+		if currentEpoch != normalized.WriterEpoch {
+			return nil, fmt.Errorf("%w: expected %d, got %d", ErrRootFSWriterEpochConflict, normalized.WriterEpoch, currentEpoch)
+		}
+		var fenced bool
+		if err := db.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM manager.runtime_slots
+				WHERE slot_id = $1 AND writer_grant_id = $2
+					AND ((state IN ($3, $4) AND claim_lease_expires_at <= NOW())
+						OR state IN ($5, $6, $7))
+			)
+		`, record.SlotID, record.ID, RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
+			RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal).Scan(&fenced); err != nil {
+			return nil, fmt.Errorf("check consumed writer claim fence: %w", err)
+		}
+		if fenced {
+			return nil, fmt.Errorf("%w: runtime claim no longer permits consume", ErrRootFSWriterGrantInvalidState)
 		}
 		return cloneRootFSWriterGrant(&record.RootFSWriterGrant), nil
 	}

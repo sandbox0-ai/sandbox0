@@ -51,6 +51,7 @@ type rootfsRuntime struct {
 	consumerNetNSRoot string
 	renewalMu         sync.Mutex
 	renewals          map[string]*rootfsRenewal
+	renewalBatcher    *writerRenewalBatcher
 }
 
 // RuntimeInfo returns the immutable configuration owned by this ctld runtime.
@@ -457,7 +458,14 @@ func (r *rootfsRuntime) Ensure(
 		if err != nil {
 			return rootfssession.Mount{}, fmt.Errorf("consume regional writer grant: %w", err)
 		}
-		r.startRenewal(request, observation, onLeaseLost)
+		_, expiresAt, scheduleErr := localWriterLeaseSchedule(observation, stepStarted)
+		if scheduleErr != nil {
+			return rootfssession.Mount{}, &ConsumedAttachError{Err: scheduleErr}
+		}
+		if !time.Now().Before(expiresAt) {
+			return rootfssession.Mount{}, &ConsumedAttachError{Err: errors.New("consumed writer lease expired before attach")}
+		}
+		r.startRenewal(request, observation, stepStarted, onLeaseLost)
 	}
 	mount, sessionTiming, err = r.sessions.EnsureWithTiming(ctx, request)
 	if err != nil && r.authority != nil {
@@ -932,6 +940,7 @@ func (r *rootfsRuntime) Close() error {
 func (r *rootfsRuntime) startRenewal(
 	request rootfshandoff.StageRequest,
 	observation protocol.LeaseObservation,
+	observationStarted time.Time,
 	onLeaseLost func(error),
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -941,6 +950,13 @@ func (r *rootfsRuntime) startRenewal(
 	}
 	renewal := &rootfsRenewal{cancel: cancel}
 	r.renewals[request.Parent] = renewal
+	renew := r.authority.RenewWriterGrant
+	if authority, ok := r.authority.(writerBatchAuthority); ok {
+		if r.renewalBatcher == nil {
+			r.renewalBatcher = newWriterRenewalBatcher(authority)
+		}
+		renew = r.renewalBatcher.renew
+	}
 	r.renewalMu.Unlock()
 	go func() {
 		defer func() {
@@ -950,12 +966,7 @@ func (r *rootfsRuntime) startRenewal(
 			}
 			r.renewalMu.Unlock()
 		}()
-		err := runWriterLeaseRenewal(ctx, request, observation, func(
-			ctx context.Context,
-			request rootfshandoff.StageRequest,
-		) (protocol.LeaseObservation, error) {
-			return r.authority.RenewWriterGrant(ctx, request)
-		})
+		err := runWriterLeaseRenewal(ctx, request, observation, observationStarted, renew)
 		if err != nil {
 			r.logger.Error("RootFS writer lease lost", "parent", request.Parent, "error", err)
 			if onLeaseLost != nil {
@@ -978,12 +989,13 @@ func runWriterLeaseRenewal(
 	ctx context.Context,
 	request rootfshandoff.StageRequest,
 	observation protocol.LeaseObservation,
+	observationStarted time.Time,
 	renew writerLeaseRenewFunc,
 ) error {
 	if renew == nil {
 		return fmt.Errorf("writer lease renew function is required")
 	}
-	renewAt, expiresAt, err := localWriterLeaseSchedule(observation)
+	renewAt, expiresAt, err := localWriterLeaseSchedule(observation, observationStarted)
 	if err != nil {
 		return err
 	}
@@ -1005,18 +1017,22 @@ func runWriterLeaseRenewal(
 		}
 
 		renewCtx, cancel := context.WithDeadline(ctx, expiresAt)
+		observationStarted = time.Now()
 		next, renewErr := renew(renewCtx, request)
 		cancel()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !time.Now().Before(expiresAt) {
+			return errors.Join(renewErr, errors.New("RootFS writer lease expired"))
+		}
 		if renewErr == nil {
-			renewAt, expiresAt, err = localWriterLeaseSchedule(next)
+			renewAt, expiresAt, err = localWriterLeaseSchedule(next, observationStarted)
 			if err != nil {
 				return fmt.Errorf("invalid renewed writer lease: %w", err)
 			}
 			lastErr = nil
 			continue
-		}
-		if ctx.Err() != nil {
-			return nil
 		}
 		lastErr = renewErr
 		if writerLeaseRenewalIsTerminal(renewErr) {
@@ -1032,14 +1048,16 @@ func runWriterLeaseRenewal(
 	}
 }
 
-func localWriterLeaseSchedule(observation protocol.LeaseObservation) (time.Time, time.Time, error) {
+// Anchor relative authority time before I/O, conservatively including queue
+// and response latency. Receiving a response cannot add its transit time to
+// the last proven lease or revive a writer whose previous lease expired.
+func localWriterLeaseSchedule(observation protocol.LeaseObservation, started time.Time) (time.Time, time.Time, error) {
 	if err := observation.Validate(); err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("validate writer lease observation: %w", err)
 	}
-	now := time.Now()
 	renewAfter := observation.RenewAfter.Sub(observation.ServerTime)
 	remaining := observation.LeaseExpiresAt.Sub(observation.ServerTime)
-	return now.Add(renewAfter), now.Add(remaining), nil
+	return started.Add(renewAfter), started.Add(remaining), nil
 }
 
 func writerLeaseRenewalIsTerminal(err error) bool {
@@ -1063,6 +1081,10 @@ func (r *rootfsRuntime) stopAllRenewals() {
 	for parent, renewal := range r.renewals {
 		renewals = append(renewals, renewal)
 		delete(r.renewals, parent)
+	}
+	if r.renewalBatcher != nil {
+		r.renewalBatcher.cancel()
+		r.renewalBatcher = nil
 	}
 	r.renewalMu.Unlock()
 	for _, renewal := range renewals {

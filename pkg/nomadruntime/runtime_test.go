@@ -39,7 +39,7 @@ func TestWriterLeaseRenewalUsesAuthorityRelativeTime(t *testing.T) {
 	called := make(chan time.Duration, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- runWriterLeaseRenewal(ctx, rootfshandoff.StageRequest{}, observation, func(
+		done <- runWriterLeaseRenewal(ctx, rootfshandoff.StageRequest{}, observation, time.Now(), func(
 			context.Context,
 			rootfshandoff.StageRequest,
 		) (protocol.LeaseObservation, error) {
@@ -64,7 +64,7 @@ func TestWriterLeaseRenewalFailsClosedAtLastObservedExpiry(t *testing.T) {
 		LeaseExpiresAt: now.Add(150 * time.Millisecond),
 	}
 	started := time.Now()
-	err := runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, func(
+	err := runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, time.Now(), func(
 		context.Context,
 		rootfshandoff.StageRequest,
 	) (protocol.LeaseObservation, error) {
@@ -86,7 +86,7 @@ func TestWriterLeaseRenewalImmediatelyRejectsStaleWriter(t *testing.T) {
 		LeaseExpiresAt: now.Add(time.Second),
 	}
 	started := time.Now()
-	err := runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, func(
+	err := runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, time.Now(), func(
 		context.Context,
 		rootfshandoff.StageRequest,
 	) (protocol.LeaseObservation, error) {
@@ -97,6 +97,41 @@ func TestWriterLeaseRenewalImmediatelyRejectsStaleWriter(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
 		t.Fatalf("stale-writer rejection elapsed = %s, want <500ms", elapsed)
+	}
+}
+
+func TestWriterLeaseRenewalRejectsSuccessAfterPreviousExpiry(t *testing.T) {
+	now := time.Now()
+	observation := protocol.LeaseObservation{ServerTime: now, RenewAfter: now, LeaseExpiresAt: now.Add(50 * time.Millisecond)}
+	err := runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, time.Now(), func(ctx context.Context, _ rootfshandoff.StageRequest) (protocol.LeaseObservation, error) {
+		<-ctx.Done()
+		// An authority may have committed renewal despite losing the timely
+		// response. The node has already lost continuous proof of its lease.
+		return batchTestObservation(), nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "writer lease expired") {
+		t.Fatalf("late successful renewal revived an expired writer: %v", err)
+	}
+}
+
+func TestWriterLeaseScheduleIncludesRequestAndQueueTime(t *testing.T) {
+	observation := batchTestObservation()
+	started := time.Now().Add(-2 * time.Second)
+	renewAt, expiresAt, err := localWriterLeaseSchedule(observation, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt.Sub(started) != 30*time.Second || renewAt.Sub(started) != 15*time.Second {
+		t.Fatalf("request latency extended lease: renew=%v expires=%v started=%v", renewAt, expiresAt, started)
+	}
+	expired := started.Add(-time.Minute)
+	called := false
+	err = runWriterLeaseRenewal(t.Context(), rootfshandoff.StageRequest{}, observation, expired, func(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error) {
+		called = true
+		return protocol.LeaseObservation{}, errdefs.ErrFailedPrecondition
+	})
+	if called || err == nil || !strings.Contains(err.Error(), "writer lease expired") {
+		t.Fatalf("expired consume observation was accepted: called=%v error=%v", called, err)
 	}
 }
 

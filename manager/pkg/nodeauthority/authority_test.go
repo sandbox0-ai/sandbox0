@@ -1,27 +1,87 @@
 package nodeauthority
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
+	writerprotocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 	"github.com/stretchr/testify/require"
 )
+
+type batchRouteVerifier struct{}
+
+func (batchRouteVerifier) Verify(context.Context, string) (nodeauth.Identity, error) {
+	return nodeauth.Identity{NodeUID: "node-uid", AgentUID: "agent-uid"}, nil
+}
+
+type batchRouteStore struct {
+	Store
+	requests []*sandboxstore.RenewRootFSWriterGrantRequest
+}
+
+func (s *batchRouteStore) RenewRootFSWriterGrants(_ context.Context, requests []*sandboxstore.RenewRootFSWriterGrantRequest, policy sandboxstore.RootFSWriterLeaseRenewalPolicy) ([]sandboxstore.RenewRootFSWriterGrantResult, error) {
+	s.requests = requests
+	now := time.Now()
+	results := make([]sandboxstore.RenewRootFSWriterGrantResult, len(requests))
+	for i, request := range requests {
+		results[i].Grant = &sandboxstore.RootFSWriterGrant{ID: request.GrantID, AuthorityObservedAt: now, LeaseExpiresAt: now.Add(policy.LeaseTTL)}
+	}
+	return results, nil
+}
+
+func TestNodeAuthorityMuxRoutesAuthenticatedWriterBatches(t *testing.T) {
+	store := &batchRouteStore{}
+	verifier := batchRouteVerifier{}
+	writer, err := rootfswriterauthority.NewHandler(rootfswriterauthority.HandlerConfig{Store: store, Verifier: verifier, LeaseTTL: 30 * time.Second})
+	require.NoError(t, err)
+	lifecycle, err := rootfswriterauthority.NewLifecycleHandler(verifier, store, writer)
+	require.NoError(t, err)
+	mux := newNodeAuthorityMux(lifecycle, http.NotFoundHandler(), http.NotFoundHandler(), http.NotFoundHandler())
+	payload, err := json.Marshal(writerprotocol.BatchRenewRequest{Items: []writerprotocol.BatchRenewItem{
+		{GrantID: "grant-1", RenewRequest: writerprotocol.RenewRequest{WriterEpoch: 1, BindingVersion: 1, BindingDigest: strings.Repeat("ab", 32)}},
+		{GrantID: "grant-2", RenewRequest: writerprotocol.RenewRequest{WriterEpoch: 2, BindingVersion: 1, BindingDigest: strings.Repeat("cd", 32)}},
+	}})
+	require.NoError(t, err)
+	for _, authenticated := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodPut, writerprotocol.BatchRenewPath, bytes.NewReader(payload))
+		if authenticated {
+			request.Header.Set("Authorization", "Bearer node-token")
+		}
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if !authenticated {
+			require.Equal(t, http.StatusUnauthorized, response.Code, "batch route must retain node authentication")
+			require.Empty(t, store.requests)
+			continue
+		}
+		require.Equal(t, http.StatusOK, response.Code)
+		var result writerprotocol.BatchRenewResponse
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+		require.NoError(t, result.Validate(2))
+		require.Len(t, store.requests, 2)
+		require.Equal(t, "node-uid", store.requests[0].ConsumerNodeUID)
+	}
+}
 
 type fakeStore struct {
 	Store

@@ -39,6 +39,30 @@ func TestWindowCursorCandidatesClickHouseIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	assertStatus := func(sequence int64, recordedAt time.Time, id string) {
+		t.Helper()
+		want := ""
+		if id != "" {
+			var encodeErr error
+			want, encodeErr = encodeCursor(recordedAt, "producer", id)
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+		}
+		status, statusErr := repo.GetStatus(ctx, "region")
+		if statusErr != nil || status.LatestWindowSequence != sequence || status.LatestWindowCursor != want ||
+			status.LatestEventSequence != 0 || status.LatestEventCursor != "" {
+			t.Fatalf("canonical status = %+v, %v; want sequence %d and cursor %q", status, statusErr, sequence, want)
+		}
+	}
+	assertStatus(0, time.Time{}, "")
+	latestWindowCursor := func() (string, error) {
+		status, statusErr := repo.readLedgerStatus(ctx, table, "window_id")
+		if statusErr != nil {
+			return "", statusErr
+		}
+		return status.cursor, nil
+	}
 	appendWindow := func(id, team, kind string, offset, sequence int64) {
 		t.Helper()
 		if err := repo.AppendWindow(ctx, &metering.Window{
@@ -54,6 +78,7 @@ func TestWindowCursorCandidatesClickHouseIntegration(t *testing.T) {
 	appendWindow("changed-team", "team-b", "storage", 11, 2)
 	appendWindow("changed-type", "team-a", "compute", 12, 3)
 	appendWindow("changed-type", "team-a", "storage", 13, 4)
+	assertStatus(4, base.Add(13), "changed-type")
 	appendWindow("stale-replay", "team-a", "compute", 14, 5)
 	appendWindow("stale-replay", "team-b", "storage", 2, 99)
 	appendWindow("duplicate", "team-a", "compute", 15, 7)
@@ -90,7 +115,7 @@ func TestWindowCursorCandidatesClickHouseIntegration(t *testing.T) {
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("paged canonical IDs = %v, want %v", ids, want)
 	}
-	latest, err := repo.latestWindowCursor(ctx)
+	latest, err := latestWindowCursor()
 	if err != nil || latest != cursor {
 		t.Fatalf("latest cursor = %q, %v, want last canonical page %q", latest, err, cursor)
 	}
@@ -98,6 +123,7 @@ func TestWindowCursorCandidatesClickHouseIntegration(t *testing.T) {
 	if err != nil || status.LatestWindowSequence != 10 {
 		t.Fatalf("canonical status = %+v, %v", status, err)
 	}
+	assertStatus(10, base.Add(15), "same-timestamp-b")
 	// Before the Unix epoch, versionFrom clamps both revisions to zero. The
 	// candidate filtering must retain FINAL's last-inserted winner.
 	if _, err := db.ExecContext(ctx, "TRUNCATE TABLE "+table); err != nil {
@@ -106,7 +132,8 @@ func TestWindowCursorCandidatesClickHouseIntegration(t *testing.T) {
 	base = time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC)
 	appendWindow("legacy", "team-a", "compute", 20, 1)
 	appendWindow("legacy", "team-a", "compute", 10, 2)
-	latest, err = repo.latestWindowCursor(ctx)
+	assertStatus(2, base.Add(10), "legacy")
+	latest, err = latestWindowCursor()
 	wantLegacy, encodeErr := encodeCursor(base.Add(10), "producer", "legacy")
 	if err != nil || encodeErr != nil || latest != wantLegacy {
 		t.Fatalf("legacy latest cursor = %q, %v, want %q", latest, err, wantLegacy)

@@ -48,6 +48,7 @@ type udpSession struct {
 }
 
 type udpReplyConn interface {
+	Read([]byte) (int, error)
 	Write([]byte) (int, error)
 	Close() error
 }
@@ -108,6 +109,12 @@ func (s *Server) ensureUDPSession(req *adapterRequest) (*udpSession, error) {
 		s.udpSessions = make(map[udpSessionKey]*udpSession)
 	}
 	session := s.udpSessions[key]
+	// A datagram accepted by an established transparent socket belongs only to
+	// that session. An idle close or policy change cannot transfer it to a new one.
+	if req.UDPSession != nil && (session != req.UDPSession || session.isClosed()) {
+		s.udpSessionMu.Unlock()
+		return nil, errFlowRetired
+	}
 	if session == nil || session.isClosed() {
 		if len(s.udpSessions) >= 65536 {
 			s.udpSessionMu.Unlock()
@@ -387,7 +394,38 @@ func (session *udpSession) ensureDownstream() (udpReplyConn, error) {
 		return nil, err
 	}
 	session.downstream = downstream
+	go session.readClientLoop(downstream)
 	return downstream, nil
+}
+
+// TPROXY prefers an established transparent UDP socket over its listener. Once
+// the first reply creates this connected socket, subsequent guest datagrams
+// arrive here. Classify every datagram against the original policy binding;
+// consulting the latest policy would reattribute queued packets after IP reuse.
+func (session *udpSession) readClientLoop(conn udpReplyConn) {
+	buffer := make([]byte, 64*1024)
+	for {
+		n, err := conn.Read(buffer)
+		if err != nil {
+			session.closeWithError(err)
+			return
+		}
+		session.mu.Lock()
+		if session.closed {
+			session.mu.Unlock()
+			return
+		}
+		req := &adapterRequest{
+			Server: session.server, Compiled: session.compiled, UDPSession: session,
+			SrcIP: session.key.SrcIP, UDPSource: cloneUDPAddr(session.clientAddr),
+			DestIP: cloneIP(session.destIP), DestPort: session.destPort,
+			UDPConn: session.clientConn, UDPPayload: buffer[:n],
+		}
+		session.mu.Unlock()
+		// Process synchronously: one receive buffer and no packet goroutine queue
+		// per bounded session. Socket closure cancels blocked reads and writes.
+		session.server.classifyUDPDatagram(req)
+	}
 }
 
 func (session *udpSession) auditSnapshot() (*policy.CompiledPolicy, *flowAudit) {

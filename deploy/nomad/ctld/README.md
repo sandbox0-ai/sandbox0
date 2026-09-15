@@ -145,9 +145,14 @@ SANDBOX0_NETWORK_NAMESPACE_INTEGRATION=1 \
     go test -race ./ctld/internal/ctld/networking/...
 ```
 
-The UDP test creates private network and mount namespaces and checks local
+The UDP tests create private network and mount namespaces and check local
 and routed destinations, tracked and untracked datagrams, and preservation
-of the original destination. It never changes production bridge sysctls.
+of the original destination. The full proxy test also sends repeated datagrams
+through an established transparent reply socket and verifies policy revocation
+and restoration on the same client socket. Established-socket reads pass through
+the same protocol classification and exact policy binding as listener reads;
+queued packets cannot enter a replacement session after retirement. These tests
+never change production bridge sysctls.
 
 For an existing node, replace the binaries and run `rollout-node.sh`. It
 starts any missing instance left by an interrupted installation, then

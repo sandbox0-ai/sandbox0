@@ -380,7 +380,7 @@ func (a *udpAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("udp adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "udp")
-	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.forwardUDPDatagram(req)
 }
 
 type tcpPassThroughAdapter struct{}
@@ -414,5 +414,5 @@ func (a *udpPassThroughAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("udp fallback adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "unknown")
-	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.forwardUDPDatagram(req)
 }

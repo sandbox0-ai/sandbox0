@@ -323,7 +323,7 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 func TestUDPSessionReplyUsesOriginalDestination(t *testing.T) {
 	var gotLocal *net.UDPAddr
 	var gotRemote *net.UDPAddr
-	reply := &recordingUDPReplyConn{}
+	reply := &recordingUDPReplyConn{done: make(chan struct{})}
 	server := &Server{
 		logger: zap.NewNop(),
 		udpReplyDialer: func(local *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error) {
@@ -376,6 +376,12 @@ func dialUDPEphemeralForTest(_ *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn,
 type recordingUDPReplyConn struct {
 	payload []byte
 	closed  bool
+	done    chan struct{}
+}
+
+func (c *recordingUDPReplyConn) Read([]byte) (int, error) {
+	<-c.done
+	return 0, net.ErrClosed
 }
 
 func (c *recordingUDPReplyConn) Write(payload []byte) (int, error) {
@@ -385,6 +391,7 @@ func (c *recordingUDPReplyConn) Write(payload []byte) (int, error) {
 
 func (c *recordingUDPReplyConn) Close() error {
 	c.closed = true
+	close(c.done)
 	return nil
 }
 

@@ -21,6 +21,11 @@ type pendingUDPReply struct {
 	err     error
 }
 
+func (c *pendingUDPReply) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
 func (c *pendingUDPReply) Write(payload []byte) (int, error) {
 	close(c.entered)
 	<-c.release

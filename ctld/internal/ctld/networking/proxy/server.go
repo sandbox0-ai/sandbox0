@@ -428,14 +428,24 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 		return
 	}
 	srcIP := src.IP.String()
-	p := s.store.GetByIP(srcIP)
+	s.classifyUDPDatagram(&adapterRequest{
+		Server: s, Compiled: s.store.GetByIP(srcIP), SrcIP: srcIP,
+		DestIP: destIP, DestPort: destPort, UDPConn: conn, UDPSource: src, UDPPayload: payload,
+	})
+}
+
+func (s *Server) classifyUDPDatagram(req *adapterRequest) {
+	p := req.Compiled
+	if s.closing.Load() || (s.store != nil && !s.store.IsCurrentBinding(req.SrcIP, p)) {
+		return
+	}
 	ctx := &udpClassifyContext{
 		Compiled:    p,
-		SrcIP:       srcIP,
-		SrcAddr:     src,
-		DestIP:      destIP,
-		DestPort:    destPort,
-		Payload:     payload,
+		SrcIP:       req.SrcIP,
+		SrcAddr:     req.UDPSource,
+		DestIP:      req.DestIP,
+		DestPort:    req.DestPort,
+		Payload:     req.UDPPayload,
 		Reassembler: s.reassembler,
 	}
 	result, err := classifyUDP(s.udpClassifiers, ctx)
@@ -443,17 +453,7 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 		s.logger.Warn("Failed to classify UDP traffic", zap.Error(err))
 		return
 	}
-	req := &adapterRequest{
-		Server:     s,
-		Compiled:   p,
-		SrcIP:      srcIP,
-		DestIP:     destIP,
-		DestPort:   destPort,
-		Host:       result.Host,
-		UDPConn:    conn,
-		UDPSource:  src,
-		UDPPayload: payload,
-	}
+	req.Host = result.Host
 	if result.Apply != nil {
 		result.Apply(req)
 	}
@@ -1094,40 +1094,21 @@ func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error
 			return fmt.Errorf("udp pass-through requires source datagram")
 		}
 		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "unknown")
-		return s.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.forwardUDPDatagram(req)
 	default:
 		return fmt.Errorf("unsupported pass-through transport %q", adapter.Transport())
 	}
 }
 
-func (s *Server) forwardUDPDatagram(
-	conn *net.UDPConn,
-	src *net.UDPAddr,
-	payload []byte,
-	destIP net.IP,
-	destPort int,
-	compiled *policy.CompiledPolicy,
-	audit *flowAudit,
-) error {
-	if conn == nil || src == nil || destIP == nil || destPort <= 0 {
+func (s *Server) forwardUDPDatagram(req *adapterRequest) error {
+	if req == nil || req.UDPConn == nil || req.UDPSource == nil || req.DestIP == nil || req.DestPort <= 0 {
 		return fmt.Errorf("missing destination")
-	}
-	req := &adapterRequest{
-		Server:     s,
-		Compiled:   compiled,
-		Audit:      audit,
-		SrcIP:      src.IP.String(),
-		DestIP:     destIP,
-		DestPort:   destPort,
-		UDPConn:    conn,
-		UDPSource:  src,
-		UDPPayload: payload,
 	}
 	session, err := s.ensureUDPSession(req)
 	if err != nil {
 		return err
 	}
-	return session.Forward(payload)
+	return session.Forward(req.UDPPayload)
 }
 
 func normalizeHost(host string) string {

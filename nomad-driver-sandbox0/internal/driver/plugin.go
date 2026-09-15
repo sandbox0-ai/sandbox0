@@ -128,7 +128,8 @@ var (
 		MustInitiateNetwork: false,
 		// Carrier tasks never write Nomad's stdout/stderr FIFOs. Guest output
 		// flows through procd; runtime failures use the existing driver logger.
-		// Avoid a separate, idle logmon process for every resident carrier.
+		// The warm job also sets logs.disabled because Nomad 1.11's external
+		// driver RPC omits this capability from its serialized response.
 		DisableLogCollection: true,
 	}
 )

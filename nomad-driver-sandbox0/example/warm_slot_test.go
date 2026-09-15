@@ -46,6 +46,9 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 					require.Len(t, group.Tasks, 1)
 					task := group.Tasks[0]
 					require.Equal(t, "sandbox0-gvisor", task.Driver)
+					require.NotNil(t, task.LogConfig)
+					require.NotNil(t, task.LogConfig.Disabled)
+					require.True(t, *task.LogConfig.Disabled, "external drivers require task-level disabling to avoid one idle logmon per carrier")
 					require.Equal(t, "/procd", task.Config["command"])
 					require.Equal(t, 50, *task.Resources.CPU)
 					require.Equal(t, 64, *task.Resources.MemoryMB)

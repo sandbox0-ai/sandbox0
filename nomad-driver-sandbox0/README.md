@@ -28,12 +28,17 @@ Nomad allocation resources reserve only carrier/driver overhead. They are
 never sandbox limits or metering truth. CPU quota/weight/cpuset, memory, and
 PIDs come only from the claim's PostgreSQL resource lease.
 
-The driver advertises `DisableLogCollection`: carriers do not connect their
-stdout/stderr to Nomad FIFOs, so Nomad must not launch a per-carrier `logmon`.
+The driver advertises `DisableLogCollection`, and every carrier task must set
+`logs { disabled = true }`. Nomad 1.11's external-driver RPC omits that capability
+from its response, so the driver setting alone still starts an idle `logmon`
+process for each carrier. Carriers do not connect stdout/stderr to Nomad FIFOs.
 Guest command output continues through procd's API, and runtime diagnostics
 continue through the driver/ctld logs. `nomad alloc logs` is not a guest-output
 API. Apply this change through normal carrier replacement when upgrading a node;
 changing capabilities does not retroactively reclaim existing logmon processes.
+After replacement, verify the deployed task's `LogConfig.Disabled` and the
+absence of carrier logmon processes on the node; a local capabilities test does
+not verify the RPC or the deployed job.
 
 ### Light-load admission
 

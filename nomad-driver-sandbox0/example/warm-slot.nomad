@@ -93,6 +93,12 @@ job "sandbox0-warm-slots" {
       task "slot" {
         driver = "sandbox0-gvisor"
 
+        # Nomad's external-driver RPC does not forward DisableLogCollection.
+        # Carriers never use these FIFOs; guest output is served by procd.
+        logs {
+          disabled = true
+        }
+
         config {
           command        = "/procd"
           args           = []

@@ -177,7 +177,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	config := write("ctld.yaml", "nomad_runtime:\n  enabled: true\n", 0o600)
 	network := write("network.yaml", "node_name: node-1\n", 0o600)
 	nomadConfig := write("nomad.hcl", "plugin \"sandbox0-gvisor\" {}\n", 0o600)
-	environment := write("ctld.env", "SANDBOX0_NODE_NAME=node-1\n", 0o600)
+	environment := write("ctld.env", "SANDBOX0_NODE_NAME=node-1\nSANDBOX0_ROOTFS_NBD_DEVICES=/dev/nbd0,/dev/nbd511\n", 0o600)
 	staleDrivers := []string{
 		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0"),
 		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0-gvisor"),
@@ -198,6 +198,10 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("staged install: %v\n%s", err, output)
 	}
+	moduleConfig, err := os.ReadFile(filepath.Join(root, "etc/modprobe.d/sandbox0-nbd.conf"))
+	if err != nil || string(moduleConfig) != "options nbd nbds_max=512 max_part=0\n" {
+		t.Fatalf("NBD provisioning must cover the configured highest device: %q, %v", moduleConfig, err)
+	}
 	for _, path := range []string{
 		"usr/local/bin/ctld",
 		"usr/local/bin/runsc",
@@ -205,6 +209,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 		"etc/nomad.d/30-sandbox0-gvisor.hcl",
 		"usr/local/libexec/sandbox0/ctld-host-check",
 		"usr/local/libexec/sandbox0/ctld-resource-cgroup-setup",
+		"usr/local/libexec/sandbox0/ctld-resource-cgroup-budget",
 		"usr/local/libexec/sandbox0/ctld-rollout-node",
 		"etc/systemd/system/sandbox0-ctld@.service",
 		"etc/systemd/system/nomad.service.d/20-sandbox0-ctld.conf",
@@ -240,6 +245,14 @@ func TestShellAssetsParse(t *testing.T) {
 	}
 }
 
+func TestPhysicalBudgetHostGuards(t *testing.T) {
+	command := exec.Command("python3", "resource_cgroup_budget_test.py")
+	command.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("physical cgroup budget guards: %v\n%s", err, output)
+	}
+}
+
 func TestRolloutWaitsForBothRolesAfterEveryRestart(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
@@ -259,9 +272,18 @@ func TestRolloutWaitsForBothRolesAfterEveryRestart(t *testing.T) {
 	}
 	writeExecutable("id", `echo 0
 `)
-	writeExecutable("sleep", `exit 0
+	writeExecutable("sleep", `
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@a.service" ]
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@b.service" ]
 `)
 	writeExecutable("systemctl", `
+if [ "$1" = start ]; then
+  shift
+  for unit do
+    : >"$ROLLOUT_STATE.$unit"
+  done
+  exit 0
+fi
 echo "restart:$2" >>"$ROLLOUT_LOG"
 case "$2" in
   sandbox0-ctld@b.service) echo b >"$ROLLOUT_STATE" ;;
@@ -278,6 +300,9 @@ for argument do
 done
 state=$(cat "$ROLLOUT_STATE")
 echo "probe:$state:$slot" >>"$ROLLOUT_LOG"
+# A missing peer cannot report synchronized readiness. Fail immediately in
+# this fixture so a broken rollout cannot wait out the production timeout.
+[ -f "$ROLLOUT_STATE.sandbox0-ctld@$slot.service" ] || exit 2
 if [ "$state:$slot" = a:b ] && [ ! -f "$ROLLOUT_RETRY" ]; then
   : >"$ROLLOUT_RETRY"
   exit 1

@@ -81,13 +81,15 @@ func (r RuntimeSlotRegistration) Validate() error {
 }
 
 type runtimeSlotJournalRecord struct {
-	Version      int                                 `json:"version"`
-	Registration RuntimeSlotRegistration             `json:"registration"`
-	Cleanup      *protocol.NodeCleanupControlRequest `json:"cleanup,omitempty"`
-	Proof        *protocol.NodeCleanupControlProof   `json:"proof,omitempty"`
-	CreatedAt    string                              `json:"created_at"`
-	UpdatedAt    string                              `json:"updated_at"`
-	CompletedAt  string                              `json:"completed_at,omitempty"`
+	Version                       int                                 `json:"version"`
+	Registration                  RuntimeSlotRegistration             `json:"registration"`
+	Cleanup                       *protocol.NodeCleanupControlRequest `json:"cleanup,omitempty"`
+	Proof                         *protocol.NodeCleanupControlProof   `json:"proof,omitempty"`
+	CreatedAt                     string                              `json:"created_at"`
+	UpdatedAt                     string                              `json:"updated_at"`
+	CompletedAt                   string                              `json:"completed_at,omitempty"`
+	RegionalRegistrationObserved  bool                                `json:"regional_registration_observed,omitempty"`
+	RegistrationAbortAcknowledged bool                                `json:"registration_abort_acknowledged,omitempty"`
 }
 
 type runtimeSlotJournal struct {
@@ -186,6 +188,9 @@ func (j *runtimeSlotJournal) Register(registration RuntimeSlotRegistration) erro
 		if err == nil {
 			if stored.Registration != registration {
 				return fmt.Errorf("runtime slot journal registration changed: %w", errdefs.ErrAlreadyExists)
+			}
+			if stored.Cleanup != nil {
+				return fmt.Errorf("runtime slot registration has a durable cleanup fence: %w", errdefs.ErrFailedPrecondition)
 			}
 			return nil
 		}
@@ -315,6 +320,9 @@ func (j *runtimeSlotJournal) Prune(now time.Time) (int, error) {
 			if record.Proof == nil || record.CompletedAt == "" {
 				return nil
 			}
+			if isRegistrationAbort(record) && !record.RegistrationAbortAcknowledged {
+				return nil
+			}
 			completedAt, err := time.Parse(time.RFC3339Nano, record.CompletedAt)
 			if err != nil {
 				return fmt.Errorf("parse runtime slot completion %q: %w", key, err)
@@ -384,6 +392,10 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 		if _, err := time.Parse(time.RFC3339Nano, record.CompletedAt); err != nil {
 			return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot journal completion time is invalid: %w", errdefs.ErrFailedPrecondition)
 		}
+	}
+	if (record.RegistrationAbortAcknowledged && (!isRegistrationAbort(record) || record.Proof == nil)) ||
+		(record.RegionalRegistrationObserved && isRegistrationAbort(record)) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot registration acknowledgement is invalid: %w", errdefs.ErrFailedPrecondition)
 	}
 	return record, nil
 }

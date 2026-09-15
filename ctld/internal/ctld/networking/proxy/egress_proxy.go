@@ -17,12 +17,16 @@ var errEgressProxyEndpointProtected = errors.New("egress proxy endpoint resolves
 
 var allowLocalEgressProxyEndpointsForTest bool
 
-type timeoutDialer struct {
-	timeout time.Duration
-}
-
-func (d timeoutDialer) Dial(network, address string) (net.Conn, error) {
-	return net.DialTimeout(network, address, d.timeout)
+func (s *Server) dialDirectTCPForRequest(req *adapterRequest) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: s.upstreamTimeout()}
+	conn, err := dialer.DialContext(req.flowContext(), "tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)))
+	if err != nil {
+		return nil, err
+	}
+	if err := req.Flow.retain(conn); err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (s *Server) dialTCPUpstreamForRequest(req *adapterRequest) (net.Conn, error) {
@@ -34,7 +38,7 @@ func (s *Server) dialTCPUpstreamForRequest(req *adapterRequest) (net.Conn, error
 	}
 	egressProxy := compiledEgressProxy(req.Compiled)
 	if egressProxy == nil {
-		return s.dialTCPUpstream(req.DestIP, req.DestPort)
+		return s.dialDirectTCPForRequest(req)
 	}
 	return s.dialViaSOCKS5EgressProxy(req, egressProxy)
 }
@@ -53,18 +57,18 @@ func (s *Server) dialViaSOCKS5EgressProxy(req *adapterRequest, cfg *policy.Compi
 	if cfg == nil {
 		return nil, fmt.Errorf("egress proxy config is nil")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.upstreamTimeout())
+	ctx, cancel := context.WithTimeout(req.flowContext(), s.upstreamTimeout())
 	defer cancel()
 
 	proxyAddress, err := resolveSOCKS5ProxyDialAddress(ctx, req.Compiled, cfg)
 	if err != nil {
 		return nil, err
 	}
-	auth, err := s.resolveSOCKS5ProxyAuth(context.Background(), req, cfg)
+	auth, err := s.resolveSOCKS5ProxyAuth(ctx, req, cfg)
 	if err != nil {
 		return nil, err
 	}
-	dialer, err := xproxy.SOCKS5("tcp", proxyAddress, auth, timeoutDialer{timeout: s.upstreamTimeout()})
+	dialer, err := xproxy.SOCKS5("tcp", proxyAddress, auth, &net.Dialer{Timeout: s.upstreamTimeout()})
 	if err != nil {
 		return nil, fmt.Errorf("create socks5 egress proxy dialer: %w", err)
 	}
@@ -73,9 +77,16 @@ func (s *Server) dialViaSOCKS5EgressProxy(req *adapterRequest, cfg *policy.Compi
 		targetHost = req.DestIP.String()
 	}
 	target := net.JoinHostPort(targetHost, fmt.Sprintf("%d", req.DestPort))
-	conn, err := dialer.Dial("tcp", target)
+	contextDialer, ok := dialer.(xproxy.ContextDialer)
+	if !ok {
+		return nil, errors.New("socks5 dialer does not support cancellation")
+	}
+	conn, err := contextDialer.DialContext(ctx, "tcp", target)
 	if err != nil {
 		return nil, fmt.Errorf("dial socks5 egress proxy target %s via %s: %w", target, proxyAddress, err)
+	}
+	if err := req.Flow.retain(conn); err != nil {
+		return nil, err
 	}
 	return conn, nil
 }
@@ -188,7 +199,7 @@ func resolveProxyEndpointIPs(ctx context.Context, host string) ([]net.IP, error)
 }
 
 func isProtectedProxyEndpointIP(compiled *policy.CompiledPolicy, ip net.IP) bool {
-	if ip == nil {
+	if ip == nil || policy.IsCloudMetadataIP(ip) {
 		return true
 	}
 	if !allowLocalEgressProxyEndpointsForTest && (ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()) {

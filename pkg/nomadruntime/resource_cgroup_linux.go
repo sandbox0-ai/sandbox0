@@ -19,6 +19,9 @@ import (
 type cgroupV2RuntimeResources struct {
 	root     string
 	ownerUID uint32
+	// Nonzero only for explicit memory overcommit; existing exact-limit
+	// admission keeps its original behavior.
+	admissionMemoryBudget int64
 }
 
 func newRuntimeResourceCgroup(
@@ -68,7 +71,12 @@ func newRuntimeResourceCgroupForOwner(
 	if err := validateRuntimeResourceCgroupCapacity(root, capacity); err != nil {
 		return nil, err
 	}
-	return &cgroupV2RuntimeResources{root: root, ownerUID: ownerUID}, nil
+	controller := &cgroupV2RuntimeResources{root: root, ownerUID: ownerUID}
+	_, admissionMemory := capacity.AdmissionLimits()
+	if admissionMemory > capacity.MemoryBytes {
+		controller.admissionMemoryBudget = capacity.MemoryBytes
+	}
+	return controller, nil
 }
 
 func (c *cgroupV2RuntimeResources) Prepare(
@@ -87,6 +95,15 @@ func (c *cgroupV2RuntimeResources) Prepare(
 	path, err := c.path(lease)
 	if err != nil {
 		return err
+	}
+	if c.admissionMemoryBudget > 0 {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			if err := c.checkMemoryAdmission(lease.MemoryBytes); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
 	}
 	created := false
 	if err := os.Mkdir(path, 0o750); err != nil {
@@ -130,6 +147,24 @@ func (c *cgroupV2RuntimeResources) Prepare(
 		if err != nil || actual != item.value {
 			return rollbackRuntimeResourceCgroup(path, created, fmt.Errorf("verify runtime cgroup %s: got %q: %w", item.file, actual, errdefs.ErrFailedPrecondition))
 		}
+	}
+	return nil
+}
+
+// checkMemoryAdmission sheds new claims before physical memory is exhausted.
+// It never rejects an exact retry of an existing cgroup. The aggregate hard
+// limit remains the final boundary when concurrent guests grow after this read.
+func (c *cgroupV2RuntimeResources) checkMemoryAdmission(requested int64) error {
+	value, err := readCgroupValue(filepath.Join(c.root, "memory.current"))
+	if err != nil {
+		return fmt.Errorf("read node memory pressure: %w", err)
+	}
+	current, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || current < 0 {
+		return fmt.Errorf("invalid node memory usage: %w", errdefs.ErrUnavailable)
+	}
+	if current >= c.admissionMemoryBudget-c.admissionMemoryBudget/10 || requested > c.admissionMemoryBudget-current {
+		return fmt.Errorf("node memory pressure prevents a new overcommitted claim: %w", errdefs.ErrUnavailable)
 	}
 	return nil
 }
@@ -245,14 +280,28 @@ func validateRuntimeResourceCgroupCapacity(root string, capacity protocol.NodeCh
 				name, configured, effective, errdefs.ErrFailedPrecondition)
 		}
 	}
-	for name, want := range map[string]string{
-		"cpu.max": "max 100000", "memory.max": "max", "memory.swap.max": "max", "pids.max": "max",
-	} {
+	limits := map[string]string{
+		"cpu.max":         strconv.FormatInt(capacity.CPUMillicores*100, 10) + " 100000",
+		"memory.max":      strconv.FormatInt(capacity.MemoryBytes, 10),
+		"memory.swap.max": "0", "pids.max": "max",
+	}
+	admissionCPU, admissionMemory := capacity.AdmissionLimits()
+	overcommit := admissionCPU > capacity.CPUMillicores || admissionMemory > capacity.MemoryBytes
+	// A physical parent bound remains valid after aggregate admission is reduced.
+	// Legacy unbounded roots are allowed only when PostgreSQL admission cannot
+	// exceed physical capacity; overcommit always requires the exact host bounds.
+	legacyLimits := map[string]string{
+		"cpu.max": "max 100000", "memory.max": "max", "memory.swap.max": "max",
+	}
+	for name, want := range limits {
 		actual, err := readCgroupValue(filepath.Join(root, name))
 		if err != nil {
 			return fmt.Errorf("read runtime cgroup %s: %w", name, err)
 		}
 		if actual != want {
+			if legacy, ok := legacyLimits[name]; !overcommit && ok && actual == legacy {
+				continue
+			}
 			return fmt.Errorf("runtime resource root %s must be %q, got %q: %w",
 				name, want, actual, errdefs.ErrFailedPrecondition)
 		}

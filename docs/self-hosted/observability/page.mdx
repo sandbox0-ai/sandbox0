@@ -84,6 +84,13 @@ Monitor the complete capacity conjunction rather than carrier count alone:
 
 ### ctld A/B
 
+An unchanged carrier allocation set does not prove that guests survived a
+primary restart. The current primary owns the NBD server; its exit disconnects
+live RootFS devices and shuts down their mounted XFS filesystems. Planned
+updates require regional claim fencing and durable pause/drain before B/A
+replacement. Verify resumed sandboxes with actual user commands. After an
+unplanned loss, recovery uses the last committed RootFS generation.
+
 Group HA alerts by node:
 
 - `ctld_ha_primary`: alert when `sum by (node) (ctld_ha_primary) != 1` persists;
@@ -119,6 +126,14 @@ sandboxes' cleanup. Periodic recovery checks regional terminal authority without
 waiting for the old consumer lease or attach grace; artifact deletion still
 requires exact regional authorization and local physical-absence proof. Normal
 unfenced consumers remain protected by their durable leases.
+
+Node recovery and regional slot cleanup use the same crash operation for each
+writer incarnation. If node cleanup takes over an unfinished local crash, it
+finishes that operation before returning physical cleanup proof. The manager
+preserves any RootFS retirement proof already committed by the node and still
+requires allocation, network, mount, and resource-cgroup absence before releasing
+the lease. Repeated ownership conflicts are a recovery failure, not evidence that
+more node capacity is needed.
 
 Monitor carrier replacement separately from guest exit and physical cleanup.
 Nomad can report a system-job stop evaluation complete with zero queued
@@ -271,6 +286,14 @@ second usage truth or cause producers to invent independent counters.
 
 Alert on outbox depth, oldest pending age, producer watermark gaps, duplicate
 or rejected operations, and ClickHouse insert latency/errors.
+
+Usage-window paging first selects a bounded set of candidate primary keys.
+`ReplacingMergeTree FINAL` reads all versions of those keys before applying
+team, type, and cursor filters. Oversized candidate sets use the original
+canonical scan. A concurrent replacement fails the page if its canonical
+version was absent from the candidate snapshot; retries cannot silently
+advance the cursor past an unseen version. This supports historical version
+formats as well as current projections.
 
 ## Signed Audit
 

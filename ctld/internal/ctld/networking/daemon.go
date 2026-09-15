@@ -636,6 +636,11 @@ func (d *Daemon) syncRedirect(
 	}
 
 	stageStarted := time.Now()
+	if forceRedirectSync {
+		if err := runtimeSlots.RevalidateNamespaces(); err != nil {
+			return fmt.Errorf("revalidate runtime-slot network namespaces: %w", err)
+		}
+	}
 	sandboxes, revision, err := runtimeSlots.Snapshot()
 	if err != nil {
 		return fmt.Errorf("snapshot runtime-slot network policies: %w", err)
@@ -665,6 +670,9 @@ func (d *Daemon) syncRedirect(
 
 	stageStarted = time.Now()
 	result := policyStore.ReconcileSandboxes(sandboxes)
+	if proxyServer != nil {
+		proxyServer.ReconcileActiveFlows()
+	}
 	for _, sourceIP := range result.RemovedIPs {
 		if proxyServer != nil {
 			proxyServer.ForgetSandboxDNS(sourceIP)
@@ -760,14 +768,8 @@ func cleanupDeniedTrackedFlows(
 	if tracker == nil || policyStore == nil || sourceIP == "" {
 		return 0
 	}
-	flows := tracker.PopBySrc(sourceIP)
 	p := policyStore.GetByIP(sourceIP)
-	var flowsToKill []conntrack.FlowKey
-	// Only kill flows that are denied by the new policy.
-	// This prevents a race condition where a new connection established
-	// immediately after the policy update but before this handler runs
-	// would be killed if we blindly cleared all flows.
-	for _, flow := range flows {
+	flowsToKill := tracker.PopBySrcMatching(sourceIP, func(flow conntrack.FlowKey) bool {
 		proto := "tcp"
 		if flow.Proto == 17 {
 			proto = "udp"
@@ -776,10 +778,8 @@ func cleanupDeniedTrackedFlows(
 		if flow.Host != "" || flow.App != "" {
 			allowed = policy.AllowEgressDestination(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto, flow.Host, flow.App)
 		}
-		if !allowed {
-			flowsToKill = append(flowsToKill, flow)
-		}
-	}
+		return !allowed
+	})
 	if len(flowsToKill) > 0 && conntrackManager != nil {
 		conntrackManager.CleanupFlows(ctx, flowsToKill)
 	}

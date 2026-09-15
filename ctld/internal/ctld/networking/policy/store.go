@@ -138,6 +138,10 @@ func applySandboxOwner(compiled *CompiledPolicy, info *model.SandboxInfo) {
 		return
 	}
 	compiled.OwnerKind = info.OwnerKind
+	compiled.RuntimeBinding = RuntimeBinding{
+		Key: info.Key(), IncarnationID: info.IncarnationID,
+		Revision: info.Revision, PolicyHash: info.NetworkPolicyHash,
+	}
 }
 
 func (s *Store) DeleteByKey(namespace, name string) {
@@ -171,6 +175,22 @@ func (s *Store) GetByIP(sourceIP string) *CompiledPolicy {
 	clone.Egress = cloneRuleSet(entry.compiled.Egress)
 	clone.Platform = clonePlatformPolicy(s.getPlatformPolicy(), sourceIP)
 	return &clone
+}
+
+// IsCurrentBinding checks the source IP and exact policy incarnation without
+// cloning policy rules. Callers use it to fence already accepted proxy sockets.
+func (s *Store) IsCurrentBinding(sourceIP string, compiled *CompiledPolicy) bool {
+	if s == nil || compiled == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry := s.byIP[sourceIP]
+	return entry != nil && entry.compiled != nil &&
+		entry.compiled.RuntimeBinding == compiled.RuntimeBinding &&
+		entry.compiled.SandboxID == compiled.SandboxID &&
+		entry.compiled.TeamID == compiled.TeamID &&
+		entry.compiled.OwnerKind == compiled.OwnerKind
 }
 
 func (s *Store) SetPlatformPolicy(policy *PlatformPolicy) {

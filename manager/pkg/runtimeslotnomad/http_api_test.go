@@ -64,11 +64,13 @@ func TestHTTPAPICallsServerAndExactClientOverMTLS(t *testing.T) {
 	defer server.Close()
 	api, err := NewHTTPAPI(resolver)
 	require.NoError(t, err)
-	target := testTarget()
+	target := httpTestTarget()
 
 	allocation, err := api.ServerAllocation(t.Context(), target)
 	require.NoError(t, err)
-	require.Equal(t, testAllocation(), allocation)
+	expected := testAllocation()
+	expected.ID = testHTTPAllocationID
+	require.Equal(t, expected, allocation)
 	present, err := api.ClientAllocationPresent(t.Context(), target)
 	require.NoError(t, err)
 	require.True(t, present)
@@ -85,6 +87,30 @@ func TestHTTPAPICallsServerAndExactClientOverMTLS(t *testing.T) {
 	require.NoError(t, api.StopAllocation(t.Context(), target, "purge-operation"))
 }
 
+func TestHTTPAPIClientObservationBoundsUnresponsiveNode(t *testing.T) {
+	state := &nomadTestServerState{token: "token"}
+	server, resolver, _ := newNomadMTLSTestServer(t, state)
+	defer server.Close()
+	server.Config.Handler = http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	})
+	resolver.client.Timeout = time.Minute
+	api, err := NewHTTPAPI(resolver)
+	require.NoError(t, err)
+
+	started := time.Now()
+	_, err = api.ClientAllocationPresent(t.Context(), httpTestTarget())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 10*time.Second, "a longer mutation timeout must not delay node observations")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started = time.Now()
+	_, err = api.ClientAllocationPresent(ctx, httpTestTarget())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), time.Second, "the pass deadline must remain authoritative")
+}
+
 func TestHTTPAPIControllerConvergesStopClientGCAndAbsence(t *testing.T) {
 	state := &nomadTestServerState{
 		token: "token", desiredStatus: "run", serverPresent: true, clientPresent: true,
@@ -96,15 +122,15 @@ func TestHTTPAPIControllerConvergesStopClientGCAndAbsence(t *testing.T) {
 	controller, err := New(api)
 	require.NoError(t, err)
 
-	before, err := controller.Observe(t.Context(), testTarget())
+	before, err := controller.Observe(t.Context(), httpTestTarget())
 	require.NoError(t, err)
 	require.True(t, before.PhysicalPresent)
 	request := runtimeslotreconciler.AllocationPurgeRequest{
-		OperationID: "purge-operation", Target: testTarget(),
+		OperationID: "purge-operation", Target: httpTestTarget(),
 	}
 	require.ErrorIs(t, controller.Purge(t.Context(), request), runtimeslotreconciler.ErrAllocationStillPresent)
 	require.NoError(t, controller.Purge(t.Context(), request))
-	after, err := controller.Observe(t.Context(), testTarget())
+	after, err := controller.Observe(t.Context(), httpTestTarget())
 	require.NoError(t, err)
 	require.False(t, after.PhysicalPresent)
 	require.Len(t, after.ProofDigest, 32)
@@ -119,13 +145,13 @@ func TestHTTPAPITreatsDirectClientNotFoundAsPhysicalAbsence(t *testing.T) {
 	api, err := NewHTTPAPI(resolver)
 	require.NoError(t, err)
 
-	allocation, err := api.ServerAllocation(t.Context(), testTarget())
+	allocation, err := api.ServerAllocation(t.Context(), httpTestTarget())
 	require.NoError(t, err)
 	require.Nil(t, allocation)
-	present, err := api.ClientAllocationPresent(t.Context(), testTarget())
+	present, err := api.ClientAllocationPresent(t.Context(), httpTestTarget())
 	require.NoError(t, err)
 	require.False(t, present)
-	require.NoError(t, api.GarbageCollectAllocation(t.Context(), testTarget()))
+	require.NoError(t, api.GarbageCollectAllocation(t.Context(), httpTestTarget()))
 }
 
 func TestHTTPAPIReturnsClientGCEligibilityFence(t *testing.T) {
@@ -138,7 +164,7 @@ func TestHTTPAPIReturnsClientGCEligibilityFence(t *testing.T) {
 	api, err := NewHTTPAPI(resolver)
 	require.NoError(t, err)
 
-	err = api.GarbageCollectAllocation(t.Context(), testTarget())
+	err = api.GarbageCollectAllocation(t.Context(), httpTestTarget())
 	require.ErrorIs(t, err, runtimeslotreconciler.ErrAllocationStillPresent)
 }
 
@@ -152,7 +178,7 @@ func TestHTTPAPIResolvesAmbiguousClientGCMissingResponseByDirectObservation(t *t
 	api, err := NewHTTPAPI(resolver)
 	require.NoError(t, err)
 
-	require.NoError(t, api.GarbageCollectAllocation(t.Context(), testTarget()))
+	require.NoError(t, api.GarbageCollectAllocation(t.Context(), httpTestTarget()))
 }
 
 func TestHTTPAPIRejectsWrongPeerAndResolverTarget(t *testing.T) {
@@ -166,14 +192,14 @@ func TestHTTPAPIRejectsWrongPeerAndResolverTarget(t *testing.T) {
 	wrongPeer.client.PeerURISAN = "spiffe://sandbox0.test/nomad/cluster/cluster-1/node/other"
 	api, err := NewHTTPAPI(wrongPeer)
 	require.NoError(t, err)
-	_, err = api.ClientAllocationPresent(t.Context(), testTarget())
+	_, err = api.ClientAllocationPresent(t.Context(), httpTestTarget())
 	require.ErrorIs(t, err, errdefs.ErrUnavailable)
 
 	wrongTarget := resolver
 	wrongTarget.client.NodeID = "other-node"
 	api, err = NewHTTPAPI(wrongTarget)
 	require.NoError(t, err)
-	_, err = api.ClientAllocationPresent(t.Context(), testTarget())
+	_, err = api.ClientAllocationPresent(t.Context(), httpTestTarget())
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
 }
 
@@ -219,20 +245,20 @@ func newNomadMTLSTestServer(
 			return
 		}
 		switch request.URL.Path {
-		case "/v1/allocation/allocation-1":
+		case "/v1/allocations":
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodGet, "method") ||
 				rejectUnexpectedNomadRequest(t, writer, request.URL.Query().Get("namespace"), "default", "namespace") {
 				return
 			}
 			if !state.serverPresent {
-				http.NotFound(writer, request)
+				_, _ = writer.Write([]byte("[]"))
 				return
 			}
-			_ = json.NewEncoder(writer).Encode(Allocation{
-				ID: "allocation-1", Namespace: "default", NodeID: "node-1",
+			_ = json.NewEncoder(writer).Encode([]Allocation{{
+				ID: testHTTPAllocationID, Namespace: "default", NodeID: "node-1",
 				DesiredStatus: state.desiredStatus, ClientStatus: "running",
-			})
-		case "/v1/allocation/allocation-1/stop":
+			}})
+		case "/v1/allocation/" + testHTTPAllocationID + "/stop":
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodPost, "method") ||
 				rejectUnexpectedNomadRequest(t, writer, request.URL.Query().Get("namespace"), "default", "namespace") ||
 				rejectUnexpectedNomadRequest(t, writer, request.URL.Query().Get("no_shutdown_delay"), "true", "no_shutdown_delay") ||
@@ -243,7 +269,7 @@ func newNomadMTLSTestServer(
 			state.lastIdempotency = request.URL.Query().Get("idempotency_token")
 			state.desiredStatus = "stop"
 			writer.WriteHeader(http.StatusOK)
-		case "/v1/client/fs/stat/allocation-1":
+		case "/v1/client/fs/stat/" + testHTTPAllocationID:
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodGet, "method") ||
 				rejectUnexpectedNomadRequest(t, writer, request.URL.Query().Get("path"), "alloc/", "path") {
 				return
@@ -253,7 +279,7 @@ func newNomadMTLSTestServer(
 				return
 			}
 			_, _ = writer.Write([]byte(`{"Tasks":{}}`))
-		case "/v1/client/allocation/allocation-1/gc":
+		case "/v1/client/allocation/" + testHTTPAllocationID + "/gc":
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodGet, "method") {
 				return
 			}
@@ -382,4 +408,12 @@ func newTestCertificatePEM(
 	require.NoError(t, err)
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: raw}),
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateRaw})
+}
+
+const testHTTPAllocationID = "40539b8a-a8f8-95c9-2e6b-eb123a3a07c6"
+
+func httpTestTarget() runtimeslotreconciler.AllocationTarget {
+	target := testTarget()
+	target.AllocationID = testHTTPAllocationID
+	return target
 }

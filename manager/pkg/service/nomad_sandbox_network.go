@@ -321,7 +321,8 @@ func (s *NomadSandboxNetworkPolicyService) CompleteNomadSandboxNetworkMutation(
 		AllocationID: mutation.AllocationID, NodeID: mutation.NodeID,
 		NodeUID: mutation.NodeUID, NodeBootID: mutation.NodeBootID,
 		NetNSIdentity: mutation.NetNSIdentity, NetworkPolicy: mutation.DesiredPolicy,
-		PolicyDigest: mutation.DesiredPolicyDigest,
+		PolicyDigest:   mutation.DesiredPolicyDigest,
+		PolicyRevision: mutation.SlotRevision, ExpectedPolicyDigest: mutation.CurrentPolicyDigest,
 	})
 	if err != nil {
 		return fmt.Errorf("dispatch active Nomad network policy: %w", err)

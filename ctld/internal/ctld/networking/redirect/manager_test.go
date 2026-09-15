@@ -29,15 +29,13 @@ func TestBuildIPTablesRestoreInputUsesTCPRedirectAndUDPTPROXY(t *testing.T) {
 	mustNotContain(t, restore, "-p tcp -m conntrack")
 	mustNotContain(t, restore, "-p tcp -m connmark")
 	mustNotContain(t, restore, "-p tcp -m socket")
-	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-p udp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
-	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
-	mustContain(t, restore, "-p udp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
-
-	mustContain(t, restore, "-p udp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-p udp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
-	mustContain(t, restore, "-p udp -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
-	mustContain(t, restore, "-p udp -m socket --transparent -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p udp --dport 443 -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p udp --dport 853 -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p udp -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p udp -j CONNMARK --set-mark 0x1/0x1")
+	mustNotContain(t, restore, "--ctstate")
+	mustNotContain(t, restore, "-m socket")
+	mustNotContain(t, restore, "-m connmark")
 
 	mustContain(t, restore, "-A "+natChainName+" -m mark --mark 0x1/0x1 -j ACCEPT")
 	mustContain(t, restore, "-A "+natChainName+" -d "+defaultLoopback+" -j RETURN")
@@ -61,6 +59,22 @@ func TestBuildIPSetRestoreInput(t *testing.T) {
 	mustContain(t, restore, "add "+nextIPSetName+" 10.0.0.3 -exist")
 	mustContain(t, restore, "swap "+nextIPSetName+" "+ipsetName)
 	mustContain(t, restore, "destroy "+nextIPSetName)
+}
+
+func TestCloudMetadataDropPrecedesEveryBypassAndRedirect(t *testing.T) {
+	restore := buildIPTablesRestoreInput(Config{ProxyHTTPPort: 18080, ProxyHTTPSPort: 18443}, []string{"0.0.0.0/0", "100.100.100.200/32"})
+	firstBypass := strings.Index(restore, "-j RETURN")
+	firstRedirect := strings.Index(restore, "-j TPROXY")
+	for _, cidr := range []string{"100.100.100.200/32", "169.254.0.0/16"} {
+		rule := "-A " + chainName + " -m set --match-set " + ipsetName + " src -d " + cidr + " -j DROP"
+		position := strings.Index(restore, rule)
+		if position < 0 || position >= firstBypass || position >= firstRedirect {
+			t.Fatalf("guest metadata protection does not precede bypass and redirect: %s", restore)
+		}
+		if strings.Contains(restore, "-A "+chainName+" -d "+cidr+" -j DROP") {
+			t.Fatal("metadata drop must not affect host credential renewal")
+		}
+	}
 }
 
 func TestEnsureTopJumpInsertsMissingJumpAtFirstRule(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"math/big"
@@ -75,5 +76,71 @@ func TestAliyunIdentityVerifierRejectsAnotherSigner(t *testing.T) {
 	signed := append(append([]byte(nil), document[:len(document)-1]...), []byte(`,"audience":"challenge-1"}`)...)
 	signature := signAliyunIdentity(t, signed, otherCertificate, otherKey)
 	_, err = verifier.Verify(document, signature, "challenge-1", "172.16.1.4")
+	require.ErrorContains(t, err, "untrusted signer")
+}
+
+// ECS returns the same detached SignedData structure without its optional
+// certificate field. Preserve the signed attributes and signature bytes.
+func withoutAliyunSignerCertificates(t *testing.T, signature string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(signature)
+	require.NoError(t, err)
+	var envelope struct {
+		ContentType asn1.ObjectIdentifier
+		Content     asn1.RawValue `asn1:"explicit,tag:0"`
+	}
+	rest, err := asn1.Unmarshal(raw, &envelope)
+	require.NoError(t, err)
+	require.Empty(t, rest)
+	var fields []asn1.RawValue
+	rest, err = asn1.Unmarshal(envelope.Content.Bytes, &fields)
+	require.NoError(t, err)
+	require.Empty(t, rest)
+	filtered := make([]asn1.RawValue, 0, len(fields))
+	for _, field := range fields {
+		if field.Class != asn1.ClassContextSpecific || field.Tag != 0 {
+			filtered = append(filtered, field)
+		}
+	}
+	content, err := asn1.Marshal(filtered)
+	require.NoError(t, err)
+	envelope.Content = asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 0, IsCompound: true, Bytes: content}
+	raw, err = asn1.Marshal(envelope)
+	require.NoError(t, err)
+	parsed, err := pkcs7.Parse(raw)
+	require.NoError(t, err)
+	require.Empty(t, parsed.Certificates)
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func TestAliyunIdentityVerifierAcceptsOmittedCertificateWithoutRelaxingIdentityChecks(t *testing.T) {
+	pemBytes, certificate, key := testAliyunIdentitySigner(t)
+	verifier, err := NewAliyunIdentityVerifier(AliyunIdentityPolicy{
+		RegionID: "us-east-1", OwnerAccountID: "1234", ImageID: "image-1",
+		InstanceTypes: []string{"ecs.test"}, SignerCertPEM: pemBytes,
+	})
+	require.NoError(t, err)
+	document := []byte(`{"zone-id":"us-east-1a","serial-number":"serial","instance-id":"i-test","region-id":"us-east-1","private-ipv4":"172.16.1.4","owner-account-id":"1234","mac":"00:11:22:33:44:55","image-id":"image-1","instance-type":"ecs.test"}`)
+	signed := append(append([]byte(nil), document[:len(document)-1]...), []byte(`,"audience":"challenge-1"}`)...)
+	signature := withoutAliyunSignerCertificates(t, signAliyunIdentity(t, signed, certificate, key))
+	identity, err := verifier.Verify(document, signature, "challenge-1", "172.16.1.4")
+	require.NoError(t, err)
+	require.Equal(t, "i-test", identity.InstanceID)
+	_, err = verifier.Verify(document, signature, "challenge-2", "172.16.1.4")
+	require.ErrorContains(t, err, "signature")
+	_, err = verifier.Verify(document, signature, "challenge-1", "172.16.1.5")
+	require.ErrorContains(t, err, "caller")
+	_, otherCertificate, otherKey := testAliyunIdentitySigner(t)
+	forged := withoutAliyunSignerCertificates(t, signAliyunIdentity(t, signed, otherCertificate, otherKey))
+	_, err = verifier.Verify(document, forged, "challenge-1", "172.16.1.4")
+	require.ErrorContains(t, err, "signature")
+	multiple, err := pkcs7.NewSignedData(signed)
+	require.NoError(t, err)
+	require.NoError(t, multiple.AddSigner(certificate, key, pkcs7.SignerInfoConfig{}))
+	require.NoError(t, multiple.AddSigner(certificate, key, pkcs7.SignerInfoConfig{}))
+	multiple.Detach()
+	raw, err := multiple.Finish()
+	require.NoError(t, err)
+	_, err = verifier.Verify(document, withoutAliyunSignerCertificates(t, base64.StdEncoding.EncodeToString(raw)), "challenge-1", "172.16.1.4")
 	require.ErrorContains(t, err, "untrusted signer")
 }

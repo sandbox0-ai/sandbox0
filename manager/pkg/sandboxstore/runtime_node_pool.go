@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
+	// Aliyun permits at most twenty extensions for one lifecycle action.
+	RuntimeNodeLifecycleHeartbeatMaxAttempts = 20
+
 	RuntimeNodePoolKindFixed   = "fixed"
 	RuntimeNodePoolKindElastic = "elastic"
 
@@ -95,7 +99,12 @@ type RuntimeNodePoolSnapshot struct {
 	ClusterActiveLeases     int
 	ClusterReadySlots       int
 	ClusterFixedUsableSlots int
-	AuthorityObservedAt     time.Time
+	// Workload demand excludes retiring slots. Their resource leases remain
+	// fully accounted above and continue to prevent physical node removal.
+	ClusterWorkloadCPU    int64
+	ClusterWorkloadMemory int64
+	ClusterWorkloadSlots  int
+	AuthorityObservedAt   time.Time
 }
 
 type RuntimeNodeDrainStatus struct {
@@ -390,6 +399,15 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			COALESCE(SUM(lease.cpu_millicores), 0)::bigint,
 			COALESCE(SUM(lease.memory_bytes), 0)::bigint,
 			COUNT(lease.lease_id)::integer,
+			COALESCE(SUM(lease.cpu_millicores) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			), 0)::bigint,
+			COALESCE(SUM(lease.memory_bytes) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			), 0)::bigint,
+			COUNT(lease.lease_id) FILTER (
+				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+			)::integer,
 			(
 				SELECT COUNT(*)::integer
 				FROM manager.runtime_slots AS slot
@@ -435,9 +453,14 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			AND lease.node_uid = capacity.node_uid
 			AND lease.node_boot_id = capacity.node_boot_id
 			AND lease.lease_state = 'active'
+		LEFT JOIN manager.runtime_slots AS workload_slot
+			ON workload_slot.resource_lease_id = lease.lease_id
+			AND workload_slot.slot_id = lease.slot_id
 	`, state.ClusterID).Scan(
 		&snapshot.ClusterUsedCPU, &snapshot.ClusterUsedMemory,
-		&snapshot.ClusterActiveLeases, &snapshot.ClusterReadySlots,
+		&snapshot.ClusterActiveLeases, &snapshot.ClusterWorkloadCPU,
+		&snapshot.ClusterWorkloadMemory, &snapshot.ClusterWorkloadSlots,
+		&snapshot.ClusterReadySlots,
 		&snapshot.ClusterFixedUsableSlots,
 	); err != nil {
 		return nil, fmt.Errorf("query runtime node pool cluster usage: %w", err)
@@ -490,6 +513,33 @@ func (s *PGSandboxStore) ReserveRuntimeNode(
 	if err != nil {
 		return nil, err
 	}
+	// A serializable snapshot can precede the advisory-lock wait. Retry the
+	// complete database-only transaction when a competing enrollment commits.
+	for attempt := 0; ; attempt++ {
+		reservation, err := s.reserveRuntimeNodeAttempt(ctx, normalized, supernet)
+		var pgErr *pgconn.PgError
+		retryableConflict := errors.As(err, &pgErr) &&
+			(pgErr.Code == "40001" || pgErr.Code == "23505" &&
+				(pgErr.ConstraintName == "idx_runtime_node_instances_live_cidr" ||
+					pgErr.ConstraintName == "runtime_node_instances_pkey"))
+		if !retryableConflict || attempt == 7 {
+			return reservation, err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *PGSandboxStore) reserveRuntimeNodeAttempt(
+	ctx context.Context,
+	normalized *ReserveRuntimeNodeRequest,
+	supernet netip.Prefix,
+) (*RuntimeNodePoolNodeUsage, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin runtime node reservation: %w", err)
@@ -588,6 +638,9 @@ func (s *PGSandboxStore) ReserveRuntimeNode(
 		allocated[prefix] = struct{}{}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read allocated runtime node subnets: %w", err)
+	}
 	cidr, ok := firstFreeRuntimeNodePrefix(supernet, normalized.AllocationPrefix, allocated)
 	if !ok {
 		return nil, fmt.Errorf("runtime node allocation supernet is exhausted")
@@ -731,7 +784,7 @@ func (s *PGSandboxStore) ActivateRuntimeNode(
 }
 
 // MarkRuntimeNodeProviderReady removes only the warming claim fence after the
-// provider has continued scale-out. Capacity and all eight warm slots are
+// provider has continued scale-out. Capacity and the configured warm slots are
 // rechecked in the same transaction so a stale lifecycle observation cannot
 // expose an incomplete node to the claim hot path.
 func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
@@ -739,7 +792,7 @@ func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
 	poolID, providerInstanceID string,
 	warmSlots int,
 ) error {
-	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(providerInstanceID) == "" || warmSlots != 8 {
+	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(providerInstanceID) == "" || warmSlots <= 0 {
 		return fmt.Errorf("runtime node provider admission identity is invalid")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -1211,6 +1264,32 @@ func (s *PGSandboxStore) ObserveRuntimeNodeLifecycleAction(
 	return action, nil
 }
 
+// ReserveRuntimeNodeLifecycleHeartbeat consumes one provider attempt before the
+// call. A single row update coordinates replicas and survives ambiguous calls
+// and process restarts without spending the provider budget again.
+func (s *PGSandboxStore) ReserveRuntimeNodeLifecycleHeartbeat(
+	ctx context.Context,
+	poolID, token string,
+	interval time.Duration,
+) (bool, error) {
+	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(token) == "" ||
+		interval < time.Second || interval > 10*time.Minute {
+		return false, errors.New("runtime node lifecycle heartbeat reservation is invalid")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE manager.runtime_node_lifecycle_actions
+		SET heartbeat_attempts = heartbeat_attempts + 1,
+			heartbeat_not_before = NOW() + $3 * INTERVAL '1 millisecond'
+		WHERE pool_id = $1 AND lifecycle_action_token = $2
+			AND state IN ('pending', 'draining') AND heartbeat_attempts < $4
+			AND (heartbeat_not_before IS NULL OR heartbeat_not_before <= NOW())
+	`, poolID, token, interval.Milliseconds(), RuntimeNodeLifecycleHeartbeatMaxAttempts)
+	if err != nil {
+		return false, fmt.Errorf("reserve runtime node lifecycle heartbeat: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *PGSandboxStore) CompleteRuntimeNodeLifecycleAction(
 	ctx context.Context,
 	token, state string,
@@ -1291,7 +1370,16 @@ func firstFreeRuntimeNodePrefix(
 		value := base + uint32(index)*step
 		addr := netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)})
 		candidate := netip.PrefixFrom(addr, prefixBits)
-		if _, exists := allocated[candidate]; !exists {
+		// Density profiles may change while earlier nodes retain smaller or
+		// larger subnets. Exact-prefix equality would reuse their addresses.
+		overlaps := false
+		for existing := range allocated {
+			if candidate.Overlaps(existing) {
+				overlaps = true
+				break
+			}
+		}
+		if !overlaps {
 			return candidate, true
 		}
 	}

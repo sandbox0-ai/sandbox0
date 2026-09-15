@@ -28,6 +28,85 @@ Nomad allocation resources reserve only carrier/driver overhead. They are
 never sandbox limits or metering truth. CPU quota/weight/cpuset, memory, and
 PIDs come only from the claim's PostgreSQL resource lease.
 
+The driver advertises `DisableLogCollection`, and every carrier task must set
+`logs { disabled = true }`. Nomad 1.11's external-driver RPC omits that capability
+from its response, so the driver setting alone still starts an idle `logmon`
+process for each carrier. Carriers do not connect stdout/stderr to Nomad FIFOs.
+Guest command output continues through procd's API, and runtime diagnostics
+continue through the driver/ctld logs. `nomad alloc logs` is not a guest-output
+API. Apply this change through normal carrier replacement when upgrading a node;
+changing capabilities does not retroactively reclaim existing logmon processes.
+After replacement, verify the deployed task's `LogConfig.Disabled` and the
+absence of carrier logmon processes on the node; a local capabilities test does
+not verify the RPC or the deployed job.
+
+### Light-load admission
+
+ctld can opt a dedicated node into higher-density admission without changing
+any sandbox's CPU quota, memory maximum, cpuset, PIDs limit, or metering lease.
+The physical capacity remains `resource_cpu_millicores` / `resource_memory_bytes`.
+Optional `admission_cpu_millicores` / `admission_memory_bytes` bound the sum of
+claimed sandbox limits. Omitted or zero values retain physical-capacity
+admission. CPU admission is bounded to 16 times physical capacity and memory
+admission to twice physical capacity; these are validation ceilings, not
+recommended operating ratios or proven density.
+
+For example, a 14-core / 56GiB sandbox budget can explicitly advertise 35000
+millicores and 70GiB for light-load admission. That changes scheduling only:
+every individual request must still fit the physical node, and PostgreSQL
+serializes concurrent claims against the admission budget. Capacity cannot be
+resized within a node boot, including reconnects. Resource reservations remain
+charged until the existing physical cgroup absence proof releases the lease.
+
+Overcommitted nodes require a predelegated parent cgroup with `cpu.max` equal
+to the physical CPU budget using a 100000-microsecond period, `memory.max`
+equal to the physical memory budget, and `memory.swap.max=0`. ctld rejects an
+unbounded parent rather than silently enabling overcommit. The memory guard
+rejects new cgroups when current usage reaches 90% of that budget or a request
+exceeds remaining physical headroom. Exact retries of existing cgroups still
+work. These checks do not guarantee simultaneous peak usage can fit: the parent
+hard limit is the final boundary if running guests grow after admission.
+
+The node-pool autoscaler's per-node resource values must match these admission
+budgets. Carrier count, NBD device count, address space, quotas, and actual
+memory pressure are separate bounds. Increasing admission alone does not prove
+500 resident sandboxes or improve a 100-way startup burst.
+
+The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6),
+`privileged_slots` (default 2), and `warm_shard` (default 0). Each job contains
+at most 32 task groups because Nomad embeds the full job in every allocation.
+For a larger inventory, render shards 0 through 17 with the same counts and
+register each nonempty job. Shard zero retains `sandbox0-warm-slots`; additional
+IDs are `sandbox0-warm-slots-shard-01` through `-17`. Existing `warm-0` through
+`warm-7` names, classes, and shard placement remain stable as counts grow.
+Moving an existing unsharded pool requires claim fencing and physical drain on
+every affected node before registering additional jobs and shrinking shard zero.
+Extra carriers require
+the target node's `sandbox0_standard_carriers` or
+`sandbox0_privileged_carriers` metadata to include their ordinal. For example,
+`standard_slots=500` across its nonempty shards plus
+`sandbox0_standard_carriers=500` permits 500 standard
+carriers on an explicitly configured node; unconfigured nodes retain their
+original six. Metadata is an operator-owned capacity profile, not a workload or
+benchmark selector. Provision enough NBD devices, private addresses, and host
+overhead first, and use `nomad job plan` to verify placement. Decreasing counts
+or node metadata requires draining the affected carriers.
+
+Set the elastic pool's `warm_slots_per_node` to the total standard and
+privileged inventory (502 for 500 plus 2). Lifecycle admission waits for that
+many live, ready carriers and a current capacity heartbeat; the database
+rechecks both before removing the node's warming fence.
+
+Alibaba Cloud node-pool clients use the refreshable SDK credential chain over
+HTTPS. ECS hosts can discover their attached RAM role through IMDSv2 without
+static keys or a role-name environment variable. Set
+`ALIBABA_CLOUD_IMDSV1_DISABLED=true` to require metadata tokens; the SDK refreshes
+temporary role credentials before expiration.
+Lifecycle reconciliation requires `ess:DescribeScalingActivities` for the
+configured group, then queries each in-progress activity's pending hooks in
+pages of at most 50. Enrollment accepts scale-out `Pending:Wait`; protected
+instances remain eligible for identity renewal while serving existing work.
+
 ## Ownership
 
 | Owner | State |

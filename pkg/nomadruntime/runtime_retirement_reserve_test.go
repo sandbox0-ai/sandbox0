@@ -2,6 +2,7 @@ package nomadruntime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,87 +29,103 @@ func TestNodeRuntimeExternalReclamationReleasesSharedRetirementReserve(t *testin
 		{name: "denied_terminal_authority", err: errdefs.ErrPermissionDenied},
 		{name: "missing_physical_proof", missingProof: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fixture := newRuntimeTerminalExpiryFixture(t)
-			require.NoError(t, fixture.manager.Close())
-			host := &retirementReserveHost{runtimeTerminalExpiryHost: fixture.host, devices: make(map[string]*retirementReserveDevice)}
-			fixture.config.Runtime = host
-			var err error
-			fixture.manager, err = rootfssession.New(fixture.config)
-			require.NoError(t, err)
-			first := fixture.stage
-			second := first
-			second.Parent = digest.FromString("second-retirement-parent").String()
-			second.Identity.RootFSID = "second-rootfs"
-			second.Identity.SlotNonce = "second-slot"
-			second.Identity.WriterGrantID = "second-grant"
-			generation := *first.Generation
-			generation.FilesystemID = second.Identity.RootFSID
-			second.Generation = &generation
-			deadline := time.Now().Add(time.Minute)
-			for _, stage := range []rootfshandoff.StageRequest{first, second} {
-				_, err := fixture.manager.Ensure(t.Context(), stage)
+		for _, targeted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/targeted=%t", tc.name, targeted), func(t *testing.T) {
+				fixture := newRuntimeTerminalExpiryFixture(t)
+				require.NoError(t, fixture.manager.Close())
+				host := &retirementReserveHost{runtimeTerminalExpiryHost: fixture.host, devices: make(map[string]*retirementReserveDevice)}
+				fixture.config.Runtime = host
+				var err error
+				fixture.manager, err = rootfssession.New(fixture.config)
 				require.NoError(t, err)
-				require.NoError(t, fixture.manager.RegisterConsumer(stage.Parent, stage.Identity, rootfssession.ConsumerRegistration{
-					LeaseID: stage.Parent, ActiveKey: "task", ContainerID: stage.Identity.SlotNonce,
-					StableMount: filepath.Join(t.TempDir(), "rootfs"), HostMountNamespace: "mnt:[1]",
-					LeaseExpiresAt: deadline.Format(time.RFC3339Nano),
-				}))
-			}
-			require.Positive(t, fixture.manager.NodeDirtyTailUsage().UsedBytes)
-			require.Equal(t, 2, fixture.manager.NodeDirtyTailUsage().Owners)
-			require.NoError(t, fixture.manager.Release(t.Context(), first.Identity))
-			if tc.missingProof {
-				host.inspectErr = errdefs.ErrUnavailable
-			}
-			proof, err := fixture.manager.CrashFenceExternal(first, "external-retirement")
-			if tc.missingProof {
-				require.ErrorIs(t, err, errdefs.ErrUnavailable)
-			} else {
-				require.NoError(t, err)
-				require.NoError(t, proof.Validate())
-			}
-			var busy *rootfsblock.DirtyTailRetirementBusyError
-			require.ErrorAs(t, fixture.manager.Release(t.Context(), second.Identity), &busy)
-			require.Equal(t, first.Parent, busy.ActiveGroup)
-			require.Equal(t, second.Parent, busy.RequestedGroup)
+				first := fixture.stage
+				second := first
+				second.Parent = digest.FromString("second-retirement-parent").String()
+				second.Identity.RootFSID = "second-rootfs"
+				second.Identity.SlotNonce = "second-slot"
+				second.Identity.WriterGrantID = "second-grant"
+				generation := *first.Generation
+				generation.FilesystemID = second.Identity.RootFSID
+				second.Generation = &generation
+				deadline := time.Now().Add(time.Minute)
+				for _, stage := range []rootfshandoff.StageRequest{first, second} {
+					_, err := fixture.manager.Ensure(t.Context(), stage)
+					require.NoError(t, err)
+					require.NoError(t, fixture.manager.RegisterConsumer(stage.Parent, stage.Identity, rootfssession.ConsumerRegistration{
+						LeaseID: stage.Parent, ActiveKey: "task", ContainerID: stage.Identity.SlotNonce,
+						StableMount: filepath.Join(t.TempDir(), "rootfs"), HostMountNamespace: "mnt:[1]",
+						LeaseExpiresAt: deadline.Format(time.RFC3339Nano),
+					}))
+				}
+				require.Positive(t, fixture.manager.NodeDirtyTailUsage().UsedBytes)
+				require.Equal(t, 2, fixture.manager.NodeDirtyTailUsage().Owners)
+				require.NoError(t, fixture.manager.Release(t.Context(), first.Identity))
+				if tc.missingProof {
+					host.inspectErr = errdefs.ErrUnavailable
+				}
+				proof, err := fixture.manager.CrashFenceExternal(first, "external-retirement")
+				if tc.missingProof {
+					require.ErrorIs(t, err, errdefs.ErrUnavailable)
+				} else {
+					require.NoError(t, err)
+					require.NoError(t, proof.Validate())
+				}
+				var busy *rootfsblock.DirtyTailRetirementBusyError
+				require.ErrorAs(t, fixture.manager.Release(t.Context(), second.Identity), &busy)
+				require.Equal(t, first.Parent, busy.ActiveGroup)
+				require.Equal(t, second.Parent, busy.RequestedGroup)
 
-			before := retirementBranchFiles(t, fixture.config.BranchRoot)
-			require.Len(t, before, 2)
-			usage := fixture.manager.NodeDirtyTailUsage()
-			authority := &retirementReserveAuthority{err: tc.err}
-			runtime := &rootfsRuntime{sessions: fixture.manager, authority: authority}
-			daemon := &nodeRuntime{runtime: runtime, logger: newLogger(zap.NewNop())}
-			daemon.scanAt(t.Context(), "", time.Now())
-			waitRecoveryWorkers(t, daemon)
-			require.Len(t, authority.requests, 1, "reclamation must be attempted before consumer expiry")
-			require.Equal(t, []rootfshandoff.StageRequest{first}, authority.requests,
-				"periodic recovery must check the external writer before its consumer lease expires")
-			require.Equal(t, before, retirementBranchFiles(t, fixture.config.BranchRoot), "unacknowledged bytes must remain intact")
-			require.Equal(t, usage, fixture.manager.NodeDirtyTailUsage())
-			require.ErrorAs(t, fixture.manager.Release(t.Context(), second.Identity), &busy)
+				before := retirementBranchFiles(t, fixture.config.BranchRoot)
+				require.Len(t, before, 2)
+				usage := fixture.manager.NodeDirtyTailUsage()
+				authority := &retirementReserveAuthority{err: tc.err}
+				runtime := &rootfsRuntime{sessions: fixture.manager, authority: authority}
+				daemon := &nodeRuntime{runtime: runtime, logger: newLogger(zap.NewNop())}
+				daemon.scanAt(t.Context(), "", time.Now())
+				waitRecoveryWorkers(t, daemon)
+				require.Len(t, authority.requests, 1, "reclamation must be attempted before consumer expiry")
+				require.Equal(t, []rootfshandoff.StageRequest{first}, authority.requests,
+					"periodic recovery must check the external writer before its consumer lease expires")
+				require.Equal(t, before, retirementBranchFiles(t, fixture.config.BranchRoot), "unacknowledged bytes must remain intact")
+				require.Equal(t, usage, fixture.manager.NodeDirtyTailUsage())
+				require.ErrorAs(t, fixture.manager.Release(t.Context(), second.Identity), &busy)
+				if targeted {
+					reclaimed, _ := daemon.reclaimRetirementReserve(t.Context(), first.Parent)
+					require.False(t, reclaimed, "a scheduling hint cannot substitute for terminal authority and physical proof")
+					require.Equal(t, before, retirementBranchFiles(t, fixture.config.BranchRoot))
+					require.Equal(t, usage, fixture.manager.NodeDirtyTailUsage())
+				}
+				priorRequests := len(authority.requests)
 
-			// Region acknowledgement, not elapsed consumer TTL or forced fencing,
-			// permits branch deletion and hands the shared reserve to the next writer.
-			authority.err = nil
-			if tc.missingProof {
-				host.inspectErr = nil
-				proof, err = fixture.manager.CrashFenceExternal(first, "external-retirement")
-				require.NoError(t, err)
-				require.NoError(t, proof.Validate())
-			}
-			daemon.mu.Lock()
-			next := daemon.recoveryRetries[first.Parent].next
-			daemon.mu.Unlock()
-			require.True(t, next.Before(deadline))
-			daemon.scanAt(t.Context(), "", next)
-			waitRecoveryWorkers(t, daemon)
-			require.Equal(t, []rootfshandoff.StageRequest{first, first}, authority.requests)
-			require.Len(t, retirementBranchFiles(t, fixture.config.BranchRoot), 1)
-			require.Equal(t, 1, fixture.manager.NodeDirtyTailUsage().Owners)
-			require.NoError(t, fixture.manager.Release(t.Context(), second.Identity))
-			require.True(t, time.Now().Before(deadline), "reserve transfer must not wait for consumer expiry")
-		})
+				// Region acknowledgement, not elapsed consumer TTL or forced fencing,
+				// permits branch deletion and hands the shared reserve to the next writer.
+				authority.err = nil
+				if tc.missingProof {
+					host.inspectErr = nil
+					proof, err = fixture.manager.CrashFenceExternal(first, "external-retirement")
+					require.NoError(t, err)
+					require.NoError(t, proof.Validate())
+				}
+				daemon.mu.Lock()
+				next := daemon.recoveryRetries[first.Parent].next
+				daemon.mu.Unlock()
+				require.True(t, next.Before(deadline))
+				if targeted {
+					reclaimed, reclaimErr := daemon.reclaimRetirementReserve(t.Context(), first.Parent)
+					require.NoError(t, reclaimErr)
+					require.True(t, reclaimed, "the next cleanup must reclaim the exact blocker without waiting for a scan")
+				} else {
+					daemon.scanAt(t.Context(), "", next)
+					waitRecoveryWorkers(t, daemon)
+				}
+				require.Len(t, authority.requests, priorRequests+1)
+				require.Equal(t, first, authority.requests[len(authority.requests)-1])
+				require.Len(t, retirementBranchFiles(t, fixture.config.BranchRoot), 1)
+				require.Equal(t, 1, fixture.manager.NodeDirtyTailUsage().Owners)
+				require.NoError(t, fixture.manager.Release(t.Context(), second.Identity))
+				require.True(t, time.Now().Before(deadline), "reserve transfer must not wait for consumer expiry")
+			})
+		}
 	}
 }
 

@@ -87,7 +87,7 @@ func (r *Reader) readEncodedCoalesced(entries []MappingEntry) (coalescedRead, er
 				continue
 			}
 			result.valid[index] = true
-			if r.cache.maxBytes > 0 {
+			if r.cache.retainsRanges() {
 				r.cache.addVerified(rangeCacheKey(entry.Object), bytes.Clone(fragment))
 			}
 		}

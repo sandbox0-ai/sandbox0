@@ -15,6 +15,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 )
 
 type NomadConfig struct {
@@ -88,10 +90,17 @@ func (n *NomadClient) FenceAndStopWarmAllocations(ctx context.Context, nodeID st
 		if allocation.terminal() {
 			continue
 		}
-		if allocation.JobID != n.warmJobID ||
+		if !nomadinventory.IsWarmJob(n.warmJobID, allocation.JobID) ||
 			(allocation.Namespace != "" && allocation.Namespace != "default") {
 			return fmt.Errorf("nomad node %s has non-warm allocation %s from job %s",
 				nodeID, allocation.ID, allocation.JobID)
+		}
+	}
+	// Validate the complete inventory before stopping any allocation. A later
+	// page may expose another job that must block this node's removal.
+	for _, allocation := range allocations {
+		if allocation.terminal() {
+			continue
 		}
 		if err := n.request(ctx, http.MethodPut,
 			"/v1/allocation/"+url.PathEscape(allocation.ID)+"/stop", nil, nil); err != nil {
@@ -118,13 +127,7 @@ func (n *NomadClient) PurgeNode(ctx context.Context, nodeID string) error {
 	return n.request(ctx, http.MethodPut, "/v1/node/"+url.PathEscape(nodeID)+"/purge", nil, nil)
 }
 
-type nomadAllocation struct {
-	ID            string `json:"ID"`
-	JobID         string `json:"JobID"`
-	Namespace     string `json:"Namespace"`
-	ClientStatus  string `json:"ClientStatus"`
-	DesiredStatus string `json:"DesiredStatus"`
-}
+type nomadAllocation nomadinventory.Allocation
 
 func (a nomadAllocation) terminal() bool {
 	// ClientStatus is Nomad's execution-state truth. A one-shot warm carrier
@@ -134,12 +137,21 @@ func (a nomadAllocation) terminal() bool {
 }
 
 func (n *NomadClient) allocations(ctx context.Context, nodeID string) ([]nomadAllocation, error) {
-	var allocations []nomadAllocation
-	if err := n.request(ctx, http.MethodGet,
-		"/v1/node/"+url.PathEscape(nodeID)+"/allocations", nil, &allocations); err != nil {
+	tokenBytes, err := os.ReadFile(n.tokenFile)
+	token := strings.TrimSpace(string(tokenBytes))
+	if err != nil || token == "" || len(tokenBytes) > 64<<10 || len(strings.Fields(token)) != 1 {
+		return nil, errors.New("nomad lifecycle token file is invalid")
+	}
+	headers := http.Header{"X-Nomad-Token": {token}, "X-Nomad-Region": {n.region}}
+	records, err := nomadinventory.List(ctx, n.http, n.baseURL, nodeID, "*", headers)
+	if err != nil {
 		return nil, err
 	}
-	return allocations, nil
+	result := make([]nomadAllocation, len(records))
+	for i, record := range records {
+		result[i] = nomadAllocation(record)
+	}
+	return result, nil
 }
 
 func (n *NomadClient) request(

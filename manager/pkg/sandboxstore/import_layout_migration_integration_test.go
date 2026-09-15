@@ -14,7 +14,7 @@ import (
 
 func TestRootFSImportLayoutMigrationRollbackRequiresNoPolicyRowsIntegration(t *testing.T) {
 	ctx := t.Context()
-	pool := newSandboxStoreIntegrationPool(t)
+	pool := newSandboxStoreIntegrationPoolAt(t, 55)
 	// The layout rollback contract is migration 54, not whichever migration
 	// happens to be latest. Remove the empty mapping extension first.
 	require.NoError(t, migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{})))
@@ -26,7 +26,7 @@ func TestRootFSImportLayoutMigrationRollbackRequiresNoPolicyRowsIntegration(t *t
 	query := `SELECT count(*) FROM information_schema.columns WHERE table_schema='manager' AND column_name='data_layout_policy'`
 	require.NoError(t, pool.QueryRow(ctx, query).Scan(&columns))
 	require.Zero(t, columns)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	applySandboxStoreMigrationsThrough(t, pool, 55)
 	require.NoError(t, pool.QueryRow(ctx, query).Scan(&columns))
 	require.Equal(t, 2, columns)
 	store := NewPGSandboxStore(pool)
@@ -36,7 +36,7 @@ func TestRootFSImportLayoutMigrationRollbackRequiresNoPolicyRowsIntegration(t *t
 	// Keep the layout-bearing operation while removing only migration 55.
 	require.NoError(t, down())
 	require.ErrorContains(t, down(), "Cannot remove RootFS layout provenance")
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	applySandboxStoreMigrationsThrough(t, pool, 55)
 	reloaded, err := store.GetRootFSImportOperation(ctx, begin.OperationID)
 	require.NoError(t, err)
 	require.Equal(t, begin.Spec, reloaded.Spec)
@@ -47,7 +47,7 @@ func TestRootFSImportLayoutMigrationRollbackRequiresNoPolicyRowsIntegration(t *t
 func TestRootFSImportLayoutMigrationRollbackWaitsForConcurrentPublisherIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSandboxStoreIntegrationPool(t)
+	pool := newSandboxStoreIntegrationPoolAt(t, 55)
 	// Give the migrator its own manager-scoped connection while the publisher
 	// and lock observer use the fixture pool concurrently.
 	config := pool.Config()

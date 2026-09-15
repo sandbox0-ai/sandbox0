@@ -342,6 +342,9 @@ func TestNomadSandboxNetworkPolicyServiceActiveBindingOnlyUpdateWaitsForAck(t *t
 	if len(preparer.requests) != 1 {
 		t.Fatalf("network prepare calls = %d", len(preparer.requests))
 	}
+	if preparer.requests[0].PolicyRevision != 7 || preparer.requests[0].ExpectedPolicyDigest != protocol.NetworkPolicyDigest(currentAnnotation) {
+		t.Fatalf("network mutation lost its PostgreSQL compare-and-swap authority: %+v", preparer.requests[0])
+	}
 	if preparer.requests[0].PolicyDigest == protocol.NetworkPolicyDigest(currentAnnotation) {
 		t.Fatal("binding-only update retained the old policy digest")
 	}

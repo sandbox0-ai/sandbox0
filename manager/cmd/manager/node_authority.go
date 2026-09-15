@@ -72,13 +72,14 @@ func logManagerRuntimeSlotTerminalPass(logger *zap.Logger, report runtimeslotrec
 		zap.Int("completed", report.Result.Completed),
 		zap.Int("skipped", report.Result.Skipped),
 		zap.Int("failed", report.Result.Failed),
+		zap.Int("carrier_refill_requested", report.Result.RefillRequested),
 		zap.Duration("duration", report.Duration),
 	}
 	if report.Error != nil {
 		logger.Warn("Runtime slot terminal reconcile pass failed", append(fields, zap.Error(report.Error))...)
 		return
 	}
-	if report.Result.Completed > 0 || report.Result.Skipped > 0 {
+	if report.Result.Completed > 0 || report.Result.Skipped > 0 || report.Result.RefillRequested > 0 {
 		logger.Info("Runtime slot terminal reconcile pass completed", fields...)
 	}
 }

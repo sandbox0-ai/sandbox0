@@ -194,10 +194,9 @@ func NewService(
 	if config.ChallengeTTL == 0 {
 		config.ChallengeTTL = 2 * time.Minute
 	}
-	prefix, err := netip.ParsePrefix(config.AllocationSupernet)
 	if config.PoolID == "" || config.ClusterID == "" || config.RegionID == "" ||
-		config.CloudRegion == "" || err != nil || !prefix.Addr().IsPrivate() ||
-		config.AllocationPrefix != 26 || config.ChallengeTTL < time.Second || config.ChallengeTTL > 5*time.Minute {
+		config.CloudRegion == "" || !validAllocationPolicy(config.AllocationSupernet, config.AllocationPrefix) ||
+		config.ChallengeTTL < time.Second || config.ChallengeTTL > 5*time.Minute {
 		return nil, errors.New("node enrollment policy is invalid")
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(config.RuntimeArtifact.SourceCommit) ||
@@ -209,6 +208,23 @@ func NewService(
 	}
 	return &Service{store: store, identity: identity, membership: membership, cloud: cloud,
 		nomad: nomad, issuer: issuer, runtimeConfig: runtimeConfig, config: config}, nil
+}
+
+// validAllocationPolicy allows node density profiles to choose their network
+// size while keeping every allocation inside a canonical RFC 1918 supernet.
+func validAllocationPolicy(supernet string, nodeBits int) bool {
+	prefix, err := netip.ParsePrefix(supernet)
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.String() != supernet ||
+		nodeBits < 20 || nodeBits > 30 || nodeBits < prefix.Bits() {
+		return false
+	}
+	for _, private := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		block := netip.MustParsePrefix(private)
+		if prefix.Bits() >= block.Bits() && block.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) Challenge(

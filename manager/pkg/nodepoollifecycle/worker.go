@@ -26,6 +26,10 @@ type Action struct {
 	InstanceIDs []string
 }
 
+// ErrAllocationRoutesPending keeps node identity and CIDR ownership fenced
+// until asynchronous cloud route deletion is observed complete.
+var ErrAllocationRoutesPending = errors.New("allocation route deletion is pending")
+
 type Cloud interface {
 	ListPendingLifecycleActions(context.Context) ([]Action, error)
 	HeartbeatLifecycleAction(context.Context, Action, time.Duration) error
@@ -50,6 +54,7 @@ type Store interface {
 	CompleteReadyRuntimeNodeScaleOutActions(context.Context, string) error
 	AbandonRuntimeNodeEnrollment(context.Context, string, string) error
 	ObserveRuntimeNodeLifecycleAction(context.Context, *sandboxstore.ObserveRuntimeNodeLifecycleActionRequest) (*sandboxstore.RuntimeNodeLifecycleAction, error)
+	ReserveRuntimeNodeLifecycleHeartbeat(context.Context, string, string, time.Duration) (bool, error)
 	BeginRuntimeNodeLifecycleActionCleanup(context.Context, string) error
 	CompleteRuntimeNodeLifecycleAction(context.Context, string, string) error
 }
@@ -96,7 +101,7 @@ func New(store Store, cloud Cloud, nomad Nomad, config Config) (*Worker, error) 
 	}
 	if store == nil || cloud == nil || nomad == nil || config.PoolID == "" ||
 		config.ScaleOutHookID == "" || config.ScaleInHookID == "" ||
-		config.ScaleOutHookID == config.ScaleInHookID || config.WarmSlotsPerNode != 8 ||
+		config.ScaleOutHookID == config.ScaleInHookID || config.WarmSlotsPerNode <= 0 ||
 		config.Interval < time.Second || config.Interval > time.Minute ||
 		config.HeartbeatTimeout < 30*time.Second || config.HeartbeatTimeout > 10*time.Minute ||
 		config.ScaleOutEnrollmentTimeout < 5*time.Minute ||
@@ -122,17 +127,19 @@ func (w *Worker) Run(ctx context.Context, report func(Result, error)) {
 	}
 }
 
+// Reconcile renews pending hooks before independent readiness and protection
+// work. A failed provider operation must not starve another action's deadline.
 func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 	var result Result
-	if err := w.reconcileProviderReadiness(ctx); err != nil {
-		return result, err
+	var failures []error
+	type pendingAction struct {
+		action   Action
+		observed *sandboxstore.RuntimeNodeLifecycleAction
 	}
-	if err := w.reconcileProtection(ctx); err != nil {
-		return result, err
-	}
+	var pending []pendingAction
 	actions, err := w.cloud.ListPendingLifecycleActions(ctx)
 	if err != nil {
-		return result, err
+		failures = append(failures, err)
 	}
 	for _, action := range actions {
 		transition, ok := w.transitionForHook(action.HookID)
@@ -147,20 +154,41 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 				ProviderInstanceIDs: action.InstanceIDs, Transition: transition,
 			})
 		if err != nil {
-			return result, err
+			failures = append(failures, err)
+			continue
 		}
-		if err := w.cloud.HeartbeatLifecycleAction(ctx, action, w.config.HeartbeatTimeout); err != nil {
-			return result, err
+		interval, timeout := w.heartbeatSchedule()
+		reserved, err := w.store.ReserveRuntimeNodeLifecycleHeartbeat(ctx, w.config.PoolID, action.Token, interval)
+		if err != nil {
+			failures = append(failures, err)
+			continue
 		}
+		if reserved {
+			if err := w.cloud.HeartbeatLifecycleAction(ctx, action, timeout); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+		}
+		pending = append(pending, pendingAction{action: action, observed: observed})
+	}
+	if err := w.reconcileProviderReadiness(ctx); err != nil {
+		failures = append(failures, err)
+	}
+	if err := w.reconcileProtection(ctx); err != nil {
+		failures = append(failures, err)
+	}
+	for _, item := range pending {
 		var completed, rolledBack bool
-		switch transition {
+		var err error
+		switch item.action.Transition {
 		case TransitionScaleOut:
-			completed, err = w.reconcileScaleOut(ctx, action, observed)
+			completed, err = w.reconcileScaleOut(ctx, item.action, item.observed)
 		case TransitionScaleIn:
-			completed, rolledBack, err = w.reconcileScaleIn(ctx, action)
+			completed, rolledBack, err = w.reconcileScaleIn(ctx, item.action)
 		}
 		if err != nil {
-			return result, err
+			failures = append(failures, err)
+			continue
 		}
 		if completed {
 			result.Completed++
@@ -169,7 +197,18 @@ func (w *Worker) Reconcile(ctx context.Context) (Result, error) {
 			result.RolledBack++
 		}
 	}
-	return result, nil
+	return result, errors.Join(failures...)
+}
+
+// heartbeatSchedule leaves four of Aliyun's twenty extensions for cleanup and
+// retries. Provider renewal is independent of frequent readiness polling; the
+// requested timeout covers two renewal intervals, including a polling margin.
+func (w *Worker) heartbeatSchedule() (interval, timeout time.Duration) {
+	const plannedAttempts = sandboxstore.RuntimeNodeLifecycleHeartbeatMaxAttempts - 4
+	interval = max(w.config.HeartbeatTimeout/2, w.config.ScaleOutEnrollmentTimeout/plannedAttempts)
+	interval = (interval + time.Second - 1) / time.Second * time.Second
+	timeout = max(w.config.HeartbeatTimeout, 2*interval+2*w.config.Interval)
+	return interval, timeout
 }
 
 func (w *Worker) reconcileProviderReadiness(ctx context.Context) error {
@@ -313,6 +352,9 @@ func (w *Worker) abandonScaleOut(ctx context.Context, action Action) (bool, erro
 		switch status.Instance.State {
 		case sandboxstore.RuntimeNodeInstanceEnrolling:
 			if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+				if errors.Is(err, ErrAllocationRoutesPending) {
+					return false, nil
+				}
 				return false, err
 			}
 			if err := w.store.AbandonRuntimeNodeEnrollment(ctx, w.config.PoolID, instanceID); err != nil {
@@ -375,6 +417,9 @@ func (w *Worker) abandonScaleOut(ctx context.Context, action Action) (bool, erro
 			return false, err
 		}
 		if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+			if errors.Is(err, ErrAllocationRoutesPending) {
+				return false, nil
+			}
 			return false, err
 		}
 		if err := w.nomad.PurgeNode(ctx, status.Instance.NodeID); err != nil {
@@ -451,6 +496,9 @@ func (w *Worker) reconcileScaleIn(ctx context.Context, action Action) (bool, boo
 
 	for instanceID, status := range statuses {
 		if err := w.cloud.DeleteAllocationRoutes(ctx, instanceID, status.Instance.AllocationCIDR); err != nil {
+			if errors.Is(err, ErrAllocationRoutesPending) {
+				return false, false, nil
+			}
 			return false, false, err
 		}
 		if err := w.nomad.PurgeNode(ctx, status.Instance.NodeID); err != nil {

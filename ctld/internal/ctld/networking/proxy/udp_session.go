@@ -14,6 +14,7 @@ import (
 )
 
 type udpSessionKey struct {
+	Binding  policy.RuntimeBinding
 	SrcIP    string
 	SrcPort  int
 	DestIP   string
@@ -41,9 +42,13 @@ type udpSession struct {
 
 	lastSeenUnixNano int64
 	closeOnce        sync.Once
+	io               sync.WaitGroup
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type udpReplyConn interface {
+	Read([]byte) (int, error)
 	Write([]byte) (int, error)
 	Close() error
 }
@@ -54,7 +59,12 @@ func newUDPSessionKey(req *adapterRequest) (udpSessionKey, error) {
 	if req == nil || req.UDPSource == nil || req.DestIP == nil || req.DestPort <= 0 {
 		return udpSessionKey{}, fmt.Errorf("udp session requires source and destination")
 	}
+	binding := policy.RuntimeBinding{}
+	if req.Compiled != nil {
+		binding = req.Compiled.RuntimeBinding
+	}
 	return udpSessionKey{
+		Binding:  binding,
 		SrcIP:    req.UDPSource.IP.String(),
 		SrcPort:  req.UDPSource.Port,
 		DestIP:   req.DestIP.String(),
@@ -77,6 +87,7 @@ func newUDPSession(server *Server, key udpSessionKey, req *adapterRequest) *udpS
 		destIP:     cloneIP(req.DestIP),
 		destPort:   req.DestPort,
 	}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
 	session.touch()
 	return session
 }
@@ -90,17 +101,49 @@ func (s *Server) ensureUDPSession(req *adapterRequest) (*udpSession, error) {
 		return nil, err
 	}
 	s.udpSessionMu.Lock()
+	if s.closing.Load() || (s.store != nil && !s.store.IsCurrentBinding(req.SrcIP, req.Compiled)) {
+		s.udpSessionMu.Unlock()
+		return nil, errFlowRetired
+	}
 	if s.udpSessions == nil {
 		s.udpSessions = make(map[udpSessionKey]*udpSession)
 	}
 	session := s.udpSessions[key]
+	// A datagram accepted by an established transparent socket belongs only to
+	// that session. An idle close or policy change cannot transfer it to a new one.
+	if req.UDPSession != nil && (session != req.UDPSession || session.isClosed()) {
+		s.udpSessionMu.Unlock()
+		return nil, errFlowRetired
+	}
 	if session == nil || session.isClosed() {
+		if len(s.udpSessions) >= 65536 {
+			s.udpSessionMu.Unlock()
+			return nil, errors.New("proxy UDP session limit exceeded")
+		}
 		session = newUDPSession(s, key, req)
 		s.udpSessions[key] = session
 	}
 	s.udpSessionMu.Unlock()
 	session.update(req)
 	return session, nil
+}
+
+// Reconciliation closes exact old sessions before the network revision is
+// acknowledged. The key includes the policy binding, so IP/port reuse cannot
+// transfer an upstream socket or late response to another runtime.
+func (s *Server) reconcileUDPSessions() {
+	s.udpSessionMu.Lock()
+	stale := make([]*udpSession, 0)
+	for _, session := range s.udpSessions {
+		compiled, _ := session.auditSnapshot()
+		if !s.store.IsCurrentBinding(session.key.SrcIP, compiled) {
+			stale = append(stale, session)
+		}
+	}
+	s.udpSessionMu.Unlock()
+	for _, session := range stale {
+		session.closeWithError(errFlowRetired)
+	}
 }
 
 func (s *Server) removeUDPSession(session *udpSession) {
@@ -171,15 +214,19 @@ func (session *udpSession) Forward(payload []byte) error {
 	session.touch()
 	_ = upstream.SetWriteDeadline(time.Now().Add(session.server.udpSessionIdleTimeout()))
 	if session.server != nil {
-		if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthEgress, len(payload)); err != nil {
+		if err := session.server.waitDatagramBandwidth(session.ioContext(), compiled, bandwidthEgress, len(payload)); err != nil {
 			session.closeWithError(err)
 			return err
 		}
+	}
+	if !session.beginIO() {
+		return net.ErrClosed
 	}
 	n, err := upstream.Write(payload)
 	if n > 0 && session.server != nil {
 		session.server.recordEgressBytes(compiled, int64(n), audit)
 	}
+	session.io.Done()
 	if err != nil {
 		session.closeWithError(err)
 	}
@@ -253,17 +300,17 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 		}
 		payload := append([]byte(nil), buf[:n]...)
 		session.touch()
-		if session.destinationPort() == 53 {
-			session.server.observeDNSResponse(session.key.SrcIP, payload)
-		}
 		compiled, audit := session.auditSnapshot()
+		if session.destinationPort() == 53 {
+			session.server.observePolicyDNSResponse(session.key.SrcIP, compiled, payload)
+		}
 		if session.server != nil {
-			if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthIngress, len(payload)); err != nil {
+			if err := session.server.waitDatagramBandwidth(session.ioContext(), compiled, bandwidthIngress, len(payload)); err != nil {
 				session.closeWithError(err)
 				return
 			}
 		}
-		written, writeErr := session.replyToClient(payload)
+		_, writeErr := session.forwardReply(payload, compiled, audit)
 		if writeErr != nil {
 			if !errors.Is(writeErr, net.ErrClosed) {
 				session.server.logger.Warn("UDP session reply write failed", zap.Error(writeErr))
@@ -271,10 +318,39 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 			session.closeWithError(writeErr)
 			return
 		}
-		if session.server != nil && written > 0 {
-			session.server.recordIngressBytes(compiled, int64(written), audit)
-		}
 	}
+}
+
+// Register writes under the same lock that closes admission to the session.
+// Socket closure interrupts in-flight writes; final audit waits until their
+// successful byte counts are recorded, including partial writes with errors.
+func (session *udpSession) beginIO() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return false
+	}
+	session.io.Add(1)
+	return true
+}
+
+func (session *udpSession) ioContext() context.Context {
+	if session.ctx != nil {
+		return session.ctx
+	}
+	return context.Background()
+}
+
+func (session *udpSession) forwardReply(payload []byte, compiled *policy.CompiledPolicy, audit *flowAudit) (int, error) {
+	if !session.beginIO() {
+		return 0, net.ErrClosed
+	}
+	defer session.io.Done()
+	written, err := session.replyToClient(payload)
+	if session.server != nil && written > 0 {
+		session.server.recordIngressBytes(compiled, int64(written), audit)
+	}
+	return written, err
 }
 
 func (session *udpSession) replyToClient(payload []byte) (int, error) {
@@ -318,7 +394,38 @@ func (session *udpSession) ensureDownstream() (udpReplyConn, error) {
 		return nil, err
 	}
 	session.downstream = downstream
+	go session.readClientLoop(downstream)
 	return downstream, nil
+}
+
+// TPROXY prefers an established transparent UDP socket over its listener. Once
+// the first reply creates this connected socket, subsequent guest datagrams
+// arrive here. Classify every datagram against the original policy binding;
+// consulting the latest policy would reattribute queued packets after IP reuse.
+func (session *udpSession) readClientLoop(conn udpReplyConn) {
+	buffer := make([]byte, 64*1024)
+	for {
+		n, err := conn.Read(buffer)
+		if err != nil {
+			session.closeWithError(err)
+			return
+		}
+		session.mu.Lock()
+		if session.closed {
+			session.mu.Unlock()
+			return
+		}
+		req := &adapterRequest{
+			Server: session.server, Compiled: session.compiled, UDPSession: session,
+			SrcIP: session.key.SrcIP, UDPSource: cloneUDPAddr(session.clientAddr),
+			DestIP: cloneIP(session.destIP), DestPort: session.destPort,
+			UDPConn: session.clientConn, UDPPayload: buffer[:n],
+		}
+		session.mu.Unlock()
+		// Process synchronously: one receive buffer and no packet goroutine queue
+		// per bounded session. Socket closure cancels blocked reads and writes.
+		session.server.classifyUDPDatagram(req)
+	}
 }
 
 func (session *udpSession) auditSnapshot() (*policy.CompiledPolicy, *flowAudit) {
@@ -387,12 +494,16 @@ func (session *udpSession) closeWithError(err error) {
 		session.upstream = nil
 		session.downstream = nil
 		session.mu.Unlock()
+		if session.cancel != nil {
+			session.cancel()
+		}
 		if upstream != nil {
 			_ = upstream.Close()
 		}
 		if downstream != nil {
 			_ = downstream.Close()
 		}
+		session.io.Wait()
 		if session.server != nil {
 			session.server.removeUDPSession(session)
 			if auditReq != nil {

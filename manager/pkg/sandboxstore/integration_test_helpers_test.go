@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,6 +23,32 @@ func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	prepareSandboxStoreCredentialSchema(t, pool)
 	require.NoError(t, RunSandboxStoreMigrations(context.Background(), pool, noopSandboxStoreMigrateLogger{}))
 	return pool
+}
+
+// Migration rollback tests pin their schema contract independently of newer migrations.
+func newSandboxStoreIntegrationPoolAt(t *testing.T, version int) *pgxpool.Pool {
+	t.Helper()
+	pool := newSandboxStoreIntegrationDatabase(t)
+	prepareSandboxStoreCredentialSchema(t, pool)
+	applySandboxStoreMigrationsThrough(t, pool, version)
+	return pool
+}
+
+func applySandboxStoreMigrationsThrough(t *testing.T, pool *pgxpool.Pool, version int) {
+	t.Helper()
+	files, err := storemigrations.FS.ReadDir(".")
+	require.NoError(t, err)
+	selected := fstest.MapFS{}
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".sql") || file.Name() >= fmt.Sprintf("%05d", version+1) {
+			continue
+		}
+		payload, err := storemigrations.FS.ReadFile(file.Name())
+		require.NoError(t, err)
+		selected[file.Name()] = &fstest.MapFile{Data: payload, Mode: 0o444}
+	}
+	require.NoError(t, migrate.Up(t.Context(), pool, ".", migrate.WithBaseFS(selected),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}), migrate.WithSchema(sandboxStoreSchemaName)))
 }
 
 func prepareSandboxStoreCredentialSchema(t *testing.T, pool *pgxpool.Pool) {

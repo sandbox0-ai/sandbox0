@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -24,9 +25,14 @@ const defaultLimit = 100
 // has not disappeared yet. A later pass must retry observation.
 var ErrAllocationStillPresent = errors.New("runtime slot allocation remains physically present")
 
+// ErrAllocationNodeUnavailable means no trustworthy direct-client observation
+// was possible. Other slots on that exact node incarnation may be deferred for
+// this pass; it never constitutes evidence that their physical state is gone.
+var ErrAllocationNodeUnavailable = errors.New("runtime slot allocation node is unavailable")
+
 // Store is the durable region authority used by the terminal reconciler.
 type Store interface {
-	ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error)
+	ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
 	FenceRuntimeSlotForReconcile(context.Context, *sandboxstore.FenceRuntimeSlotForReconcileRequest) (*sandboxstore.RuntimeSlot, error)
@@ -169,14 +175,17 @@ type Config struct {
 
 // Result summarizes one bounded reconciliation pass.
 type Result struct {
-	Candidates int
-	Completed  int
-	Skipped    int
-	Failed     int
+	Candidates      int
+	Completed       int
+	Skipped         int
+	Failed          int
+	RefillRequested int
 }
 
 // Reconciler executes plugin-independent terminal cleanup.
 type Reconciler struct {
+	mu         sync.Mutex
+	after      *sandboxstore.RuntimeSlot
 	store      Store
 	allocation AllocationController
 	node       NodeCleaner
@@ -205,17 +214,51 @@ func New(config Config) (*Reconciler, error) {
 // RunOnce processes a bounded candidate batch. One failed slot does not block
 // independent slots; the returned error joins every per-slot failure.
 func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
-	candidates, err := r.store.ListRuntimeSlotsForReconcile(ctx, r.limit)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	candidates, err := r.store.ListRuntimeSlotsForReconcileAfter(ctx, r.limit, r.after)
 	if err != nil {
 		return Result{}, fmt.Errorf("list runtime slots for reconcile: %w", err)
 	}
 	result := Result{Candidates: len(candidates)}
+	// Traverse beyond an unresolved full batch, then wrap for retries. This is
+	// local scheduling state only: each candidate is re-read and fenced below.
+	// A canceled pass must leave its unprocessed suffix eligible next time.
+	processed := 0
+	defer func() {
+		if processed == len(candidates) && len(candidates) < r.limit {
+			r.after = nil
+		}
+	}()
 	errs := make([]error, 0)
+	// An unreachable retired node can contribute hundreds of old carriers. One
+	// failed observation must not consume the pass deadline once per carrier and
+	// delay healthy nodes' cleanup. Retry every node on the next pass, without
+	// persisting an availability assumption or changing any slot authority.
+	type nodeIncarnation struct{ cluster, node, uid, boot string }
+	unavailable := make(map[nodeIncarnation]bool)
 	for index := range candidates {
+		if err := ctx.Err(); err != nil {
+			result.Skipped += len(candidates) - index
+			errs = append(errs, err)
+			break
+		}
+		candidate := candidates[index]
+		cursor := candidate
+		r.after = &cursor
+		processed++
+		node := nodeIncarnation{candidate.ClusterID, candidate.NodeID, candidate.NodeUID, candidate.NodeBootID}
+		if unavailable[node] {
+			result.Skipped++
+			continue
+		}
 		completed, err := r.reconcile(ctx, candidates[index].ID)
 		if err != nil {
 			result.Failed++
 			errs = append(errs, fmt.Errorf("reconcile runtime slot %s: %w", candidates[index].ID, err))
+			if errors.Is(err, ErrAllocationNodeUnavailable) {
+				unavailable[node] = true
+			}
 			continue
 		}
 		if completed {
@@ -271,6 +314,7 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	var writerProof WriterFinalizeProof
 	writerRetireKind := ""
 	writerAlreadyTerminal := false
+	writerNodeOwned := false
 	if slot.WriterGrantID != "" {
 		grant, err = r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
 		if err != nil {
@@ -278,6 +322,17 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 		if err := validateWriterGrant(grant, slot); err != nil {
 			return false, err
+		}
+		if grant.GateParent != "" {
+			canonical := rootfshandoff.CrashRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+			// Preserve legacy region-owned retirements across rolling upgrades.
+			// A node-owned operation may only be the exact shared incarnation ID;
+			// the writer controller also validates its locked lifecycle binding.
+			if grant.RetireOperationID == "" || grant.RetireOperationID == canonical {
+				ids.writer = canonical
+				writerNodeOwned = grant.State == sandboxstore.RootFSWriterGrantStateConsumed ||
+					grant.RetireOperationID == canonical && grant.RetireKind == sandboxstore.RootFSWriterRetireKindCrashAbandon
+			}
 		}
 		if terminalWriterNeedsDirectCleanup(grant, ids.writer) {
 			writerFence, writerProof, writerRetireKind, err = terminalWriterProofs(grant)
@@ -355,6 +410,26 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	}
 	if err := validateNodeCleanupProof(cleanupProof, slot, ids.cleanup); err != nil {
 		return false, err
+	}
+	if writerNodeOwned && !writerAlreadyTerminal {
+		// The node may finish its durable local crash while answering cleanup.
+		// Keep that committed RootFS proof; never overwrite it with the broader
+		// runtime-slot proof or release the lease before both are verified.
+		storedGrant, err := r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
+		if err != nil {
+			return false, fmt.Errorf("reload node-owned writer retirement: %w", err)
+		}
+		if err := validateWriterGrant(storedGrant, slot); err != nil || !writerGrantIdentityEqual(storedGrant, grant) ||
+			storedGrant.RetireOperationID != ids.writer || storedGrant.RetireKind != sandboxstore.RootFSWriterRetireKindCrashAbandon {
+			return false, errors.New("node-owned writer retirement changed during cleanup")
+		}
+		if storedGrant.State == sandboxstore.RootFSWriterGrantStateRetired {
+			writerFence, writerProof, writerRetireKind, err = terminalWriterProofs(storedGrant)
+			if err != nil {
+				return false, err
+			}
+			writerAlreadyTerminal = true
+		}
 	}
 
 	if slot.WriterGrantID != "" && !writerAlreadyTerminal {

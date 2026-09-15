@@ -48,6 +48,9 @@ type Config struct {
 	RootFSMaxNodeDirtyTailBytes           int64
 	RootFSDirtyTailRetirementReserveBytes int64
 	RootFSNBDDevices                      []string
+	RootFSReadCacheBytes                  int64
+	RootFSReadCacheDirectory              string
+	RootFSReadDiskCacheBytes              int64
 
 	RootFSObjectType                 string
 	RootFSObjectBucket               string
@@ -168,6 +171,15 @@ func (c Config) Validate() error {
 		paths = append(paths, struct{ name, value string }{
 			"rootfs_object_encryption_key_path", c.RootFSObjectEncryptionKeyPath,
 		})
+	}
+	if c.RootFSReadCacheBytes < 0 || c.RootFSReadDiskCacheBytes < 0 {
+		return fmt.Errorf("RootFS read cache budgets must be non-negative")
+	}
+	if (c.RootFSReadCacheDirectory == "") != (c.RootFSReadDiskCacheBytes == 0) {
+		return fmt.Errorf("RootFS disk cache directory and byte budget must be configured together")
+	}
+	if c.RootFSReadCacheDirectory != "" {
+		paths = append(paths, struct{ name, value string }{"rootfs_read_cache_directory", c.RootFSReadCacheDirectory})
 	}
 	for _, path := range paths {
 		if err := validateCanonicalAbsolutePath(path.name, path.value); err != nil {

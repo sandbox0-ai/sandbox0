@@ -2,12 +2,23 @@ package sandboxstore
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
+	for _, slots := range []int{8, 502} {
+		t.Run(fmt.Sprintf("carriers_%d", slots), func(t *testing.T) {
+			testRuntimeNodePoolWarmingFenceAndSnapshot(t, slots)
+		})
+	}
+}
+
+func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
+	t.Helper()
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
@@ -61,7 +72,7 @@ func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
 	require.False(t, snapshot.Nodes[0].CapacityLive)
 	require.Equal(t, 8, snapshot.ClusterFixedUsableSlots)
 
-	_, err = pool.Exec(ctx, `
+	_, err = pool.Exec(ctx, fmt.Sprintf(`
 		INSERT INTO manager.runtime_node_capacities (
 			cluster_id, node_id, node_uid, node_boot_id,
 			cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems,
@@ -82,11 +93,27 @@ func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
 			'sha256:' || repeat('a', 64), 'fastpath_ready',
 			decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'),
 			decode(repeat('03', 32), 'hex'), NOW() + INTERVAL '1 minute', NOW()
-		FROM generate_series(1, 8) AS value;
-	`)
+		FROM generate_series(1, %d) AS value;
+	`, warmSlots))
 	require.NoError(t, err)
-	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", 8))
-	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", 8))
+	for _, invalid := range []int{-1, 0} {
+		require.ErrorContains(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", invalid), "identity is invalid")
+	}
+	// A stale final carrier must keep the node fenced despite the total row count.
+	lastSlot := fmt.Sprintf("elastic-slot-%d", warmSlots)
+	_, err = pool.Exec(ctx, `UPDATE manager.runtime_slots SET heartbeat_expires_at = NOW() - INTERVAL '1 minute' WHERE slot_id = $1`, lastSlot)
+	require.NoError(t, err)
+	require.ErrorContains(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots), "admission is not ready")
+	snapshot, err = store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.False(t, snapshot.Nodes[0].ProviderReady)
+	var fences int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.runtime_node_fences WHERE state = 'warming'`).Scan(&fences))
+	require.Equal(t, 1, fences)
+	_, err = pool.Exec(ctx, `UPDATE manager.runtime_slots SET heartbeat_expires_at = NOW() + INTERVAL '1 minute' WHERE slot_id = $1`, lastSlot)
+	require.NoError(t, err)
+	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots))
+	require.NoError(t, store.MarkRuntimeNodeProviderReady(ctx, "elastic", "i-1", warmSlots))
 	require.NoError(t, store.CompleteReadyRuntimeNodeScaleOutActions(ctx, "elastic"))
 	action, err := store.ObserveRuntimeNodeLifecycleAction(ctx, actionRequest)
 	require.NoError(t, err)
@@ -146,4 +173,49 @@ func TestAbandonedScaleOutBlocksLateEnrollmentAndReleasesCIDRIntegration(t *test
 	replacementReservation, err := store.ReserveRuntimeNode(ctx, &replacement)
 	require.NoError(t, err)
 	require.Equal(t, reservation.AllocationCIDR, replacementReservation.AllocationCIDR)
+}
+
+func TestRuntimeNodeReservationsPreserveNetworksAcrossDensityProfilesIntegration(t *testing.T) {
+	ctx := context.Background()
+	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
+	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", "nomad")
+	require.NoError(t, err)
+	request := func(index, bits int) *ReserveRuntimeNodeRequest {
+		return &ReserveRuntimeNodeRequest{
+			PoolID: "elastic", ProviderInstanceID: fmt.Sprintf("i-%d", index), PoolKind: RuntimeNodePoolKindElastic,
+			ClusterID: "nomad", NodeName: fmt.Sprintf("s0-i-%d", index), NodeUID: fmt.Sprintf("ecs/us-east-1/i-%d", index),
+			PrivateIP: fmt.Sprintf("10.0.1.%d", index+10), AllocationSupernet: "172.27.0.0/17", AllocationPrefix: bits,
+		}
+	}
+	original, err := store.ReserveRuntimeNode(ctx, request(0, 26))
+	require.NoError(t, err)
+	require.Equal(t, "172.27.0.0/26", original.AllocationCIDR)
+	type result struct {
+		reservation *RuntimeNodePoolNodeUsage
+		err         error
+	}
+	results := make(chan result, 8)
+	for index := 1; index <= 8; index++ {
+		go func() {
+			bits := 23
+			if index%2 == 0 {
+				bits = 26
+			}
+			reservation, err := store.ReserveRuntimeNode(ctx, request(index, bits))
+			results <- result{reservation, err}
+		}()
+	}
+	allocated := []netip.Prefix{netip.MustParsePrefix(original.AllocationCIDR)}
+	for range 8 {
+		outcome := <-results
+		require.NoError(t, outcome.err)
+		prefix := netip.MustParsePrefix(outcome.reservation.AllocationCIDR)
+		for _, existing := range allocated {
+			require.False(t, prefix.Overlaps(existing))
+		}
+		allocated = append(allocated, prefix)
+	}
+	retry, err := store.ReserveRuntimeNode(ctx, request(0, 23))
+	require.NoError(t, err)
+	require.Equal(t, original.AllocationCIDR, retry.AllocationCIDR, "retries retain the enrolled node network")
 }

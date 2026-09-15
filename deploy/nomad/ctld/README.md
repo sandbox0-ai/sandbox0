@@ -11,10 +11,16 @@ control sockets, and per-lease cgroups. Do not add systemd filesystem isolation 
 create a private mount/device namespace and break the exact mount namespace
 shared with the Nomad task driver.
 
-The A/B pair protects node-local runtime availability during a process crash or
-certificate rollout. It does not make the ECS worker stateful and it is not a
-stopped standby server. Both processes run on the same disposable node; all
-durable sandbox truth remains in PostgreSQL and S3.
+The A/B pair elects one node-local runtime owner and recovers its durable
+journal. It does not preserve running guest filesystems across primary exit:
+the current NBD server belongs to that process, and disconnecting it shuts down
+the mounted XFS filesystem. An unchanged Nomad allocation set is not proof of
+guest continuity. Before planned ctld updates, fence regional claims, durably
+pause the explicitly authorized sandboxes, and drain their physical runtimes;
+then update B before A and resume from the committed RootFS heads. An unplanned
+primary loss recovers from the last committed generation and may lose the dirty
+tail. Both processes run on the same node; durable sandbox truth remains in
+PostgreSQL and S3.
 
 Build the three pinned binaries, provision the files referenced by
 `ctld.yaml` under `/etc/sandbox0/pki` and `/etc/sandbox0/tokens`, copy the
@@ -56,8 +62,28 @@ The driver-level `runsc_operation_timeout_seconds` separately bounds each
 observed runsc duration. A larger value is a diagnostic accommodation for
 software-emulated nodes, not an SLO relaxation.
 
+Writer grant consumption retries an uncertain transport outcome at most three
+times using the same token and binding. The regional authority rechecks the
+writer epoch and claim fence; a replay does not extend the original lease.
+Ctld coalesces writer renewals for up to 250 milliseconds, with at most 256
+grants per request, two concurrent requests, and 512 queued renewals. Each
+writer retains its own expiry and cleanup obligation. Queue and network time
+count against that expiry, and a late success cannot revive an expired writer.
+An unavailable authority therefore causes bounded retries followed by fenced
+retirement, rather than indefinite local write authority. Runtime cleanup and
+resource release still require the existing physical absence proofs.
+
+Each periodic network resync revalidates at most 32 warm or claimed namespaces
+and rotates through the remaining records. This removes physically absent
+allocations from the policy and redirect projection even before their IP is
+reused. Exact IP collisions are still checked immediately. Claimed namespaces
+retain the journaled address while stock runsc owns it in netstack. Unknown
+inspection failures remain fail-closed; projection fencing never deletes a
+durable registration or substitutes for regional terminal and resource proofs.
+
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
-64-device NBD pool, applies required networking sysctls, installs tmpfiles
+NBD pool covering the highest configured device index (at least 64 devices),
+applies required networking sysctls, installs tmpfiles
 rules for the reboot-volatile runtime directories, and places the task driver
 in `/opt/nomad/plugins`. Before each ctld start it provisions the root-owned
 `/sys/fs/cgroup/sandbox0` cgroup-v2 subtree, initializes its cpuset from the
@@ -65,9 +91,26 @@ parent's effective confinement, and enables `cpu`, `cpuset`, `memory`, and
 `pids` for per-lease children. Startup fails if those controllers are not
 available/delegated or the root itself contains processes; existing active
 lease children are preserved across A/B restarts. Installation fails instead of reloading an in-use NBD
-module when it was already loaded with fewer than 64 devices; drain and reboot
+module when it was already loaded with fewer than the required devices; drain and reboot
 that node to apply the installed module option. The driver still performs a
 synchronous ctld socket fingerprint before advertising a warm slot.
+
+For an explicit high-density profile, set
+`SANDBOX0_ENFORCE_PHYSICAL_CGROUP_BUDGET=true` in the ctld environment and
+install Python 3 with PyYAML. The prestart helper reads the physical CPU and
+memory from `nomad_runtime` in `CONFIG_PATH`; admission totals never set the
+parent limit. It sets `cpu.max`, `memory.max`, and disables swap only when the
+resource subtree has no processes or lease children. Identical limits are
+verified without mutation during A/B restarts. A profile change therefore
+requires the normal durable pause, PostgreSQL fence, and physical drain first.
+Physical capacity, CPU confinement, and the effective admission budget are
+immutable within one kernel boot in PostgreSQL. Changing any of these values
+requires a controlled host reboot after the drain; restarting ctld A/B alone
+cannot register the new shape. Keep the node fenced until the new boot has
+registered the expected capacity over its authenticated manager channel. Local
+ctld readiness and Nomad carrier health do not prove that registration succeeded.
+Returning to physical-only admission also requires this boot transition and
+retains the physical parent protection.
 For a full node reboot, the authenticated new boot may execute cleanup for an
 old boot only through the plugin-independent path. The durable slot journal
 must match the old incarnation, and cleanup must independently observe the old
@@ -100,9 +143,38 @@ The configured `nomad_runtime.nbd_devices` list, not only the kernel
 `nbds_max`, is the usable RootFS concurrency bound. Keep that list at least as
 wide as the largest synchronized claim batch plus operational replacement
 headroom. The supplied environment example configures 16 devices, while the
-production acceptance warm job reserves eight slots.
+default warm job reserves eight slots. A density profile must expand both this
+list and the kernel device pool before admission; increasing carrier count alone
+does not increase RootFS concurrency.
+
+Carrier networking uses stock CNI `ptp`. Before admitting a carrier, ctld
+proves that its veth peer belongs to the held namespace, is up, and has no
+bridge or other master. A bridge's `br_netfilter` path can discard the socket
+selected by UDP TPROXY before local delivery. A migration must durably drain
+the node and wait for every old bridge port to disappear before changing the
+CNI file. Existing claimed namespaces remain inspectable for their drain.
+
+Run namespace identity and generated UDP redirect acceptance in an isolated
+privileged Linux test container with `iproute2`, `iptables`, `ipset`, `unshare`
+and Python 3 installed:
+
+```sh
+SANDBOX0_NETWORK_NAMESPACE_INTEGRATION=1 \
+    SANDBOX0_NETWORK_REDIRECT_INTEGRATION=1 \
+    go test -race ./ctld/internal/ctld/networking/...
+```
+
+The UDP tests create private network and mount namespaces and check local
+and routed destinations, tracked and untracked datagrams, and preservation
+of the original destination. The full proxy test also sends repeated datagrams
+through an established transparent reply socket and verifies policy revocation
+and restoration on the same client socket. Established-socket reads pass through
+the same protocol classification and exact policy binding as listener reads;
+queued packets cannot enter a replacement session after retirement. These tests
+never change production bridge sysctls.
 
 For an existing node, replace the binaries and run `rollout-node.sh`. It
+starts any missing instance left by an interrupted installation, then
 restarts slot B and then A, waiting for each instance to become primary-ready
 or synchronized-standby-ready before touching its peer. Drain and roll nodes
 one at a time for changes that alter the runsc compatibility digest, RootFS

@@ -60,7 +60,7 @@ type auditDelivery struct {
 	wake            chan struct{}
 	canonicalQueue  chan *auditCanonicalCall
 	canonicalSlot   chan struct{}
-	canonicalGate   sync.RWMutex
+	replayMu        sync.Mutex
 	canonicalMu     sync.Mutex
 	canonicalCalls  map[string]*auditCanonicalCall
 	foregroundCalls atomic.Int64
@@ -357,9 +357,7 @@ func (d *auditDelivery) dispatchCanonicalBatch(
 		return
 	}
 	slotStarted := time.Now()
-	d.canonicalGate.RLock()
 	if err := d.acquireCanonicalSlot(ctx); err != nil {
-		d.canonicalGate.RUnlock()
 		d.observeStage(source, "slot_wait", slotStarted, err)
 		for _, call := range batch {
 			d.completeCanonicalCall(call, d.pendingCanonicalError("canonical delivery did not start", err))
@@ -370,7 +368,6 @@ func (d *auditDelivery) dispatchCanonicalBatch(
 
 	go func() {
 		results := func() []error {
-			defer d.canonicalGate.RUnlock()
 			defer d.releaseCanonicalSlot()
 			d.observeInFlightDelta(1)
 			defer d.observeInFlightDelta(-1)
@@ -501,23 +498,13 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
 		return nil
 	}
-	if !d.canonicalGate.TryLock() {
+	if !d.replayMu.TryLock() {
 		return nil
 	}
-	defer d.canonicalGate.Unlock()
+	defer d.replayMu.Unlock()
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
 		return nil
 	}
-
-	slotStarted := time.Now()
-	if err := d.acquireCanonicalSlot(ctx); err != nil {
-		d.observeStage("replay", "slot_wait", slotStarted, err)
-		return err
-	}
-	d.observeStage("replay", "slot_wait", slotStarted, nil)
-	defer d.releaseCanonicalSlot()
-	d.observeInFlightDelta(1)
-	defer d.observeInFlightDelta(-1)
 
 	d.mu.Lock()
 	events, err := d.loadBatchLocked(auditReplayBatchSize)
@@ -525,32 +512,38 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(events) == 0 {
+	// Replay claims the same per-event delivery ownership as foreground
+	// requests. A duplicate joins its existing acknowledgement; unrelated
+	// mutations retain access to the other bounded canonical writer slots.
+	batch := make([]*auditCanonicalCall, 0, len(events))
+	for _, event := range events {
+		if call, leader := d.joinCanonicalCall(event); leader {
+			batch = append(batch, call)
+		}
+	}
+	if len(batch) == 0 {
 		return nil
 	}
-	insertStarted := time.Now()
-	insertErr := d.writer.InsertEvents(ctx, events)
-	d.observeStage("replay", "clickhouse_insert", insertStarted, insertErr)
-	d.observeBatchSize("replay", len(events), insertErr)
-	if insertErr != nil {
-		return insertErr
+	slotStarted := time.Now()
+	if err := d.acquireCanonicalSlot(ctx); err != nil {
+		d.observeStage("replay", "slot_wait", slotStarted, err)
+		d.failCanonicalBatch(batch, err)
+		return err
 	}
-	cleanupStarted := time.Now()
-	d.mu.Lock()
-	cleanupErr := d.removeBatchLocked(events)
-	if cleanupErr != nil {
-		d.mu.Unlock()
-		d.observeStage("replay", "spool_cleanup", cleanupStarted, cleanupErr)
-		return cleanupErr
+	d.observeStage("replay", "slot_wait", slotStarted, nil)
+	results := func() []error {
+		defer d.releaseCanonicalSlot()
+		d.observeInFlightDelta(1)
+		defer d.observeInFlightDelta(-1)
+		return d.deliverCanonicalBatch(ctx, batch, "replay")
+	}()
+	for index, call := range batch {
+		d.completeCanonicalCall(call, results[index])
 	}
-	d.mu.Unlock()
-	d.observeStage("replay", "spool_cleanup", cleanupStarted, nil)
 	if len(events) == auditReplayBatchSize {
-		// Yield the canonical slot after each batch so a strict mutation cannot
-		// be starved behind an arbitrarily large recovery backlog.
 		d.signalReplay()
 	}
-	return nil
+	return errors.Join(results...)
 }
 
 func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {

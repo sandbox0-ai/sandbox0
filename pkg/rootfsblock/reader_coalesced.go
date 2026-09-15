@@ -200,7 +200,7 @@ func (r *Reader) readCoalesced(entries []MappingEntry) (coalescedRead, error) {
 				continue
 			}
 			result.valid[index] = true
-			if r.cache.maxBytes > 0 {
+			if r.cache.retainsRanges() {
 				// Each entry must own its allocation: an evicted neighbor must
 				// not leave a 1MiB array retained but charged as only 64KiB.
 				r.cache.addVerified(rangeCacheKey(entry.Object), bytes.Clone(fragment))

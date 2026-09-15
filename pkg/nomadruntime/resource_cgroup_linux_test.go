@@ -5,12 +5,70 @@ package nomadruntime
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/containerd/errdefs"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
+
+func TestRuntimeResourceCgroupOvercommitRequiresPhysicalBoundsAndShedsPressure(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, value := range map[string]string{
+		"cgroup.controllers": "cpu cpuset memory pids", "cgroup.subtree_control": "cpu cpuset memory pids",
+		"cgroup.procs": "", "cpuset.cpus.effective": "0-3", "cpuset.mems.effective": "0",
+		"cpu.max": "max 100000", "memory.max": "max", "memory.swap.max": "max", "pids.max": "max",
+		"memory.current": "0",
+	} {
+		write(name, value)
+	}
+	capacity := testRuntimeResourceCgroupCapacity()
+	capacity.MemoryBytes = 1 << 30
+	capacity.AdmissionCPUMillicores, capacity.AdmissionMemoryBytes = 8000, 2<<30
+	if _, err := newRuntimeResourceCgroupForOwner(root, capacity, uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("unbounded overcommit root error = %v", err)
+	}
+	write("cpu.max", "200000 100000")
+	write("memory.max", strconv.FormatInt(capacity.MemoryBytes, 10))
+	write("memory.swap.max", "0")
+	controller, err := newRuntimeResourceCgroupForOwner(root, capacity, uint32(os.Geteuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := testRuntimeResourceCgroupLease(t, "admission-first")
+	if err := controller.Prepare(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	write("memory.current", strconv.FormatInt(950<<20, 10))
+	if err := controller.Prepare(t.Context(), first); err != nil {
+		t.Fatalf("exact retry under pressure = %v", err)
+	}
+	second := testRuntimeResourceCgroupLease(t, "admission-second")
+	if err := controller.Prepare(t.Context(), second); !errdefs.IsUnavailable(err) {
+		t.Fatalf("high-memory admission error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, second.CgroupName)); !os.IsNotExist(err) {
+		t.Fatalf("rejected claim created a cgroup: %v", err)
+	}
+	write("memory.current", strconv.FormatInt(300<<20, 10))
+	if err := controller.Prepare(t.Context(), second); !errdefs.IsUnavailable(err) {
+		t.Fatalf("request larger than current physical headroom error = %v", err)
+	}
+	write("memory.current", "0")
+	if err := controller.Prepare(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := readCgroupValue(filepath.Join(root, second.CgroupName, "memory.max")); err != nil || value != "805306368" {
+		t.Fatalf("sandbox memory limit changed: %q, %v", value, err)
+	}
+}
 
 func TestRuntimeResourceCgroupRequiresExactPredelegatedRoot(t *testing.T) {
 	root := t.TempDir()
@@ -50,6 +108,51 @@ func TestRuntimeResourceCgroupRequiresExactPredelegatedRoot(t *testing.T) {
 	outside.CPUMillicores = 1_000
 	if _, err := newRuntimeResourceCgroupForOwner(root, outside, uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("outside cpuset error = %v", err)
+	}
+}
+
+func TestRuntimeResourceCgroupPhysicalBoundsSurviveAdmissionReduction(t *testing.T) {
+	root := t.TempDir()
+	capacity := testRuntimeResourceCgroupCapacity()
+	capacity.MemoryBytes = 1 << 30
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, value := range map[string]string{
+		"cgroup.controllers": "cpu cpuset memory pids", "cgroup.subtree_control": "cpu cpuset memory pids",
+		"cgroup.procs": "", "cpuset.cpus.effective": "0-3", "cpuset.mems.effective": "0",
+		"cpu.max": "200000 100000", "memory.max": strconv.FormatInt(capacity.MemoryBytes, 10),
+		"memory.swap.max": "0", "pids.max": "max", "memory.current": "0",
+	} {
+		write(name, value)
+	}
+	for _, admission := range []struct{ cpu, memory int64 }{
+		{8000, 2 << 30}, {2000, 1 << 30}, {0, 0},
+	} {
+		capacity.AdmissionCPUMillicores, capacity.AdmissionMemoryBytes = admission.cpu, admission.memory
+		controller, err := newRuntimeResourceCgroupForOwner(root, capacity, uint32(os.Geteuid()))
+		if err != nil {
+			t.Fatalf("admission %v with physical parent limits: %v", admission, err)
+		}
+		if err := controller.Prepare(t.Context(), testRuntimeResourceCgroupLease(t, "bounded-parent")); err != nil {
+			t.Fatalf("lease after admission reduction: %v", err)
+		}
+	}
+	for name, bad := range map[string]string{
+		"cpu.max": "100000 100000", "memory.max": "536870912", "memory.swap.max": "1", "pids.max": "1",
+	} {
+		original, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(name, bad)
+		if _, err := newRuntimeResourceCgroupForOwner(root, capacity, uint32(os.Geteuid())); !errdefs.IsFailedPrecondition(err) {
+			t.Fatalf("mismatched physical bound %s error = %v", name, err)
+		}
+		write(name, string(original))
 	}
 }
 

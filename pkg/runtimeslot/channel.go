@@ -69,11 +69,15 @@ type NodeChannelHello struct {
 // NodeChannelCapacity is the ctld-owned allocatable resource boundary for one
 // dedicated node boot. It is refreshed by bounded channel reconnects.
 type NodeChannelCapacity struct {
-	CPUMillicores   int64  `json:"cpu_millicores"`
-	MemoryBytes     int64  `json:"memory_bytes"`
-	CPUSetCPUs      string `json:"cpuset_cpus"`
-	CPUSetMems      string `json:"cpuset_mems"`
-	TTLMilliseconds int64  `json:"ttl_milliseconds"`
+	CPUMillicores int64 `json:"cpu_millicores"`
+	MemoryBytes   int64 `json:"memory_bytes"`
+	// Admission budgets bound the sum of sandbox limits, independently of
+	// the physical cgroup boundary. Zero preserves non-overcommitted admission.
+	AdmissionCPUMillicores int64  `json:"admission_cpu_millicores,omitempty"`
+	AdmissionMemoryBytes   int64  `json:"admission_memory_bytes,omitempty"`
+	CPUSetCPUs             string `json:"cpuset_cpus"`
+	CPUSetMems             string `json:"cpuset_mems"`
+	TTLMilliseconds        int64  `json:"ttl_milliseconds"`
 }
 
 func (c NodeChannelCapacity) Validate() error {
@@ -91,10 +95,30 @@ func (c NodeChannelCapacity) Validate() error {
 	if c.MemoryBytes < 1 || c.MemoryBytes > MaxRuntimeMemoryBytes {
 		return fmt.Errorf("node capacity memory is outside the supported range")
 	}
+	cpu, memory := c.AdmissionLimits()
+	if cpu < c.CPUMillicores || cpu > c.CPUMillicores*16 {
+		return fmt.Errorf("node CPU admission budget must be between physical capacity and 16 times that capacity")
+	}
+	if memory < c.MemoryBytes || memory > c.MemoryBytes*2 {
+		return fmt.Errorf("node memory admission budget must be between physical capacity and twice that capacity")
+	}
 	if c.TTLMilliseconds < 1_000 || c.TTLMilliseconds > 600_000 {
 		return fmt.Errorf("node capacity TTL must be between 1000 and 600000 milliseconds")
 	}
 	return nil
+}
+
+// AdmissionLimits returns the budget consumed by sandbox CPU/memory limits.
+// Physical capacity and per-sandbox cgroup limits are never inflated by it.
+func (c NodeChannelCapacity) AdmissionLimits() (int64, int64) {
+	cpu, memory := c.AdmissionCPUMillicores, c.AdmissionMemoryBytes
+	if cpu == 0 {
+		cpu = c.CPUMillicores
+	}
+	if memory == 0 {
+		memory = c.MemoryBytes
+	}
+	return cpu, memory
 }
 
 // Validate rejects ambiguous stream identity and capability negotiation.
@@ -366,7 +390,7 @@ func (r NodeRunningForkControlRequest) Validate() error {
 }
 
 // NodeNetworkPrepareControlRequest binds one exact ctld-owned network policy
-// application before a writer grant is issued.
+// application for an initial claim or a fenced active-policy mutation.
 type NodeNetworkPrepareControlRequest struct {
 	OperationID   string `json:"operation_id"`
 	ClaimID       string `json:"claim_id"`
@@ -379,6 +403,11 @@ type NodeNetworkPrepareControlRequest struct {
 	NetNSIdentity string `json:"netns_identity"`
 	NetworkPolicy string `json:"network_policy"`
 	PolicyDigest  string `json:"policy_digest"`
+	// PolicyRevision is the PostgreSQL slot revision captured by the mutation.
+	// Zero is reserved for initial claim; later revisions fence delayed retries,
+	// including ABA changes back to previously applied policy bytes.
+	PolicyRevision       int64  `json:"policy_revision,omitempty"`
+	ExpectedPolicyDigest string `json:"expected_policy_digest,omitempty"`
 }
 
 // Validate rejects network preparation detached from its physical slot or
@@ -398,6 +427,14 @@ func (r NodeNetworkPrepareControlRequest) Validate() error {
 	}
 	if r.PolicyDigest != NetworkPolicyDigest(r.NetworkPolicy) {
 		return fmt.Errorf("network policy digest does not match raw policy")
+	}
+	if r.PolicyRevision < 0 || (r.PolicyRevision == 0) != (r.ExpectedPolicyDigest == "") {
+		return fmt.Errorf("network mutation requires both a positive slot revision and expected policy digest")
+	}
+	if r.ExpectedPolicyDigest != "" {
+		if err := digest.Digest(r.ExpectedPolicyDigest).Validate(); err != nil {
+			return fmt.Errorf("invalid expected network policy digest: %w", err)
+		}
 	}
 	return nil
 }

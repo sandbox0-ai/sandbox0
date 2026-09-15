@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -409,8 +410,13 @@ func TestNodeRuntimeReclaimsMatchingInternalCrashTerminal(t *testing.T) {
 	testNodeRuntimeCleansExactRuntimeSlot(t, true)
 }
 
-func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) {
+func TestNodeRuntimeFinishesMatchingInternalCrashBeforeSlotCleanup(t *testing.T) {
+	testNodeRuntimeCleansExactRuntimeSlot(t, true, true)
+}
+
+func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool, pending ...bool) {
 	t.Helper()
+	internalPending := len(pending) == 1 && pending[0]
 	consumerRoot := t.TempDir()
 	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
 	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
@@ -477,6 +483,9 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 		recovery:          []rootfssession.RecoverySession{recovery},
 		proof:             localProof,
 	}
+	if internalPending {
+		runtime.reclaimError = errdefs.ErrFailedPrecondition
+	}
 	runner := newFakeRunsc()
 	runner.stateErr = errdefs.ErrNotFound
 	network := newFakeCtldNetwork(t)
@@ -518,7 +527,14 @@ func testNodeRuntimeCleansExactRuntimeSlot(t *testing.T, internalTerminal bool) 
 	require.NoError(t, err)
 	require.True(t, reflect.DeepEqual(first, second), "retry changed proof: %#v != %#v", first, second)
 	if internalTerminal {
-		require.Equal(t, 1, runtime.reclaimCalls)
+		if internalPending {
+			require.Equal(t, 2, runtime.reclaimCalls)
+			require.Equal(t, 1, runtime.crashCalls)
+			require.Equal(t, request.WriterOperationID, runtime.lastOperation)
+		} else {
+			require.Equal(t, 1, runtime.reclaimCalls)
+			require.Zero(t, runtime.crashCalls)
+		}
 		require.Zero(t, runtime.localCalls)
 		require.Equal(t, request.WriterAuthorityDigest, first.RootFSProofDigest)
 	} else {
@@ -966,6 +982,7 @@ type cleanupRootFSRuntime struct {
 	localCalls   int
 	retireCalls  int
 	reclaimCalls int
+	reclaimError error
 }
 
 func (r *cleanupRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
@@ -1074,6 +1091,9 @@ func (r *cleanupRootFSRuntime) ReclaimVerifiedTerminal(
 	rootfshandoff.StageRequest,
 ) error {
 	r.reclaimCalls++
+	if r.reclaimError != nil && r.crashCalls == 0 {
+		return r.reclaimError
+	}
 	r.recovery = nil
 	return nil
 }
@@ -1340,12 +1360,12 @@ func TestNomadAllocationSourceUsesAbsenceAsThePurgeFence(t *testing.T) {
 		case "/v1/job/sandbox0-warm-slots":
 			require.Equal(t, "default", request.URL.Query().Get("namespace"))
 			_, _ = writer.Write([]byte(`{"ID":"sandbox0-warm-slots","Namespace":"default"}`))
-		case "/v1/node/node-a/allocations":
+		case "/v1/allocations":
 			_, _ = writer.Write([]byte(`[
-            {"ID":"running","DesiredStatus":"run","ClientStatus":"running"},
-            {"ID":"pending","DesiredStatus":"run","ClientStatus":"pending"},
-            {"ID":"stopping","DesiredStatus":"stop","ClientStatus":"running"},
-            {"ID":"complete","DesiredStatus":"run","ClientStatus":"complete"}
+            {"NodeID":"node-a","ID":"running","DesiredStatus":"run","ClientStatus":"running"},
+            {"NodeID":"node-a","ID":"pending","DesiredStatus":"run","ClientStatus":"pending"},
+            {"NodeID":"node-a","ID":"stopping","DesiredStatus":"stop","ClientStatus":"running"},
+            {"NodeID":"node-a","ID":"complete","DesiredStatus":"run","ClientStatus":"complete"}
         ]`))
 		default:
 			http.NotFound(writer, request)
@@ -1373,7 +1393,7 @@ func TestNomadAllocationSourceRejectsACLFilteredCatalog(t *testing.T) {
 		switch request.URL.Path {
 		case "/v1/job/sandbox0-warm-slots":
 			http.Error(writer, "Permission denied", http.StatusForbidden)
-		case "/v1/node/node-a/allocations":
+		case "/v1/allocations":
 			nodeListCalled = true
 			_, _ = writer.Write([]byte(`[]`))
 		default:
@@ -1390,4 +1410,43 @@ func TestNomadAllocationSourceRejectsACLFilteredCatalog(t *testing.T) {
 	require.ErrorContains(t, err, "verify Nomad allocation catalog visibility: HTTP 403")
 	require.Nil(t, active)
 	require.False(t, nodeListCalled, "an ACL-filterable empty list must never establish allocation absence")
+}
+
+func TestNomadAllocationSourceRetainsLaterPageAndFailsClosed(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		t.Run(fmt.Sprint(broken), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/job/sandbox0-warm-slots" {
+					_, _ = w.Write([]byte(`{"ID":"sandbox0-warm-slots","Namespace":"default"}`))
+					return
+				}
+				require.Equal(t, "/v1/allocations", r.URL.Path)
+				require.Equal(t, `NodeID == "node-a"`, r.URL.Query().Get("filter"))
+				require.Equal(t, "default", r.URL.Query().Get("namespace"))
+				if r.URL.Query().Get("next_token") == "" {
+					w.Header().Set("X-Nomad-NextToken", "second")
+					_, _ = w.Write([]byte(`[{"ID":"first","NodeID":"node-a"}]`))
+					return
+				}
+				if broken {
+					_, _ = w.Write([]byte(`[{"ID":`))
+					return
+				}
+				_, _ = w.Write([]byte(`[{"ID":"stopped-on-later-page","NodeID":"node-a","ClientStatus":"complete","DesiredStatus":"stop"}]`))
+			}))
+			defer server.Close()
+			source, err := newNomadAllocationSource(NomadAllocationConfig{
+				Address: server.URL, NodeID: "node-a", Namespace: "default", JobID: "sandbox0-warm-slots",
+			})
+			require.NoError(t, err)
+			active, err := source.ActiveAllocations(t.Context())
+			if broken {
+				require.Error(t, err)
+				require.Nil(t, active, "a partial catalog must not be used to abandon a writer")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, map[string]bool{"first": true, "stopped-on-later-page": true}, active)
+			}
+		})
+	}
 }

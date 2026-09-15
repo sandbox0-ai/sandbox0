@@ -21,6 +21,10 @@ wait_ready() {
 }
 
 [ "$(id -u)" -eq 0 ] || { echo "rollout must run as root" >&2; exit 1; }
+# An active target can outlive a failed initial install with a stopped peer.
+# Start missing instances before the B-then-A rollout waits for both roles;
+# starting an already running instance leaves its process untouched.
+systemctl start sandbox0-ctld@a.service sandbox0-ctld@b.service
 for restarted_slot in b a; do
   systemctl restart "sandbox0-ctld@${restarted_slot}.service"
   # Restarting the old primary promotes its peer. The restarted standby may

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
 )
@@ -29,7 +31,8 @@ func NewAliyunESS(region, scalingGroupID string) (*AliyunESS, error) {
 	if region == "" || scalingGroupID == "" {
 		return nil, errors.New("aliyun ESS region and scaling group ID are required")
 	}
-	client, err := ess.NewClientWithProvider(region)
+	credential := aliyunclient.Credentials()
+	client, err := ess.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, fmt.Errorf("create Aliyun ESS client: %w", err)
 	}

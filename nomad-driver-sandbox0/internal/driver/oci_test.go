@@ -15,6 +15,7 @@
 package driver
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,33 @@ func TestBuildSpecAppliesSecurityClassAndEphemeralMounts(t *testing.T) {
 	}
 	if shmCount != 1 {
 		t.Fatalf("shm mount count = %d", shmCount)
+	}
+}
+
+func TestBuildSpecKeepsTemporaryFilesOutsidePersistentRootFS(t *testing.T) {
+	for _, memory := range []int64{128 << 20, 2 << 30, 16 << 30} {
+		spec := buildSpec(specOptions{Command: "/procd", Resources: &driversResources{MemoryLimitBytes: memory}})
+		tmp := findOCIMount(spec.Mounts, "/tmp")
+		if tmp == nil || tmp.Type != "tmpfs" || tmp.Source != "tmpfs" ||
+			!containsString(tmp.Options, fmt.Sprintf("size=%d", memory/2)) ||
+			!containsString(tmp.Options, "mode=1777") || containsString(tmp.Options, "noexec") {
+			t.Fatalf("temporary mount for memory %d = %#v", memory, tmp)
+		}
+	}
+	spec := buildSpec(specOptions{Command: "/procd", EphemeralMounts: []runtimecontrol.EphemeralMount{
+		{MountPath: "/tmp", SizeBytes: 256 << 20},
+	}})
+	count := 0
+	for _, mount := range spec.Mounts {
+		if mount.Destination == "/tmp" {
+			count++
+			if !containsString(mount.Options, "size=268435456") {
+				t.Fatalf("template /tmp override = %#v", mount)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("duplicate /tmp mount count = %d", count)
 	}
 }
 

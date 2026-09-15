@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Apply the configured physical parent budget only while the subtree is empty."""
+import fcntl
+import os
+import pathlib
+import re
+import stat
+import sys
+
+
+def requested_limits(runtime, cpu_count, memory_bytes):
+    """Use physical capacity from ctld configuration, never admission totals."""
+    values = []
+    for name in ("resource_cpu_millicores", "resource_memory_bytes"):
+        value = runtime.get(name)
+        if isinstance(value, str):
+            value = os.path.expandvars(value)
+            if not re.fullmatch(r"[1-9][0-9]*", value):
+                raise ValueError("physical capacity must resolve to positive integers")
+            value = int(value)
+        if type(value) is not int or value <= 0:
+            raise ValueError("physical capacity must be positive integers")
+        values.append(value)
+    cpu, memory = values
+    if cpu > cpu_count * 1000 or memory > memory_bytes:
+        raise ValueError("physical capacity exceeds the host")
+    return {"cpu.max": str(cpu * 100) + " 100000", "memory.max": str(memory), "memory.swap.max": "0"}
+
+
+def private_lock(path, owner_uid):
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_mode & 0o077:
+        os.close(fd)
+        raise ValueError("physical budget lock must be a private root-owned file")
+    return os.fdopen(fd, "r+")
+
+
+def apply_limits(root, limits, owner_uid, primary_lock):
+    """An identical budget is safe across A/B restarts with occupied children."""
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner_uid or info.st_mode & 0o022:
+        raise ValueError("resource root must be owned by root and not writable by others")
+    changed = []
+    for name, value in limits.items():
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("resource limit is not a regular cgroup control file")
+        if path.read_text().strip() != value:
+            changed.append(name)
+    if changed:
+        # Share the actual ctld HA flock, so a primary cannot create a lease
+        # between the empty-subtree check and writing the physical limit.
+        with private_lock(primary_lock, owner_uid) as primary:
+            try:
+                fcntl.flock(primary.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("physical budget changes require both ctld instances stopped") from None
+            # An empty child can still own a retained resource lease.
+            if any(p.is_dir() for p in root.iterdir()) or (root / "cgroup.procs").read_text().strip():
+                raise ValueError("physical budget changes require a drained, empty resource root")
+            for name in changed:
+                (root / name).write_text(limits[name])
+    if any((root / name).read_text().strip() != value for name, value in limits.items()):
+        raise ValueError("physical resource budget did not converge")
+
+
+def main():
+    if os.geteuid() != 0:
+        raise ValueError("physical budget setup requires root")
+    import yaml
+    root = pathlib.Path("/sys/fs/cgroup/sandbox0")
+    config_path = pathlib.Path(os.environ.get("CONFIG_PATH", "/etc/sandbox0/ctld.yaml"))
+    if config_path.is_symlink() or not config_path.is_file():
+        raise ValueError("ctld configuration must be a regular file")
+    info = config_path.stat()
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError("ctld configuration must be protected and root-owned")
+    try:
+        runtime = yaml.safe_load(config_path.read_text())["nomad_runtime"]
+    except Exception:
+        raise ValueError("cannot decode the ctld physical capacity configuration") from None
+    if not isinstance(runtime, dict):
+        raise ValueError("nomad_runtime must contain the physical capacity configuration")
+    if os.path.expandvars(str(runtime.get("resource_cgroup_root", ""))) != str(root):
+        raise ValueError("physical budget requires the canonical resource root")
+    meminfo = pathlib.Path("/proc/meminfo").read_text()
+    total = re.search(r"^MemTotal:\s+([0-9]+) kB$", meminfo, re.MULTILINE)
+    if not total:
+        raise ValueError("host memory capacity is unavailable")
+    limits = requested_limits(runtime, os.cpu_count() or 0, int(total[1]) * 1024)
+    lock_path = "/run/sandbox0/physical-resource-budget.lock"
+    ha = pathlib.Path("/var/lib/sandbox0/ctld/ha")
+    ha.mkdir(mode=0o700, exist_ok=True)
+    if ha.is_symlink() or ha.stat().st_uid != 0 or ha.stat().st_mode & 0o022:
+        raise ValueError("ctld HA directory must be a private root-owned directory")
+    with private_lock(lock_path, 0) as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        apply_limits(root, limits, 0, ha / "primary.lock")
+    print("physical_resource_budget_verified=true")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, ImportError) as error:
+        # The parser's original error can contain sensitive configuration lines.
+        print("physical resource budget setup failed: " + str(error), file=sys.stderr)
+        sys.exit(1)

@@ -126,6 +126,11 @@ var (
 		FSIsolation:         fsisolation.Image,
 		NetIsolationModes:   []drivers.NetIsolationMode{drivers.NetIsolationModeGroup},
 		MustInitiateNetwork: false,
+		// Carrier tasks never write Nomad's stdout/stderr FIFOs. Guest output
+		// flows through procd; runtime failures use the existing driver logger.
+		// The warm job also sets logs.disabled because Nomad 1.11's external
+		// driver RPC omits this capability from its serialized response.
+		DisableLogCollection: true,
 	}
 )
 

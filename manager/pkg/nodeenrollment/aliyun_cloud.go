@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
@@ -41,15 +43,16 @@ func NewAliyunCloud(
 	region, scalingGroupID string,
 	routeTableIDs []string,
 ) (*AliyunCloud, error) {
-	essClient, err := ess.NewClientWithProvider(region)
+	credential := aliyunclient.Credentials()
+	essClient, err := ess.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
-	ecsClient, err := ecs.NewClientWithProvider(region)
+	ecsClient, err := ecs.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
-	vpcClient, err := vpc.NewClientWithProvider(region)
+	vpcClient, err := vpc.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +107,8 @@ func (c *AliyunCloud) ValidateElasticInstance(ctx context.Context, identity Aliy
 	instance := instances[0]
 	if instance.InstanceId != identity.InstanceID || instance.ScalingGroupId != c.scalingGroupID ||
 		instance.PrivateIpAddress != identity.PrivateIPv4 || instance.InstanceType != identity.InstanceType ||
-		(instance.LifecycleState != "InService" && instance.LifecycleState != "Pending") {
+		(instance.LifecycleState != "InService" && instance.LifecycleState != "Protected" &&
+			instance.LifecycleState != "Pending" && instance.LifecycleState != "Pending:Wait") {
 		return errors.New("ESS instance membership differs from signed identity")
 	}
 	return nil

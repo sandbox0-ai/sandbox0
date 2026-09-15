@@ -138,6 +138,9 @@ disk headroom. The regional composite-tail backlog is bounded: an S3 outage
 must apply backpressure instead of growing unbounded local or PostgreSQL data.
 Do not release a writer or delete its local branch before immutable publication
 or an explicit crash-abandon terminal transaction.
+The shared retirement reserve remains charged to its writer group across WAL
+close and reopen, until every charged journal is reclaimed. Reopening a journal
+alone does not authorize retirement writes or enlarge ordinary write admission.
 
 ## Durable OCI Importer
 
@@ -321,6 +324,20 @@ The terminal worker must remain independent of the task-driver process. It
 owns exact Nomad stop and client GC, node cleanup requests, physical absence
 observation, RootFS fencing, and the final PostgreSQL capacity release.
 
+Nomad allocation observations use exact-ID, indexed summaries without embedding
+the carrier job. Incomplete, unauthorized, or mismatched catalog responses do
+not establish absence; physical cleanup still requires the exact node proof.
+Direct-client allocation observations have a five-second upper bound, even
+when the endpoint permits longer cleanup requests. If an observation fails,
+the worker defers other slots on that exact node incarnation until its next
+pass. Their leases and physical cleanup requirements remain intact. This
+prevents a retired node's carrier inventory from repeatedly consuming the
+same pass deadline while healthy nodes wait for capacity to be reclaimed.
+The worker resumes each bounded batch after the previous candidate and wraps
+for retries at the end of the traversal. This in-memory cursor prevents an
+unresolved full batch from permanently hiding later cleanup work; it does not
+change the required authority checks or physical absence proofs.
+
 Compact external-crash proofs are replay history for exact writer bindings
 already verified terminal regionally and reclaimed on the node. Local expiry
 requires the matching durable binding and physical proof, `BranchRemoved`,
@@ -390,12 +407,52 @@ small overhead reservations and must not be copied into these values.
 lease children survive ctld A/B restart. A lease returns to capacity only after
 its cgroup and all other runtime state are physically absent.
 
+Lightly loaded pools can opt into admission budgets larger than physical
+capacity using `nomad_runtime.admission_cpu_millicores` and
+`nomad_runtime.admission_memory_bytes`. Omitted or zero values preserve physical
+capacity admission. These budgets bound the sum of individual sandbox limits;
+they do not change a sandbox's CPU quota, memory limit, metering, or isolation.
+Include the `150m` CPU floor for every sandbox when sizing this budget. For
+example, 420 minimum-memory sandboxes require at least 63000 millicores of CPU
+admission, plus the leases of any other running sandboxes. A larger admission
+budget does not add physical CPUs or guarantee simultaneous peak CPU usage.
+Each individual request must still fit the physical node. CPU budgets are
+bounded to 16 times physical capacity and memory budgets to twice physical
+capacity; these are validation ceilings, not recommended operating ratios.
+
+Before enabling overcommit, provision the parent resource cgroup with
+`cpu.max` equal to the physical CPU budget over a 100000-microsecond period,
+`memory.max` equal to the physical memory budget, and `memory.swap.max=0`.
+ctld rejects an unbounded parent when overcommit is enabled. These exact
+physical bounds are also accepted without overcommit and can remain in place
+when a node reboots with reduced admission budgets. With memory overcommit, new cgroups are
+rejected when current aggregate usage reaches 90% of the physical budget or
+the requested memory limit exceeds remaining physical headroom. Exact retries
+of existing cgroups remain available. Guest growth after admission can still
+reach the aggregate limit, so simultaneous peak usage is not guaranteed by an
+overcommitted profile. Validate resident workload memory and tail latency
+before increasing density. Admission budgets cannot change within the same
+node boot. Drain expanded-budget nodes before rolling back the database
+migration, and keep autoscaler per-node admission budgets consistent with the
+enrolled runtime profile.
+
 ## NBD And Local Disk
+
+The canonical warm job has configurable `standard_slots` and `privileged_slots`
+bounds, defaulting to 6 and 2. Additional groups are eligible only on nodes with
+matching `sandbox0_standard_carriers` or `sandbox0_privileged_carriers` Nomad
+metadata. Expanding the job leaves unconfigured nodes at their original width.
+Keep the node profile, usable private IPs, and RootFS devices consistent; drain
+affected carriers before reducing either bound.
 
 `nomad_runtime.nbd_devices` is the actual concurrent RootFS attachment bound.
 The kernel's `nbds_max` alone does not make devices available to ctld. Keep the
 configured list wider than the largest synchronized claim batch plus
 replacement/retirement headroom.
+The host installer derives the NBD module device count from the configured
+`SANDBOX0_ROOTFS_NBD_DEVICES` inventory, with a floor of 64 devices. It refuses
+to reload an in-use module to grow the pool; apply a larger pool on a fresh or
+drained, rebooted node.
 
 Each NBD connection admits up to 64 independent read requests, with a separate
 byte budget of eight maximum-sized responses. This wider small-read window
@@ -425,6 +482,23 @@ scheduling is disposable boot-local/process-local state, rebuilt after restart
 or an observed recovery transition, not durable ownership or terminal truth.
 The durable journal and regional authority remain the recovery inputs.
 
+An optional node-wide disk tier reuses verified immutable RootFS ranges across
+sandboxes, memory-cache eviction, and ctld process replacement. Configure both
+`nomad_runtime.read_cache_directory` and `nomad_runtime.read_disk_cache_bytes`;
+`nomad_runtime.read_cache_bytes` controls the memory tier and defaults to
+128 MiB. Use a dedicated node-private local directory. The disk cache contains
+decoded plaintext, validates every hit against its content checksum, and never
+caches a sandbox's private writable branch. Missing or corrupt entries fall
+back to object storage. Bounded asynchronous fills and eviction keep cache
+failures off the source-read success path. This cache is disposable and does
+not replace durable branch state or object storage.
+
+The primary ctld metrics endpoint exposes `ctld_rootfs_read_cache_disk_*` hit,
+miss, fill, error, drop, and occupancy metrics, plus
+`ctld_rootfs_read_cache_queued_write_bytes`. Compare these with object-storage
+reads and end-to-end command readiness. A new sandbox on a cached node does
+not represent an empty-node-cache start.
+
 ## Network Runtime
 
 Run ctld A/B directly in host mount, network, cgroup, and device namespaces.
@@ -435,6 +509,13 @@ state and takes over after promotion.
 Configure cluster DNS and platform-allowed CIDRs narrowly. Sandbox policy is
 applied before runsc creation, and manager exposes the generation only after
 the applied policy digest is part of the launch proof.
+
+Cloud metadata destinations are always denied for sandbox traffic: Aliyun
+`100.100.100.200`, IPv4 link-local `169.254.0.0/16`, and the IPv6 metadata endpoint
+`fd00:ec2::254`. Tenant rules, platform allow lists, DNS bypass lists, and SOCKS5
+proxy selection cannot override this boundary. The IPv4 kernel drop precedes
+configured bypasses and applies only to registered sandbox source IPs, preserving
+host-side enrollment and credential renewal.
 
 Never enable a second task-driver-local network-policy path. The driver consumes
 ctld's durable policy proof; it does not install namespace-local fallback
@@ -456,13 +537,26 @@ restart {
 ```
 
 Each task group must also keep `network { mode = "cni/sandbox0" }`. That name
-selects the rendered per-node CNI configuration and its leased allocation
-CIDR. Nomad `bridge` mode selects a different built-in network and must not be
-used for these carriers.
+selects the rendered per-node stock CNI `ptp` configuration and its leased
+allocation CIDR. A directly routed host veth is required for UDP TPROXY;
+ctld rejects bridged carrier peers. Nomad `bridge` mode selects a different
+built-in network and must not be used for these carriers. Drain an existing
+node and wait for every old bridge port to disappear before migrating its
+CNI configuration; existing namespaces retain the topology they were created with.
 
 Each carrier is one-shot. Nomad replaces the allocation after consumption.
 Pool width, node capacity, and NBD count are independent constraints and should
 be monitored together.
+
+Autoscaler workload demand counts resource leases for claiming, starting, and
+active slots. Quiescing and orphaned slots retain their resource leases until
+physical cleanup is proven, but do not create replacement workload demand.
+Cleanup backlog therefore cannot by itself purchase additional worker capacity.
+Unsatisfied claims and configured headroom still contribute to scale-out demand;
+scale-in still requires the normal stabilization and node drain protocol.
+Aliyun route cleanup deletes only the verified immutable route entry ID and
+waits for route absence before releasing node identity or the allocation subnet.
+An accepted asynchronous delete request alone does not complete scale-in.
 
 Autoscaled clients must start with `sandbox0_admitted=false`. After exact node
 identity and a live ctld capacity heartbeat are established, bootstrap may set

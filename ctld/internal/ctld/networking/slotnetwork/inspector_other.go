@@ -17,3 +17,7 @@ func newNamespaceInspector(string) NamespaceInspector {
 func (unsupportedNamespaceInspector) Inspect(string, string) (string, error) {
 	return "", fmt.Errorf("runtime slot network namespace inspection requires Linux: %w", errdefs.ErrNotImplemented)
 }
+
+func (unsupportedNamespaceInspector) InspectClaimed(string, string, string) error {
+	return fmt.Errorf("runtime slot network namespace inspection requires Linux: %w", errdefs.ErrNotImplemented)
+}

@@ -36,6 +36,9 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -48,11 +51,13 @@ const (
 	rootFSSessionAttachGrace       = 2 * time.Minute
 	rootFSSessionReconcileTimeout  = 3 * time.Minute
 	// Periodic terminal-proof housekeeping must leave capacity for recovery of
-	// physical writers. Explicit fencing/cleanup and pressure planning do not
-	// enter this speculative-work budget.
-	rootFSRecoveryConcurrency      = 4
-	rootFSProofRecoveryConcurrency = 2
-	rootFSRecoveryBackoffMax       = time.Minute
+	// physical writers. Lease-loss notifications have their own bounded lane,
+	// so a deletion burst cannot issue one concurrent regional RPC per guest.
+	// Explicit regional cleanup and pressure planning remain independent.
+	rootFSRecoveryConcurrency       = 4
+	rootFSProofRecoveryConcurrency  = 2
+	rootFSUrgentRecoveryConcurrency = 2
+	rootFSRecoveryBackoffMax        = time.Minute
 	// Startup recovery may have to rebuild and idempotently verify the full
 	// configured 10 GiB dirty-tail bound. Keep this separate from the shorter
 	// steady-state reconciliation budget so a normal node does not retain
@@ -167,30 +172,35 @@ type nodeRuntime struct {
 	config  Config
 	logger  logger
 
-	mu                 sync.Mutex
-	wg                 sync.WaitGroup
-	inflight           map[string]*reconciliationState
-	preempting         map[string]int
-	scanMu             sync.Mutex
-	recoveryRetries    map[string]*recoveryRetry
-	recoverySequence   uint64
-	periodicRecovery   int
-	periodicProofs     int
-	trigger            chan string
-	allocations        nomadAllocationSource
-	runtimeSlotNetwork runtimeSlotNetworkControl
-	resourceCgroups    runtimeResourceCgroup
-	journal            *runtimeSlotJournal
-	lastJournalPrune   time.Time
-	clusterID          string
-	nodeID             string
-	nodeUID            string
+	mu                    sync.Mutex
+	wg                    sync.WaitGroup
+	inflight              map[string]*reconciliationState
+	preempting            map[string]int
+	scanMu                sync.Mutex
+	recoveryRetries       map[string]*recoveryRetry
+	recoverySequence      uint64
+	periodicRecovery      int
+	periodicProofs        int
+	urgentRecovery        int
+	trigger               chan string
+	allocations           nomadAllocationSource
+	runtimeSlotNetwork    runtimeSlotNetworkControl
+	resourceCgroups       runtimeResourceCgroup
+	journal               *runtimeSlotJournal
+	registrationAuthority registrationAbortAuthority
+	registrationAfter     string
+	lastJournalPrune      time.Time
+	metricTargets         map[string]runtimeMetricBinding
+	clusterID             string
+	nodeID                string
+	nodeUID               string
 }
 
 type reconciliationState struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	periodic bool
+	urgent   bool
 	proof    bool
 }
 
@@ -454,6 +464,8 @@ type NomadAllocationConfig struct {
 	RuntimeSlotCtldNetworkSocket  string
 	RuntimeResourceCPUMillicores  int64
 	RuntimeResourceMemoryBytes    int64
+	RuntimeAdmissionCPUMillicores int64
+	RuntimeAdmissionMemoryBytes   int64
 	RuntimeResourceCPUSetCPUs     string
 	RuntimeResourceCPUSetMems     string
 }
@@ -538,6 +550,11 @@ func run(
 		return err
 	}
 	defer runtime.Close()
+	unregisterCacheMetrics, err := registerReadCacheMetrics(prometheus.DefaultRegisterer, runtime.sessions.ReadCacheStats)
+	if err != nil {
+		return fmt.Errorf("register node RootFS cache metrics: %w", err)
+	}
+	defer unregisterCacheMetrics()
 	resourceCgroups, err := newRuntimeResourceCgroup(
 		config.RuntimeResourceCgroupRoot,
 		runtimeNodeCapacity(nomadConfig),
@@ -565,6 +582,11 @@ func run(
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
+	registrationAuthority, err := newRegistrationAbortAuthority(config)
+	if err != nil {
+		return fmt.Errorf("create registration recovery authority: %w", err)
+	}
+	daemon.registrationAuthority = registrationAuthority
 	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork, resourceCgroups)
 	if err != nil {
 		return err
@@ -573,6 +595,11 @@ func run(
 	go func() {
 		defer daemon.wg.Done()
 		daemon.reconcileLoop(daemonCtx)
+	}()
+	daemon.wg.Add(1)
+	go func() {
+		defer daemon.wg.Done()
+		daemon.reconcileRegistrationLoop(daemonCtx)
 	}()
 	var nodeChannelErr <-chan error
 	if nodeChannelAgent != nil {
@@ -654,11 +681,13 @@ func validateNomadAllocationConfig(config NomadAllocationConfig) error {
 
 func runtimeNodeCapacity(config NomadAllocationConfig) protocol.NodeChannelCapacity {
 	return protocol.NodeChannelCapacity{
-		CPUMillicores:   config.RuntimeResourceCPUMillicores,
-		MemoryBytes:     config.RuntimeResourceMemoryBytes,
-		CPUSetCPUs:      config.RuntimeResourceCPUSetCPUs,
-		CPUSetMems:      config.RuntimeResourceCPUSetMems,
-		TTLMilliseconds: protocol.DefaultNodeChannelCapacityTTLMilliseconds,
+		CPUMillicores:          config.RuntimeResourceCPUMillicores,
+		MemoryBytes:            config.RuntimeResourceMemoryBytes,
+		AdmissionCPUMillicores: config.RuntimeAdmissionCPUMillicores,
+		AdmissionMemoryBytes:   config.RuntimeAdmissionMemoryBytes,
+		CPUSetCPUs:             config.RuntimeResourceCPUSetCPUs,
+		CPUSetMems:             config.RuntimeResourceCPUSetMems,
+		TTLMilliseconds:        protocol.DefaultNodeChannelCapacityTTLMilliseconds,
 	}
 }
 
@@ -677,6 +706,13 @@ func (d *nodeRuntime) RegisterRuntimeSlot(
 	if registration.ClusterID != d.clusterID || registration.NodeID != d.nodeID {
 		return fmt.Errorf("runtime slot registration target does not match this daemon: %w", errdefs.ErrPermissionDenied)
 	}
+	// Share the existing per-slot physical-operation gate with cleanup. A late
+	// default-deny registration must not recreate policy after an absence proof.
+	// Registration never preempts recovery or a regional cleanup operation.
+	if !d.beginReconciliation(registration.SlotID, nil) {
+		return fmt.Errorf("runtime slot registration conflicts with an active physical operation: %w", errdefs.ErrUnavailable)
+	}
+	defer d.endReconciliation(registration.SlotID)
 	stableMount, err := validateRootfsPath(registration.StableMount, d.config.RootFSConsumerMountRoot)
 	if err != nil {
 		return fmt.Errorf("validate runtime slot stable mount: %w: %w", err, errdefs.ErrFailedPrecondition)
@@ -721,7 +757,9 @@ func (d *nodeRuntime) RegisterRuntimeSlot(
 	if err := d.runtimeSlotNetwork.Register(ctx, local); err != nil {
 		return fmt.Errorf("apply ctld warm-slot default-deny policy: %w", err)
 	}
-	return nil
+	// Cleanup may durably fence the slot while waiting for this operation's
+	// gate. Recheck that fence before allowing the driver to publish readiness.
+	return d.journal.Register(registration)
 }
 
 func (d *nodeRuntime) runtimeSlotNetworkRegistrationRequest(
@@ -984,11 +1022,31 @@ func (d *nodeRuntime) cleanupWriterRuntimeSlot(
 				return protocol.NodeCleanupControlProof{}, fmt.Errorf("terminal RootFS crash proof cannot satisfy %s retirement: %w", request.WriterRetireKind, errdefs.ErrFailedPrecondition)
 			}
 			if reclaimErr := d.runtime.ReclaimVerifiedTerminal(ctx, matched.Stage); reclaimErr != nil {
-				return protocol.NodeCleanupControlProof{}, fmt.Errorf("reclaim verified terminal RootFS session: %w", reclaimErr)
+				if !errdefs.IsFailedPrecondition(reclaimErr) {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("reclaim verified terminal RootFS session: %w", reclaimErr)
+				}
+				// BeginCleanup suppresses the background recovery worker for this
+				// slot. Finish its exact already-started crash here, or the slot
+				// would wait forever for the worker it has fenced out.
+				if _, finishErr := d.runtime.CrashFence(ctx, matched.Stage, request.WriterOperationID, observation); finishErr != nil {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("finish owned RootFS crash retirement: %w", finishErr)
+				}
+				if reclaimErr := d.runtime.ReclaimVerifiedTerminal(ctx, matched.Stage); reclaimErr != nil {
+					return protocol.NodeCleanupControlProof{}, fmt.Errorf("verify completed RootFS crash retirement: %w", reclaimErr)
+				}
 			}
 			rootFSProofDigest = request.WriterAuthorityDigest
 		} else {
 			crashProof, fenceErr := d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+			var busy *rootfsblock.DirtyTailRetirementBusyError
+			if errors.As(fenceErr, &busy) && busy.ActiveGroup != matched.Stage.Parent {
+				reclaimed, reclaimErr := d.reclaimRetirementReserve(ctx, busy.ActiveGroup)
+				if reclaimErr != nil {
+					fenceErr = errors.Join(fenceErr, fmt.Errorf("reclaim blocking retirement: %w", reclaimErr))
+				} else if reclaimed {
+					crashProof, fenceErr = d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+				}
+			}
 			if fenceErr != nil {
 				return protocol.NodeCleanupControlProof{}, fenceErr
 			}
@@ -1190,6 +1248,22 @@ func (d *nodeRuntime) cleanupGrantlessRuntimeSlot(
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
 ) (protocol.NodeCleanupControlProof, error) {
+	if strings.HasPrefix(request.OperationID, protocol.RegistrationAbortOperationPrefix) {
+		// A registration fence cannot authorize discarding an unexpected local
+		// writer, including legacy state missing from the regional slot catalog.
+		// Inspect under the same per-slot physical-operation gate as cleanup.
+		if d.runtime == nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("registration abort requires the local writer journal: %w", errdefs.ErrUnavailable)
+		}
+		sessions, err := d.runtime.RecoverySessions()
+		if err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
+		matched, err := matchRuntimeSlotCleanupSession(sessions, request)
+		if err != nil || matched != nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("registration abort conflicts with local writer state: %w", errdefs.ErrFailedPrecondition)
+		}
+	}
 	return d.cleanupJournaledRuntimeSlot(ctx, request, record, "")
 }
 
@@ -1688,6 +1762,11 @@ func (d *nodeRuntime) beginRecoveryReconciliation(
 		proof && d.periodicProofs >= rootFSProofRecoveryConcurrency) {
 		return nil
 	}
+	if !periodic && d.urgentRecovery >= rootFSUrgentRecoveryConcurrency {
+		// The durable recovery snapshot is retried by the periodic scan; no
+		// lifecycle authority or work item is lost when this hint is coalesced.
+		return nil
+	}
 	if !d.beginReconciliationLocked(key, cancel) {
 		return nil
 	}
@@ -1698,6 +1777,9 @@ func (d *nodeRuntime) beginRecoveryReconciliation(
 		if proof {
 			d.periodicProofs++
 		}
+	} else {
+		state.urgent = true
+		d.urgentRecovery++
 	}
 	d.recoverySequence++
 	retry.lastAttempt = d.recoverySequence
@@ -1826,6 +1908,9 @@ func (d *nodeRuntime) endReconciliationLocked(key string) {
 				d.periodicProofs--
 			}
 		}
+		if current.urgent {
+			d.urgentRecovery--
+		}
 		close(current.done)
 	}
 }
@@ -1837,12 +1922,13 @@ func (d *nodeRuntime) reconciliationInFlight(key string) bool {
 }
 
 type httpNomadAllocationSource struct {
-	allocationURL string
-	visibilityURL string
-	namespace     string
-	jobID         string
-	tokenFile     string
-	http          *http.Client
+	allocationBase *url.URL
+	nodeID         string
+	visibilityURL  string
+	namespace      string
+	jobID          string
+	tokenFile      string
+	http           *http.Client
 }
 
 func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSource, error) {
@@ -1862,8 +1948,7 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		return nil, fmt.Errorf("nomad address must be an HTTP(S) origin")
 	}
 	basePath := strings.TrimSuffix(parsed.Path, "/")
-	parsed.Path = basePath + "/v1/node/" + url.PathEscape(nodeID) + "/allocations"
-	allocationURL := parsed.String()
+	allocationBase := *parsed
 	parsed.Path = basePath + "/v1/job/" + url.PathEscape(jobID)
 	query := parsed.Query()
 	query.Set("namespace", namespace)
@@ -1897,7 +1982,7 @@ func newNomadAllocationSource(config NomadAllocationConfig) (nomadAllocationSour
 		transport.TLSClientConfig = tlsConfig
 	}
 	return &httpNomadAllocationSource{
-		allocationURL: allocationURL, visibilityURL: visibilityURL,
+		allocationBase: &allocationBase, nodeID: nodeID, visibilityURL: visibilityURL,
 		namespace: namespace, jobID: jobID, tokenFile: strings.TrimSpace(config.TokenFile),
 		http: &http.Client{Timeout: 2 * time.Second, Transport: transport},
 	}, nil
@@ -1944,28 +2029,13 @@ func (s *httpNomadAllocationSource) ActiveAllocations(ctx context.Context) (map[
 		return nil, errors.New("nomad allocation catalog visibility anchor does not match configured job")
 	}
 
-	request, err = http.NewRequestWithContext(ctx, http.MethodGet, s.allocationURL, nil)
-	if err != nil {
-		return nil, err
-	}
+	headers := http.Header{}
 	if token != "" {
-		request.Header.Set("X-Nomad-Token", token)
+		headers.Set("X-Nomad-Token", token)
 	}
-	response, err = s.http.Do(request)
+	records, err := nomadinventory.List(ctx, s.http, s.allocationBase, s.nodeID, s.namespace, headers)
 	if err != nil {
 		return nil, fmt.Errorf("list Nomad node allocations: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		payload, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
-		return nil, fmt.Errorf("list Nomad node allocations: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(payload)))
-	}
-	var records []struct {
-		ID string `json:"ID"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, nomadAllocationResponseMaxBytes))
-	if err := decoder.Decode(&records); err != nil {
-		return nil, fmt.Errorf("decode Nomad node allocations: %w", err)
 	}
 	active := make(map[string]bool, len(records))
 	for _, record := range records {
@@ -2015,9 +2085,7 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 }
 
 func crashOperationID(stage rootfshandoff.StageRequest) string {
-	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
-	sum := sha256.Sum256([]byte(payload))
-	return "nomad-crash-" + hex.EncodeToString(sum[:16])
+	return rootfshandoff.CrashRetireOperationID(stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
 }
 
 func (d *nodeRuntime) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {

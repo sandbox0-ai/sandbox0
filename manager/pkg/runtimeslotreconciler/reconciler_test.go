@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,7 +26,7 @@ type fakeStore struct {
 	lifecycle     *sandboxstore.SandboxLifecycleTxn
 }
 
-func (f *fakeStore) ListRuntimeSlotsForReconcile(context.Context, int) ([]sandboxstore.RuntimeSlot, error) {
+func (f *fakeStore) ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error) {
 	f.record("list")
 	if f.slot.State == sandboxstore.RuntimeSlotStateTerminal {
 		return nil, nil
@@ -163,10 +164,11 @@ func (f *fakeAllocation) Purge(_ context.Context, request AllocationPurgeRequest
 }
 
 type fakeNode struct {
-	order       *[]string
-	requests    []NodeCleanupRequest
-	cleanupLost bool
-	mutate      func(*NodeCleanupProof)
+	order        *[]string
+	requests     []NodeCleanupRequest
+	cleanupLost  bool
+	mutate       func(*NodeCleanupProof)
+	afterCleanup func()
 }
 
 func (f *fakeNode) Cleanup(_ context.Context, request NodeCleanupRequest) (NodeCleanupProof, error) {
@@ -182,6 +184,9 @@ func (f *fakeNode) Cleanup(_ context.Context, request NodeCleanupRequest) (NodeC
 	}
 	if f.mutate != nil {
 		f.mutate(&proof)
+	}
+	if f.afterCleanup != nil {
+		f.afterCleanup()
 	}
 	if f.cleanupLost {
 		f.cleanupLost = false
@@ -208,6 +213,8 @@ func (f *fakeWriter) Fence(_ context.Context, request WriterFenceRequest) (Write
 	if f.store.grant.State == sandboxstore.RootFSWriterGrantStateIssued ||
 		f.store.grant.State == sandboxstore.RootFSWriterGrantStateConsumed {
 		f.store.grant.State = sandboxstore.RootFSWriterGrantStateRetiring
+		f.store.grant.RetireOperationID = request.OperationID
+		f.store.grant.RetireKind = sandboxstore.RootFSWriterRetireKindCrashAbandon
 	}
 	if f.fenceLost {
 		f.fenceLost = false
@@ -360,6 +367,86 @@ func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 		!bytes.Equal(fixture.writer.completes[0].NodeCleanupDigest, bytes.Repeat([]byte{0x41}, 32)) {
 		t.Fatalf("fence/cleanup binding = node %x writer %x", fixture.node.requests[0].WriterAuthorityDigest,
 			fixture.writer.completes[0].NodeCleanupDigest)
+	}
+}
+
+func TestReconcilerResumesNodeOwnedCrashAndKeepsItsCommittedProof(t *testing.T) {
+	for _, initiallyRetiring := range []bool{false, true} {
+		t.Run(fmt.Sprint(initiallyRetiring), func(t *testing.T) {
+			fixture := newReconcileFixture(t, true)
+			attachResourceLease(t, fixture)
+			grant := fixture.store.grant
+			grant.GateParent = "node-parent-1"
+			operation := rootfshandoff.CrashRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+			if initiallyRetiring {
+				grant.State = sandboxstore.RootFSWriterGrantStateRetiring
+				grant.RetireKind = sandboxstore.RootFSWriterRetireKindCrashAbandon
+				grant.RetireOperationID = operation
+			}
+			proof := bytes.Repeat([]byte{0x71}, 32)
+			fixture.node.afterCleanup = func() {
+				grant.State = sandboxstore.RootFSWriterGrantStateRetired
+				grant.RetireProofDigest = append([]byte(nil), proof...)
+			}
+			fixture.node.cleanupLost = true
+			first, err := fixture.reconciler.RunOnce(t.Context())
+			if err == nil || first.Failed != 1 || len(fixture.allocation.purges) != 0 || fixture.store.finalizeCalls != 0 {
+				t.Fatalf("lost cleanup response advanced authority: result=%+v err=%v", first, err)
+			}
+			second, err := fixture.reconciler.RunOnce(t.Context())
+			if err != nil || second.Completed != 1 {
+				t.Fatalf("node-owned crash did not recover: result=%+v err=%v", second, err)
+			}
+			if len(fixture.writer.completes) != 0 || !bytes.Equal(grant.RetireProofDigest, proof) ||
+				fixture.writer.fences[0].OperationID != operation ||
+				!reflect.DeepEqual(fixture.node.requests[0], fixture.node.requests[1]) {
+				t.Fatalf("node-owned crash authority or retry changed")
+			}
+			if fixture.store.slot.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseReleased {
+				t.Fatal("verified cleanup did not release the resource lease")
+			}
+		})
+	}
+}
+
+func TestReconcilerPreservesLegacyCrashRetirementOperation(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	grant := fixture.store.grant
+	grant.GateParent = "node-parent-1"
+	grant.State = sandboxstore.RootFSWriterGrantStateRetiring
+	grant.RetireKind = sandboxstore.RootFSWriterRetireKindCrashAbandon
+	grant.RetireOperationID = operationIDs(fixture.store.slot).writer
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result.Completed != 1 || fixture.writer.fences[0].OperationID != grant.RetireOperationID {
+		t.Fatalf("legacy retirement was replaced: result=%+v err=%v", result, err)
+	}
+}
+
+func TestReconcilerRejectsChangedNodeOwnedRetirementBeforeReleasingCapacity(t *testing.T) {
+	for name, mutate := range map[string]func(*sandboxstore.RootFSWriterGrant){
+		"epoch":     func(g *sandboxstore.RootFSWriterGrant) { g.WriterEpoch++ },
+		"operation": func(g *sandboxstore.RootFSWriterGrant) { g.RetireOperationID = "another-operation" },
+		"kind": func(g *sandboxstore.RootFSWriterGrant) {
+			g.RetireKind = sandboxstore.RootFSWriterRetireKindPlannedPublish
+		},
+		"missing proof": func(g *sandboxstore.RootFSWriterGrant) { g.RetireProofDigest = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newReconcileFixture(t, true)
+			attachResourceLease(t, fixture)
+			fixture.store.grant.GateParent = "node-parent-1"
+			fixture.node.afterCleanup = func() {
+				g := fixture.store.grant
+				g.State = sandboxstore.RootFSWriterGrantStateRetired
+				g.RetireProofDigest = bytes.Repeat([]byte{0x71}, 32)
+				mutate(g)
+			}
+			result, err := fixture.reconciler.RunOnce(t.Context())
+			if err == nil || result.Failed != 1 || len(fixture.allocation.purges) != 0 ||
+				fixture.store.finalizeCalls != 0 || fixture.store.slot.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseActive {
+				t.Fatalf("changed writer authority released capacity: result=%+v err=%v", result, err)
+			}
+		})
 	}
 }
 

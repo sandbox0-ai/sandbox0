@@ -130,7 +130,8 @@ func (h *ChannelHub) Prepare(
 		AllocationID: request.AllocationID, NodeID: request.NodeID,
 		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, NetworkPolicy: request.NetworkPolicy,
-		PolicyDigest: request.PolicyDigest,
+		PolicyDigest:   request.PolicyDigest,
+		PolicyRevision: request.PolicyRevision, ExpectedPolicyDigest: request.ExpectedPolicyDigest,
 	}
 	target := protocol.NodeChannelTarget{
 		SlotID: request.SlotID, ClusterID: request.ClusterID,
@@ -208,8 +209,10 @@ func (h *ChannelHub) ServeHTTP(writer http.ResponseWriter, request *http.Request
 				ClusterID: hello.ClusterID, NodeID: hello.NodeID, NodeUID: hello.NodeUID,
 				NodeBootID: hello.NodeBootID, CPUMillicores: hello.Capacity.CPUMillicores,
 				MemoryBytes: hello.Capacity.MemoryBytes, CPUSetCPUs: hello.Capacity.CPUSetCPUs,
-				CPUSetMems: hello.Capacity.CPUSetMems,
-				TTL:        time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
+				AdmissionCPUMillicores: hello.Capacity.AdmissionCPUMillicores,
+				AdmissionMemoryBytes:   hello.Capacity.AdmissionMemoryBytes,
+				CPUSetMems:             hello.Capacity.CPUSetMems,
+				TTL:                    time.Duration(hello.Capacity.TTLMilliseconds) * time.Millisecond,
 			})
 	} else {
 		err = h.capacityStore.ExpireRuntimeNodeCapacity(request.Context(),

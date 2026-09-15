@@ -22,31 +22,35 @@ const (
 // CPU set is a confinement boundary; CPU millicores may be lower to reserve
 // host overhead but may never exceed physical set cardinality.
 type RuntimeNodeCapacity struct {
-	ClusterID           string
-	NodeID              string
-	NodeUID             string
-	NodeBootID          string
-	CPUMillicores       int64
-	MemoryBytes         int64
-	CPUSetCPUs          string
-	CPUSetMems          string
-	HeartbeatExpiresAt  time.Time
-	Revision            int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	AuthorityObservedAt time.Time
+	ClusterID              string
+	NodeID                 string
+	NodeUID                string
+	NodeBootID             string
+	CPUMillicores          int64
+	MemoryBytes            int64
+	AdmissionCPUMillicores int64
+	AdmissionMemoryBytes   int64
+	CPUSetCPUs             string
+	CPUSetMems             string
+	HeartbeatExpiresAt     time.Time
+	Revision               int64
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	AuthorityObservedAt    time.Time
 }
 
 type RegisterRuntimeNodeCapacityRequest struct {
-	ClusterID     string
-	NodeID        string
-	NodeUID       string
-	NodeBootID    string
-	CPUMillicores int64
-	MemoryBytes   int64
-	CPUSetCPUs    string
-	CPUSetMems    string
-	TTL           time.Duration
+	ClusterID              string
+	NodeID                 string
+	NodeUID                string
+	NodeBootID             string
+	CPUMillicores          int64
+	MemoryBytes            int64
+	AdmissionCPUMillicores int64
+	AdmissionMemoryBytes   int64
+	CPUSetCPUs             string
+	CPUSetMems             string
+	TTL                    time.Duration
 }
 
 // ExpireRuntimeNodeCapacityRequest identifies one exact node boot whose
@@ -72,9 +76,9 @@ func (s *PGSandboxStore) RegisterRuntimeNodeCapacity(
 		INSERT INTO manager.runtime_node_capacities (
 			cluster_id, node_id, node_uid, node_boot_id,
 			cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems,
-			heartbeat_expires_at
+			heartbeat_expires_at, admission_cpu_millicores, admission_memory_bytes
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-			NOW() + ($9::double precision * INTERVAL '1 millisecond'))
+			NOW() + ($9::double precision * INTERVAL '1 millisecond'), $10, $11)
 		ON CONFLICT (cluster_id, node_id, node_uid, node_boot_id) DO UPDATE
 		SET heartbeat_expires_at = EXCLUDED.heartbeat_expires_at,
 			revision = manager.runtime_node_capacities.revision + 1,
@@ -83,9 +87,13 @@ func (s *PGSandboxStore) RegisterRuntimeNodeCapacity(
 			AND manager.runtime_node_capacities.memory_bytes = EXCLUDED.memory_bytes
 			AND manager.runtime_node_capacities.cpuset_cpus = EXCLUDED.cpuset_cpus
 			AND manager.runtime_node_capacities.cpuset_mems = EXCLUDED.cpuset_mems
+			AND COALESCE(NULLIF(manager.runtime_node_capacities.admission_cpu_millicores, 0),
+				manager.runtime_node_capacities.cpu_millicores) = EXCLUDED.admission_cpu_millicores
+			AND COALESCE(NULLIF(manager.runtime_node_capacities.admission_memory_bytes, 0),
+				manager.runtime_node_capacities.memory_bytes) = EXCLUDED.admission_memory_bytes
 	`, normalized.ClusterID, normalized.NodeID, normalized.NodeUID, normalized.NodeBootID,
 		normalized.CPUMillicores, normalized.MemoryBytes, normalized.CPUSetCPUs, normalized.CPUSetMems,
-		normalized.TTL.Milliseconds())
+		normalized.TTL.Milliseconds(), normalized.AdmissionCPUMillicores, normalized.AdmissionMemoryBytes)
 	if err != nil {
 		return nil, mapRuntimeSlotConflict("register runtime node capacity", err)
 	}
@@ -169,6 +177,16 @@ func normalizeRuntimeNodeCapacityRequest(
 		return nil, fmt.Errorf("capacity TTL must be between one second and %s", MaxRuntimeNodeCapacityTTL)
 	}
 	normalized.TTL = time.Duration(normalized.TTL.Milliseconds()) * time.Millisecond
+	capacity := protocol.NodeChannelCapacity{
+		CPUMillicores: normalized.CPUMillicores, MemoryBytes: normalized.MemoryBytes,
+		CPUSetCPUs: normalized.CPUSetCPUs, CPUSetMems: normalized.CPUSetMems,
+		AdmissionCPUMillicores: normalized.AdmissionCPUMillicores, AdmissionMemoryBytes: normalized.AdmissionMemoryBytes,
+		TTLMilliseconds: normalized.TTL.Milliseconds(),
+	}
+	if err := capacity.Validate(); err != nil {
+		return nil, fmt.Errorf("runtime node admission capacity: %w", err)
+	}
+	normalized.AdmissionCPUMillicores, normalized.AdmissionMemoryBytes = capacity.AdmissionLimits()
 	return &normalized, nil
 }
 
@@ -210,6 +228,8 @@ func runtimeNodeCapacitySelectSQL() string {
 	return `
 		SELECT cluster_id, node_id, node_uid, node_boot_id,
 			cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems,
+			COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
+			COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes),
 			heartbeat_expires_at, revision, created_at, updated_at, NOW()
 		FROM manager.runtime_node_capacities `
 }
@@ -219,6 +239,7 @@ func scanRuntimeNodeCapacity(row runtimeSlotScanner) (*RuntimeNodeCapacity, erro
 	if err := row.Scan(
 		&capacity.ClusterID, &capacity.NodeID, &capacity.NodeUID, &capacity.NodeBootID,
 		&capacity.CPUMillicores, &capacity.MemoryBytes, &capacity.CPUSetCPUs, &capacity.CPUSetMems,
+		&capacity.AdmissionCPUMillicores, &capacity.AdmissionMemoryBytes,
 		&capacity.HeartbeatExpiresAt, &capacity.Revision, &capacity.CreatedAt, &capacity.UpdatedAt,
 		&capacity.AuthorityObservedAt,
 	); err != nil {

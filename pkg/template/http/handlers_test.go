@@ -131,6 +131,24 @@ func TestCreateTemplateAcceptsPrivilegedClassAndEphemeralMounts(t *testing.T) {
 	}
 }
 
+func TestCreateSmallTemplatePersistsPlatformCPUFloor(t *testing.T) {
+	store := &testTemplateStore{}
+	handler := &Handler{Store: store, Logger: zap.NewNop()}
+	router := templateTestRouter(http.MethodPost, "/api/v1/templates", handler.CreateTemplate,
+		&internalauth.Claims{TeamID: "team-1", UserID: "user-1"})
+	body := `{"template_id":"small","spec":{"mainContainer":{"image":"registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"memory":"128Mi"}}}}`
+	response := performTemplateRequest(router, http.MethodPost, "/api/v1/templates", body)
+	if response.Code != http.StatusCreated || !store.createCalled {
+		t.Fatalf("status = %d, persisted = %t, body = %s", response.Code, store.createCalled, response.Body.String())
+	}
+	if got := store.createdOrUpdatedSpec.MainContainer.Resources.CPU; got != "150m" {
+		t.Fatalf("persisted CPU = %q, want 150m", got)
+	}
+	if strings.Contains(response.Body.String(), `"cpu"`) {
+		t.Fatal("public template response exposed internal CPU field")
+	}
+}
+
 func TestCreateTemplateRejectsUnknownFields(t *testing.T) {
 	tests := []struct {
 		name, field, fragment string

@@ -144,6 +144,49 @@ even on a hit. This prevents bulk data scans from evicting a fitting mapping
 working set, but does not make a mixed-image data working set fit in memory or
 guarantee claim/command latency.
 
+### Node disk tier
+
+`NewReadCacheWithDisk` optionally adds a node-owned disk tier below the memory
+LRU and above the object source. All session readers on that node share it.
+Keys use the decoded SHA-256 and length, so immutable bytes can be reused across
+object locations, generations, and raw/compressed encodings. Descriptor and
+parent/child validation still runs; writable branches and composite-tail
+overrides never enter this cache.
+
+The directory contains plaintext and must be dedicated host-private storage,
+outside every sandbox mount. It is restricted to mode 0700, holds a single-owner
+lock, and rejects symlink paths. Every disk hit verifies length and checksum;
+missing, corrupted, or unreadable entries fall back to the authenticated object
+source. A disk error cannot turn invalid data into a successful read.
+
+In ctld's `nomad_runtime` configuration:
+
+```yaml
+nomad_runtime:
+    read_cache_bytes: 134217728
+    read_cache_directory: /var/lib/sandbox0/ctld/read-cache-v1
+    read_disk_cache_bytes: 8589934592
+```
+
+Memory defaults to 128MiB when omitted. Disk caching is opt-in: its directory and
+positive byte budget must be supplied together. The disk budget counts payload
+bytes, not filesystem metadata or allocation rounding. At most 131072 ranges
+are indexed, independently bounding metadata even with tiny mapping entries.
+Eviction follows process-local LRU order; restart reconstructs bounded occupancy
+without persisting per-hit recency. This disposable tier is never a durability
+source for user writes.
+
+Verified fills use a non-blocking queue capped at 32 entries and 8MiB including
+the active write. Duplicate pending fills share one queue entry. Saturation or
+disk failure skips cache fills without failing the demand read. Atomic rename
+publishes completed files; no cache fsync extends the claim path. On process
+restart, completed entries are reusable and an incomplete staging file is
+discarded. Host crashes may lose cache data; checksum validation handles torn
+files on their next use. `Close` drains accepted fills and releases ownership.
+`ReadCache.Stats` reports hits, misses, writes, errors, dropped fills, occupancy,
+and queued bytes. Local disk reuse is distinct from a fresh node with no cache;
+neither a new sandbox nor clearing guest page cache establishes the latter.
+
 ## Remaining acceptance
 
 An explicit `BuildMaterializedGenerationWithLayout` entry point can partition

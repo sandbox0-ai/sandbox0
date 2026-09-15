@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
 )
 
 const (
@@ -24,6 +26,12 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 
 	buf.WriteString("*mangle\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
+	// Metadata protection must precede all configured bypasses and TPROXY.
+	// Scope it to registered guest sources so host enrollment and credential
+	// renewal keep their own access to the cloud metadata service.
+	for _, cidr := range policy.CloudMetadataIPv4CIDRs() {
+		_, _ = fmt.Fprintf(&buf, "-A %s -m set --match-set %s src -d %s -j DROP\n", chainName, ipsetName, cidr)
+	}
 
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))
@@ -63,13 +71,12 @@ func appendTPROXYRules(buf *bytes.Buffer, inputInterface, protocol string, destP
 	if destPort > 0 {
 		base += fmt.Sprintf(" --dport %d", destPort)
 	}
-	_, _ = fmt.Fprintf(buf, "%s -m connmark --mark %s -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, tproxyMark, proxyPort, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j CONNMARK --set-mark %s\n",
+	// Every registered guest datagram must enter policy enforcement, including
+	// untracked packets and established tuples without our connection mark.
+	// Conntrack state is an optimization hint, never an authorization boundary.
+	_, _ = fmt.Fprintf(buf, "%s -j CONNMARK --set-mark %s\n",
 		base, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, proxyPort, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
+	_, _ = fmt.Fprintf(buf, "%s -j TPROXY --on-port %d --tproxy-mark %s\n",
 		base, proxyPort, tproxyMark)
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
+	writerprotocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -178,13 +179,7 @@ func New(config Config) (*Component, error) {
 		return nil, err
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
-	mux.Handle("/internal/v1/rootfs-writer-grants/", lifecycleHandler)
-	mux.Handle(strings.TrimSuffix(protocol.PathPrefix, "/"), http.NotFoundHandler())
-	mux.Handle(protocol.PathPrefix, runtimeSlotHandler)
-	mux.Handle(protocol.NodeChannelPath, hub)
-	mux.HandleFunc("/healthz", backlogHealthHandler(config.Store))
+	mux := newNodeAuthorityMux(lifecycleHandler, runtimeSlotHandler, hub, backlogHealthHandler(config.Store))
 	authorized, err := nodeauth.NewVerifiedCertificateMiddleware(verifier, mux)
 	if err != nil {
 		_ = hub.Close()
@@ -202,6 +197,20 @@ func New(config Config) (*Component, error) {
 		store: config.Store, hub: hub, server: server,
 		terminal: terminal, allocation: allocation, pressure: pressure,
 	}, nil
+}
+
+func newNodeAuthorityMux(writer, slots, channel, health http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
+	mux.Handle("/internal/v1/rootfs-writer-grants/", writer)
+	// The collection action is outside the per-grant slash subtree. Keep it
+	// behind the same node certificate middleware and writer authentication.
+	mux.Handle(writerprotocol.BatchRenewPath, writer)
+	mux.Handle(strings.TrimSuffix(protocol.PathPrefix, "/"), http.NotFoundHandler())
+	mux.Handle(protocol.PathPrefix, slots)
+	mux.Handle(protocol.NodeChannelPath, channel)
+	mux.Handle("/healthz", health)
+	return mux
 }
 
 // SetWriterPressurePauser installs the fully assembled runtime backend before

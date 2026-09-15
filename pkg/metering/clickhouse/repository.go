@@ -343,33 +343,21 @@ func (r *Repository) watermarkInsertValues(watermark *metering.ProducerWatermark
 
 func (r *Repository) GetStatus(ctx context.Context, fallbackRegionID string) (*metering.Status, error) {
 	status := &metering.Status{RegionID: fallbackRegionID}
-	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT COALESCE(MAX(sequence), 0)
-FROM %s FINAL
-`, qualified(r.cfg.Database, r.cfg.EventsTable))).Scan(&status.LatestEventSequence); err != nil {
-		return nil, fmt.Errorf("query latest event sequence: %w", err)
-	}
-	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT COALESCE(MAX(sequence), 0)
-FROM %s FINAL
-`, qualified(r.cfg.Database, r.cfg.WindowsTable))).Scan(&status.LatestWindowSequence); err != nil {
-		return nil, fmt.Errorf("query latest window sequence: %w", err)
-	}
-	if cursor, err := r.latestEventCursor(ctx); err != nil {
+	events, err := r.readLedgerStatus(ctx, qualified(r.cfg.Database, r.cfg.EventsTable), "event_id")
+	if err != nil {
 		return nil, err
-	} else {
-		status.LatestEventCursor = cursor
 	}
-	if cursor, err := r.latestWindowCursor(ctx); err != nil {
+	windows, err := r.readLedgerStatus(ctx, qualified(r.cfg.Database, r.cfg.WindowsTable), "window_id")
+	if err != nil {
 		return nil, err
-	} else {
-		status.LatestWindowCursor = cursor
 	}
+	status.LatestEventSequence, status.LatestEventCursor = events.sequence, events.cursor
+	status.LatestWindowSequence, status.LatestWindowCursor = windows.sequence, windows.cursor
 
 	var completeBefore sql.NullTime
 	var producerCount uint64
 	var regionID string
-	err := r.db.QueryRowContext(ctx, watermarkStatusQuery(qualified(r.cfg.Database, r.cfg.WatermarksTable))).Scan(&completeBefore, &producerCount, &regionID)
+	err = r.db.QueryRowContext(ctx, watermarkStatusQuery(qualified(r.cfg.Database, r.cfg.WatermarksTable))).Scan(&completeBefore, &producerCount, &regionID)
 	if err != nil {
 		return nil, fmt.Errorf("query producer watermarks: %w", err)
 	}
@@ -392,42 +380,6 @@ func watermarkStatusQuery(table string) string {
 SELECT MAX(complete_before), COUNT(), any(region_id)
 FROM %s FINAL
 `, table)
-}
-
-func (r *Repository) latestEventCursor(ctx context.Context) (string, error) {
-	var recordedAt time.Time
-	var producer, id string
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT recorded_at, producer, event_id
-FROM %s FINAL
-ORDER BY recorded_at DESC, producer DESC, event_id DESC
-LIMIT 1
-`, qualified(r.cfg.Database, r.cfg.EventsTable))).Scan(&recordedAt, &producer, &id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("query latest event cursor: %w", err)
-	}
-	return encodeCursor(recordedAt, producer, id)
-}
-
-func (r *Repository) latestWindowCursor(ctx context.Context) (string, error) {
-	var recordedAt time.Time
-	var producer, id string
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT recorded_at, producer, window_id
-FROM %s FINAL
-ORDER BY recorded_at DESC, producer DESC, window_id DESC
-LIMIT 1
-`, qualified(r.cfg.Database, r.cfg.WindowsTable))).Scan(&recordedAt, &producer, &id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("query latest window cursor: %w", err)
-	}
-	return encodeCursor(recordedAt, producer, id)
 }
 
 func (r *Repository) ListEvents(ctx context.Context, cursor string, limit int) ([]*metering.Event, string, error) {
@@ -591,6 +543,14 @@ func (r *Repository) listWindowKeys(
 	limit int,
 ) ([]windowLookupKey, error) {
 	where, args := windowWhere(teamID, windowType, cursor)
+	candidates, err := r.windowCandidates(ctx, where, args, cursor)
+	if err != nil {
+		return nil, err
+	}
+	if candidates != nil {
+		where += " AND " + candidates.predicate
+		args = append(args, candidates.args...)
+	}
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
@@ -619,6 +579,12 @@ LIMIT ?
 			return nil, fmt.Errorf("scan usage window key: %w", err)
 		}
 		identity := key.identity()
+		key.RecordedAt = key.RecordedAt.UTC()
+		if candidates != nil {
+			if _, observed := candidates.observed[key]; !observed {
+				return nil, fmt.Errorf("usage window changed while selecting its candidate version")
+			}
+		}
 		if _, ok := seen[identity]; ok {
 			return nil, fmt.Errorf(
 				"usage window key %q from producer %q is duplicated after FINAL",

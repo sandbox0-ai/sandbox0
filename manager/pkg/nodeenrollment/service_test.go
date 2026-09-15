@@ -158,3 +158,44 @@ func TestFinalizeDistinguishesInitialEnrollmentFromActiveIdentityRenewal(t *test
 		})
 	}
 }
+
+func TestNodeEnrollmentAcceptsBoundedPrivateDensityNetworks(t *testing.T) {
+	for _, test := range []struct {
+		name, supernet string
+		bits           int
+		valid          bool
+	}{
+		{"legacy", "172.27.0.0/17", 26, true},
+		{"five-hundred-residents", "172.28.0.0/14", 23, true},
+		{"largest-node", "10.64.0.0/12", 20, true},
+		{"smallest-node", "192.168.0.0/16", 30, true},
+		{"single-node", "172.27.0.0/23", 23, true},
+		{"host-bits", "172.27.0.1/17", 23, false},
+		{"public", "8.0.0.0/8", 23, false},
+		{"partly-public", "10.0.0.0/7", 23, false},
+		{"ipv6", "fd00::/48", 64, false},
+		{"outside-supernet", "172.27.0.0/26", 23, false},
+		{"too-large-node", "10.0.0.0/8", 19, false},
+		{"too-small-node", "172.27.0.0/17", 31, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewService(&enrollmentStoreStub{}, &AliyunIdentityVerifier{},
+				enrollmentMembershipStub{}, enrollmentCloudStub{}, &enrollmentNomadStub{},
+				enrollmentIssuerStub{}, enrollmentRendererStub{}, Config{
+					PoolID: "elastic", ClusterID: "nomad", RegionID: "ali-ue1", CloudRegion: "us-east-1",
+					AllocationSupernet: test.supernet, AllocationPrefix: test.bits,
+					RuntimeArtifact: RuntimeArtifact{
+						SourceCommit: "1111111111111111111111111111111111111111",
+						ObjectKey:    "sandbox0-nomad-runtime/release.tar.gz",
+						SHA256:       "2222222222222222222222222222222222222222222222222222222222222222",
+						OSSEndpoint:  "https://oss.internal", OSSBucket: "runtime",
+					},
+				})
+			if test.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "policy is invalid")
+			}
+		})
+	}
+}

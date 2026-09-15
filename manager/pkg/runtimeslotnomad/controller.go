@@ -76,7 +76,8 @@ func (c *Controller) Observe(
 	}
 	clientPresent, err := c.api.ClientAllocationPresent(ctx, target)
 	if err != nil {
-		return runtimeslotreconciler.AllocationObservation{}, fmt.Errorf("observe direct Nomad client allocation: %w", err)
+		return runtimeslotreconciler.AllocationObservation{}, fmt.Errorf("observe direct Nomad client allocation: %w: %w",
+			runtimeslotreconciler.ErrAllocationNodeUnavailable, err)
 	}
 	present := serverOwnsAllocation || clientPresent
 	proof, err := allocationProof(target, present)

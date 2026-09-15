@@ -357,6 +357,7 @@ func (r *Reader) readSourceRangeInto(key string, offset int64, payload []byte) e
 // content and bounds distinct source loads across all Readers, even with no LRU
 // storage. Waiters rotate by Reader, not by tenant or object identity.
 type ReadCache struct {
+	disk          *diskReadCache
 	sourceSlots   sourceReadAdmission
 	mu            sync.Mutex
 	maxBytes      int64
@@ -380,16 +381,38 @@ type rangeCacheEntry struct {
 }
 
 func NewReadCache(maxBytes int64) (*ReadCache, error) {
+	return NewReadCacheWithDisk(maxBytes, DiskCacheConfig{})
+}
+
+// NewReadCacheWithDisk shares both tiers across generation readers. The caller
+// owns Close; disk entries survive it and can be reused by the next node process.
+func NewReadCacheWithDisk(maxBytes int64, diskConfig DiskCacheConfig) (*ReadCache, error) {
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
 	}
+	disk, err := openDiskReadCache(diskConfig)
+	if err != nil {
+		return nil, err
+	}
 	cache := &ReadCache{maxBytes: maxBytes, items: make(map[readCacheKey]*list.Element), order: list.New()}
+	cache.disk = disk
 	cache.mappingOrder = list.New()
 	cache.mappingBudget = min(maxBytes/8, int64(16<<20))
 	return cache, nil
 }
 
 func (c *ReadCache) get(key readCacheKey) ([]byte, bool) {
+	if payload, ok := c.getMemory(key); ok {
+		return payload, true
+	}
+	if payload, ok := c.disk.get(key); ok {
+		c.addMemory(key, payload)
+		return payload, true
+	}
+	return nil, false
+}
+
+func (c *ReadCache) getMemory(key readCacheKey) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	element, ok := c.items[key]
@@ -404,6 +427,11 @@ func (c *ReadCache) get(key readCacheKey) ([]byte, bool) {
 // backing array must remain immutable even after eviction: active reads and
 // singleflight recipients may still hold it independently of the LRU.
 func (c *ReadCache) addVerified(key readCacheKey, payload []byte) {
+	c.disk.enqueue(key, payload)
+	c.addMemory(key, payload)
+}
+
+func (c *ReadCache) addMemory(key readCacheKey, payload []byte) {
 	entryBytes := rangeCacheBytes(key, payload)
 	if c.maxBytes == 0 || entryBytes > c.maxBytes {
 		return
@@ -419,6 +447,14 @@ func (c *ReadCache) addVerified(key readCacheKey, payload []byte) {
 	c.bytes += entryBytes
 	c.evictLocked()
 }
+
+// Close drains the bounded disk write queue and releases this node's cache lock.
+func (c *ReadCache) Close() error { return c.disk.Close() }
+
+// Stats exposes disk reuse independently of process-local memory hits.
+func (c *ReadCache) Stats() ReadCacheStats { return c.disk.stats() }
+
+func (c *ReadCache) retainsRanges() bool { return c.maxBytes > 0 || c.disk != nil }
 
 func (c *ReadCache) getPage(key readCacheKey) (MappingPage, bool) {
 	c.mu.Lock()

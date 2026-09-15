@@ -10,12 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/vpc"
 )
 
 type aliyunLifecycleESS interface {
+	DescribeScalingActivities(*ess.DescribeScalingActivitiesRequest) (*ess.DescribeScalingActivitiesResponse, error)
 	DescribeScalingInstances(*ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error)
 	DescribeLifecycleActions(*ess.DescribeLifecycleActionsRequest) (*ess.DescribeLifecycleActionsResponse, error)
 	RecordLifecycleActionHeartbeat(*ess.RecordLifecycleActionHeartbeatRequest) (*ess.RecordLifecycleActionHeartbeatResponse, error)
@@ -47,7 +50,7 @@ func (c *AliyunCloud) ElasticInstancesInService(
 			if instance.ScalingGroupId != c.scalingGroupID || !slices.Contains(chunk, instance.InstanceId) {
 				return nil, errors.New("aliyun returned an unexpected elastic instance")
 			}
-			result[instance.InstanceId] = instance.LifecycleState == "InService"
+			result[instance.InstanceId] = instance.LifecycleState == "InService" || instance.LifecycleState == "Protected"
 		}
 	}
 	return result, nil
@@ -66,11 +69,12 @@ type AliyunCloud struct {
 }
 
 func NewAliyunCloud(region, scalingGroupID string, routeTableIDs []string) (*AliyunCloud, error) {
-	essClient, err := ess.NewClientWithProvider(region)
+	credential := aliyunclient.Credentials()
+	essClient, err := ess.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
-	vpcClient, err := vpc.NewClientWithProvider(region)
+	vpcClient, err := vpc.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
 		return nil, err
 	}
@@ -101,16 +105,69 @@ func newAliyunCloud(
 		scalingGroupID: scalingGroupID, routeTableIDs: cleanRoutes}, nil
 }
 
+// ListPendingLifecycleActions resolves current scaling activities for this exact
+// group before querying their hooks. Instance creation activity IDs cannot be
+// reused here because scale-in has a different activity.
 func (c *AliyunCloud) ListPendingLifecycleActions(ctx context.Context) ([]Action, error) {
+	activityIDs, err := c.inProgressScalingActivities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var actions []Action
+	for _, activityID := range activityIDs {
+		observed, err := c.pendingActivityActions(ctx, activityID)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, observed...)
+	}
+	return actions, nil
+}
+
+func (c *AliyunCloud) inProgressScalingActivities(ctx context.Context) ([]string, error) {
+	var ids []string
+	seen := make(map[string]bool)
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		request := ess.CreateDescribeScalingActivitiesRequest()
+		request.ScalingGroupId = c.scalingGroupID
+		request.StatusCode = "InProgress"
+		request.PageNumber = requests.NewInteger(page)
+		request.PageSize = requests.NewInteger(50)
+		response, err := c.ess.DescribeScalingActivities(request)
+		if err != nil {
+			return nil, err
+		}
+		for _, activity := range response.ScalingActivities.ScalingActivity {
+			if activity.ScalingGroupId != c.scalingGroupID || strings.TrimSpace(activity.ScalingActivityId) == "" {
+				return nil, errors.New("aliyun returned an unexpected scaling activity")
+			}
+			if activity.StatusCode == "InProgress" && !seen[activity.ScalingActivityId] {
+				seen[activity.ScalingActivityId] = true
+				ids = append(ids, activity.ScalingActivityId)
+			}
+		}
+		if len(response.ScalingActivities.ScalingActivity) == 0 || page*50 >= response.TotalCount {
+			break
+		}
+	}
+	return ids, nil
+}
+
+func (c *AliyunCloud) pendingActivityActions(ctx context.Context, activityID string) ([]Action, error) {
 	var actions []Action
 	var nextToken string
+	seenTokens := make(map[string]bool)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		request := ess.CreateDescribeLifecycleActionsRequest()
+		request.ScalingActivityId = activityID
 		request.LifecycleActionStatus = "Pending"
-		request.MaxResults = requests.NewInteger(100)
+		request.MaxResults = requests.NewInteger(50)
 		request.NextToken = nextToken
 		response, err := c.ess.DescribeLifecycleActions(request)
 		if err != nil {
@@ -133,6 +190,10 @@ func (c *AliyunCloud) ListPendingLifecycleActions(ctx context.Context) ([]Action
 		if nextToken == "" {
 			break
 		}
+		if seenTokens[nextToken] {
+			return nil, errors.New("aliyun repeated a lifecycle action pagination token")
+		}
+		seenTokens[nextToken] = true
 	}
 	return actions, nil
 }
@@ -179,6 +240,19 @@ func (c *AliyunCloud) SetInstancesProtection(
 	instanceIDs []string,
 	protected bool,
 ) error {
+	// Pending and removing instances are governed by their lifecycle hook and
+	// cannot enter the ESS Protected state. Missing instances are omitted too.
+	inService, err := c.ElasticInstancesInService(ctx, instanceIDs)
+	if err != nil {
+		return err
+	}
+	eligible := make([]string, 0, len(instanceIDs))
+	for _, id := range instanceIDs {
+		if inService[id] {
+			eligible = append(eligible, id)
+		}
+	}
+	instanceIDs = eligible
 	for start := 0; start < len(instanceIDs); start += 20 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -206,6 +280,8 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 		}
 		describe := vpc.CreateDescribeRouteEntryListRequest()
 		describe.RouteTableId = routeTableID
+		// Aliyun only permits next-hop filters for custom routes.
+		describe.RouteEntryType = "Custom"
 		describe.DestinationCidrBlock = allocationCIDR
 		describe.NextHopId = instanceID
 		describe.NextHopType = "Instance"
@@ -215,31 +291,44 @@ func (c *AliyunCloud) DeleteAllocationRoutes(
 			return err
 		}
 		entries := response.RouteEntrys.RouteEntry
+		if response.NextToken != "" {
+			return fmt.Errorf("allocation route lookup in %s is incomplete", routeTableID)
+		}
 		if len(entries) == 0 {
 			continue
 		}
 		if len(entries) != 1 || entries[0].RouteTableId != routeTableID ||
-			entries[0].DestinationCidrBlock != allocationCIDR {
+			entries[0].DestinationCidrBlock != allocationCIDR ||
+			entries[0].Type != "Custom" || entries[0].RouteEntryId == "" {
 			return fmt.Errorf("allocation route lookup in %s is not exact", routeTableID)
 		}
 		entry := entries[0]
 		if entry.InstanceId != "" && entry.InstanceId != instanceID {
 			return fmt.Errorf("allocation route in %s belongs to another instance", routeTableID)
 		}
-		if len(entry.NextHops.NextHop) > 0 &&
-			!slices.ContainsFunc(entry.NextHops.NextHop, func(hop vpc.NextHop) bool {
-				return hop.NextHopId == instanceID && hop.NextHopType == "Instance"
-			}) {
+		hops := entry.NextHops.NextHop
+		if (len(hops) == 0 && entry.InstanceId != instanceID) || len(hops) > 1 ||
+			(len(hops) == 1 && (hops[0].NextHopId != instanceID || hops[0].NextHopType != "Instance")) {
 			return fmt.Errorf("allocation route in %s has an unexpected next hop", routeTableID)
 		}
 		remove := vpc.CreateDeleteRouteEntryRequest()
-		remove.RouteTableId = routeTableID
+		if entry.Status == "Deleting" {
+			return ErrAllocationRoutesPending
+		}
+		if entry.Status != "Available" {
+			return fmt.Errorf("allocation route in %s is not available for deletion", routeTableID)
+		}
+		// Aliyun accepts either the immutable entry ID or table/CIDR/next-hop
+		// selectors. Combining both makes every scale-in fail validation.
 		remove.RouteEntryId = entry.RouteEntryId
-		remove.DestinationCidrBlock = allocationCIDR
 		remove.NextHopId = instanceID
 		if _, err := c.vpc.DeleteRouteEntry(remove); err != nil {
 			return err
 		}
+		// Deletion is asynchronous, and the provider forbids concurrent route
+		// deletes in a VPC. Observe absence on a later pass before releasing the
+		// node's identity and subnet or deleting another route for this node.
+		return ErrAllocationRoutesPending
 	}
 	return nil
 }

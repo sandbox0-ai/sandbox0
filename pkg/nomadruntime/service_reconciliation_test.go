@@ -401,6 +401,47 @@ func TestNodeRuntimeRecoveryUrgentAndPressureBypassPeriodicBudget(t *testing.T) 
 	requireRecoveryCounts(t, h.d, rootFSRecoveryConcurrency, 0)
 }
 
+func TestNodeRuntimeRecoveryBoundsUrgentBurstAndRetainsDeferredWork(t *testing.T) {
+	var sessions []rootfssession.RecoverySession
+	for i := range 40 {
+		sessions = append(sessions, recoveryTestSession(fmt.Sprintf("burst-%02d", i), false))
+	}
+	h := newRecoveryTestHarness(t, sessions...)
+	for _, session := range sessions {
+		h.d.scan(h.ctx, session.Stage.Parent)
+	}
+	attempts := h.take(t, rootFSUrgentRecoveryConcurrency)
+	require.EqualValues(t, rootFSUrgentRecoveryConcurrency, recoverySequence(h.d))
+	h.d.mu.Lock()
+	require.Equal(t, rootFSUrgentRecoveryConcurrency, h.d.urgentRecovery)
+	state := h.d.inflight[recoveryInflightKey(sessions[0])]
+	h.d.mu.Unlock()
+	state.cancel()
+	for _, attempt := range attempts {
+		if attempt.stage.Parent == sessions[0].Stage.Parent {
+			<-attempt.ctx.Done()
+		}
+	}
+	h.d.scan(h.ctx, sessions[2].Stage.Parent)
+	require.EqualValues(t, rootFSUrgentRecoveryConcurrency, recoverySequence(h.d), "cancellation must not free a lane before backend completion")
+	for _, attempt := range attempts {
+		close(attempt.release)
+	}
+	waitRecoveryWorkers(t, h.d)
+	h.d.mu.Lock()
+	require.Zero(t, h.d.urgentRecovery)
+	h.d.mu.Unlock()
+	// Ignore the completed identities; the original durable snapshot still
+	// contains every deferred writer without keeping an unbounded hint queue.
+	h.runtime.setSessions(sessions[2:]...)
+	h.d.scan(h.ctx, "")
+	deferred := h.take(t, rootFSRecoveryConcurrency)
+	for _, attempt := range deferred {
+		require.NotContains(t, []string{sessions[0].Stage.Parent, sessions[1].Stage.Parent}, attempt.stage.Parent)
+	}
+	requireRecoveryCounts(t, h.d, rootFSRecoveryConcurrency, 0)
+}
+
 func TestNodeRuntimeRecoveryCancellationDoesNotReleaseActiveBackend(t *testing.T) {
 	session := recoveryTestSession("shutdown", false)
 	h := newRecoveryTestHarness(t, session)

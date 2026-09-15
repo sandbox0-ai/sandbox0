@@ -114,7 +114,9 @@ func TestCPUForMemory(t *testing.T) {
 		want   string
 	}{
 		{name: "whole cpu", memory: "4Gi", want: "1"},
-		{name: "fractional minimum sandbox memory rounds up to millicpu", memory: "128Mi", want: "32m"},
+		{name: "minimum sandbox memory receives CPU floor", memory: "128Mi", want: "150m"},
+		{name: "below CPU floor", memory: "512Mi", want: "150m"},
+		{name: "above CPU floor rounds up to millicpu", memory: "615Mi", want: "151m"},
 		{name: "half cpu", memory: "2Gi", want: "500m"},
 	}
 
@@ -146,7 +148,7 @@ func TestValidateResourceRatio(t *testing.T) {
 		t.Fatalf("expected ratio to pass, got %v", err)
 	}
 
-	spec.MainContainer.Resources.CPU = "32m"
+	spec.MainContainer.Resources.CPU = "150m"
 	spec.MainContainer.Resources.Memory = "129Mi"
 	if err := ValidateResourceRatio(spec, quantity.MustParse("4Gi"), "rounded template"); err != nil {
 		t.Fatalf("expected rounded memory-derived cpu to pass, got %v", err)
@@ -160,5 +162,56 @@ func TestValidateResourceRatio(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "builtin template default total cpu must match the value derived from memory") {
 		t.Fatalf("unexpected error %q", got)
+	}
+}
+
+func TestResolveClaimResourcesEnforcesCPUFloorForStoredTemplatesAndOverrides(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, cpu, memory, override string
+		wantCPU                     int64
+		wantMemory                  int64
+	}{
+		{name: "legacy template", cpu: "63m", memory: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
+		{name: "legacy default ratio template", cpu: "32m", memory: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
+		{name: "claim memory override", cpu: "1", memory: "2Gi", override: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
+		{name: "larger stored CPU preserved", cpu: "2", memory: "2Gi", wantCPU: 2000, wantMemory: 2 << 30},
+		{name: "larger override preserves ratio", cpu: "1", memory: "2Gi", override: "16Gi", wantCPU: 8000, wantMemory: 16 << 30},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			spec := v1alpha1.TemplateSpec{MainContainer: v1alpha1.ContainerSpec{
+				Resources: v1alpha1.ResourceQuota{CPU: test.cpu, Memory: test.memory},
+			}}
+			var override *string
+			if test.override != "" {
+				override = &test.override
+			}
+			got, err := NewResourcePolicy("2Gi", "16Gi").ResolveClaimResources(spec, override)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.CPUMillicores != test.wantCPU || got.MemoryBytes != test.wantMemory ||
+				quantity.MustParse(got.Quota.CPU).MilliValue() != test.wantCPU {
+				t.Fatalf("resolved resources = %#v, want %dm/%d bytes", got, test.wantCPU, test.wantMemory)
+			}
+			if spec.MainContainer.Resources.CPU != test.cpu {
+				t.Fatal("claim resolution modified the stored template")
+			}
+		})
+	}
+}
+
+func TestResolveClaimResourcesRejectsInvalidStoredCPUBeforeApplyingFloor(t *testing.T) {
+	t.Parallel()
+	for _, cpu := range []string{"bad", "0", "-1", "0.1m"} {
+		t.Run(cpu, func(t *testing.T) {
+			spec := v1alpha1.TemplateSpec{MainContainer: v1alpha1.ContainerSpec{
+				Resources: v1alpha1.ResourceQuota{CPU: cpu, Memory: "128Mi"},
+			}}
+			if _, err := (ResourcePolicy{}).ResolveClaimResources(spec, nil); err == nil {
+				t.Fatalf("invalid stored CPU %q accepted", cpu)
+			}
+		})
 	}
 }

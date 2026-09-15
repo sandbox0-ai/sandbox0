@@ -105,6 +105,12 @@ Nomad carrier resources are overhead only. To change memory, claim another
 sandbox with the required resource override; the Update Sandbox API does not
 change an existing sandbox's resource lease.
 
+The CPU limit is the memory-derived amount rounded up to a whole millicore,
+with a minimum of `150m` (0.15 CPU). The minimum also applies when a stored
+template predates this rule. Claim, resume and fork allocate a new resource
+lease; existing running leases are not resized. CPU admission and compute
+metering use the full amount recorded in that lease.
+
 Claim-time helpers expose this as `WithSandboxMemory` in Go, `memory` in Python,
 `memory` in TypeScript, and `--memory` in the `s0` CLI.
 

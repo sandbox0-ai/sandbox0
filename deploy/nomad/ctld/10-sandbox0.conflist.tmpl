@@ -1,0 +1,23 @@
+{
+    "cniVersion": "1.0.0",
+    "name": "sandbox0",
+    "plugins": [
+        {"type": "loopback"},
+        {
+            "type": "ptp",
+            "ipMasq": true,
+            "ipam": {
+                "type": "host-local",
+                "ranges": [[{"subnet": "{{.AllocationCIDR}}"}]],
+                "routes": [{"dst": "0.0.0.0/0"}],
+                "dataDir": "/var/run/cni"
+            }
+        },
+        {
+            "type": "firewall",
+            "backend": "iptables",
+            "iptablesAdminChainName": "S0-NOMAD-ADMIN"
+        },
+        {"type": "portmap", "capabilities": {"portMappings": true}, "snat": true}
+    ]
+}

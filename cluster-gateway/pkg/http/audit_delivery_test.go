@@ -390,10 +390,10 @@ func TestAuditDeliveryRecordsStageAndBatchMetrics(t *testing.T) {
 	if got := len(delivery.canonicalSlot); got != 0 {
 		t.Fatalf("occupied canonical writer slots = %d, want 0", got)
 	}
-	if !delivery.canonicalGate.TryLock() {
-		t.Fatal("canonical gate is still held after PersistCanonical returned")
+	if !delivery.replayMu.TryLock() {
+		t.Fatal("replay gate is still held after PersistCanonical returned")
 	}
-	delivery.canonicalGate.Unlock()
+	delivery.replayMu.Unlock()
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("Gather() error = %v", err)
@@ -458,6 +458,101 @@ type concurrentAuditDeliveryWriter struct {
 	max     int
 	started chan struct{}
 	release chan struct{}
+}
+
+type blockedReplayWriter struct {
+	auditDeliveryWriter
+	backgroundID string
+	entered      chan struct{}
+	release      chan struct{}
+}
+
+func (w *blockedReplayWriter) InsertEvents(ctx context.Context, events []sandboxobservability.Event) error {
+	for _, event := range events {
+		if event.EventID == w.backgroundID {
+			close(w.entered)
+			select {
+			case <-w.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return w.auditDeliveryWriter.InsertEvents(ctx, events)
+}
+
+func TestAuditDeliverySlowReplayDoesNotBlockDifferentCanonicalEvent(t *testing.T) {
+	background := testAuditDeliveryEvent(t, uuid.NewString())
+	foreground := testAuditDeliveryEvent(t, uuid.NewString())
+	writer := &blockedReplayWriter{backgroundID: background.EventID, entered: make(chan struct{}), release: make(chan struct{})}
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.EnqueueDurable(context.Background(), background); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- delivery.replay(ctx) }()
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("background replay did not start")
+	}
+	requestCtx, stopRequest := context.WithTimeout(ctx, time.Second)
+	defer stopRequest()
+	if err := delivery.PersistCanonical(requestCtx, foreground); err != nil {
+		t.Fatalf("an unrelated canonical event waited for blocked replay: %v", err)
+	}
+	if events := writer.snapshotEvents(); len(events) != 1 || events[0].EventID != foreground.EventID {
+		t.Fatalf("canonical foreground result before replay completion = %#v", events)
+	}
+	close(writer.release)
+	if err := <-replayDone; err != nil {
+		t.Fatal(err)
+	}
+	if events := writer.snapshotEvents(); len(events) != 2 || events[1].EventID != background.EventID {
+		t.Fatalf("canonical results after replay = %#v", events)
+	}
+}
+
+func TestAuditDeliveryCanceledReplayReleasesEventOwnership(t *testing.T) {
+	event := testAuditDeliveryEvent(t, uuid.NewString())
+	writer := &blockedReplayWriter{backgroundID: event.EventID, entered: make(chan struct{}), release: make(chan struct{})}
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- delivery.replay(ctx) }()
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("background replay did not start")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, errAuditDeliveryPending) {
+		t.Fatalf("canceled replay error = %v, want pending canonical event", err)
+	}
+	if delivery.pendingCalls.Load() != 0 || len(delivery.canonicalSlot) != 0 {
+		t.Fatal("canceled replay retained event ownership or a writer slot")
+	}
+	// The failed insert must retain durable custody and permit a fresh owner
+	// to deliver the same signed event after storage recovers.
+	writer.backgroundID = ""
+	if err := delivery.PersistCanonical(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if events := writer.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("canonical events after retry = %#v", events)
+	}
 }
 
 func (w *concurrentAuditDeliveryWriter) InsertEvents(_ context.Context, _ []sandboxobservability.Event) error {

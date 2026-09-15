@@ -173,8 +173,12 @@ Keep `restart { attempts = 0 }`. A carrier is one-shot and must be replaced by a
 fresh allocation and network namespace after consumption.
 
 Keep every carrier on `mode = "cni/sandbox0"`. The control-plane-rendered
-`sandbox0` CNI network binds the node's allocated CIDR; Nomad's built-in
-`bridge` mode uses its separate default network and is not interchangeable.
+`sandbox0` CNI network uses stock CNI `ptp` and binds the node's allocated CIDR.
+Its directly routed host veth is required for TCP and UDP policy enforcement;
+bridge peers are rejected before carrier admission. Nomad's built-in `bridge`
+mode uses its separate default network and is not interchangeable. Migrating
+an existing CNI bridge requires a durable node drain and removal of all its
+carrier ports before replacing the configuration.
 
 Confirm manager sees:
 

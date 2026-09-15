@@ -39,11 +39,12 @@ type HandlerConfig struct {
 type routeAction string
 
 const (
-	actionSlot         routeAction = ""
-	actionReady        routeAction = "ready"
-	actionHeartbeat    routeAction = "heartbeat"
-	actionStarting     routeAction = "starting"
-	actionCommandReady routeAction = "command-ready"
+	actionSlot              routeAction = ""
+	actionReady             routeAction = "ready"
+	actionHeartbeat         routeAction = "heartbeat"
+	actionStarting          routeAction = "starting"
+	actionCommandReady      routeAction = "command-ready"
+	actionRegistrationAbort routeAction = "registration-abort"
 )
 
 func NewHandler(config HandlerConfig) (http.Handler, error) {
@@ -82,6 +83,8 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			serveStarting(config, identity, slotID, writer, request)
 		case actionCommandReady:
 			serveCommandReady(config, identity, slotID, writer, request)
+		case actionRegistrationAbort:
+			serveRegistrationAbort(config, identity, slotID, writer, request)
 		default:
 			writeError(writer, http.StatusBadRequest, protocol.ErrorInvalidArgument, "invalid runtime slot action")
 		}
@@ -91,6 +94,12 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 func serveRegister(config HandlerConfig, identity nodeauth.Identity, slotID string, writer http.ResponseWriter, request *http.Request) {
 	var body protocol.RegistrationRequest
 	if !decodeBody(writer, request, &body) || !validateBody(writer, body.Validate()) {
+		return
+	}
+	// Placement belongs to the verified certificate. Checking only NodeUID
+	// after INSERT would let a node persist a slot under a foreign placement.
+	if body.ClusterID != identity.ClusterID || body.NodeID != identity.NodeID {
+		writeError(writer, http.StatusForbidden, protocol.ErrorPermissionDenied, "runtime slot placement does not match authenticated node")
 		return
 	}
 	slot, err := config.Store.RegisterRuntimeSlot(request.Context(), &sandboxstore.RegisterRuntimeSlotRequest{
@@ -220,11 +229,12 @@ func authenticate(verifier nodeauth.Verifier, writer http.ResponseWriter, reques
 		writeError(writer, status, code, err.Error())
 		return nodeauth.Identity{}, false
 	}
-	identity.NodeUID = strings.TrimSpace(identity.NodeUID)
 	identity.AgentUID = strings.TrimSpace(identity.AgentUID)
-	if identity.NodeUID == "" || len(identity.NodeUID) > 512 {
-		writeError(writer, http.StatusForbidden, protocol.ErrorPermissionDenied, "authenticated node identity is invalid")
-		return nodeauth.Identity{}, false
+	for _, value := range []string{identity.ClusterID, identity.NodeID, identity.NodeUID} {
+		if value == "" || strings.TrimSpace(value) != value || len(value) > 512 {
+			writeError(writer, http.StatusForbidden, protocol.ErrorPermissionDenied, "authenticated node placement identity is invalid")
+			return nodeauth.Identity{}, false
+		}
 	}
 	return identity, true
 }
@@ -256,7 +266,7 @@ func authorizeNode(writer http.ResponseWriter, slot *sandboxstore.RuntimeSlot, i
 		writeError(writer, http.StatusServiceUnavailable, protocol.ErrorUnavailable, "runtime slot store returned no record")
 		return false
 	}
-	if slot.NodeUID != identity.NodeUID {
+	if slot.NodeUID != identity.NodeUID || slot.ClusterID != identity.ClusterID || slot.NodeID != identity.NodeID {
 		writeError(writer, http.StatusForbidden, protocol.ErrorPermissionDenied, "runtime slot belongs to another node")
 		return false
 	}
@@ -394,7 +404,7 @@ func parseRoute(path string) (string, routeAction, error) {
 	}
 	action := routeAction(segments[1])
 	switch action {
-	case actionReady, actionHeartbeat, actionStarting, actionCommandReady:
+	case actionReady, actionHeartbeat, actionStarting, actionCommandReady, actionRegistrationAbort:
 		return slotID, action, nil
 	default:
 		return "", "", fmt.Errorf("invalid runtime slot action")

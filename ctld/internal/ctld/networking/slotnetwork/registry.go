@@ -32,6 +32,7 @@ const (
 	defaultTerminalRetention = 48 * time.Hour
 	defaultMaxRecords        = 100000
 	maxRecordBytes           = 256 << 10
+	namespaceRecheckBatch    = 32
 
 	recordStateWarm      = "warm"
 	recordStateClaimed   = "claimed"
@@ -62,10 +63,11 @@ type Config struct {
 	ExpectedOwnerUID *uint32
 }
 
-// NamespaceInspector proves an exact namespace incarnation and returns its
-// single routable IPv4 address while holding a handle to that namespace.
+// NamespaceInspector proves an exact namespace incarnation while holding its
+// handle. Claimed namespaces may have transferred their address into netstack.
 type NamespaceInspector interface {
 	Inspect(path, expectedIdentity string) (string, error)
+	InspectClaimed(path, expectedIdentity, expectedSourceIP string) error
 }
 
 type registryRecord struct {
@@ -111,14 +113,15 @@ type Registry struct {
 	config     Config
 	generation string
 
-	mu              sync.Mutex
-	entries         map[string]registryEntry
-	operationSlots  map[string]string
-	revision        uint64
-	appliedRevision uint64
-	appliedChanged  chan struct{}
-	notify          func()
-	closed          bool
+	mu                    sync.Mutex
+	entries               map[string]registryEntry
+	operationSlots        map[string]string
+	revision              uint64
+	appliedRevision       uint64
+	appliedChanged        chan struct{}
+	notify                func()
+	closed                bool
+	namespaceRecheckAfter string
 }
 
 // NewRegistry opens the shared-host journal used by both ctld HA slots.
@@ -457,8 +460,9 @@ func (r *Registry) waitForRegistration(
 	return err
 }
 
-// Prepare durably transitions one registered warm slot to its exact claimed
-// policy and waits for a successful redirect synchronization that contains it.
+// Prepare durably claims a warm slot or compares and replaces an active policy.
+// It acknowledges only after redirect and active-flow synchronization applies
+// the exact persisted request; retries cannot roll back a newer slot revision.
 func (r *Registry) Prepare(
 	ctx context.Context,
 	request protocol.RuntimeSlotNetworkPrepareRequest,
@@ -470,16 +474,19 @@ func (r *Registry) Prepare(
 	if r == nil || r.db == nil {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
 	}
-	if token, revision, ready, err := r.prepareState(request); ready || err != nil {
+	if token, revision, ready, err := r.prepareState(request, policySpec); ready || err != nil {
 		if err != nil {
 			return rootfshandoff.NetworkPolicyToken{}, err
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	sourceIP, err := r.inspector.Inspect(
-		filepath.Join(r.config.NetNSRoot, request.NetNSRelativePath),
-		request.Request.NetNSIdentity,
-	)
+	r.mu.Lock()
+	entry, ok := r.entries[request.Request.SlotID]
+	r.mu.Unlock()
+	if !ok {
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot has no warm network registration: %w", errdefs.ErrFailedPrecondition)
+	}
+	sourceIP, err := r.inspectNamespace(entry.record)
 	if err != nil {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("inspect runtime slot network namespace: %w", err)
 	}
@@ -489,12 +496,12 @@ func (r *Registry) Prepare(
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network registry is closed: %w", errdefs.ErrUnavailable)
 	}
-	entry, ok := r.entries[request.Request.SlotID]
+	entry, ok = r.entries[request.Request.SlotID]
 	if !ok {
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot has no warm network registration: %w", errdefs.ErrFailedPrecondition)
 	}
-	if entry.record.State == recordStateClaimed {
+	if entry.record.State == recordStateClaimed && entry.record.Prepare != nil && *entry.record.Prepare == request.Request {
 		token, revision, err := matchPrepare(entry, request)
 		r.mu.Unlock()
 		if err != nil {
@@ -502,9 +509,13 @@ func (r *Registry) Prepare(
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	if err := matchWarmPrepare(entry.record, request, sourceIP); err != nil {
+	if err := matchNextPrepare(entry, request, policySpec); err != nil {
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, err
+	}
+	if entry.record.SourceIP != sourceIP {
+		r.mu.Unlock()
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network source IP changed before prepare: %w", errdefs.ErrFailedPrecondition)
 	}
 	if slot := r.operationSlots[request.Request.OperationID]; slot != "" && slot != request.Request.SlotID {
 		r.mu.Unlock()
@@ -527,6 +538,18 @@ func (r *Registry) Prepare(
 		if slot := operations.Get([]byte(request.Request.OperationID)); slot != nil && string(slot) != request.Request.SlotID {
 			return fmt.Errorf("runtime slot network operation is bound to slot %q: %w", slot, errdefs.ErrAlreadyExists)
 		}
+		if entry.record.Prepare != nil {
+			// One operation index per retained slot keeps repeated policy changes
+			// bounded. The persisted revision fences every superseded operation.
+			if err := operations.Delete([]byte(entry.record.Prepare.OperationID)); err != nil {
+				return err
+			}
+			epoch, err := records.NextSequence()
+			if err != nil || epoch == 0 || epoch > math.MaxInt64 {
+				return fmt.Errorf("allocate updated runtime slot network epoch: %w", err)
+			}
+			record.NetworkEpoch = int64(epoch)
+		}
 		if err := validateRecord(record); err != nil {
 			return err
 		}
@@ -542,6 +565,9 @@ func (r *Registry) Prepare(
 	r.revision++
 	revision := r.revision
 	r.entries[record.Registration.SlotID] = registryEntry{record: record, revision: revision}
+	if entry.record.Prepare != nil {
+		delete(r.operationSlots, entry.record.Prepare.OperationID)
+	}
 	r.operationSlots[request.Request.OperationID] = request.Request.SlotID
 	notify := r.notify
 	token := policyToken(record)
@@ -554,6 +580,7 @@ func (r *Registry) Prepare(
 
 func (r *Registry) prepareState(
 	request protocol.RuntimeSlotNetworkPrepareRequest,
+	policySpec *v1alpha1.NetworkPolicySpec,
 ) (rootfshandoff.NetworkPolicyToken, uint64, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -572,26 +599,35 @@ func (r *Registry) prepareState(
 	}
 	switch entry.record.State {
 	case recordStateClaimed:
-		token, revision, err := matchPrepare(entry, request)
-		return token, revision, true, err
-	case recordStateWarm:
-		if !entry.record.Registration.MatchesPrepare(request.Request) ||
-			entry.record.Registration.NetNSRelativePath != request.NetNSRelativePath {
-			return rootfshandoff.NetworkPolicyToken{}, 0, true, fmt.Errorf("runtime slot network claim belongs to another registration: %w", errdefs.ErrFailedPrecondition)
+		if entry.record.Prepare != nil && *entry.record.Prepare == request.Request {
+			token, revision, err := matchPrepare(entry, request)
+			return token, revision, true, err
 		}
-		return rootfshandoff.NetworkPolicyToken{}, 0, false, nil
+		return rootfshandoff.NetworkPolicyToken{}, 0, false, matchNextPrepare(entry, request, policySpec)
+	case recordStateWarm:
+		return rootfshandoff.NetworkPolicyToken{}, 0, false, matchNextPrepare(entry, request, policySpec)
 	default:
 		return rootfshandoff.NetworkPolicyToken{}, 0, true, fmt.Errorf("runtime slot network policy is terminal: %w", errdefs.ErrFailedPrecondition)
 	}
 }
 
-func matchWarmPrepare(record registryRecord, request protocol.RuntimeSlotNetworkPrepareRequest, sourceIP string) error {
-	if record.State != recordStateWarm || !record.Registration.MatchesPrepare(request.Request) ||
+func matchNextPrepare(entry registryEntry, request protocol.RuntimeSlotNetworkPrepareRequest, spec *v1alpha1.NetworkPolicySpec) error {
+	record := entry.record
+	if entry.physicalAbsent || !record.Registration.MatchesPrepare(request.Request) ||
 		record.Registration.NetNSRelativePath != request.NetNSRelativePath {
 		return fmt.Errorf("runtime slot network claim belongs to another registration: %w", errdefs.ErrFailedPrecondition)
 	}
-	if record.SourceIP != sourceIP {
-		return fmt.Errorf("runtime slot network source IP changed before claim: %w", errdefs.ErrFailedPrecondition)
+	if record.State == recordStateWarm && request.Request.PolicyRevision == 0 {
+		return nil
+	}
+	if record.State != recordStateClaimed || record.Prepare == nil {
+		return fmt.Errorf("runtime slot network policy is not an active claim: %w", errdefs.ErrFailedPrecondition)
+	}
+	previous, next := record.Prepare, request.Request
+	if next.OperationID == previous.OperationID || next.ClaimID != previous.ClaimID ||
+		next.PolicyRevision <= previous.PolicyRevision || next.ExpectedPolicyDigest != previous.PolicyDigest ||
+		spec.SandboxID != record.SandboxID || spec.TeamID != record.TeamID {
+		return fmt.Errorf("runtime slot network mutation does not match its current claim, revision and policy: %w", errdefs.ErrAlreadyExists)
 	}
 	return nil
 }
@@ -757,6 +793,57 @@ type namespaceCandidate struct {
 	key          string
 	registration protocol.RuntimeSlotNetworkRegistrationRequest
 	sourceIP     string
+	claimed      bool
+}
+
+func (r *Registry) inspectNamespace(record registryRecord) (string, error) {
+	registration := record.Registration
+	path := filepath.Join(r.config.NetNSRoot, registration.NetNSRelativePath)
+	if record.State == recordStateClaimed {
+		// Stock runsc removes host IPv4 addresses when passing them to netstack.
+		// Retain the journaled source only while the exact namespace and its
+		// carrier link still exist; an initial claim must discover a real IP.
+		return record.SourceIP, r.inspector.InspectClaimed(path, registration.NetNSIdentity, record.SourceIP)
+	}
+	return r.inspector.Inspect(path, registration.NetNSIdentity)
+}
+
+// RevalidateNamespaces checks a bounded, rotating slice of desired policies.
+// CNI may remove an allocation whose IP has not yet been reused. Such records
+// must leave the redirect projection without waiting for an IP collision.
+// This only fences the projection; regional cleanup still owns durable records.
+func (r *Registry) RevalidateNamespaces() error {
+	if r == nil {
+		return fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return fmt.Errorf("runtime slot network registry is closed: %w", errdefs.ErrUnavailable)
+	}
+	candidates := make([]namespaceCandidate, 0)
+	for key, entry := range r.entries {
+		if entry.physicalAbsent || (entry.record.State != recordStateWarm && entry.record.State != recordStateClaimed) {
+			continue
+		}
+		candidates = append(candidates, namespaceCandidate{
+			key: key, registration: entry.record.Registration, sourceIP: entry.record.SourceIP,
+			claimed: entry.record.State == recordStateClaimed,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key < candidates[j].key })
+	selected := make([]namespaceCandidate, 0, min(namespaceRecheckBatch, len(candidates)))
+	if len(candidates) > 0 {
+		start := sort.Search(len(candidates), func(i int) bool { return candidates[i].key > r.namespaceRecheckAfter })
+		for offset := 0; offset < min(namespaceRecheckBatch, len(candidates)); offset++ {
+			selected = append(selected, candidates[(start+offset)%len(candidates)])
+		}
+		// Advance even if inspection fails, so one unknown namespace cannot
+		// indefinitely starve unrelated allocations of their physical checks.
+		r.namespaceRecheckAfter = selected[len(selected)-1].key
+	}
+	r.mu.Unlock()
+	return r.fenceNamespaceCandidates(selected, false)
 }
 
 func (r *Registry) fenceAbsentNamespaces() error {
@@ -773,6 +860,7 @@ func (r *Registry) fenceAbsentNamespaces() error {
 		}
 		candidate := namespaceCandidate{
 			key: key, registration: entry.record.Registration, sourceIP: entry.record.SourceIP,
+			claimed: entry.record.State == recordStateClaimed,
 		}
 		bySourceIP[candidate.sourceIP] = append(bySourceIP[candidate.sourceIP], candidate)
 	}
@@ -784,31 +872,46 @@ func (r *Registry) fenceAbsentNamespaces() error {
 	}
 	r.mu.Unlock()
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key < candidates[j].key })
+	return r.fenceNamespaceCandidates(candidates, true)
+}
 
+func (r *Registry) fenceNamespaceCandidates(candidates []namespaceCandidate, failFast bool) error {
 	absent := make([]namespaceCandidate, 0)
+	var inspectionErr error
 	for _, candidate := range candidates {
-		registration := candidate.registration
-		sourceIP, err := r.inspector.Inspect(
-			filepath.Join(r.config.NetNSRoot, registration.NetNSRelativePath),
-			registration.NetNSIdentity,
-		)
-		// A registered namespace only enters the journal after it has exactly one
-		// routable IPv4 address. If that address is now gone while its recorded IP
-		// collides with another incarnation, it cannot still own the recorded
-		// source IP and must not poison the node-wide desired-state snapshot.
+		record := registryRecord{Registration: candidate.registration, SourceIP: candidate.sourceIP, State: recordStateWarm}
+		if candidate.claimed {
+			record.State = recordStateClaimed
+		}
+		sourceIP, err := r.inspectNamespace(record)
+		// CNI teardown removes the carrier link even if runsc retains a handle
+		// to the namespace. Merely transferring its IP into netstack does not
+		// prove absence and must not let another allocation replace its policy.
 		if errors.Is(err, errExactNamespaceAbsent) || errors.Is(err, errExactNamespaceUnroutable) {
 			absent = append(absent, candidate)
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("revalidate runtime slot network namespace %s: %w", candidate.key, err)
-		}
-		if sourceIP != candidate.sourceIP {
-			return fmt.Errorf(
+			err = fmt.Errorf("revalidate runtime slot network namespace %s: %w", candidate.key, err)
+		} else if sourceIP != candidate.sourceIP {
+			err = fmt.Errorf(
 				"runtime slot network source IP changed from %s to %s for %s: %w",
 				candidate.sourceIP, sourceIP, candidate.key, errdefs.ErrFailedPrecondition,
 			)
 		}
+		if err != nil {
+			if failFast {
+				return err
+			}
+			// Periodic batches finish their bounded checks to preserve rotation.
+			// Keep only the first error; failed inspection never fences a record.
+			if inspectionErr == nil {
+				inspectionErr = err
+			}
+		}
+	}
+	if inspectionErr != nil {
+		return inspectionErr
 	}
 	if len(absent) == 0 {
 		return nil
@@ -824,6 +927,7 @@ func (r *Registry) fenceAbsentNamespaces() error {
 		entry, ok := r.entries[candidate.key]
 		if !ok || entry.physicalAbsent || entry.record.Registration != candidate.registration ||
 			entry.record.SourceIP != candidate.sourceIP ||
+			(entry.record.State == recordStateClaimed) != candidate.claimed ||
 			(entry.record.State != recordStateWarm && entry.record.State != recordStateClaimed) {
 			continue
 		}

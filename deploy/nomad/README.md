@@ -33,7 +33,41 @@ cluster may publish one `standard` and one `privileged` class; template
 `mainContainer.securityClass` selects between them. Zero or multiple matches
 for the same cluster and security class fail closed.
 
-Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers.
+Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers. Node recovery and lifecycle inventory use
+bounded, paginated allocation summaries with exact node checks. Avoid the
+node-specific full allocation endpoint in operational tooling: it embeds the
+complete Job in every allocation and can exhaust control-plane memory at high
+carrier counts. Catalog truncation or pagination errors must block reclamation;
+completed/stopping allocations remain present until physical cleanup is proven.
+
+With terminal reconciliation enabled, manager also checks failed allocations in
+the default `sandbox0-warm-slots` job family, including its bounded shards.
+Startup can fail before regional registration, leaving no PostgreSQL slot for
+the terminal worker to discover. After terminal work, at most once every 30
+seconds, manager visits one configured Nomad cluster and up to eight failed
+carriers, with a five-second request budget. It revalidates each exact allocation
+before requesting replacement of that exact failed allocation. Retries recheck
+whether it already has a replacement. This
+scheduling repair does not release regional leases, garbage-collect client
+state, or discard node journals; physical retirement remains a separate proof.
+
+ctld also reconciles registrations left only in its durable journal. Every ten
+seconds, one bounded pass scans at most 256 records and processes up to eight
+candidates older than two minutes, within a twenty-second budget. An existing
+regional slot stays with its normal lifecycle coordinator. For an absent slot,
+PostgreSQL first persists a registration-abort fence; database triggers exclude
+late registration even from an older manager binary during a rolling update.
+Only that exact authenticated fence permits the existing grantless physical
+cleanup. ctld preserves an unacknowledged cleanup proof until the region confirms
+it. These fences are retained after cleanup and cannot be removed by migration
+rollback. They do not create resource leases or declare a running guest terminal.
+
+Runtime-slot authority credentials must resolve to the exact cluster ID, Nomad
+node ID, and durable node UID. Registration rejects another placement before
+writing PostgreSQL. A successor boot of the same authenticated node may finish
+an older journal incarnation; its exact network and mount identity checks remain
+required.
+
 Manager atomically leases exact CPU and memory from ctld-reported node capacity;
 ctld creates `/sys/fs/cgroup/sandbox0/<lease>` and the driver writes that lease
 into the OCI spec. Carrier allocation resources are overhead, not sandbox
@@ -47,6 +81,12 @@ bounded elastic pool with minimum zero and maximum 299. The fixed worker keeps
 the ordinary warm claim path available; it is not a stopped standby. Elastic
 workers are fresh ECS instances created by the provider only when manager's
 PostgreSQL-backed pressure controller raises desired capacity.
+Operators may configure a narrower `min_elastic_nodes..max_elastic_nodes`
+range inside `0..299`, including `1..1` for one retained worker or `0..0` to
+disable new elastic capacity. The provider fleet's outer boundary stays
+unchanged. Density-profile trials must account for the configured fleet bound
+before enrollment is enabled; a smaller node subnet does not itself limit
+cloud scale-out.
 If the fixed worker loses its live carrier set, the same controller temporarily
 requests one elastic worker even without user pressure; it scales that
 replacement back to zero only after the fixed baseline has recovered and the
@@ -63,8 +103,10 @@ An elastic node is admitted in three stages:
 1. Cloud-init starts a post-cloud-final unit. It uses Alibaba IMDSv2 to obtain
    a signed instance identity, receives a one-time manager challenge, and is
    checked against the exact ESS group, account, image, instance type, source
-   address, and region.
-2. Manager atomically reserves a `/26`, prepares its routes, returns one
+   address, and region. ECS signatures may omit their certificate; verification
+   resolves the single signer against the pinned official Alibaba certificate
+   and still verifies the exact document and challenge.
+2. Manager atomically reserves the configured node subnet (default `/26`), prepares its routes, returns one
    content-addressed runtime bundle, a short Nomad certificate, and a scoped
    introduction JWT. The client registers with
    `sandbox0_admitted=false`; no warm carrier can land on it.
@@ -72,7 +114,7 @@ An elastic node is admitted in three stages:
    UID. The node installs ctld A/B and its exact rendered config. Only after a
    live ctld capacity heartbeat does the node present
    `sandbox0_admitted=true`, and manager enables Nomad scheduling. The ESS
-   scale-out lifecycle action continues only after all eight warm carriers are
+   scale-out lifecycle action continues only after all configured warm carriers are
    ready. A PostgreSQL `warming` fence still excludes those carriers from the
    claim transaction until ESS has accepted `CONTINUE`, so Nomad readiness
    alone cannot expose a half-admitted node.
@@ -80,8 +122,18 @@ An elastic node is admitted in three stages:
 Scale-out enrollment has a durable 20-minute deadline by default. On timeout,
 manager first blocks late bootstrap retries, then removes allocation routes,
 stops and purges warm allocations, revokes the node identity, releases its
-`/26`, and completes the whole ESS action with `ABANDON`. A node with an
+subnet, and completes the whole ESS action with `ABANDON`. A node with an
 unexpected active sandbox lease is protected and fails closed instead.
+
+Aliyun permits only twenty heartbeat extensions per lifecycle action. Manager
+reserves renewal attempts atomically in PostgreSQL, independently of readiness
+polling, and retains the count across replicas and restarts. Renewal timing
+covers the enrollment deadline while reserving attempts for cleanup. Ambiguous
+provider calls consume an attempt; the controller does not replay them freely.
+Pending hooks are renewed before independent readiness and protection work.
+Protection changes apply only to ESS `InService` or `Protected` instances;
+waiting instances remain under their lifecycle hook. One failed action does
+not prevent other pending actions from renewing or completing.
 
 Exact node certificates are short-lived. `sandbox0-node-bootstrap.timer`
 renews them before expiry. Nomad temporarily marks the node ineligible for new
@@ -100,6 +152,10 @@ Identity-bearing `ctld.env.tmpl` and `10-sandbox0.conflist.tmpl` files must use
 the exact Go template fields enforced by the builder. The archive may contain
 only the documented `/etc/sandbox0`, Nomad driver, and CNI config paths. It is
 never assembled by copying a live worker.
+
+Set `SANDBOX0_NOMAD_ADDRESS=https://{{.PrivateIP}}:4646` in `ctld.env.tmpl`.
+The bootstrapper checks this exact node address; loopback and control-server
+addresses are not valid replacements.
 
 ## Manager authority files
 
@@ -136,11 +192,23 @@ mutually authenticated.
    the Nomad client. This A/B process pair is not a stopped ECS standby node.
    Elastic nodes execute the signed enrollment flow automatically.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad` with
-   `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. Keep
+   `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. The
+   default eight carriers fit in shard zero. Larger pools require every
+   nonempty `warm_shard` from 0 through 17 with identical standard/privileged
+   counts; each job is bounded to 32 groups. Migrate an existing unsharded pool
+   only after fencing claims and draining every affected node. Keep
    `restart { attempts = 0 }`: a consumed slot gets a fresh allocation and
    network namespace, never a task restart in the same allocation. Keep the
    task groups on `cni/sandbox0`; Nomad's built-in `bridge` network does not
    use the node's rendered allocation-CIDR configuration.
+   Use the stock CNI `ptp` data plane in `ctld/10-sandbox0.conflist.tmpl`.
+   Bridge-backed carrier interfaces are rejected before claim: the bridge
+   netfilter path can lose UDP TPROXY delivery and bypass a deny policy.
+   Point-to-point veth links retain each allocation's IPAM and firewall
+   contracts without a shared guest Layer 2 segment. Migrating an existing
+   bridge requires node fencing, zero active allocations and physical removal
+   of every old bridge port before replacing the CNI configuration. Claimed
+   legacy namespaces remain inspectable for exact drain and cleanup.
 5. Confirm PostgreSQL has live node capacity, resource-neutral ready slots,
    connected node channels, default-deny networking, and replacement slots.
 6. Run `tools/runtime-slot-slo` through the public regional endpoint as

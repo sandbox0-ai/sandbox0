@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +23,10 @@ import (
 )
 
 const maxResponseBytes = 64 << 10
+
+// A full batch contains up to 256 independent grant identities and three
+// timestamps each; valid responses can exceed the single-grant limit.
+const maxBatchRenewResponseBytes = 128 << 10
 
 // PublishGenerationRequest submits a node's local detach proof and sealed
 // block generation to the regional writer authority.
@@ -127,11 +130,32 @@ func (c *ManagerClient) ConsumeWriterGrant(ctx context.Context, stage rootfshand
 	if err != nil {
 		return protocol.LeaseObservation{}, err
 	}
-	var observation protocol.LeaseObservation
-	if err := c.putWriterGrant(ctx, "consume", protocol.ConsumePath(stage.Identity.WriterGrantID), protocol.ConsumeRequest(binding), &observation); err != nil {
-		return protocol.LeaseObservation{}, err
+	// Consume is idempotent for this exact token and durable binding. A lost
+	// acknowledgement must not turn a committed consume into an attach failure.
+	// Replays neither mint another grant nor extend the authority's lease.
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return protocol.LeaseObservation{}, err
+		}
+		var observation protocol.LeaseObservation
+		err = c.putWriterGrant(ctx, "consume", protocol.ConsumePath(stage.Identity.WriterGrantID), binding, &observation)
+		if err == nil {
+			return observation, nil
+		}
+		if ctx.Err() != nil {
+			return protocol.LeaseObservation{}, ctx.Err()
+		}
+		if attempt >= 2 || !errdefs.IsUnavailable(err) {
+			return protocol.LeaseObservation{}, err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return protocol.LeaseObservation{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return observation, nil
 }
 
 // PublishWriterGrant terminally publishes one locally sealed generation.
@@ -330,6 +354,15 @@ func (c *ManagerClient) RenewWriterGrants(ctx context.Context, stages []rootfsha
 	if err := response.Validate(len(request.Items)); err != nil {
 		return protocol.BatchRenewResponse{}, fmt.Errorf("validate writer renewal batch response: %w: %w", err, errdefs.ErrUnavailable)
 	}
+	requested := make(map[string]struct{}, len(request.Items))
+	for _, item := range request.Items {
+		requested[item.GrantID] = struct{}{}
+	}
+	for _, result := range response.Results {
+		if _, ok := requested[result.GrantID]; !ok {
+			return protocol.BatchRenewResponse{}, fmt.Errorf("writer renewal response contains an unrequested grant: %w", errdefs.ErrUnavailable)
+		}
+	}
 	return response, nil
 }
 
@@ -411,15 +444,21 @@ func (c *ManagerClient) putWriterGrant(ctx context.Context, operation, path stri
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.http.Do(request)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		// The HTTP client's per-attempt timeout does not expire the caller's
+		// claim or writer lease. Classify it as an uncertain transport outcome.
 		return fmt.Errorf("%s writer grant: %w: %w", operation, err, errdefs.ErrUnavailable)
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		if result != nil {
-			if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(result); err != nil {
+			responseLimit := int64(maxResponseBytes)
+			if _, batch := result.(*protocol.BatchRenewResponse); batch {
+				responseLimit = maxBatchRenewResponseBytes
+			}
+			if err := json.NewDecoder(io.LimitReader(response.Body, responseLimit)).Decode(result); err != nil {
 				return fmt.Errorf("decode %s writer grant response: %w: %w", operation, err, errdefs.ErrUnavailable)
 			}
 			if observation, ok := result.(*protocol.LeaseObservation); ok {
@@ -442,7 +481,7 @@ func (c *ManagerClient) putWriterGrant(ctx context.Context, operation, path stri
 	case http.StatusPreconditionFailed:
 		return fmt.Errorf("%s: %w", message, errdefs.ErrFailedPrecondition)
 	case http.StatusGatewayTimeout:
-		return fmt.Errorf("%s: %w", message, context.DeadlineExceeded)
+		return fmt.Errorf("%s: %w: %w", message, context.DeadlineExceeded, errdefs.ErrUnavailable)
 	default:
 		if response.StatusCode >= 400 && response.StatusCode < 500 {
 			return fmt.Errorf("%s: %w", message, errdefs.ErrFailedPrecondition)

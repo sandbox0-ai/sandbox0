@@ -308,7 +308,14 @@ func (s *Service) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*s
 	}
 	s.enqueueNomadSandboxPause(sandboxID)
 	if err := s.CompletePausingSandboxRuntime(ctx, sandboxID); err != nil && !errors.Is(err, errNomadSandboxPausePending) {
-		return nil, err
+		if !errors.Is(err, errdefs.ErrUnavailable) && !errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		// The regional intent already committed and remains owned by the pause
+		// controller. A reconnect or deadline must not turn accepted work into
+		// an API failure, nor imply that its checkpoint has completed.
+		s.logger.Warn("Accepted sandbox pause awaits runtime recovery",
+			zap.String("sandboxID", sandboxID), zap.Error(err))
 	}
 	return &service.PauseSandboxResponse{
 		SandboxID: sandboxID, Paused: false, Status: managerapi.SandboxStatusStarting,

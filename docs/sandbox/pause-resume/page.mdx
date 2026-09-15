@@ -59,6 +59,11 @@ The initial response can report `starting`/`paused: false` while this work
 continues. Poll sandbox details until `status` is `paused` and `paused` is
 `true` before treating the checkpoint as resume-ready.
 
+After the pause intent is durably recorded, a temporary node-channel outage
+or completion deadline still returns `202 Accepted`; the pause controller
+retries the same operation. This response does not confirm a saved checkpoint.
+Failure to record the initial intent still returns an error.
+
 ```bash
 s0 sandbox get sb_abc123
 ```

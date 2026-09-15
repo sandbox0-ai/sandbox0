@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,30 @@ func TestSelectClusterForTemplateRejectsInvalidOverrideBeforeCapacityQuery(t *te
 	}, "team-a")
 	if err == nil || repo.queries != 0 {
 		t.Fatalf("error = %v, capacity queries = %d", err, repo.queries)
+	}
+}
+
+func TestSelectClusterForSmallSandboxUsesCPUFloor(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(fmt.Sprintf("memory_override_%t", override), func(t *testing.T) {
+			tpl := routingTemplate("small")
+			tpl.Spec.MainContainer.Resources = sandboxspec.ResourceQuota{CPU: "32m", Memory: "128Mi"}
+			repo := &fakeCapacityRepository{capacities: []*db.ClusterCapacity{
+				capacity("cluster-a", 1, 1, 1, 128<<20, 150),
+			}}
+			req := &apispec.ClaimRequest{Template: "small"}
+			if override {
+				memory := "128Mi"
+				req.Config = &apispec.SandboxConfig{Resources: &apispec.SandboxResourceConfig{Memory: &memory}}
+			}
+			_, _, _, err := routingServer(tpl, repo).selectClusterForTemplate(routingContext(), req, "team-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repo.cpuMillicores != 150 || repo.memoryBytes != 128<<20 {
+				t.Fatalf("capacity query = %dm/%d, want 150m/128Mi", repo.cpuMillicores, repo.memoryBytes)
+			}
+		})
 	}
 }
 

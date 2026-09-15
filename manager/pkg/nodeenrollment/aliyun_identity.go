@@ -100,7 +100,13 @@ func (v *AliyunIdentityVerifier) Verify(
 	}
 	p7.Content = signedContent
 	signer := p7.GetOnlySigner()
-	if signer == nil || subtle.ConstantTimeCompare(signer.Raw, v.signer.Raw) != 1 {
+	if signer != nil && subtle.ConstantTimeCompare(signer.Raw, v.signer.Raw) != 1 {
+		return AliyunInstanceIdentity{}, errors.New("aliyun identity signature uses an untrusted signer")
+	}
+	// ECS omits certificates from its detached signature. Resolve its single
+	// signer against the operator-pinned certificate, never caller-supplied roots.
+	p7.Certificates = []*x509.Certificate{v.signer}
+	if p7.GetOnlySigner() == nil {
 		return AliyunInstanceIdentity{}, errors.New("aliyun identity signature uses an untrusted signer")
 	}
 	if err := p7.Verify(); err != nil {

@@ -366,7 +366,9 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 // expired heartbeat is retained so a reconciler crash remains immediately
 // discoverable, and later node heartbeats cannot revive the fenced slot. A
 // consumed writer is locked and must also be past its renewal grace so a
-// queued renewal cannot revive it after this transaction commits.
+// queued renewal cannot revive it after this transaction commits. A terminal
+// writer is independently due even if its resource-neutral carrier still
+// heartbeats; carrier liveness cannot restore retired RootFS authority.
 func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 	ctx context.Context,
 	request *FenceRuntimeSlotForReconcileRequest,
@@ -392,9 +394,6 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 		}
 		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) ||
 			runtimeSlotPreCommandReadyClaimExpired(slot) || resumeAuthorityAborted
-		if !due {
-			return nil, ErrRuntimeSlotNotDue
-		}
 		if slot.WriterGrantID != "" {
 			var grantState string
 			var leaseExpiresAt *time.Time
@@ -412,8 +411,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 				return nil, err
 			}
 			switch grantState {
-			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring,
-				RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
+			case RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
+				due = true
+			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring:
 			case RootFSWriterGrantStateConsumed:
 				if !resumeAuthorityAborted &&
 					(leaseExpiresAt == nil || leaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(authorityObservedAt)) {
@@ -422,6 +422,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 			default:
 				return nil, fmt.Errorf("%w: runtime slot writer grant is in invalid state %s", ErrRuntimeSlotInvalid, grantState)
 			}
+		}
+		if !due {
+			return nil, ErrRuntimeSlotNotDue
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
@@ -586,7 +589,8 @@ func selectRuntimeSlotResourceLease(
 						AND capacity.node_uid = runtime_slots.node_uid
 						AND capacity.node_boot_id = runtime_slots.node_boot_id
 						AND capacity.heartbeat_expires_at > NOW()
-						AND capacity.cpu_millicores >= $4 + COALESCE((
+						AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
+						AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE((
 							SELECT SUM(lease.cpu_millicores)
 							FROM manager.runtime_resource_leases AS lease
 							WHERE lease.cluster_id = capacity.cluster_id
@@ -595,7 +599,7 @@ func selectRuntimeSlotResourceLease(
 								AND lease.node_boot_id = capacity.node_boot_id
 								AND lease.lease_state = 'active'
 						), 0)
-						AND capacity.memory_bytes >= $5 + COALESCE((
+						AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE((
 							SELECT SUM(lease.memory_bytes)
 							FROM manager.runtime_resource_leases AS lease
 							WHERE lease.cluster_id = capacity.cluster_id
@@ -619,15 +623,18 @@ func selectRuntimeSlotResourceLease(
 		excludedSlots = append(excludedSlots, slot.ID)
 
 		var capacityCPU, capacityMemory int64
+		var physicalCPU, physicalMemory int64
 		var cpusetCPUs, cpusetMems string
 		err = tx.QueryRow(ctx, `
-			SELECT cpu_millicores, memory_bytes, cpuset_cpus, cpuset_mems
+			SELECT cpu_millicores, memory_bytes,
+				COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
+				COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes), cpuset_cpus, cpuset_mems
 			FROM manager.runtime_node_capacities
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND heartbeat_expires_at > NOW()
 			FOR UPDATE
 		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(
-			&capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
+			&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
@@ -644,7 +651,8 @@ func selectRuntimeSlotResourceLease(
 		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(&usedCPU, &usedMemory); err != nil {
 			return nil, protocol.RuntimeResourceLease{}, nil, err
 		}
-		if capacityCPU-usedCPU < request.Resources.CPUMillicores ||
+		if physicalCPU < request.Resources.CPUMillicores || physicalMemory < request.Resources.MemoryBytes ||
+			capacityCPU-usedCPU < request.Resources.CPUMillicores ||
 			capacityMemory-usedMemory < request.Resources.MemoryBytes {
 			continue
 		}
@@ -1192,13 +1200,38 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 // physical incarnations before lease-expired or authority-revoked candidates
 // without deleting their durable claim and writer identities.
 func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit int) ([]RuntimeSlot, error) {
+	return s.ListRuntimeSlotsForReconcileAfter(ctx, limit, nil)
+}
+
+// ListRuntimeSlotsForReconcileAfter resumes a read-only candidate traversal.
+// The cursor uses the observed ordering values, even if that slot has since
+// changed state or disappeared. It grants no cleanup or resource authority.
+func (s *PGSandboxStore) ListRuntimeSlotsForReconcileAfter(ctx context.Context, limit int, after *RuntimeSlot) ([]RuntimeSlot, error) {
 	if limit <= 0 || limit > MaxRuntimeSlotReconcileLimit {
 		return nil, fmt.Errorf("runtime slot reconcile limit must be between 1 and %d", MaxRuntimeSlotReconcileLimit)
 	}
+	priority, heartbeat, id := 0, time.Time{}, ""
+	if after != nil {
+		id, heartbeat = after.ID, after.HeartbeatExpiresAt
+		switch after.State {
+		case RuntimeSlotStateOrphaned:
+			priority = 0
+		case RuntimeSlotStateQuiescing:
+			priority = 1
+		default:
+			priority = 2
+		}
+	}
 	rows, err := s.pool.Query(ctx, runtimeSlotSelectSQL()+`
-		WHERE state IN ($1, $2)
+		WHERE (state IN ($1, $2)
 			OR (state <> $3 AND heartbeat_expires_at <= NOW())
 			OR (state IN ($4, $5) AND claim_lease_expires_at <= NOW())
+			OR (state <> $3 AND EXISTS (
+				SELECT 1 FROM manager.rootfs_writer_grants AS writer
+				WHERE writer.grant_id = runtime_slots.writer_grant_id
+					AND writer.slot_id = runtime_slots.slot_id
+					AND writer.state IN ($13, $14)
+			))
 			OR (state <> $3 AND EXISTS (
 				SELECT 1
 				FROM manager.sandbox_lifecycle_txns AS lifecycle
@@ -1206,14 +1239,19 @@ func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit
 					AND lifecycle.sandbox_id = runtime_slots.sandbox_id
 					AND lifecycle.kind = $6 AND lifecycle.source = $7
 					AND lifecycle.phase = $8
-			))
+			)))
+			AND ($10 = '' OR (
+				CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
+				heartbeat_expires_at, slot_id
+			) > ($11, $12, $10))
 		ORDER BY
 			CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
 			heartbeat_expires_at, slot_id
 		LIMIT $9
 	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
 		RuntimeSlotStateClaiming, RuntimeSlotStateStarting,
-		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit)
+		SandboxLifecycleKindResume, SandboxLifecycleSourceManual, SandboxLifecyclePhaseAborted, limit, id, priority, heartbeat,
+		RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled)
 	if err != nil {
 		return nil, err
 	}

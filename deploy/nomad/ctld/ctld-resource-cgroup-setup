@@ -65,3 +65,11 @@ for controller in $controllers; do
     exit 1
   }
 done
+
+# Opt-in profiles provision the parent from the same physical capacity that
+# ctld validates. Existing deployments keep their current parent budget.
+case "${SANDBOX0_ENFORCE_PHYSICAL_CGROUP_BUDGET:-false}" in
+  true) /usr/local/libexec/sandbox0/ctld-resource-cgroup-budget ;;
+  false) ;;
+  *) echo "SANDBOX0_ENFORCE_PHYSICAL_CGROUP_BUDGET must be true or false" >&2; exit 1 ;;
+esac

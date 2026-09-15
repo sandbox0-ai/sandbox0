@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -147,7 +149,11 @@ func (c *dnsHostCache) Lookup(sandboxIP string, destIP net.IP) []dnsHostCandidat
 		delete(sandboxEntries, ip)
 	}
 	if len(sandboxEntries) == 0 {
-		delete(c.bySandbox, sandboxIP)
+		for key := range c.bySandbox {
+			if key == sandboxIP || strings.HasPrefix(key, sandboxIP+"|") {
+				delete(c.bySandbox, key)
+			}
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if !candidates[i].ObservedAt.Equal(candidates[j].ObservedAt) {
@@ -167,7 +173,11 @@ func (c *dnsHostCache) ForgetSandbox(sandboxIP string) {
 		return
 	}
 	c.mu.Lock()
-	delete(c.bySandbox, sandboxIP)
+	for key := range c.bySandbox {
+		if key == sandboxIP || strings.HasPrefix(key, sandboxIP+"|") {
+			delete(c.bySandbox, key)
+		}
+	}
 	c.mu.Unlock()
 }
 
@@ -219,7 +229,11 @@ func (c *dnsHostCache) pruneLocked(sandboxIP string, now time.Time) {
 		}
 	}
 	if len(sandboxEntries) == 0 {
-		delete(c.bySandbox, sandboxIP)
+		for key := range c.bySandbox {
+			if key == sandboxIP || strings.HasPrefix(key, sandboxIP+"|") {
+				delete(c.bySandbox, key)
+			}
+		}
 		return
 	}
 	if len(entries) <= maxDNSHostCacheEntries {
@@ -243,7 +257,11 @@ func (c *dnsHostCache) pruneLocked(sandboxIP string, now time.Time) {
 		}
 	}
 	if len(sandboxEntries) == 0 {
-		delete(c.bySandbox, sandboxIP)
+		for key := range c.bySandbox {
+			if key == sandboxIP || strings.HasPrefix(key, sandboxIP+"|") {
+				delete(c.bySandbox, key)
+			}
+		}
 	}
 }
 
@@ -394,6 +412,20 @@ func normalizeDNSHostname(host string) string {
 	return normalizeHost(host)
 }
 
+// DNS hints share the flow's immutable policy binding. A late response from a
+// retired connection may populate only its old namespace, never a reused IP.
+func dnsPolicyCacheKey(sourceIP string, compiled *policy.CompiledPolicy) string {
+	if compiled == nil || compiled.RuntimeBinding.Key == "" {
+		return sourceIP
+	}
+	binding, _ := json.Marshal(compiled.RuntimeBinding)
+	return fmt.Sprintf("%s|%x", sourceIP, sha256.Sum256(binding))
+}
+
+func (s *Server) observePolicyDNSResponse(sourceIP string, compiled *policy.CompiledPolicy, payload []byte) {
+	s.observeDNSResponse(dnsPolicyCacheKey(sourceIP, compiled), payload)
+}
+
 func (s *Server) observeDNSResponse(sandboxIP string, payload []byte) {
 	if s == nil || s.dnsCache == nil {
 		return
@@ -420,7 +452,7 @@ func (s *Server) applyCachedDNSHost(req *adapterRequest, classification trafficC
 	if classification.Transport != "tcp" || classification.Protocol != "ssh" || classification.Host != "" || classification.UnknownReason != "" {
 		return classification
 	}
-	candidates := s.dnsCache.Lookup(req.SrcIP, classification.DestIP)
+	candidates := s.dnsCache.Lookup(dnsPolicyCacheKey(req.SrcIP, req.Compiled), classification.DestIP)
 	if len(candidates) == 0 {
 		return classification
 	}
@@ -486,6 +518,7 @@ func hasDomainScopedSSHAuthRule(compiled *policy.CompiledPolicy) bool {
 }
 
 type dnsTCPResponseObserver struct {
+	compiled  *policy.CompiledPolicy
 	writer    io.Writer
 	server    *Server
 	sandboxIP string
@@ -525,7 +558,7 @@ func (w *dnsTCPResponseObserver) observe(data []byte) {
 			return
 		}
 		message := append([]byte(nil), w.buffer[2:2+messageLength]...)
-		w.server.observeDNSResponse(w.sandboxIP, message)
+		w.server.observePolicyDNSResponse(w.sandboxIP, w.compiled, message)
 		w.buffer = w.buffer[2+messageLength:]
 	}
 }
@@ -534,6 +567,7 @@ func (s *Server) pipeDNSOverTCP(client net.Conn, upstream net.Conn, upstreamWrit
 	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, compiled, bandwidthEgress)}
 	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(client, compiled, bandwidthIngress)}
 	dnsObserver := &dnsTCPResponseObserver{
+		compiled:  compiled,
 		writer:    clientCounter,
 		server:    s,
 		sandboxIP: sandboxIP,

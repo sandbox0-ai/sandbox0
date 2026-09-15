@@ -161,6 +161,8 @@ Gateway operations produce an `attempt` before authorization or execution and a 
 
 The default `durable_async` path normally becomes query-visible after immediate delivery wakeups and the one-second flush/replay cycle. It is not a read-after-write guarantee.
 
+Gateway replay and foreground requests share a bounded pool of canonical writers. An in-flight replay of the same event shares its acknowledgement with the request; replay of unrelated events does not hold a global admission lock. Mutations still require the applicable ClickHouse acknowledgement before proceeding.
+
 Failure behavior is fail-closed at the applicable admission boundary:
 
 | Failure | Caller-visible behavior |

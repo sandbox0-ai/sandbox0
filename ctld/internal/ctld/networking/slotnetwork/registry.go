@@ -62,10 +62,11 @@ type Config struct {
 	ExpectedOwnerUID *uint32
 }
 
-// NamespaceInspector proves an exact namespace incarnation and returns its
-// single routable IPv4 address while holding a handle to that namespace.
+// NamespaceInspector proves an exact namespace incarnation while holding its
+// handle. Claimed namespaces may have transferred their address into netstack.
 type NamespaceInspector interface {
 	Inspect(path, expectedIdentity string) (string, error)
+	InspectClaimed(path, expectedIdentity, expectedSourceIP string) error
 }
 
 type registryRecord struct {
@@ -477,10 +478,13 @@ func (r *Registry) Prepare(
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	sourceIP, err := r.inspector.Inspect(
-		filepath.Join(r.config.NetNSRoot, request.NetNSRelativePath),
-		request.Request.NetNSIdentity,
-	)
+	r.mu.Lock()
+	entry, ok := r.entries[request.Request.SlotID]
+	r.mu.Unlock()
+	if !ok {
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot has no warm network registration: %w", errdefs.ErrFailedPrecondition)
+	}
+	sourceIP, err := r.inspectNamespace(entry.record)
 	if err != nil {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("inspect runtime slot network namespace: %w", err)
 	}
@@ -490,7 +494,7 @@ func (r *Registry) Prepare(
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network registry is closed: %w", errdefs.ErrUnavailable)
 	}
-	entry, ok := r.entries[request.Request.SlotID]
+	entry, ok = r.entries[request.Request.SlotID]
 	if !ok {
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot has no warm network registration: %w", errdefs.ErrFailedPrecondition)
@@ -787,6 +791,19 @@ type namespaceCandidate struct {
 	key          string
 	registration protocol.RuntimeSlotNetworkRegistrationRequest
 	sourceIP     string
+	claimed      bool
+}
+
+func (r *Registry) inspectNamespace(record registryRecord) (string, error) {
+	registration := record.Registration
+	path := filepath.Join(r.config.NetNSRoot, registration.NetNSRelativePath)
+	if record.State == recordStateClaimed {
+		// Stock runsc removes host IPv4 addresses when passing them to netstack.
+		// Retain the journaled source only while the exact namespace and its
+		// carrier link still exist; an initial claim must discover a real IP.
+		return record.SourceIP, r.inspector.InspectClaimed(path, registration.NetNSIdentity, record.SourceIP)
+	}
+	return r.inspector.Inspect(path, registration.NetNSIdentity)
 }
 
 func (r *Registry) fenceAbsentNamespaces() error {
@@ -803,6 +820,7 @@ func (r *Registry) fenceAbsentNamespaces() error {
 		}
 		candidate := namespaceCandidate{
 			key: key, registration: entry.record.Registration, sourceIP: entry.record.SourceIP,
+			claimed: entry.record.State == recordStateClaimed,
 		}
 		bySourceIP[candidate.sourceIP] = append(bySourceIP[candidate.sourceIP], candidate)
 	}
@@ -817,15 +835,14 @@ func (r *Registry) fenceAbsentNamespaces() error {
 
 	absent := make([]namespaceCandidate, 0)
 	for _, candidate := range candidates {
-		registration := candidate.registration
-		sourceIP, err := r.inspector.Inspect(
-			filepath.Join(r.config.NetNSRoot, registration.NetNSRelativePath),
-			registration.NetNSIdentity,
-		)
-		// A registered namespace only enters the journal after it has exactly one
-		// routable IPv4 address. If that address is now gone while its recorded IP
-		// collides with another incarnation, it cannot still own the recorded
-		// source IP and must not poison the node-wide desired-state snapshot.
+		record := registryRecord{Registration: candidate.registration, SourceIP: candidate.sourceIP, State: recordStateWarm}
+		if candidate.claimed {
+			record.State = recordStateClaimed
+		}
+		sourceIP, err := r.inspectNamespace(record)
+		// CNI teardown removes the carrier link even if runsc retains a handle
+		// to the namespace. Merely transferring its IP into netstack does not
+		// prove absence and must not let another allocation replace its policy.
 		if errors.Is(err, errExactNamespaceAbsent) || errors.Is(err, errExactNamespaceUnroutable) {
 			absent = append(absent, candidate)
 			continue
@@ -854,6 +871,7 @@ func (r *Registry) fenceAbsentNamespaces() error {
 		entry, ok := r.entries[candidate.key]
 		if !ok || entry.physicalAbsent || entry.record.Registration != candidate.registration ||
 			entry.record.SourceIP != candidate.sourceIP ||
+			(entry.record.State == recordStateClaimed) != candidate.claimed ||
 			(entry.record.State != recordStateWarm && entry.record.State != recordStateClaimed) {
 			continue
 		}

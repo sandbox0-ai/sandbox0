@@ -22,6 +22,10 @@ func (syncTestNamespaceInspector) Inspect(string, string) (string, error) {
 	return "192.0.2.8", nil
 }
 
+func (syncTestNamespaceInspector) InspectClaimed(string, string, string) error {
+	return nil
+}
+
 type syncTestRedirect struct {
 	mu    sync.Mutex
 	input [][]string

@@ -107,6 +107,44 @@ func TestRegistryActivePolicyMutationPersistsAndFencesABA(t *testing.T) {
 	}
 }
 
+func TestRegistryMutatesClaimedNetstackAndKeepsLiveIPCollision(t *testing.T) {
+	r := claimedMutationRegistry(t)
+	inspector := r.inspector.(*fakeNamespaceInspector)
+	inspector.mu.Lock()
+	inspector.err = fmt.Errorf("address moved into netstack: %w", errExactNamespaceUnroutable)
+	inspector.transferred = true
+	inspector.mu.Unlock()
+	next := nextPolicyRequest(testPrepareRequest(), 7)
+	if _, err := r.Prepare(t.Context(), next); err != nil {
+		t.Fatalf("active netstack mutation: %v", err)
+	}
+	// A newly registered carrier must not silently displace the still-live
+	// claimed netstack simply because its address is absent from host netlink.
+	inspector.mu.Lock()
+	inspector.err = nil
+	inspector.mu.Unlock()
+	second := testRegistrationRequest()
+	second.SlotID, second.AllocationID, second.NetNSRelativePath = "slot-2", "allocation-2", "allocation-2"
+	second.NetNSIdentity = "netns-v1:1:3"
+	if err := r.Register(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	inspector.mu.Lock()
+	inspector.errors = []error{fmt.Errorf("address moved into netstack: %w", errExactNamespaceUnroutable), nil}
+	inspector.mu.Unlock()
+	sandboxes, _, err := r.Snapshot()
+	if err != nil || len(sandboxes) != 2 || r.Stats().Orphaned != 0 {
+		t.Fatalf("live source collision = %+v, %v, stats %+v", sandboxes, err, r.Stats())
+	}
+	inspector.mu.Lock()
+	inspector.transferred = false
+	inspector.err = fmt.Errorf("carrier removed: %w", errExactNamespaceUnroutable)
+	inspector.mu.Unlock()
+	if _, err := r.Prepare(t.Context(), nextPolicyRequest(next, 8)); err == nil {
+		t.Fatal("mutated a removed carrier")
+	}
+}
+
 func TestRegistryActivePolicyMutationRejectsChangedAuthority(t *testing.T) {
 	for name, change := range map[string]func(*protocol.RuntimeSlotNetworkPrepareRequest){
 		"claim":           func(r *protocol.RuntimeSlotNetworkPrepareRequest) { r.Request.ClaimID = "other-claim" },

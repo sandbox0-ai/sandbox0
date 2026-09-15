@@ -33,3 +33,29 @@ func TestSelectRoutableIPv4ClassifiesNetworkReadiness(t *testing.T) {
 		t.Fatalf("selected address = %q, %v", address, err)
 	}
 }
+
+func TestSelectClaimedIPv4RequiresCarrierAfterAddressTransfer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		addresses map[string]struct{}
+		links     int
+		ok        bool
+	}{
+		"before transfer":     {map[string]struct{}{"192.0.2.8": {}}, 1, true},
+		"netstack transfer":   {nil, 1, true},
+		"CNI removed link":    {nil, 0, false},
+		"extra link":          {nil, 2, false},
+		"address changed":     {map[string]struct{}{"192.0.2.9": {}}, 1, false},
+		"ambiguous addresses": {map[string]struct{}{"192.0.2.8": {}, "192.0.2.9": {}}, 1, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			address, err := selectClaimedIPv4(tc.addresses, tc.links, "192.0.2.8")
+			if tc.ok {
+				if err != nil || address != "192.0.2.8" {
+					t.Fatalf("claimed address = %q, %v", address, err)
+				}
+			} else if !errdefs.IsFailedPrecondition(err) {
+				t.Fatalf("changed carrier = %q, %v", address, err)
+			}
+		})
+	}
+}

@@ -15,12 +15,30 @@ import (
 )
 
 type fakeNamespaceInspector struct {
-	mu       sync.Mutex
-	paths    []string
-	identity []string
-	podIP    string
-	err      error
-	errors   []error
+	mu          sync.Mutex
+	paths       []string
+	identity    []string
+	podIP       string
+	err         error
+	errors      []error
+	transferred bool
+}
+
+func (i *fakeNamespaceInspector) InspectClaimed(path, identity, expectedSourceIP string) error {
+	address, err := i.Inspect(path, identity)
+	i.mu.Lock()
+	transferred := i.transferred
+	i.mu.Unlock()
+	if transferred && errors.Is(err, errExactNamespaceUnroutable) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if address != expectedSourceIP {
+		return fmt.Errorf("claimed source IP changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
 }
 
 func (i *fakeNamespaceInspector) Inspect(path, identity string) (string, error) {

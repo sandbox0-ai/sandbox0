@@ -25,6 +25,15 @@ func newNamespaceInspector(root string) NamespaceInspector {
 }
 
 func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, error) {
+	return i.inspect(path, expectedIdentity, "")
+}
+
+func (i *namespaceInspector) InspectClaimed(path, expectedIdentity, expectedSourceIP string) error {
+	_, err := i.inspect(path, expectedIdentity, expectedSourceIP)
+	return err
+}
+
+func (i *namespaceInspector) inspect(path, expectedIdentity, claimedSourceIP string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -63,9 +72,13 @@ func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, err
 		return "", fmt.Errorf("list network namespace links: %w", err)
 	}
 	addresses := make(map[string]struct{})
+	liveLinks := 0
 	for _, link := range links {
 		if link == nil || link.Attrs() == nil || link.Attrs().Flags&net.FlagLoopback != 0 {
 			continue
+		}
+		if link.Attrs().Flags&net.FlagUp != 0 {
+			liveLinks++
 		}
 		values, err := netlinkHandle.AddrList(link, netlink.FAMILY_V4)
 		if err != nil {
@@ -78,7 +91,32 @@ func (i *namespaceInspector) Inspect(path, expectedIdentity string) (string, err
 			addresses[value.IP.String()] = struct{}{}
 		}
 	}
+	if claimedSourceIP != "" {
+		return selectClaimedIPv4(addresses, liveLinks, claimedSourceIP)
+	}
 	return selectRoutableIPv4(addresses)
+}
+
+// selectClaimedIPv4 preserves the original address after stock runsc transfers
+// it into netstack. It still requires the exact carrier link and rejects any
+// conflicting host address; CNI teardown cannot masquerade as a live guest.
+func selectClaimedIPv4(addresses map[string]struct{}, liveLinks int, expected string) (string, error) {
+	if liveLinks == 0 {
+		return "", fmt.Errorf("claimed namespace lost its carrier link: %w: %w", errExactNamespaceUnroutable, errdefs.ErrFailedPrecondition)
+	}
+	if liveLinks != 1 {
+		return "", fmt.Errorf("claimed namespace must have exactly one live carrier link: %w", errdefs.ErrFailedPrecondition)
+	}
+	if len(addresses) != 0 {
+		address, err := selectRoutableIPv4(addresses)
+		if err != nil {
+			return "", err
+		}
+		if address != expected {
+			return "", fmt.Errorf("claimed namespace source IP changed: %w", errdefs.ErrFailedPrecondition)
+		}
+	}
+	return expected, nil
 }
 
 func selectRoutableIPv4(addresses map[string]struct{}) (string, error) {

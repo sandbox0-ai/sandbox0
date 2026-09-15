@@ -13,6 +13,8 @@ const (
 	DefaultMemoryPerCPU     = "4Gi"
 	DefaultSandboxMinMemory = "128Mi"
 	DefaultSandboxMaxMemory = "16Gi"
+	// Small sandboxes still need enough CPU to start the guest and execute commands.
+	minimumSandboxCPUMillicores int64 = 150
 )
 
 // ResourcePolicy defines the platform-wide resource bounds shared by
@@ -135,6 +137,12 @@ func (p ResourcePolicy) ResolveClaimResources(
 	if millicpu <= 0 || quantity.NewMilli(millicpu).Cmp(cpu) != 0 {
 		return ClaimResources{}, fmt.Errorf("CPU must be a positive exact millicore quantity")
 	}
+	// Stored templates can predate the CPU floor. Normalize the new lease,
+	// without rewriting template history or changing an active runtime's limits.
+	if millicpu < minimumSandboxCPUMillicores {
+		millicpu = minimumSandboxCPUMillicores
+		quota.CPU = quantity.NewMilli(millicpu).String()
+	}
 	memoryBytes := memory.Value()
 	if memoryBytes <= 0 || quantity.New(memoryBytes).Cmp(memory) != 0 {
 		return ClaimResources{}, fmt.Errorf("memory must be a positive exact byte quantity")
@@ -170,7 +178,8 @@ func positiveQuantityOrDefault(value, fallback string) quantity.Quantity {
 }
 
 // CPUForMemory returns the CPU limit required for a memory limit at the given
-// memory-per-CPU ratio, rounded up to exact millicore precision.
+// memory-per-CPU ratio, rounded up to exact millicore precision and bounded
+// below by the platform CPU floor.
 func CPUForMemory(memory, memoryPerCPU quantity.Quantity) quantity.Quantity {
 	if memory.Sign() <= 0 || memoryPerCPU.Sign() <= 0 {
 		return quantity.Quantity{}
@@ -185,7 +194,7 @@ func CPUForMemory(memory, memoryPerCPU quantity.Quantity) quantity.Quantity {
 	if !quotient.IsInt64() {
 		return quantity.NewMilli(1<<63 - 1)
 	}
-	return quantity.NewMilli(quotient.Int64())
+	return quantity.NewMilli(max(quotient.Int64(), minimumSandboxCPUMillicores))
 }
 
 // ValidateResourceRatio enforces the platform memory-derived CPU shape for template specs.

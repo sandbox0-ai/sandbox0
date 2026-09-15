@@ -412,6 +412,10 @@ capacity using `nomad_runtime.admission_cpu_millicores` and
 `nomad_runtime.admission_memory_bytes`. Omitted or zero values preserve physical
 capacity admission. These budgets bound the sum of individual sandbox limits;
 they do not change a sandbox's CPU quota, memory limit, metering, or isolation.
+Include the `150m` CPU floor for every sandbox when sizing this budget. For
+example, 420 minimum-memory sandboxes require at least 63000 millicores of CPU
+admission, plus the leases of any other running sandboxes. A larger admission
+budget does not add physical CPUs or guarantee simultaneous peak CPU usage.
 Each individual request must still fit the physical node. CPU budgets are
 bounded to 16 times physical capacity and memory budgets to twice physical
 capacity; these are validation ceilings, not recommended operating ratios.

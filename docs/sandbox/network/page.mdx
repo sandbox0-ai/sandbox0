@@ -7,6 +7,11 @@ Use `mode` as the default fallback, and use `egress.trafficRules` for explicit o
 Cloud metadata and host credential endpoints are protected by the platform. An
 `allow-all` policy or explicit allow rule cannot grant access to those destinations.
 
+An active-policy update is acknowledged only after the node applies the new
+policy and reconciles existing connections. Concurrent updates are serialized
+against the current policy and runtime version; a delayed retry cannot restore
+an older policy. Reopening access requires a new TCP connection after revocation.
+
 ## Policy Shape
 
 | Field | Description |

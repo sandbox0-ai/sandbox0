@@ -457,8 +457,9 @@ func (r *Registry) waitForRegistration(
 	return err
 }
 
-// Prepare durably transitions one registered warm slot to its exact claimed
-// policy and waits for a successful redirect synchronization that contains it.
+// Prepare durably claims a warm slot or compares and replaces an active policy.
+// It acknowledges only after redirect and active-flow synchronization applies
+// the exact persisted request; retries cannot roll back a newer slot revision.
 func (r *Registry) Prepare(
 	ctx context.Context,
 	request protocol.RuntimeSlotNetworkPrepareRequest,
@@ -470,7 +471,7 @@ func (r *Registry) Prepare(
 	if r == nil || r.db == nil {
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
 	}
-	if token, revision, ready, err := r.prepareState(request); ready || err != nil {
+	if token, revision, ready, err := r.prepareState(request, policySpec); ready || err != nil {
 		if err != nil {
 			return rootfshandoff.NetworkPolicyToken{}, err
 		}
@@ -494,7 +495,7 @@ func (r *Registry) Prepare(
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot has no warm network registration: %w", errdefs.ErrFailedPrecondition)
 	}
-	if entry.record.State == recordStateClaimed {
+	if entry.record.State == recordStateClaimed && entry.record.Prepare != nil && *entry.record.Prepare == request.Request {
 		token, revision, err := matchPrepare(entry, request)
 		r.mu.Unlock()
 		if err != nil {
@@ -502,9 +503,13 @@ func (r *Registry) Prepare(
 		}
 		return r.waitForPrepare(ctx, request, token, revision)
 	}
-	if err := matchWarmPrepare(entry.record, request, sourceIP); err != nil {
+	if err := matchNextPrepare(entry, request, policySpec); err != nil {
 		r.mu.Unlock()
 		return rootfshandoff.NetworkPolicyToken{}, err
+	}
+	if entry.record.SourceIP != sourceIP {
+		r.mu.Unlock()
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("runtime slot network source IP changed before prepare: %w", errdefs.ErrFailedPrecondition)
 	}
 	if slot := r.operationSlots[request.Request.OperationID]; slot != "" && slot != request.Request.SlotID {
 		r.mu.Unlock()
@@ -527,6 +532,18 @@ func (r *Registry) Prepare(
 		if slot := operations.Get([]byte(request.Request.OperationID)); slot != nil && string(slot) != request.Request.SlotID {
 			return fmt.Errorf("runtime slot network operation is bound to slot %q: %w", slot, errdefs.ErrAlreadyExists)
 		}
+		if entry.record.Prepare != nil {
+			// One operation index per retained slot keeps repeated policy changes
+			// bounded. The persisted revision fences every superseded operation.
+			if err := operations.Delete([]byte(entry.record.Prepare.OperationID)); err != nil {
+				return err
+			}
+			epoch, err := records.NextSequence()
+			if err != nil || epoch == 0 || epoch > math.MaxInt64 {
+				return fmt.Errorf("allocate updated runtime slot network epoch: %w", err)
+			}
+			record.NetworkEpoch = int64(epoch)
+		}
 		if err := validateRecord(record); err != nil {
 			return err
 		}
@@ -542,6 +559,9 @@ func (r *Registry) Prepare(
 	r.revision++
 	revision := r.revision
 	r.entries[record.Registration.SlotID] = registryEntry{record: record, revision: revision}
+	if entry.record.Prepare != nil {
+		delete(r.operationSlots, entry.record.Prepare.OperationID)
+	}
 	r.operationSlots[request.Request.OperationID] = request.Request.SlotID
 	notify := r.notify
 	token := policyToken(record)
@@ -554,6 +574,7 @@ func (r *Registry) Prepare(
 
 func (r *Registry) prepareState(
 	request protocol.RuntimeSlotNetworkPrepareRequest,
+	policySpec *v1alpha1.NetworkPolicySpec,
 ) (rootfshandoff.NetworkPolicyToken, uint64, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -572,26 +593,35 @@ func (r *Registry) prepareState(
 	}
 	switch entry.record.State {
 	case recordStateClaimed:
-		token, revision, err := matchPrepare(entry, request)
-		return token, revision, true, err
-	case recordStateWarm:
-		if !entry.record.Registration.MatchesPrepare(request.Request) ||
-			entry.record.Registration.NetNSRelativePath != request.NetNSRelativePath {
-			return rootfshandoff.NetworkPolicyToken{}, 0, true, fmt.Errorf("runtime slot network claim belongs to another registration: %w", errdefs.ErrFailedPrecondition)
+		if entry.record.Prepare != nil && *entry.record.Prepare == request.Request {
+			token, revision, err := matchPrepare(entry, request)
+			return token, revision, true, err
 		}
-		return rootfshandoff.NetworkPolicyToken{}, 0, false, nil
+		return rootfshandoff.NetworkPolicyToken{}, 0, false, matchNextPrepare(entry, request, policySpec)
+	case recordStateWarm:
+		return rootfshandoff.NetworkPolicyToken{}, 0, false, matchNextPrepare(entry, request, policySpec)
 	default:
 		return rootfshandoff.NetworkPolicyToken{}, 0, true, fmt.Errorf("runtime slot network policy is terminal: %w", errdefs.ErrFailedPrecondition)
 	}
 }
 
-func matchWarmPrepare(record registryRecord, request protocol.RuntimeSlotNetworkPrepareRequest, sourceIP string) error {
-	if record.State != recordStateWarm || !record.Registration.MatchesPrepare(request.Request) ||
+func matchNextPrepare(entry registryEntry, request protocol.RuntimeSlotNetworkPrepareRequest, spec *v1alpha1.NetworkPolicySpec) error {
+	record := entry.record
+	if entry.physicalAbsent || !record.Registration.MatchesPrepare(request.Request) ||
 		record.Registration.NetNSRelativePath != request.NetNSRelativePath {
 		return fmt.Errorf("runtime slot network claim belongs to another registration: %w", errdefs.ErrFailedPrecondition)
 	}
-	if record.SourceIP != sourceIP {
-		return fmt.Errorf("runtime slot network source IP changed before claim: %w", errdefs.ErrFailedPrecondition)
+	if record.State == recordStateWarm && request.Request.PolicyRevision == 0 {
+		return nil
+	}
+	if record.State != recordStateClaimed || record.Prepare == nil {
+		return fmt.Errorf("runtime slot network policy is not an active claim: %w", errdefs.ErrFailedPrecondition)
+	}
+	previous, next := record.Prepare, request.Request
+	if next.OperationID == previous.OperationID || next.ClaimID != previous.ClaimID ||
+		next.PolicyRevision <= previous.PolicyRevision || next.ExpectedPolicyDigest != previous.PolicyDigest ||
+		spec.SandboxID != record.SandboxID || spec.TeamID != record.TeamID {
+		return fmt.Errorf("runtime slot network mutation does not match its current claim, revision and policy: %w", errdefs.ErrAlreadyExists)
 	}
 	return nil
 }

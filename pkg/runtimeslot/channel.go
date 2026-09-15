@@ -390,7 +390,7 @@ func (r NodeRunningForkControlRequest) Validate() error {
 }
 
 // NodeNetworkPrepareControlRequest binds one exact ctld-owned network policy
-// application before a writer grant is issued.
+// application for an initial claim or a fenced active-policy mutation.
 type NodeNetworkPrepareControlRequest struct {
 	OperationID   string `json:"operation_id"`
 	ClaimID       string `json:"claim_id"`
@@ -403,6 +403,11 @@ type NodeNetworkPrepareControlRequest struct {
 	NetNSIdentity string `json:"netns_identity"`
 	NetworkPolicy string `json:"network_policy"`
 	PolicyDigest  string `json:"policy_digest"`
+	// PolicyRevision is the PostgreSQL slot revision captured by the mutation.
+	// Zero is reserved for initial claim; later revisions fence delayed retries,
+	// including ABA changes back to previously applied policy bytes.
+	PolicyRevision       int64  `json:"policy_revision,omitempty"`
+	ExpectedPolicyDigest string `json:"expected_policy_digest,omitempty"`
 }
 
 // Validate rejects network preparation detached from its physical slot or
@@ -422,6 +427,14 @@ func (r NodeNetworkPrepareControlRequest) Validate() error {
 	}
 	if r.PolicyDigest != NetworkPolicyDigest(r.NetworkPolicy) {
 		return fmt.Errorf("network policy digest does not match raw policy")
+	}
+	if r.PolicyRevision < 0 || (r.PolicyRevision == 0) != (r.ExpectedPolicyDigest == "") {
+		return fmt.Errorf("network mutation requires both a positive slot revision and expected policy digest")
+	}
+	if r.ExpectedPolicyDigest != "" {
+		if err := digest.Digest(r.ExpectedPolicyDigest).Validate(); err != nil {
+			return fmt.Errorf("invalid expected network policy digest: %w", err)
+		}
 	}
 	return nil
 }

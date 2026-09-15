@@ -78,17 +78,19 @@ type NodeExecutor interface {
 // NetworkPrepareRequest asks the trusted node/network controller to apply an
 // exact policy incarnation before the writer grant is issued.
 type NetworkPrepareRequest struct {
-	OperationID   string
-	ClaimID       string
-	SlotID        string
-	ClusterID     string
-	AllocationID  string
-	NodeID        string
-	NodeUID       string
-	NodeBootID    string
-	NetNSIdentity string
-	NetworkPolicy string
-	PolicyDigest  string
+	OperationID          string
+	ClaimID              string
+	SlotID               string
+	ClusterID            string
+	AllocationID         string
+	NodeID               string
+	NodeUID              string
+	NodeBootID           string
+	NetNSIdentity        string
+	NetworkPolicy        string
+	PolicyDigest         string
+	PolicyRevision       int64
+	ExpectedPolicyDigest string
 }
 
 // NetworkPreparer must be exactly idempotent by OperationID and return the

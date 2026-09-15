@@ -130,7 +130,8 @@ func (h *ChannelHub) Prepare(
 		AllocationID: request.AllocationID, NodeID: request.NodeID,
 		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, NetworkPolicy: request.NetworkPolicy,
-		PolicyDigest: request.PolicyDigest,
+		PolicyDigest:   request.PolicyDigest,
+		PolicyRevision: request.PolicyRevision, ExpectedPolicyDigest: request.ExpectedPolicyDigest,
 	}
 	target := protocol.NodeChannelTarget{
 		SlotID: request.SlotID, ClusterID: request.ClusterID,

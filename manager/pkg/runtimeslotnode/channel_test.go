@@ -610,7 +610,8 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		OperationID: "operation-1", ClaimID: "claim-1", SlotID: "slot-1",
 		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
 		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "1:2",
-		NetworkPolicy: `{"mode":"block-all"}`,
+		NetworkPolicy:  `{"mode":"block-all"}`,
+		PolicyRevision: 7, ExpectedPolicyDigest: protocol.NetworkPolicyDigest("previous"),
 	}
 	networkRequest.PolicyDigest = protocol.NetworkPolicyDigest(networkRequest.NetworkPolicy)
 	policyToken, err := hub.Prepare(t.Context(), networkRequest)
@@ -674,7 +675,8 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		AllocationID: networkRequest.AllocationID, NodeID: networkRequest.NodeID,
 		NodeUID: networkRequest.NodeUID, NodeBootID: networkRequest.NodeBootID,
 		NetNSIdentity: networkRequest.NetNSIdentity, NetworkPolicy: networkRequest.NetworkPolicy,
-		PolicyDigest: networkRequest.PolicyDigest,
+		PolicyDigest:   networkRequest.PolicyDigest,
+		PolicyRevision: networkRequest.PolicyRevision, ExpectedPolicyDigest: networkRequest.ExpectedPolicyDigest,
 	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
 		len(executor.commands) != 1 || executor.commands[0] != commandRequest ||
 		len(executor.plannedRetires) != 1 || executor.plannedRetires[0] != plannedRetireRequest ||

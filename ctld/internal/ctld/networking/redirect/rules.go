@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
 )
 
 const (
@@ -24,6 +26,12 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 
 	buf.WriteString("*mangle\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
+	// Metadata protection must precede all configured bypasses and TPROXY.
+	// Scope it to registered guest sources so host enrollment and credential
+	// renewal keep their own access to the cloud metadata service.
+	for _, cidr := range policy.CloudMetadataIPv4CIDRs() {
+		_, _ = fmt.Fprintf(&buf, "-A %s -m set --match-set %s src -d %s -j DROP\n", chainName, ipsetName, cidr)
+	}
 
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))

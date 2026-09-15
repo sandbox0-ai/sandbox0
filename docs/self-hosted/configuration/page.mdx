@@ -506,6 +506,13 @@ Configure cluster DNS and platform-allowed CIDRs narrowly. Sandbox policy is
 applied before runsc creation, and manager exposes the generation only after
 the applied policy digest is part of the launch proof.
 
+Cloud metadata destinations are always denied for sandbox traffic: Aliyun
+`100.100.100.200`, IPv4 link-local `169.254.0.0/16`, and the IPv6 metadata endpoint
+`fd00:ec2::254`. Tenant rules, platform allow lists, DNS bypass lists, and SOCKS5
+proxy selection cannot override this boundary. The IPv4 kernel drop precedes
+configured bypasses and applies only to registered sandbox source IPs, preserving
+host-side enrollment and credential renewal.
+
 Never enable a second task-driver-local network-policy path. The driver consumes
 ctld's durable policy proof; it does not install namespace-local fallback
 rules.

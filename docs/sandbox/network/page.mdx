@@ -4,6 +4,9 @@
 
 Use `mode` as the default fallback, and use `egress.trafficRules` for explicit ordered allow and deny behavior.
 
+Cloud metadata and host credential endpoints are protected by the platform. An
+`allow-all` policy or explicit allow rule cannot grant access to those destinations.
+
 ## Policy Shape
 
 | Field | Description |

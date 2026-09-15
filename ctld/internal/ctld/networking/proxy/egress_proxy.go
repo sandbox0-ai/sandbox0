@@ -199,7 +199,7 @@ func resolveProxyEndpointIPs(ctx context.Context, host string) ([]net.IP, error)
 }
 
 func isProtectedProxyEndpointIP(compiled *policy.CompiledPolicy, ip net.IP) bool {
-	if ip == nil {
+	if ip == nil || policy.IsCloudMetadataIP(ip) {
 		return true
 	}
 	if !allowLocalEgressProxyEndpointsForTest && (ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()) {

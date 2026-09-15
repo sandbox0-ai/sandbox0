@@ -25,6 +25,9 @@ func AllowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 }
 
 func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, transport string, host string, appProtocol string) bool {
+	if IsCloudMetadataIP(destIP) {
+		return false
+	}
 	if policy == nil {
 		return true
 	}
@@ -92,6 +95,9 @@ func UnknownFallbackAction(policy *CompiledPolicy) UnknownTrafficAction {
 // pass-through behavior even under block-all so sandbox bootstrap traffic
 // to core services remains functional.
 func AllowUnknownEgressFallback(policy *CompiledPolicy, destIP net.IP, host string) bool {
+	if IsCloudMetadataIP(destIP) {
+		return false
+	}
 	if policy == nil {
 		return true
 	}

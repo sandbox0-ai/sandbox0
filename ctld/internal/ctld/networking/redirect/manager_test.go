@@ -63,6 +63,22 @@ func TestBuildIPSetRestoreInput(t *testing.T) {
 	mustContain(t, restore, "destroy "+nextIPSetName)
 }
 
+func TestCloudMetadataDropPrecedesEveryBypassAndRedirect(t *testing.T) {
+	restore := buildIPTablesRestoreInput(Config{ProxyHTTPPort: 18080, ProxyHTTPSPort: 18443}, []string{"0.0.0.0/0", "100.100.100.200/32"})
+	firstBypass := strings.Index(restore, "-j RETURN")
+	firstRedirect := strings.Index(restore, "-j TPROXY")
+	for _, cidr := range []string{"100.100.100.200/32", "169.254.0.0/16"} {
+		rule := "-A " + chainName + " -m set --match-set " + ipsetName + " src -d " + cidr + " -j DROP"
+		position := strings.Index(restore, rule)
+		if position < 0 || position >= firstBypass || position >= firstRedirect {
+			t.Fatalf("guest metadata protection does not precede bypass and redirect: %s", restore)
+		}
+		if strings.Contains(restore, "-A "+chainName+" -d "+cidr+" -j DROP") {
+			t.Fatal("metadata drop must not affect host credential renewal")
+		}
+	}
+}
+
 func TestEnsureTopJumpInsertsMissingJumpAtFirstRule(t *testing.T) {
 	ipt := newFakeIPTables([]string{"-j OTHER_PREROUTING"})
 	manager := &iptablesManager{ipt: ipt}

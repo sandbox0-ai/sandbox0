@@ -117,7 +117,15 @@ func buildSpec(options specOptions) specs.Spec {
 		linux.CgroupsPath = options.Resources.CgroupPath
 	}
 
+	// /tmp must never enter the writable RootFS generation. Size its empty
+	// tmpfs from the committed memory lease, without allocating that memory.
+	// Actual pages remain charged to the sandbox's memory cgroup.
+	tmpBytes := int64(64 << 20)
+	if options.Resources != nil && options.Resources.MemoryLimitBytes > 0 {
+		tmpBytes = max(1<<20, options.Resources.MemoryLimitBytes/2)
+	}
 	mounts := []specs.Mount{
+		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "mode=1777", fmt.Sprintf("size=%d", tmpBytes)}},
 		{Destination: "/proc", Type: "proc", Source: "proc"},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
@@ -141,6 +149,8 @@ func buildSpec(options specOptions) specs.Spec {
 		if mount.MountPath == "/dev/shm" {
 			ephemeral.Source = "shm"
 			ephemeral.Options = append(ephemeral.Options, "noexec")
+		}
+		if mount.MountPath == "/dev/shm" || mount.MountPath == "/tmp" {
 			for index := range mounts {
 				if mounts[index].Destination == mount.MountPath {
 					mounts[index] = ephemeral

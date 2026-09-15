@@ -49,6 +49,10 @@ mounts such as `/proc`, `/dev`, and `/sys`, and template-defined
 `ephemeralMounts` are recreated for each runtime generation and are not
 snapshot content.
 
+The default `/tmp` tmpfs capacity is half the sandbox memory limit. Writes
+consume the sandbox's memory budget; the capacity itself reserves no memory.
+A template can set an explicit `/tmp` capacity using `ephemeralMounts`.
+
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
 </Callout>

@@ -55,6 +55,25 @@ func TestNamespaceInspectorAddressTransferIntegration(t *testing.T) {
 	if err := links.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "s0-test0"}, PeerName: "s0-test1"}); err != nil {
 		t.Fatal(err)
 	}
+	peer, err := links.LinkByName("s0-test1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := links.LinkSetNsFd(peer, int(original)); err != nil {
+		t.Fatal(err)
+	}
+	host, err := netlink.NewHandleAt(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	peer, err = host.LinkByName("s0-test1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.LinkSetUp(peer); err != nil {
+		t.Fatal(err)
+	}
 	link, err := links.LinkByName("s0-test0")
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +101,23 @@ func TestNamespaceInspectorAddressTransferIntegration(t *testing.T) {
 	inspector := newNamespaceInspector(root)
 	if got, err := inspector.Inspect(path, identity); err != nil || got != "192.0.2.8" {
 		t.Fatalf("initial address = %q, %v", got, err)
+	}
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "s0-test-br"}}
+	if err := host.LinkAdd(bridge); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = host.LinkDel(bridge) }()
+	if err := host.LinkSetMaster(peer, bridge); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspector.Inspect(path, identity); !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("bridge-backed carrier must be rejected before claim: %v", err)
+	}
+	if err := inspector.InspectClaimed(path, identity, "192.0.2.8"); err != nil {
+		t.Fatalf("legacy claimed identity must remain inspectable for drain: %v", err)
+	}
+	if err := host.LinkSetNoMaster(peer); err != nil {
+		t.Fatal(err)
 	}
 	// Stock runsc removes this host address while its AF_PACKET carrier stays.
 	if err := links.AddrDel(link, address); err != nil {

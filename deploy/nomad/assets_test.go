@@ -177,7 +177,7 @@ func TestNodeRuntimeTemplateBuilderProducesExactIdentityArchive(t *testing.T) {
 		"etc/sandbox0/pki/manager-ca.pem":            "manager-ca\n",
 		"etc/sandbox0/tokens/nomad.token":            "scoped-token\n",
 		"etc/nomad.d/30-sandbox0-gvisor.hcl":         "plugin config {}\n",
-		"opt/cni/config/10-sandbox0.conflist.tmpl":   `{"subnet":"{{.AllocationCIDR}}"}`,
+		"opt/cni/config/10-sandbox0.conflist.tmpl":   `{"cniVersion":"1.0.0","name":"sandbox0","plugins":[{"type":"ptp","ipam":{"type":"host-local","subnet":"{{.AllocationCIDR}}"}}]}`,
 	}
 	for name, payload := range files {
 		path := filepath.Join(source, filepath.FromSlash(name))

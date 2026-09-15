@@ -4,10 +4,12 @@ package slotnetwork
 
 import (
 	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 
 	"github.com/containerd/errdefs"
+	"github.com/vishvananda/netlink"
 )
 
 func TestNamespaceInspectorClassifiesMissingExactIncarnation(t *testing.T) {
@@ -15,6 +17,30 @@ func TestNamespaceInspectorClassifiesMissingExactIncarnation(t *testing.T) {
 	_, err := newNamespaceInspector(root).Inspect(filepath.Join(root, "missing"), "netns-v1:1:2")
 	if !errors.Is(err, errExactNamespaceAbsent) || !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("missing namespace error = %v", err)
+	}
+}
+
+func TestRoutedCarrierRejectsBridgeAndReusedPeerIdentity(t *testing.T) {
+	carrier := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Index: 7, ParentIndex: 41}}
+	for _, tc := range []struct {
+		name   string
+		change func(*netlink.LinkAttrs)
+		valid  bool
+	}{
+		{"routed ptp", func(*netlink.LinkAttrs) {}, true},
+		{"bridge master", func(a *netlink.LinkAttrs) { a.MasterIndex = 3 }, false},
+		{"reused host index", func(a *netlink.LinkAttrs) { a.ParentIndex = 8 }, false},
+		{"different namespace", func(a *netlink.LinkAttrs) { a.NetNsID = 5 }, false},
+		{"peer down", func(a *netlink.LinkAttrs) { a.Flags = 0 }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Index: 41, ParentIndex: 7, NetNsID: 4, Flags: net.FlagUp}}
+			tc.change(peer.Attrs())
+			err := validateRoutedCarrierPeer(carrier, peer, 4)
+			if (err == nil) != tc.valid || (err != nil && !errdefs.IsFailedPrecondition(err)) {
+				t.Fatalf("routed carrier validation = %v, want valid %v", err, tc.valid)
+			}
+		})
 	}
 }
 

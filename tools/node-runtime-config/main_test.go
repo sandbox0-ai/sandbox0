@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -61,6 +62,51 @@ func TestRenderUsesExactSharedRuntimeTemplate(t *testing.T) {
 	if !strings.Contains(files["node-runtime/opt/cni/config/10-sandbox0.conflist"], "172.26.0.0/20") {
 		t.Fatal("rendered CNI config does not bind the fixed allocation CIDR")
 	}
+	if strings.Contains(files["node-runtime/opt/cni/config/10-sandbox0.conflist"], `"bridge"`) {
+		t.Fatal("rendered legacy template retained a bridge data plane")
+	}
+}
+
+func TestNormalizeNetworkPreparesProtectedOutputWithoutChangingInput(t *testing.T) {
+	directory := t.TempDir()
+	input, output := filepath.Join(directory, "source.conflist"), filepath.Join(directory, "prepared.conflist")
+	original := []byte(`{"plugins":[{"type":"bridge","bridge":"s0nomad","ipam":{"type":"host-local","subnet":"192.0.2.0/24"}}]}`)
+	if err := os.WriteFile(input, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeNetwork([]string{"--input", input, "--output", output}); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(input)
+	if err != nil || !bytes.Equal(actual, original) {
+		t.Fatalf("source changed while preparing migration: %v", err)
+	}
+	prepared, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Plugins []struct {
+			Type string `json:"type"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(prepared, &config); err != nil || len(config.Plugins) != 1 || config.Plugins[0].Type != "ptp" {
+		t.Fatalf("expected prepared ptp configuration: %s: %v", prepared, err)
+	}
+	info, err := os.Stat(output)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("output must be protected: %v", err)
+	}
+	if err := os.WriteFile(input, []byte(`{"plugins":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeNetwork([]string{"--input", input, "--output", output}); err == nil {
+		t.Fatal("invalid configuration accepted")
+	}
+	actual, err = os.ReadFile(output)
+	if err != nil || !bytes.Equal(actual, prepared) {
+		t.Fatalf("failed conversion replaced prepared output: %v", err)
+	}
 }
 
 func TestWriteArchiveRejectsNoncanonicalDestination(t *testing.T) {
@@ -99,7 +145,7 @@ func writeTemplate(t *testing.T, destination string) {
 		"etc/sandbox0/pki/manager-ca.pem":            "manager-ca\n",
 		"etc/sandbox0/tokens/nomad.token":            "nomad-token\n",
 		"etc/nomad.d/30-sandbox0-gvisor.hcl":         "plugin config {}\n",
-		"opt/cni/config/10-sandbox0.conflist.tmpl":   `{"subnet":"{{.AllocationCIDR}}"}`,
+		"opt/cni/config/10-sandbox0.conflist.tmpl":   `{"cniVersion":"1.0.0","name":"sandbox0","plugins":[{"type":"bridge","bridge":"s0nomad","ipam":{"type":"host-local","subnet":"{{.AllocationCIDR}}"}}]}`,
 	}
 	file, err := os.Create(destination)
 	if err != nil {

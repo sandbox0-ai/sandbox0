@@ -174,6 +174,14 @@ mutually authenticated.
    network namespace, never a task restart in the same allocation. Keep the
    task groups on `cni/sandbox0`; Nomad's built-in `bridge` network does not
    use the node's rendered allocation-CIDR configuration.
+   Use the stock CNI `ptp` data plane in `ctld/10-sandbox0.conflist.tmpl`.
+   Bridge-backed carrier interfaces are rejected before claim: the bridge
+   netfilter path can lose UDP TPROXY delivery and bypass a deny policy.
+   Point-to-point veth links retain each allocation's IPAM and firewall
+   contracts without a shared guest Layer 2 segment. Migrating an existing
+   bridge requires node fencing, zero active allocations and physical removal
+   of every old bridge port before replacing the CNI configuration. Claimed
+   legacy namespaces remain inspectable for exact drain and cleanup.
 5. Confirm PostgreSQL has live node capacity, resource-neutral ready slots,
    connected node channels, default-deny networking, and replacement slots.
 6. Run `tools/runtime-slot-slo` through the public regional endpoint as

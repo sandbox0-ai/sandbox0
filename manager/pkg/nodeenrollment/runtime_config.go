@@ -13,6 +13,8 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadcni"
 )
 
 const maxRuntimeConfigArchiveBytes = 8 << 20
@@ -182,8 +184,16 @@ func (r *RuntimeConfigTemplate) Render(identity RuntimeConfigIdentity) ([]byte, 
 				return nil, fmt.Errorf("render node runtime config %s: %w", file.name, err)
 			}
 			contents = rendered.Bytes()
-			if bytes.Contains(contents, []byte("{{")) || bytes.Contains(contents, []byte("}}")) {
+			// Adjacent closing braces are valid in compact JSON CNI objects.
+			if bytes.Contains(contents, []byte("{{")) {
 				return nil, fmt.Errorf("rendered node runtime config %s retains a template marker", file.name)
+			}
+		}
+		if file.name == "opt/cni/config/10-sandbox0.conflist" {
+			var err error
+			contents, err = nomadcni.RoutedConfig(contents)
+			if err != nil {
+				return nil, fmt.Errorf("prepare routed carrier CNI configuration: %w", err)
 			}
 		}
 		header := &tar.Header{

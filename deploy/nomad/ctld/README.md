@@ -128,6 +128,27 @@ default warm job reserves eight slots. A density profile must expand both this
 list and the kernel device pool before admission; increasing carrier count alone
 does not increase RootFS concurrency.
 
+Carrier networking uses stock CNI `ptp`. Before admitting a carrier, ctld
+proves that its veth peer belongs to the held namespace, is up, and has no
+bridge or other master. A bridge's `br_netfilter` path can discard the socket
+selected by UDP TPROXY before local delivery. A migration must durably drain
+the node and wait for every old bridge port to disappear before changing the
+CNI file. Existing claimed namespaces remain inspectable for their drain.
+
+Run namespace identity and generated UDP redirect acceptance in an isolated
+privileged Linux test container with `iproute2`, `iptables`, `ipset`, `unshare`
+and Python 3 installed:
+
+```sh
+SANDBOX0_NETWORK_NAMESPACE_INTEGRATION=1 \
+    SANDBOX0_NETWORK_REDIRECT_INTEGRATION=1 \
+    go test -race ./ctld/internal/ctld/networking/...
+```
+
+The UDP test creates private network and mount namespaces and checks local
+and routed destinations, tracked and untracked datagrams, and preservation
+of the original destination. It never changes production bridge sysctls.
+
 For an existing node, replace the binaries and run `rollout-node.sh`. It
 starts any missing instance left by an interrupted installation, then
 restarts slot B and then A, waiting for each instance to become primary-ready

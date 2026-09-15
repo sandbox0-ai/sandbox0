@@ -71,13 +71,12 @@ func appendTPROXYRules(buf *bytes.Buffer, inputInterface, protocol string, destP
 	if destPort > 0 {
 		base += fmt.Sprintf(" --dport %d", destPort)
 	}
-	_, _ = fmt.Fprintf(buf, "%s -m connmark --mark %s -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, tproxyMark, proxyPort, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j CONNMARK --set-mark %s\n",
+	// Every registered guest datagram must enter policy enforcement, including
+	// untracked packets and established tuples without our connection mark.
+	// Conntrack state is an optimization hint, never an authorization boundary.
+	_, _ = fmt.Fprintf(buf, "%s -j CONNMARK --set-mark %s\n",
 		base, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, proxyPort, tproxyMark)
-	_, _ = fmt.Fprintf(buf, "%s -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
+	_, _ = fmt.Fprintf(buf, "%s -j TPROXY --on-port %d --tproxy-mark %s\n",
 		base, proxyPort, tproxyMark)
 }
 

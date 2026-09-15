@@ -25,6 +25,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
 	"github.com/sandbox0-ai/sandbox0/pkg/nodebootstrap"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadcni"
 )
 
 const maxArchiveBytes = 8 << 20
@@ -53,7 +54,7 @@ func (i *identityFlags) register(flags *flag.FlagSet) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: node-runtime-config <render|install> [flags]"))
+		fatal(errors.New("usage: node-runtime-config <render|install|normalize-network> [flags]"))
 	}
 	var err error
 	switch os.Args[1] {
@@ -61,8 +62,10 @@ func main() {
 		err = render(os.Args[2:])
 	case "install":
 		err = install(os.Args[2:])
+	case "normalize-network":
+		err = normalizeNetwork(os.Args[2:])
 	default:
-		err = errors.New("usage: node-runtime-config <render|install> [flags]")
+		err = errors.New("usage: node-runtime-config <render|install|normalize-network> [flags]")
 	}
 	if err != nil {
 		fatal(err)
@@ -98,6 +101,28 @@ func render(arguments []string) error {
 		return err
 	}
 	return writeArchive(output, payload)
+}
+
+// normalizeNetwork prepares a file for a fresh or drained node. The rollout
+// owns drain verification, the protected destination and rollback custody.
+func normalizeNetwork(arguments []string) error {
+	flags := flag.NewFlagSet("normalize-network", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var input, output string
+	flags.StringVar(&input, "input", "", "source CNI configuration")
+	flags.StringVar(&output, "output", "", "prepared routed CNI configuration")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		return errors.New("invalid normalize-network arguments")
+	}
+	payload, err := readArchive(input)
+	if err != nil {
+		return err
+	}
+	prepared, err := nomadcni.RoutedConfig(payload)
+	if err != nil {
+		return err
+	}
+	return writeArchive(output, prepared)
 }
 
 func install(arguments []string) error {

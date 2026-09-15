@@ -51,11 +51,13 @@ const (
 	rootFSSessionAttachGrace       = 2 * time.Minute
 	rootFSSessionReconcileTimeout  = 3 * time.Minute
 	// Periodic terminal-proof housekeeping must leave capacity for recovery of
-	// physical writers. Explicit fencing/cleanup and pressure planning do not
-	// enter this speculative-work budget.
-	rootFSRecoveryConcurrency      = 4
-	rootFSProofRecoveryConcurrency = 2
-	rootFSRecoveryBackoffMax       = time.Minute
+	// physical writers. Lease-loss notifications have their own bounded lane,
+	// so a deletion burst cannot issue one concurrent regional RPC per guest.
+	// Explicit regional cleanup and pressure planning remain independent.
+	rootFSRecoveryConcurrency       = 4
+	rootFSProofRecoveryConcurrency  = 2
+	rootFSUrgentRecoveryConcurrency = 2
+	rootFSRecoveryBackoffMax        = time.Minute
 	// Startup recovery may have to rebuild and idempotently verify the full
 	// configured 10 GiB dirty-tail bound. Keep this separate from the shorter
 	// steady-state reconciliation budget so a normal node does not retain
@@ -179,6 +181,7 @@ type nodeRuntime struct {
 	recoverySequence   uint64
 	periodicRecovery   int
 	periodicProofs     int
+	urgentRecovery     int
 	trigger            chan string
 	allocations        nomadAllocationSource
 	runtimeSlotNetwork runtimeSlotNetworkControl
@@ -195,6 +198,7 @@ type reconciliationState struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	periodic bool
+	urgent   bool
 	proof    bool
 }
 
@@ -1721,6 +1725,11 @@ func (d *nodeRuntime) beginRecoveryReconciliation(
 		proof && d.periodicProofs >= rootFSProofRecoveryConcurrency) {
 		return nil
 	}
+	if !periodic && d.urgentRecovery >= rootFSUrgentRecoveryConcurrency {
+		// The durable recovery snapshot is retried by the periodic scan; no
+		// lifecycle authority or work item is lost when this hint is coalesced.
+		return nil
+	}
 	if !d.beginReconciliationLocked(key, cancel) {
 		return nil
 	}
@@ -1731,6 +1740,9 @@ func (d *nodeRuntime) beginRecoveryReconciliation(
 		if proof {
 			d.periodicProofs++
 		}
+	} else {
+		state.urgent = true
+		d.urgentRecovery++
 	}
 	d.recoverySequence++
 	retry.lastAttempt = d.recoverySequence
@@ -1858,6 +1870,9 @@ func (d *nodeRuntime) endReconciliationLocked(key string) {
 			if current.proof {
 				d.periodicProofs--
 			}
+		}
+		if current.urgent {
+			d.urgentRecovery--
 		}
 		close(current.done)
 	}

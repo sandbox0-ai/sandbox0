@@ -187,6 +187,9 @@ func (j *runtimeSlotJournal) Register(registration RuntimeSlotRegistration) erro
 			if stored.Registration != registration {
 				return fmt.Errorf("runtime slot journal registration changed: %w", errdefs.ErrAlreadyExists)
 			}
+			if stored.Cleanup != nil {
+				return fmt.Errorf("runtime slot registration has a durable cleanup fence: %w", errdefs.ErrFailedPrecondition)
+			}
 			return nil
 		}
 		record := runtimeSlotJournalRecord{

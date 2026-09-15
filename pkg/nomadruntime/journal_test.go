@@ -51,9 +51,11 @@ func TestRuntimeSlotJournalPersistsExactCleanupProof(t *testing.T) {
 	started, err := journal.BeginCleanup(request)
 	require.NoError(t, err)
 	require.Equal(t, request, *started.Cleanup)
+	require.ErrorIs(t, journal.Register(registration), errdefs.ErrFailedPrecondition)
 	proof := testRuntimeSlotJournalProof(t, request)
 	require.NoError(t, journal.CompleteCleanup(request, proof))
 	require.NoError(t, journal.CompleteCleanup(request, proof))
+	require.ErrorIs(t, journal.Register(registration), errdefs.ErrFailedPrecondition)
 	require.NoError(t, journal.Close())
 
 	journal, err = newRuntimeSlotJournal(path, time.Hour)
@@ -62,6 +64,7 @@ func TestRuntimeSlotJournalPersistsExactCleanupProof(t *testing.T) {
 	recovered, err := journal.BeginCleanup(request)
 	require.NoError(t, err)
 	require.Equal(t, proof, *recovered.Proof)
+	require.ErrorIs(t, journal.Register(registration), errdefs.ErrFailedPrecondition)
 
 	changedRequest := request
 	changedRequest.NodeBootID = "another-boot"

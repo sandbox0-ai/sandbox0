@@ -694,6 +694,13 @@ func (d *nodeRuntime) RegisterRuntimeSlot(
 	if registration.ClusterID != d.clusterID || registration.NodeID != d.nodeID {
 		return fmt.Errorf("runtime slot registration target does not match this daemon: %w", errdefs.ErrPermissionDenied)
 	}
+	// Share the existing per-slot physical-operation gate with cleanup. A late
+	// default-deny registration must not recreate policy after an absence proof.
+	// Registration never preempts recovery or a regional cleanup operation.
+	if !d.beginReconciliation(registration.SlotID, nil) {
+		return fmt.Errorf("runtime slot registration conflicts with an active physical operation: %w", errdefs.ErrUnavailable)
+	}
+	defer d.endReconciliation(registration.SlotID)
 	stableMount, err := validateRootfsPath(registration.StableMount, d.config.RootFSConsumerMountRoot)
 	if err != nil {
 		return fmt.Errorf("validate runtime slot stable mount: %w: %w", err, errdefs.ErrFailedPrecondition)
@@ -738,7 +745,9 @@ func (d *nodeRuntime) RegisterRuntimeSlot(
 	if err := d.runtimeSlotNetwork.Register(ctx, local); err != nil {
 		return fmt.Errorf("apply ctld warm-slot default-deny policy: %w", err)
 	}
-	return nil
+	// Cleanup may durably fence the slot while waiting for this operation's
+	// gate. Recheck that fence before allowing the driver to publish readiness.
+	return d.journal.Register(registration)
 }
 
 func (d *nodeRuntime) runtimeSlotNetworkRegistrationRequest(

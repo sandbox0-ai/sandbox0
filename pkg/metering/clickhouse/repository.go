@@ -591,6 +591,14 @@ func (r *Repository) listWindowKeys(
 	limit int,
 ) ([]windowLookupKey, error) {
 	where, args := windowWhere(teamID, windowType, cursor)
+	candidates, err := r.windowCandidates(ctx, where, args, cursor)
+	if err != nil {
+		return nil, err
+	}
+	if candidates != nil {
+		where += " AND " + candidates.predicate
+		args = append(args, candidates.args...)
+	}
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
@@ -619,6 +627,12 @@ LIMIT ?
 			return nil, fmt.Errorf("scan usage window key: %w", err)
 		}
 		identity := key.identity()
+		key.RecordedAt = key.RecordedAt.UTC()
+		if candidates != nil {
+			if _, observed := candidates.observed[key]; !observed {
+				return nil, fmt.Errorf("usage window changed while selecting its candidate version")
+			}
+		}
 		if _, ok := seen[identity]; ok {
 			return nil, fmt.Errorf(
 				"usage window key %q from producer %q is duplicated after FINAL",

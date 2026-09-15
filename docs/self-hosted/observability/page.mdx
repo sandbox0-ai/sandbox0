@@ -287,6 +287,14 @@ second usage truth or cause producers to invent independent counters.
 Alert on outbox depth, oldest pending age, producer watermark gaps, duplicate
 or rejected operations, and ClickHouse insert latency/errors.
 
+Usage-window paging first selects a bounded set of candidate primary keys.
+`ReplacingMergeTree FINAL` reads all versions of those keys before applying
+team, type, and cursor filters. Oversized candidate sets use the original
+canonical scan. A concurrent replacement fails the page if its canonical
+version was absent from the candidate snapshot; retries cannot silently
+advance the cursor past an unseen version. This supports historical version
+formats as well as current projections.
+
 ## Signed Audit
 
 Signed centralized audit is a separately licensed per-sandbox history feature.

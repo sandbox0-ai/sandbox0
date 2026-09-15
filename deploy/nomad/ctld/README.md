@@ -73,6 +73,14 @@ An unavailable authority therefore causes bounded retries followed by fenced
 retirement, rather than indefinite local write authority. Runtime cleanup and
 resource release still require the existing physical absence proofs.
 
+Each periodic network resync revalidates at most 32 warm or claimed namespaces
+and rotates through the remaining records. This removes physically absent
+allocations from the policy and redirect projection even before their IP is
+reused. Exact IP collisions are still checked immediately. Claimed namespaces
+retain the journaled address while stock runsc owns it in netstack. Unknown
+inspection failures remain fail-closed; projection fencing never deletes a
+durable registration or substitutes for regional terminal and resource proofs.
+
 The installer adds `sandbox0-ctld.target` as a hard Nomad dependency, loads a
 NBD pool covering the highest configured device index (at least 64 devices),
 applies required networking sysctls, installs tmpfiles

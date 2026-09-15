@@ -32,6 +32,7 @@ const (
 	defaultTerminalRetention = 48 * time.Hour
 	defaultMaxRecords        = 100000
 	maxRecordBytes           = 256 << 10
+	namespaceRecheckBatch    = 32
 
 	recordStateWarm      = "warm"
 	recordStateClaimed   = "claimed"
@@ -112,14 +113,15 @@ type Registry struct {
 	config     Config
 	generation string
 
-	mu              sync.Mutex
-	entries         map[string]registryEntry
-	operationSlots  map[string]string
-	revision        uint64
-	appliedRevision uint64
-	appliedChanged  chan struct{}
-	notify          func()
-	closed          bool
+	mu                    sync.Mutex
+	entries               map[string]registryEntry
+	operationSlots        map[string]string
+	revision              uint64
+	appliedRevision       uint64
+	appliedChanged        chan struct{}
+	notify                func()
+	closed                bool
+	namespaceRecheckAfter string
 }
 
 // NewRegistry opens the shared-host journal used by both ctld HA slots.
@@ -806,6 +808,44 @@ func (r *Registry) inspectNamespace(record registryRecord) (string, error) {
 	return r.inspector.Inspect(path, registration.NetNSIdentity)
 }
 
+// RevalidateNamespaces checks a bounded, rotating slice of desired policies.
+// CNI may remove an allocation whose IP has not yet been reused. Such records
+// must leave the redirect projection without waiting for an IP collision.
+// This only fences the projection; regional cleanup still owns durable records.
+func (r *Registry) RevalidateNamespaces() error {
+	if r == nil {
+		return fmt.Errorf("runtime slot network registry is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return fmt.Errorf("runtime slot network registry is closed: %w", errdefs.ErrUnavailable)
+	}
+	candidates := make([]namespaceCandidate, 0)
+	for key, entry := range r.entries {
+		if entry.physicalAbsent || (entry.record.State != recordStateWarm && entry.record.State != recordStateClaimed) {
+			continue
+		}
+		candidates = append(candidates, namespaceCandidate{
+			key: key, registration: entry.record.Registration, sourceIP: entry.record.SourceIP,
+			claimed: entry.record.State == recordStateClaimed,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key < candidates[j].key })
+	selected := make([]namespaceCandidate, 0, min(namespaceRecheckBatch, len(candidates)))
+	if len(candidates) > 0 {
+		start := sort.Search(len(candidates), func(i int) bool { return candidates[i].key > r.namespaceRecheckAfter })
+		for offset := 0; offset < min(namespaceRecheckBatch, len(candidates)); offset++ {
+			selected = append(selected, candidates[(start+offset)%len(candidates)])
+		}
+		// Advance even if inspection fails, so one unknown namespace cannot
+		// indefinitely starve unrelated allocations of their physical checks.
+		r.namespaceRecheckAfter = selected[len(selected)-1].key
+	}
+	r.mu.Unlock()
+	return r.fenceNamespaceCandidates(selected, false)
+}
+
 func (r *Registry) fenceAbsentNamespaces() error {
 	r.mu.Lock()
 	if r.closed {
@@ -832,8 +872,12 @@ func (r *Registry) fenceAbsentNamespaces() error {
 	}
 	r.mu.Unlock()
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key < candidates[j].key })
+	return r.fenceNamespaceCandidates(candidates, true)
+}
 
+func (r *Registry) fenceNamespaceCandidates(candidates []namespaceCandidate, failFast bool) error {
 	absent := make([]namespaceCandidate, 0)
+	var inspectionErr error
 	for _, candidate := range candidates {
 		record := registryRecord{Registration: candidate.registration, SourceIP: candidate.sourceIP, State: recordStateWarm}
 		if candidate.claimed {
@@ -848,14 +892,26 @@ func (r *Registry) fenceAbsentNamespaces() error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("revalidate runtime slot network namespace %s: %w", candidate.key, err)
-		}
-		if sourceIP != candidate.sourceIP {
-			return fmt.Errorf(
+			err = fmt.Errorf("revalidate runtime slot network namespace %s: %w", candidate.key, err)
+		} else if sourceIP != candidate.sourceIP {
+			err = fmt.Errorf(
 				"runtime slot network source IP changed from %s to %s for %s: %w",
 				candidate.sourceIP, sourceIP, candidate.key, errdefs.ErrFailedPrecondition,
 			)
 		}
+		if err != nil {
+			if failFast {
+				return err
+			}
+			// Periodic batches finish their bounded checks to preserve rotation.
+			// Keep only the first error; failed inspection never fences a record.
+			if inspectionErr == nil {
+				inspectionErr = err
+			}
+		}
+	}
+	if inspectionErr != nil {
+		return inspectionErr
 	}
 	if len(absent) == 0 {
 		return nil

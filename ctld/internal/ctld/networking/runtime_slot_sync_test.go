@@ -2,6 +2,7 @@ package networking
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,71 @@ import (
 )
 
 type syncTestNamespaceInspector struct{}
+
+type periodicSyncNamespaceInspector struct {
+	calls int
+	err   error
+}
+
+func (i *periodicSyncNamespaceInspector) Inspect(string, string) (string, error) {
+	i.calls++
+	return "192.0.2.8", i.err
+}
+
+func (i *periodicSyncNamespaceInspector) InspectClaimed(path, identity, _ string) error {
+	_, err := i.Inspect(path, identity)
+	return err
+}
+
+func TestSyncRedirectRevalidatesNamespacesOnlyDuringPeriodicSync(t *testing.T) {
+	directory := t.TempDir()
+	root := filepath.Join(directory, "netns")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	inspector := &periodicSyncNamespaceInspector{}
+	registry, err := slotnetwork.NewRegistry(slotnetwork.Config{
+		StatePath: filepath.Join(directory, "network.db"), NetNSRoot: root,
+		NodeID: "node-1", ExpectedOwnerUID: testOwnerUID(),
+	}, inspector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	registry.SetNotify(func() { registry.Acknowledge(registry.Stats().Revision) })
+	if err := registry.Register(t.Context(), protocol.RuntimeSlotNetworkRegistrationRequest{
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		NetNSIdentity: "netns-v1:1:2", NetNSRelativePath: "allocation-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := policy.NewStore(zap.NewNop())
+	redirect := &syncTestRedirect{}
+	daemon := &Daemon{cfg: &apiconfig.NetworkRuntimeConfig{NodeName: "node-1"}, logger: zap.NewNop()}
+	sync := func(periodic bool) error {
+		return daemon.syncRedirect(t.Context(), registry, store, nil, redirect, conntrack.NewTracker(), nil, nil, periodic)
+	}
+	if err := sync(false); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.calls != 1 {
+		t.Fatalf("foreground sync repeated physical inspection: %d", inspector.calls)
+	}
+	if err := sync(true); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.calls != 2 {
+		t.Fatalf("periodic sync skipped physical inspection: %d", inspector.calls)
+	}
+	inspector.err = errors.New("physical namespace inspection unavailable")
+	if err := sync(true); !errors.Is(err, inspector.err) {
+		t.Fatalf("periodic sync error = %v", err)
+	}
+	if stats := registry.Stats(); stats.Warm != 1 || stats.Orphaned != 0 {
+		t.Fatalf("unknown namespace was fenced: %+v", stats)
+	}
+}
 
 func (syncTestNamespaceInspector) Inspect(string, string) (string, error) {
 	return "192.0.2.8", nil

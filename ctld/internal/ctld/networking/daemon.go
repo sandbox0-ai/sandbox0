@@ -636,6 +636,11 @@ func (d *Daemon) syncRedirect(
 	}
 
 	stageStarted := time.Now()
+	if forceRedirectSync {
+		if err := runtimeSlots.RevalidateNamespaces(); err != nil {
+			return fmt.Errorf("revalidate runtime-slot network namespaces: %w", err)
+		}
+	}
 	sandboxes, revision, err := runtimeSlots.Snapshot()
 	if err != nil {
 		return fmt.Errorf("snapshot runtime-slot network policies: %w", err)

@@ -30,7 +30,7 @@ func TestNormalizeOperationSpecAppliesCanonicalBuildDefaults(t *testing.T) {
 	spec, err := NormalizeOperationSpec(OperationSpec{
 		SourceOCIRef:     "registry.example/sandbox@" + source.String(),
 		Platform:         ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"},
-		FormatGeneration: 3, ProcdProtocol: "sandbox0.procd.v3",
+		FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3",
 		ProcdDigest:      digest.FromString("operation-procd").String(),
 		LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
 	})
@@ -38,14 +38,14 @@ func TestNormalizeOperationSpecAppliesCanonicalBuildDefaults(t *testing.T) {
 	require.Equal(t, rootfsblock.DefaultDataRangeBytes, spec.BlockOptions.DataRangeBytes)
 	require.Equal(t, rootfsblock.DefaultPackBytes, spec.BlockOptions.PackBytes)
 	require.Equal(t, rootfsblock.DefaultPageEntries, spec.BlockOptions.PageEntries)
-	require.Equal(t, "rootfs/v1", spec.BlockOptions.ObjectPrefix)
+	require.Equal(t, "rootfs/v2", spec.BlockOptions.ObjectPrefix)
 }
 
 func TestNormalizeOperationSpecRejectsMutableOrUnboundedInputs(t *testing.T) {
 	valid := OperationSpec{
 		SourceOCIRef:     "registry.example/sandbox@" + digest.FromString("operation-source").String(),
 		Platform:         ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"},
-		FormatGeneration: 3, ProcdProtocol: "sandbox0.procd.v3",
+		FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3",
 		ProcdDigest:      digest.FromString("operation-procd").String(),
 		LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
 		BlockOptions:     rootfsblock.BuildOptions{ObjectPrefix: "rootfs/import/operation"},

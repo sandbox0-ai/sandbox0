@@ -1294,7 +1294,7 @@ func TestNodeRuntimePersistsExactPlannedRetireBeforeAcknowledging(t *testing.T) 
 		FilesystemID: stage.Identity.RootFSID, SourceOCIDigest: digest.FromString("planned-retire-oci").String(),
 		BaseArtifactDigest: digest.FromString("planned-retire-artifact").String(),
 		BaseBlockRoot:      blockHead, CurrentBlockHead: blockHead, WriterEpoch: stage.Identity.WriterEpoch - 1,
-		FormatGeneration: 1, DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 1,
+		FormatGeneration: 2, DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 1,
 		Descriptor: blockDescriptor,
 	}
 	require.NoError(t, stage.ValidateDurableBinding())

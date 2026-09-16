@@ -88,7 +88,7 @@ func (s *geometryDiscoveryImports) BeginRootFSImport(_ context.Context, req *san
 }
 
 func TestConfigureRootFSImportDiscoveryWiresRawGeometry(t *testing.T) {
-	for _, configured := range []int{0, 1 << 20, 8 << 20} {
+	for _, configured := range []int{0, 16 << 10, 64 << 10} {
 		t.Run(fmt.Sprint(configured), func(t *testing.T) {
 			image := "registry.example/runtime@sha256:" + strings.Repeat("a", 64)
 			imports := &geometryDiscoveryImports{}
@@ -134,7 +134,7 @@ func TestRootFSImportWorkerIDIsCanonicalAndUnique(t *testing.T) {
 }
 
 func TestConfigureRootFSImportDiscoveryAndClaimerShareFormatPolicy(t *testing.T) {
-	for _, policy := range []struct{ format, dataRange int }{{0, 0}, {1, 0}, {1, 1 << 20}, {2, 0}, {2, 16 << 10}, {2, 64 << 10}} {
+	for _, policy := range []struct{ format, dataRange int }{{0, 0}, {0, 16 << 10}, {2, 0}, {2, 16 << 10}, {2, 64 << 10}} {
 		t.Run(fmt.Sprint(policy), func(t *testing.T) {
 			image := "registry.example/runtime@sha256:" + strings.Repeat("a", 64)
 			cfg := &config.ManagerConfig{RootFSImporter: config.RootFSImporterConfig{
@@ -153,7 +153,7 @@ func TestConfigureRootFSImportDiscoveryAndClaimerShareFormatPolicy(t *testing.T)
 			claim := sandboxRuntimeClaimConfig(cfg, sandboxRuntimeBackendDependencies{}, nil)
 			format, err := rootfsimporter.ImageImportFormat(claim.RootFSFormatGeneration)
 			require.NoError(t, err)
-			require.Equal(t, max(policy.format, 1), format)
+			require.Equal(t, 2, format)
 			require.Equal(t, format, imports.lookups[0].FormatGeneration)
 			require.Equal(t, format, imports.begun[0].Spec.FormatGeneration)
 			require.Equal(t, policy.dataRange, claim.RootFSImportDataRangeBytes)

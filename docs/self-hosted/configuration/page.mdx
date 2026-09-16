@@ -154,9 +154,9 @@ rootfs_importer:
     procd_digest: sha256:<pinned-digest>
     discovery_interval: 5s
     discovery_page_size: 100
-    format_generation: 1
-    # Optional for format 1: require 1 MiB ranges for new image-based claims.
-    # data_range_bytes: 1048576
+    format_generation: 2
+    # Require the default 64 KiB decoded geometry for new image-based claims.
+    data_range_bytes: 65536
     data_layout_policy: ""
     mapping_group_policy: ""
 ```

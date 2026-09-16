@@ -42,7 +42,7 @@ func waitDiskWrites(t *testing.T, cache *ReadCache) {
 }
 
 func TestDiskCacheReadsWholeGenerationAfterRestartWithoutSource(t *testing.T) {
-	for _, version := range []int{DescriptorVersion, CompressedFormatVersion} {
+	for _, version := range []int{CompressedFormatVersion} {
 		for _, chunk := range []int{4096, coalescedReadBytes} {
 			t.Run(fmt.Sprintf("format-%d/read-%d", version, chunk), func(t *testing.T) {
 				payload := make([]byte, coalescedReadBytes)

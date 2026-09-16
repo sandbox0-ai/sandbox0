@@ -134,9 +134,10 @@ func testOperation(attempts int) *sandboxstore.RootFSImportOperation {
 		Spec: rootfsimporter.OperationSpec{
 			SourceOCIRef:     "docker.io/library/alpine@" + digest.FromString("alpine").String(),
 			Platform:         rootfsimporter.ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"},
-			FormatGeneration: 1, ProcdProtocol: testProcdProtocol, ProcdDigest: testProcdDigest,
+			FormatGeneration: 2, ProcdProtocol: testProcdProtocol, ProcdDigest: testProcdDigest,
 			LogicalSizeBytes: 300 << 20,
 			BlockOptions: rootfsblock.BuildOptions{
+				FormatVersion:  rootfsblock.DescriptorVersion,
 				DataRangeBytes: rootfsblock.DefaultDataRangeBytes,
 				PackBytes:      rootfsblock.DefaultPackBytes, PageEntries: rootfsblock.DefaultPageEntries,
 				ObjectPrefix: "rootfs/import/test",

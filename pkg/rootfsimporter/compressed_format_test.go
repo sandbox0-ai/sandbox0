@@ -34,9 +34,9 @@ func TestCompressedImportRequiresMatchingDurableFormatBinding(t *testing.T) {
 	explicitID, _, err := DeterministicOperation(normalized)
 	require.NoError(t, err)
 	require.Equal(t, explicitID, implicitID)
-	input.BlockOptions.FormatVersion = rootfsblock.DescriptorVersion
+	input.BlockOptions.FormatVersion = 1
 	_, err = NormalizeOperationSpec(input)
-	require.ErrorContains(t, err, "format generation")
+	require.ErrorContains(t, err, "unsupported build format version 1")
 }
 
 func TestCompressedArtifactAttestationCannotUseLegacyGeneration(t *testing.T) {

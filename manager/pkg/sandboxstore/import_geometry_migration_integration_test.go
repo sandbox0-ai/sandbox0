@@ -34,26 +34,26 @@ func TestRootFSImportGeometryMigrationProvenanceIntegration(t *testing.T) {
 		want   int
 	}{
 		{name: "missing"},
-		{name: "one", sizes: []int{1 << 20}, want: 1 << 20},
-		{name: "eight", sizes: []int{8 << 20}, want: 8 << 20},
-		{name: "unanimous", sizes: []int{1 << 20, 1 << 20}, want: 1 << 20},
-		{name: "maximum-page-entries", sizes: []int{1 << 20}, want: 1 << 20, change: func(req *BeginRootFSImportRequest) {
+		{name: "one", sizes: []int{16 << 10}, want: 16 << 10},
+		{name: "eight", sizes: []int{64 << 10}, want: 64 << 10},
+		{name: "unanimous", sizes: []int{16 << 10, 16 << 10}, want: 16 << 10},
+		{name: "maximum-page-entries", sizes: []int{16 << 10}, want: 16 << 10, change: func(req *BeginRootFSImportRequest) {
 			req.Spec.BlockOptions.PageEntries = 65536
 		}},
-		{name: "ambiguous", sizes: []int{1 << 20, 8 << 20}},
-		{name: "source-alias", sizes: []int{1 << 20}, change: func(req *BeginRootFSImportRequest) {
+		{name: "ambiguous", sizes: []int{16 << 10, 64 << 10}},
+		{name: "source-alias", sizes: []int{16 << 10}, change: func(req *BeginRootFSImportRequest) {
 			req.Spec.SourceOCIRef = strings.Replace(req.Spec.SourceOCIRef, "registry.example/", "mirror.example/", 1)
 		}},
-		{name: "platform", sizes: []int{1 << 20}, change: func(req *BeginRootFSImportRequest) {
+		{name: "platform", sizes: []int{16 << 10}, change: func(req *BeginRootFSImportRequest) {
 			req.Spec.Platform.Architecture = "arm64"
 		}},
-		{name: "procd", sizes: []int{1 << 20}, change: func(req *BeginRootFSImportRequest) {
+		{name: "procd", sizes: []int{16 << 10}, change: func(req *BeginRootFSImportRequest) {
 			req.Spec.ProcdProtocol = "different.procd"
 		}},
-		{name: "size", sizes: []int{1 << 20}, change: func(req *BeginRootFSImportRequest) {
+		{name: "size", sizes: []int{16 << 10}, change: func(req *BeginRootFSImportRequest) {
 			req.Spec.LogicalSizeBytes += 4096
 		}},
-		{name: "mixed-valid-and-invalid", sizes: []int{1 << 20, 1 << 20}, change: func(req *BeginRootFSImportRequest) {
+		{name: "mixed-valid-and-invalid", sizes: []int{16 << 10, 16 << 10}, change: func(req *BeginRootFSImportRequest) {
 			if strings.HasSuffix(req.OperationID, "-1") {
 				req.Spec.FormatGeneration++
 			}
@@ -160,9 +160,14 @@ func insertPreGeometryReadyOperation(t *testing.T, _ *PGSandboxStore, pool *pgxp
 	t.Helper()
 	// This is a pre-upgrade row: current store SQL may reference columns which
 	// intentionally do not exist until later migrations have run.
-	normalized, sourceDigest, err := normalizeBeginRootFSImport(begin)
+	// Normalize valid geometry, then restore historical format metadata for
+	// SQL-only malformed-provenance cases rejected by today's import API.
+	input := *begin
+	input.Spec.FormatGeneration = 2
+	normalized, sourceDigest, err := normalizeBeginRootFSImport(&input)
 	require.NoError(t, err)
 	spec := normalized.Spec
+	spec.FormatGeneration = begin.Spec.FormatGeneration
 	_, err = pool.Exec(t.Context(), `
 		INSERT INTO manager.rootfs_import_operations (operation_id, source_oci_ref, source_oci_digest,
 			oci_os, oci_architecture, oci_variant, format_generation, procd_protocol, procd_digest,

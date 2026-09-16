@@ -12,7 +12,8 @@ import (
 
 func TestRuntimeNodeLifecycleHeartbeatBudgetSurvivesConcurrentReplicasIntegration(t *testing.T) {
 	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
+	// Pin the migration whose irreversible down contract is asserted below.
+	pool := newSandboxStoreIntegrationPoolAt(t, 57)
 	store := NewPGSandboxStore(pool)
 	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", "nomad")
 	require.NoError(t, err)

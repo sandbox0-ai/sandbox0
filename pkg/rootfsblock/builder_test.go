@@ -83,7 +83,7 @@ func TestBuildMaterializedGenerationRejectsShortInputAndConflictingObject(t *tes
 
 func TestNormalizeBuildOptionsRejectsUnboundedPack(t *testing.T) {
 	_, err := NormalizeBuildOptions(BuildOptions{
-		DataRangeBytes: MaxDataRangeBytes,
+		DataRangeBytes: CompressedDataRangeBytes,
 		PackBytes:      DefaultPackBytes + MaxDataRangeBytes,
 	})
 	require.ErrorContains(t, err, "no greater than")

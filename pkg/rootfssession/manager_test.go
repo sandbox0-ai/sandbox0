@@ -1632,7 +1632,7 @@ func testStageRequestWithBlocks(t *testing.T, objects *sessionObjectStore, name 
 		FilesystemID: request.Identity.RootFSID, SourceOCIDigest: digest.FromString("oci-" + name).String(),
 		BaseArtifactDigest: digest.FromString("artifact-" + name).String(),
 		BaseBlockRoot:      built.Descriptor.MappingRoot.RootDigest, CurrentBlockHead: built.Descriptor.MappingRoot.RootDigest,
-		WriterEpoch: 0, FormatGeneration: 1, DurabilityState: "s3_materialized", LocatorVersion: 1,
+		WriterEpoch: 0, FormatGeneration: 2, DurabilityState: "s3_materialized", LocatorVersion: 1,
 		Descriptor: built.Payload,
 	}
 	require.NoError(t, request.Validate())

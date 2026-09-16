@@ -96,7 +96,7 @@ func TestDurableWorkerReplaysPublishedRustFSObjectsBeforeReadyCAS(t *testing.T) 
 		Platform: rootfsimporter.ReadyArtifactPlatform{
 			OS: "linux", Architecture: "amd64",
 		},
-		FormatGeneration: 1,
+		FormatGeneration: 2,
 		ProcdProtocol:    "sandbox0.procd.v1",
 		ProcdDigest:      procd.String(),
 		LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,

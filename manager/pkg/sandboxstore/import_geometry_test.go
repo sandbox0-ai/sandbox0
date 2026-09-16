@@ -18,7 +18,7 @@ func TestReadyRootFSArtifactRequirementsImportPolicy(t *testing.T) {
 		FormatGeneration: base.FormatGeneration, LogicalSizeBytes: base.LogicalSizeBytes,
 		ProcdProtocol: base.ProcdProtocol, ProcdDigest: base.ProcdDigest,
 	}
-	for _, size := range []int{0, rootfsblock.LogicalBlockSize, 1 << 20, 8 << 20} {
+	for _, size := range []int{0, rootfsblock.LogicalBlockSize, 16 << 10, 64 << 10} {
 		t.Run(fmt.Sprintf("valid-%d", size), func(t *testing.T) {
 			policy := requirements
 			policy.ImportDataRangeBytes = size
@@ -26,7 +26,7 @@ func TestReadyRootFSArtifactRequirementsImportPolicy(t *testing.T) {
 			require.NoError(t, policy.validateSourceLookup(base.SourceOCIDigest))
 		})
 	}
-	for _, size := range []int{-1, 1, 4097, 3 << 20, (8 << 20) + 4096} {
+	for _, size := range []int{-1, 1, 4097, 3 << 20, (8 << 20) + 4096, 1 << 20, 8 << 20} {
 		t.Run(fmt.Sprintf("invalid-%d", size), func(t *testing.T) {
 			policy := requirements
 			policy.ImportDataRangeBytes = size
@@ -51,7 +51,7 @@ func TestRootFSImportPublicationRequiresCanonicalGeometry(t *testing.T) {
 	operation := &RootFSImportOperation{Spec: spec, SourceOCIDigest: result.SourceOCIDigest.String()}
 	_, originalAttestation, originalDigest, err := validateRootFSImportResult(operation, result)
 	require.NoError(t, err)
-	operation.Spec.BlockOptions.DataRangeBytes = 1 << 20
+	operation.Spec.BlockOptions.DataRangeBytes = 16 << 10
 	_, attestation, artifactDigest, err := validateRootFSImportResult(operation, result)
 	require.NoError(t, err)
 	require.Equal(t, originalAttestation, attestation, "import provenance does not alter canonical attestation bytes")

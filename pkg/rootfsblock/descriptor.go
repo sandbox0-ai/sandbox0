@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	DescriptorVersion       = 1
-	MappingPageVersion      = 1
+	DescriptorVersion       = 2
+	MappingPageVersion      = 2
 	CompressedFormatVersion = 2
 	LogicalBlockSize        = 4096
 	MaxDescriptorBytes      = 64 << 10
@@ -67,12 +67,10 @@ func (r ObjectRange) StoredLength() int64 {
 	return r.Length
 }
 
-// ValidateFormatBinding prevents compressed descriptors from entering legacy
-// runtime/import lanes. Existing non-compressed generation identities retain
-// their previous compatibility contract; generation two requires format two.
+// ValidateFormatBinding admits only the durable Format2 contract.
 func ValidateFormatBinding(formatGeneration, descriptorVersion int) error {
-	if (descriptorVersion == CompressedFormatVersion || formatGeneration == CompressedFormatVersion) && descriptorVersion != formatGeneration {
-		return fmt.Errorf("compressed block descriptor must match the admitted format generation")
+	if formatGeneration != DescriptorVersion || descriptorVersion != DescriptorVersion {
+		return fmt.Errorf("RootFS requires format generation 2 and descriptor version 2")
 	}
 	return nil
 }
@@ -118,7 +116,7 @@ func EncodeDescriptor(descriptor Descriptor) ([]byte, error) {
 }
 
 func (d Descriptor) Validate() error {
-	if d.Version != DescriptorVersion && d.Version != CompressedFormatVersion {
+	if d.Version != DescriptorVersion {
 		return fmt.Errorf("unsupported block descriptor version %d", d.Version)
 	}
 	if d.BlockSizeBytes != LogicalBlockSize || d.LogicalSizeBytes <= 0 || d.LogicalSizeBytes%d.BlockSizeBytes != 0 {
@@ -142,11 +140,8 @@ func (d Descriptor) Validate() error {
 }
 
 func (l MappingRootLocator) Validate() error {
-	if l.Version != MappingPageVersion && l.Version != CompressedFormatVersion {
+	if l.Version != MappingPageVersion {
 		return fmt.Errorf("unsupported mapping page version %d", l.Version)
-	}
-	if l.Version == MappingPageVersion && l.Object.Encoding != "" {
-		return fmt.Errorf("legacy mapping root cannot contain encoded ranges")
 	}
 	if err := validateDigest("root_digest", l.RootDigest); err != nil {
 		return err

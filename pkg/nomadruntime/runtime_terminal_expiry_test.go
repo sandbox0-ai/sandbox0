@@ -205,7 +205,7 @@ func newRuntimeTerminalExpiryFixture(t *testing.T) *runtimeTerminalExpiryFixture
 			FilesystemID: "rootfs", SourceOCIDigest: digest.FromString("oci").String(),
 			BaseArtifactDigest: digest.FromString("artifact").String(),
 			BaseBlockRoot:      built.Descriptor.MappingRoot.RootDigest, CurrentBlockHead: built.Descriptor.MappingRoot.RootDigest,
-			WriterEpoch: 0, FormatGeneration: 1, DurabilityState: "s3_materialized", LocatorVersion: 1,
+			WriterEpoch: 0, FormatGeneration: 2, DurabilityState: "s3_materialized", LocatorVersion: 1,
 			Descriptor: built.Payload,
 		},
 	}

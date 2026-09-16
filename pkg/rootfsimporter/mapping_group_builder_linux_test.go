@@ -27,6 +27,9 @@ func TestBlockBuilderRejectsUnsupportedMappingPolicyBeforeUnpacking(t *testing.T
 	for _, policy := range []string{"unknown", rootfsblock.ContiguousMappingV1} {
 		f := newOCIBlockBuildFixture(t)
 		f.request.BlockOptions.MappingGroupPolicy = policy
+		if policy == rootfsblock.ContiguousMappingV1 {
+			f.request.BlockOptions.FormatVersion = 1
+		}
 		_, err := f.builder().Build(t.Context(), f.request)
 		require.Error(t, err)
 		require.Zero(t, f.unpacker.calls)

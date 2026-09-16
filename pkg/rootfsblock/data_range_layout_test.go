@@ -79,7 +79,7 @@ func TestDataRangeLayoutRejectsUnboundBuildBeforeIO(t *testing.T) {
 		{"zero", 2 * unit, BuildOptions{FormatVersion: 2}, &DataRangeLayout{}},
 		{"wrong-size", 3 * unit, BuildOptions{FormatVersion: 2}, layout},
 		{"wrong-unit", 2 * unit, BuildOptions{FormatVersion: 2, DataRangeBytes: 4096}, layout},
-		{"legacy", 2 * unit, BuildOptions{DataRangeBytes: unit}, layout},
+		{"retired-format", 2 * unit, BuildOptions{FormatVersion: 1, DataRangeBytes: unit}, layout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reader := &layoutUnexpectedRead{}

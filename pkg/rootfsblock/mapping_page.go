@@ -15,7 +15,6 @@ import (
 
 const (
 	mappingPageHeaderBytes      = 32
-	mappingEntryFixedBytes      = 64
 	compressedMappingEntryBytes = 80
 	MaxMappingPageEntries       = 65536
 	MaxDataRangeBytes           = 8 << 20
@@ -34,7 +33,7 @@ const (
 // logical ranges read as zeroes. Internal pages point only at child pages;
 // leaf pages point only at immutable data ranges.
 type MappingPage struct {
-	// Zero preserves the version-one in-memory/wire representation.
+	// Zero selects the current Format2 wire representation.
 	Version    int
 	Level      uint8
 	StartBlock uint64
@@ -60,10 +59,7 @@ func (p MappingPage) formatVersion() int {
 }
 
 func (p MappingPage) entryBytes() int {
-	if p.formatVersion() == CompressedFormatVersion {
-		return compressedMappingEntryBytes
-	}
-	return mappingEntryFixedBytes
+	return compressedMappingEntryBytes
 }
 
 func EncodeMappingPage(page MappingPage) ([]byte, error) {
@@ -97,13 +93,11 @@ func EncodeMappingPage(page MappingPage) ([]byte, error) {
 			return nil, err
 		}
 		copy(payload[offset+32:offset+64], checksum)
-		if page.formatVersion() == CompressedFormatVersion {
-			if entry.Object.Encoding == RangeEncodingZstd {
-				payload[offset+64] = 1
-			}
-			binary.BigEndian.PutUint32(payload[offset+68:offset+72], uint32(entry.Object.EncodedLength))
-			binary.BigEndian.PutUint32(payload[offset+72:offset+76], entry.DataOffset)
+		if entry.Object.Encoding == RangeEncodingZstd {
+			payload[offset+64] = 1
 		}
+		binary.BigEndian.PutUint32(payload[offset+68:offset+72], uint32(entry.Object.EncodedLength))
+		binary.BigEndian.PutUint32(payload[offset+72:offset+76], entry.DataOffset)
 		offset += page.entryBytes()
 		copy(payload[offset:offset+len(entry.Object.Key)], entry.Object.Key)
 		offset += len(entry.Object.Key)
@@ -119,7 +113,7 @@ func DecodeMappingPage(payload []byte) (MappingPage, error) {
 		return MappingPage{}, fmt.Errorf("mapping page magic is invalid")
 	}
 	version := int(binary.BigEndian.Uint16(payload[8:10]))
-	if version != MappingPageVersion && version != CompressedFormatVersion {
+	if version != MappingPageVersion {
 		return MappingPage{}, fmt.Errorf("unsupported mapping page version %d", version)
 	}
 	if payload[11] != 0 {
@@ -130,11 +124,8 @@ func DecodeMappingPage(payload []byte) (MappingPage, error) {
 		return MappingPage{}, fmt.Errorf("mapping page has too many entries")
 	}
 	page := MappingPage{
-		Level: payload[10], StartBlock: binary.BigEndian.Uint64(payload[16:24]),
+		Version: version, Level: payload[10], StartBlock: binary.BigEndian.Uint64(payload[16:24]),
 		BlockCount: binary.BigEndian.Uint64(payload[24:32]), Entries: make([]MappingEntry, 0, entryCount),
-	}
-	if version == CompressedFormatVersion {
-		page.Version = version
 	}
 	offset := mappingPageHeaderBytes
 	for index := uint32(0); index < entryCount; index++ {
@@ -164,17 +155,15 @@ func DecodeMappingPage(payload []byte) (MappingPage, error) {
 				Checksum: checksum,
 			},
 		}
-		if version == CompressedFormatVersion {
-			if payload[offset+64] > 1 || payload[offset+65] != 0 || payload[offset+66] != 0 || payload[offset+67] != 0 ||
-				binary.BigEndian.Uint32(payload[offset+76:offset+80]) != 0 {
-				return MappingPage{}, fmt.Errorf("invalid encoded mapping entry flags")
-			}
-			if payload[offset+64] == 1 {
-				entry.Object.Encoding = RangeEncodingZstd
-			}
-			entry.Object.EncodedLength = int64(binary.BigEndian.Uint32(payload[offset+68 : offset+72]))
-			entry.DataOffset = binary.BigEndian.Uint32(payload[offset+72 : offset+76])
+		if payload[offset+64] > 1 || payload[offset+65] != 0 || payload[offset+66] != 0 || payload[offset+67] != 0 ||
+			binary.BigEndian.Uint32(payload[offset+76:offset+80]) != 0 {
+			return MappingPage{}, fmt.Errorf("invalid encoded mapping entry flags")
 		}
+		if payload[offset+64] == 1 {
+			entry.Object.Encoding = RangeEncodingZstd
+		}
+		entry.Object.EncodedLength = int64(binary.BigEndian.Uint32(payload[offset+68 : offset+72]))
+		entry.DataOffset = binary.BigEndian.Uint32(payload[offset+72 : offset+76])
 		offset += page.entryBytes()
 		entry.Object.Key = string(payload[offset : offset+keyLength])
 		offset += keyLength
@@ -190,7 +179,7 @@ func DecodeMappingPage(payload []byte) (MappingPage, error) {
 }
 
 func (p MappingPage) Validate() error {
-	if p.formatVersion() != MappingPageVersion && p.formatVersion() != CompressedFormatVersion {
+	if p.formatVersion() != MappingPageVersion {
 		return fmt.Errorf("unsupported mapping page version %d", p.Version)
 	}
 	if p.BlockCount == 0 || p.StartBlock > math.MaxUint64-p.BlockCount {
@@ -202,9 +191,6 @@ func (p MappingPage) Validate() error {
 	pageEnd := p.StartBlock + p.BlockCount
 	previousEnd := p.StartBlock
 	for index, entry := range p.Entries {
-		if p.formatVersion() == MappingPageVersion && (entry.Object.Encoding != "" || entry.DataOffset != 0) {
-			return fmt.Errorf("legacy mapping entry contains encoded data")
-		}
 		if entry.BlockCount == 0 || entry.LogicalStart < p.StartBlock || entry.LogicalStart > math.MaxUint64-uint64(entry.BlockCount) {
 			return fmt.Errorf("mapping entry %d logical range is invalid", index)
 		}

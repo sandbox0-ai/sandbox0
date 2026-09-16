@@ -11,7 +11,7 @@ import (
 // Keep this pre-layout wire shape independent of ReadyArtifactAttestation:
 // adding optional fields must not rename or reorder legacy identity inputs.
 func TestDataLayoutPreservesExactLegacyAttestationBytesAndIdentity(t *testing.T) {
-	for _, generation := range []int{1, 2} {
+	for _, generation := range []int{2} {
 		result := readyAttestationTestBuildResult(t)
 		if generation == 2 {
 			result = layoutAttestationResult(t)

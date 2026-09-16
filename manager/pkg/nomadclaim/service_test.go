@@ -1687,7 +1687,7 @@ func TestServiceRejectsBaseArtifactFromDifferentPlatform(t *testing.T) {
 }
 
 func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
-	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 16<<10)
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: "snapshot-1", FilesystemID: "snapshot-filesystem", TeamID: "team-1",
 		HeadGenerationID:   "snapshot-generation",
@@ -1722,7 +1722,7 @@ func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 }
 
 func TestServiceRestoresAttestedTemplateRootFSBeforeClaim(t *testing.T) {
-	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 16<<10)
 	tpl := fixture.service.templates.(*fakeTemplateStore).template
 	tpl.RootFS = &templatepkg.RootFSTemplateSource{
 		StorageFormat: templatepkg.RootFSTemplateStorageFormatBlockCOWV1,
@@ -1832,7 +1832,7 @@ func TestServiceRejectsTemplateSnapshotGenerationFilesystemMismatch(t *testing.T
 }
 
 func TestServiceCapturesPausedNomadTemplateAsBlockGeneration(t *testing.T) {
-	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 16<<10)
 	sourceSpec := fixture.service.templates.(*fakeTemplateStore).template.Spec
 	fixture.store.records["source-sandbox"] = &sandboxstore.SandboxRecord{
 		ID: "source-sandbox", TeamID: "team-1", ClusterID: "cluster-1",
@@ -2821,25 +2821,25 @@ func preparePausedNomadRebase(
 			ID: "filesystem-" + operationID, TeamID: record.TeamID,
 			HeadGenerationID:   "generation-source-" + operationID,
 			WriterEpoch:        7,
-			BaseArtifactDigest: sourceArtifactDigest, FormatGeneration: 1,
+			BaseArtifactDigest: sourceArtifactDigest, FormatGeneration: 2,
 		},
 		SourceGeneration: &sandboxstore.RootFSGeneration{
 			ID: "generation-source-" + operationID, FilesystemID: "filesystem-" + operationID,
 			SourceOCIDigest:    digest.FromString(operationID + "-source-oci").String(),
 			BaseArtifactDigest: sourceArtifactDigest, BaseBlockRoot: sourceBaseRoot,
-			CurrentBlockHead: sourceHead, WriterEpoch: 7, FormatGeneration: 1,
+			CurrentBlockHead: sourceHead, WriterEpoch: 7, FormatGeneration: 2,
 			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
 			LocatorVersion:  4, Descriptor: sourceDescriptor,
 		},
 		SourceBaseArtifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest:  sourceArtifactDigest,
 			SourceOCIDigest: digest.FromString(operationID + "-source-oci").String(),
-			BaseBlockRoot:   sourceBaseRoot, FormatGeneration: 1, Descriptor: sourceBaseDescriptor,
+			BaseBlockRoot:   sourceBaseRoot, FormatGeneration: 2, Descriptor: sourceBaseDescriptor,
 		},
 		TargetBaseArtifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest:  targetArtifactDigest,
 			SourceOCIDigest: digest.FromString(operationID + "-target-oci").String(),
-			BaseBlockRoot:   targetBaseRoot, FormatGeneration: 1, Descriptor: targetBaseDescriptor,
+			BaseBlockRoot:   targetBaseRoot, FormatGeneration: 2, Descriptor: targetBaseDescriptor,
 		},
 		TargetGenerationID: sandboxstore.NomadPausedRebaseGenerationID(
 			operationID, record.ID, "generation-source-"+operationID, targetArtifactDigest,
@@ -3113,7 +3113,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		claimPhases: make(map[string]string),
 		artifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest: artifactDigest, SourceOCIRef: template.Spec.MainContainer.Image,
-			SourceOCIDigest: imageDigest, FormatGeneration: 1, LogicalSizeBytes: 8 << 30,
+			SourceOCIDigest: imageDigest, FormatGeneration: 2, LogicalSizeBytes: 8 << 30,
 			ProcdProtocol: "sandbox0.procd.test.v1",
 			ProcdDigest:   "sha256:" + strings.Repeat("f", 64),
 			Platform:      sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
@@ -3139,7 +3139,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		QuotaLimits:            quotaLimits,
 		NetworkPolicies:        networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:         templatepkg.NewResourcePolicy("1Gi", "8Gi"),
-		RootFSFormatGeneration: 1,
+		RootFSFormatGeneration: 2,
 		RootFSProcdProtocol:    "sandbox0.procd.test.v1",
 		RootFSProcdDigest:      "sha256:" + strings.Repeat("f", 64),
 		ClaimTTL:               15 * time.Second,

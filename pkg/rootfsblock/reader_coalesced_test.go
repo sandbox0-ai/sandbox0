@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -49,9 +50,8 @@ func (s *adaptiveSource) requests() []adaptiveGet {
 func adaptiveFixture(t testing.TB, size, pageEntries int) (*adaptiveSource, *buildTestStore, Descriptor, []byte) {
 	t.Helper()
 	payload := make([]byte, size)
-	for i := range payload {
-		payload[i] = byte(i/adaptiveRangeBytes + 1)
-	}
+	// Exercise Format2's incompressible raw-range path with stable bytes.
+	_, _ = rand.New(rand.NewSource(7)).Read(payload)
 	// Cache and flight identities use verified content, not physical offsets.
 	// Keep ranges unique beyond 256 entries so wide fixtures really exercise
 	// independent source loads instead of accidentally deduplicating them.

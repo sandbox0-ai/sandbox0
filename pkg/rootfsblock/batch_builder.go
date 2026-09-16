@@ -273,13 +273,10 @@ func (b *batchObjectBuilder) publishPayloads(kind, objectKind string, items []ba
 	stored := make([]batchPayload, len(items))
 	for index, item := range items {
 		stored[index] = item
-		locators[index] = ObjectRange{Length: int64(len(item.payload)), Checksum: digest.FromBytes(item.payload).String()}
-		if b.options.formatVersion() == CompressedFormatVersion {
-			var err error
-			stored[index].payload, locators[index], err = b.encoder.encode(b.ctx, item.payload)
-			if err != nil {
-				return nil, err
-			}
+		var err error
+		stored[index].payload, locators[index], err = b.encoder.encode(b.ctx, item.payload)
+		if err != nil {
+			return nil, err
 		}
 	}
 	items = stored

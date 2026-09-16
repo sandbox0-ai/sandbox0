@@ -409,13 +409,13 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 		filesystem: &sandboxstore.RootFSFilesystem{
 			ID: "filesystem-1", TeamID: "team-1", HeadGenerationID: "generation-1",
 			WriterEpoch:        7,
-			BaseArtifactDigest: artifact, FormatGeneration: 1,
+			BaseArtifactDigest: artifact, FormatGeneration: 2,
 		},
 		generation: &sandboxstore.RootFSGeneration{
 			ID: "generation-1", FilesystemID: "filesystem-1",
 			SourceOCIDigest:    digest.FromString("procd-image").String(),
 			BaseArtifactDigest: artifact, BaseBlockRoot: digest.FromString("base-root").String(),
-			CurrentBlockHead: root, WriterEpoch: 7, FormatGeneration: 1,
+			CurrentBlockHead: root, WriterEpoch: 7, FormatGeneration: 2,
 			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
 			LocatorVersion:  1, Descriptor: descriptor,
 		},

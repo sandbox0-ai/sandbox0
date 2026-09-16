@@ -59,7 +59,7 @@ func rootFSImportTestFixture(
 	spec := rootfsimporter.OperationSpec{
 		SourceOCIRef:     "registry.example/sandbox@" + sourceDigest.String(),
 		Platform:         rootfsimporter.ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"},
-		FormatGeneration: 3, ProcdProtocol: "sandbox0.procd.v3",
+		FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3",
 		ProcdDigest: procdDigest.String(), LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
 		BlockOptions: rootfsblock.BuildOptions{ObjectPrefix: prefix},
 	}

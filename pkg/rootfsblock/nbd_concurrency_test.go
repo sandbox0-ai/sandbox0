@@ -127,10 +127,10 @@ func TestNBDConcurrentCoalescedWaitersDoNotHideIndependentRange(t *testing.T) {
 			require.NoError(t, <-h.send(nbdCommandRead, byte(index+1), uint64(index*LogicalBlockSize), LogicalBlockSize))
 		}
 		require.Zero(t, <-started)
-		require.NoError(t, <-h.send(nbdCommandRead, 17, 32*LogicalBlockSize, LogicalBlockSize))
+		require.NoError(t, <-h.send(nbdCommandRead, 17, CompressedDataRangeBytes, LogicalBlockSize))
 		synctest.Wait()
 		require.Len(t, started, 1, "independent demanded range must not wait behind coalesced readers")
-		require.Equal(t, int64(32*LogicalBlockSize), <-started)
+		require.Positive(t, <-started, "the second compressed range has its own physical offset")
 		close(release)
 		seen := make(map[byte]bool)
 		for index := 0; index < 17; index++ {

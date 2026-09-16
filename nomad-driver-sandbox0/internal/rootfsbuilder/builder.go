@@ -86,7 +86,7 @@ func Build(ctx context.Context, store objectstore.ContextConditionalStore, optio
 		GenerationID: generationID, FilesystemID: options.RootFSID,
 		SourceOCIDigest: sourceDigest, BaseArtifactDigest: artifactDigest,
 		BaseBlockRoot: blockRoot, CurrentBlockHead: blockRoot,
-		WriterEpoch: 0, FormatGeneration: 1, DurabilityState: rootfsblock.DurabilityS3,
+		WriterEpoch: 0, FormatGeneration: 2, DurabilityState: rootfsblock.DurabilityS3,
 		LocatorVersion: 1, Descriptor: result.Payload,
 	}
 	if err := descriptor.Validate(); err != nil {

@@ -188,6 +188,12 @@ Confirm manager sees:
 - default-deny warm networking; and
 - enough NBD devices and replacement carriers.
 
+Authenticated node streams rotate periodically to refresh credentials and
+capacity. In-flight requests allow up to five seconds for the same node boot
+to reconnect, within the caller's deadline, and retain their exact request
+identity. Longer outages still fail closed; this grace does not relax node
+authentication or permit live operations on another boot.
+
 ## 7. Start The API Path
 
 Start cluster-gateway, regional-gateway, optional scheduler, and optional

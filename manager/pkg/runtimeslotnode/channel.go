@@ -26,9 +26,12 @@ import (
 )
 
 const (
-	nodeChannelHelloTimeout   = 5 * time.Second
-	maxNodeChannelPending     = 1024
-	nodeChannelReconnectGrace = 750 * time.Millisecond
+	nodeChannelHelloTimeout = 5 * time.Second
+	maxNodeChannelPending   = 1024
+	// Stream rotation first drains canceled node operations, then authenticates
+	// and registers capacity again. A subsecond grace rejected valid reconnects
+	// under load. Keep this wait bounded by the handshake budget and caller.
+	nodeChannelReconnectGrace = nodeChannelHelloTimeout
 )
 
 // ChannelHub accepts mutually authenticated node-initiated streams and routes

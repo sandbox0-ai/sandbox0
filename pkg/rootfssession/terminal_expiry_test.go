@@ -22,6 +22,9 @@ func historicalExternalProofFixture(t *testing.T, name string) (*Manager, rootfs
 	var descriptor map[string]any
 	require.NoError(t, json.Unmarshal(request.Generation.Descriptor, &descriptor))
 	descriptor["version"] = 1
+	root, ok := descriptor["mapping_root"].(map[string]any)
+	require.True(t, ok)
+	root["version"] = 1
 	payload, err := json.Marshal(descriptor)
 	require.NoError(t, err)
 	request.Generation.Descriptor = payload

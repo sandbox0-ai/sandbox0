@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,97 @@ import (
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 )
+
+// Legacy descriptor bytes remain audit evidence, never executable input. No
+// legacy encoder or reader is needed to retain the exact historical binding.
+func historicalExternalProofFixture(t *testing.T, name string) (*Manager, rootfshandoff.StageRequest) {
+	t.Helper()
+	manager, _, request := reclaimedExternalProofFixture(t, name)
+	var descriptor map[string]any
+	require.NoError(t, json.Unmarshal(request.Generation.Descriptor, &descriptor))
+	descriptor["version"] = 1
+	payload, err := json.Marshal(descriptor)
+	require.NoError(t, err)
+	request.Generation.Descriptor = payload
+	request.Generation.FormatGeneration = 1
+	binding, err := request.BindingDigest()
+	require.NoError(t, err)
+	mutateExpiryRecord(t, manager, request.Parent, func(stored *record) {
+		stage := cloneDurableStage(request)
+		stored.Stage = &stage
+		stored.BaseDescriptor = append([]byte(nil), payload...)
+		stored.BindingDigest = hex.EncodeToString(binding[:])
+		stored.CrashFence.Result.BindingDigest = stored.BindingDigest
+	})
+	return manager, request
+}
+
+func TestManagerRetainsHistoricalExternalProofAcrossRestartUntilExpiry(t *testing.T) {
+	manager, request := historicalExternalProofFixture(t, "historical-expiry")
+	require.Error(t, request.ValidateDurableBinding())
+	require.NoError(t, request.ValidateTerminalBinding())
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	deadline, eligible, err := externalProofQuietUntil(stored)
+	require.NoError(t, err)
+	require.True(t, eligible)
+	config := Config{
+		StatePath: manager.db.Path(), BranchRoot: manager.branchRoot, MountRoot: manager.mountRoot,
+		Source: manager.source, Publisher: manager.publisher, Runtime: manager.runtime,
+		MaxDirtyTailBytes: manager.maxDirty, MaxNodeDirtyTailBytes: manager.nodeDirty.Usage().MaxBytes,
+		DirtyTailRetirementReserveBytes: manager.retirementReserve,
+	}
+	require.NoError(t, manager.Close())
+	restarted, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restarted.Close()) })
+	after, err := restarted.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stored, after, "restart must not rewrite historical evidence")
+	recovery, err := restarted.RecoverySessions()
+	require.NoError(t, err)
+	require.Empty(t, recovery, "unexpired history stays outside active recovery")
+	forgotten, err := restarted.ForgetExpiredExternalTerminal(request, deadline.Add(-time.Nanosecond))
+	require.NoError(t, err)
+	require.False(t, forgotten)
+	forgotten, err = restarted.ForgetExpiredExternalTerminal(request, deadline)
+	require.NoError(t, err)
+	require.True(t, forgotten)
+	_, err = restarted.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerHistoricalDescriptorRequiresExactReclaimedExternalProof(t *testing.T) {
+	for _, field := range []string{"live", "active", "unreclaimed", "local-crash", "missing-proof", "planned", "binding", "descriptor", "physical-proof", "reservation"} {
+		t.Run(field, func(t *testing.T) {
+			manager, request := historicalExternalProofFixture(t, "historical-"+field)
+			stored, err := manager.load(request.Parent)
+			require.NoError(t, err)
+			switch field {
+			case "active":
+				stored.State = stateReady
+			case "unreclaimed":
+				stored.BranchRemoved = false
+			case "local-crash":
+				stored.CrashFence.External = false
+			case "missing-proof":
+				stored.CrashFence.Result = nil
+			case "planned":
+				stored.RetireOperationID = "uncommitted"
+			case "binding":
+				stored.BindingDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			case "descriptor":
+				stored.Stage.Generation.Descriptor = append(stored.Stage.Generation.Descriptor, ' ')
+			case "physical-proof":
+				stored.CrashFence.Result.WriterEpoch++
+			case "reservation":
+				stored.DeviceReservationReleased = false
+			}
+			_, err = recoverySessionFromRecord(request.Parent, stored, field == "live")
+			require.Error(t, err)
+		})
+	}
+}
 
 func TestManagerForgetsOnlyExpiredReclaimedExternalProof(t *testing.T) {
 	manager, runtime, request := reclaimedExternalProofFixture(t, "external-expiry")

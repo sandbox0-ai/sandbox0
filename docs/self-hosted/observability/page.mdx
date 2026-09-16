@@ -201,7 +201,11 @@ node caches; neither case alone establishes a production latency guarantee.
 The durable importer publishes Format2 RootFS generations, with compressed range
 addresses in authenticated mappings, decoded checksum verification and shared
 source admission. Format1 is no longer supported; migrate retained Format1 data
-before upgrading. Format activation does not establish a startup latency result:
+before upgrading. Already reclaimed external terminal proofs retain their exact
+historical descriptor bytes for the existing 48-hour replay window. Their
+binding and physical cleanup evidence are checked without opening an old-format
+RootFS; active sessions still require a supported format. Format activation does
+not establish a startup latency result:
 measure privileged lifecycle, populated size, mapping depth, and production-width
 claim plus first-command performance separately.
 

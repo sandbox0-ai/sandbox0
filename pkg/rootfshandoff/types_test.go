@@ -36,6 +36,32 @@ func TestGenerationDescriptorRejectsNonSHA256IdentityDigests(t *testing.T) {
 	require.ErrorContains(t, validateSHA256Digest(" "+digest.FromString("value").String()), "canonical sha256")
 }
 
+func TestTerminalBindingPreservesOpaqueDescriptorWithoutAdmittingIt(t *testing.T) {
+	request := validStageRequest()
+	hash := digest.FromString("historical-root").String()
+	request.Generation = &GenerationDescriptor{
+		Version: GenerationDescriptorVersion, GenerationID: request.InitialGeneration,
+		FilesystemID: request.Identity.RootFSID, SourceOCIDigest: hash, BaseArtifactDigest: hash,
+		BaseBlockRoot: hash, CurrentBlockHead: hash, FormatGeneration: 1,
+		DurabilityState: "s3_materialized", LocatorVersion: 1,
+		Descriptor: []byte(`{"version":1,"historical":"opaque"}`),
+	}
+	require.NoError(t, request.ValidateTerminalBinding())
+	require.Error(t, request.Validate())
+	require.Error(t, request.ValidateDurableBinding())
+	first, err := request.BindingDigest()
+	require.NoError(t, err)
+	request.Generation.Descriptor = append(request.Generation.Descriptor, ' ')
+	second, err := request.BindingDigest()
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "opaque historical bytes remain bound exactly")
+	request.Generation.FilesystemID = "other-rootfs"
+	require.Error(t, request.ValidateTerminalBinding())
+	request.Generation.FilesystemID = request.Identity.RootFSID
+	request.Generation.Descriptor = nil
+	require.Error(t, request.ValidateTerminalBinding())
+}
+
 func TestReadyRequestNormalize(t *testing.T) {
 	request := ReadyRequest{
 		Parent: "parent", Source: "/run/sandbox0/rootfs/root-1",

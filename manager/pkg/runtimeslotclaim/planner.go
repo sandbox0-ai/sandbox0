@@ -256,7 +256,7 @@ func New(config Config) (*Planner, error) {
 			return nil, errors.New("runtime node demand pool ID is required and bounded")
 		}
 		if demandTTL == 0 {
-			demandTTL = 2 * time.Minute
+			demandTTL = 5 * time.Minute
 		}
 		if demandTTL < time.Second || demandTTL > 30*time.Minute {
 			return nil, errors.New("runtime node demand TTL must be between one second and 30 minutes")

@@ -92,6 +92,93 @@ requests one elastic worker even without user pressure; it scales that
 replacement back to zero only after the fixed baseline has recovered and the
 normal scale-in stabilization window has elapsed.
 
+### Capacity policy and cost controls
+
+Do not confuse guest capacity, carrier inventory, and readiness. A carrier is
+an allocation/netns/control channel without a running guest. It still consumes
+host and Nomad overhead. CPU/memory leases, NBD devices, IP addresses, compatible
+security classes, and carrier inventory independently constrain admission.
+
+`warm_slots_per_node` is the new-worker admission readiness threshold.
+`elastic_slots_per_node` describes the provisioned carrier capacity of one new
+elastic worker; when omitted it falls back to the legacy readiness value.
+The fixed worker contributes its **observed** usable carriers without being
+capped by either setting. Never advertise hypothetical carrier capacity: the
+corresponding job groups, node profile, NBD pool and network must exist first.
+This change does not dynamically grow a 30-carrier node to 200 carriers.
+
+The controller uses leased workload CPU/memory and slots, unsatisfied claim
+pressure, and explicit `headroom_*`; it does not use guest CPU utilization as
+permission to overcommit. Retiring workloads are excluded from new workload
+demand but all unreleased leases still protect their node from removal, even
+after heartbeat expiry or a successor boot. A successfully acquired operation
+is excluded from pressure even if its earlier failed-attempt row has not expired.
+
+Start with a narrow elastic bound and a ten-minute `scale_in_stabilization`,
+then tune from measurements of create bursts, worker readiness, and idle cost:
+
+| Setting | Suggested initial policy | Purpose |
+| --- | --- | --- |
+| `scale_in_stabilization` | `10m` | Require sustained low demand, rather than a full idle hour |
+| `max_scale_in_step` / `scale_in_cooldown` | `1` / `1m` | Bound each shrink batch; keep the established quiet window between batches |
+| `max_scale_out_step` / `max_pending_nodes` | `2` / `2` | Bound purchases and include cloud-requested workers not yet enrolled |
+| `scale_out_warmup` | `5m` | Do not reverse a purchase when failed-claim pressure expires during boot |
+| `demand_ttl` | `5m` | Bounded pressure signal; this is not a durable waiting queue |
+| `headroom_*` | Workload-dependent | Reserve capacity for arrivals during measured node preparation time |
+
+An enrolling worker and a live in-progress drain block another scale-in pass.
+Running sandboxes are not migrated to make an aggregate packing calculation
+come true: busy elastic nodes remain protected even after an operator lowers
+the purchase ceiling. The lifecycle transaction remains the final authority
+against claim/drain races. A default minimum of zero is cost-oriented, not a
+guarantee of instant capacity for bursts or fixed-node failures. Compute quota
+rejections are distinct from node shortage and must not trigger purchases.
+
+Decision logs include the unconstrained required node count, configured target,
+actually applied count, and a capacity-limit indicator. `max_elastic_nodes: 0`
+must be observable as disabled growth, even with `enabled: true`. Inspect
+`scale_out_pending_budget`, `scale_in_waiting_for_warmup`,
+`scale_in_waiting_for_enrollment`, and `scale_in_waiting_for_drain` before
+changing limits to bypass a stalled lifecycle.
+
+### Carrier inventory roadmap and acceptance boundary
+
+The current Nomad system-job family replenishes consumed/failed carriers to a
+configured node profile. It is not an adaptive ready-buffer controller. Two
+different time scales are needed before enabling adaptive inventory:
+
+1. A node-local ready buffer, bounded by claim burst rate times carrier refill
+   latency and by real free resources, per compatibility/security class.
+2. A regional compute reserve, bounded by net new workload demand during the
+   much longer ECS/bootstrap/admission interval. In-flight nodes count once.
+
+Grow node-local inventory before purchasing a worker when truthful capacity is
+available, but never suppress a genuine resource shortage indefinitely while
+waiting for carrier repair. A safe implementation must bind every adjustment
+to node UID/boot, atomically retire only idle unleased slots against concurrent
+claims, and retain terminal cleanup proofs before stopping allocations or
+releasing IP/NBD resources. Reducing a Nomad metadata watermark can invalidate
+an active system allocation and is **not** an acceptable live shrink protocol.
+Persist desired inventory in the existing regional/node authority boundaries;
+do not add another independent capacity truth or treat speculative inventory
+as claim-ready. Also account for per-node fragmentation and impossible request
+shapes, not only aggregate free CPU/memory. These are prerequisites for the
+adaptive controller, not capabilities claimed by the current static profile.
+
+Acceptance must cover 200 carriers with resources for only 30 guests, 30
+carriers with resources for 200, mixed security classes, failed claim followed
+by successful retry, full-node requests, expired capacity heartbeat, slow
+enrollment beyond demand TTL, partial scale-in, and preserved business data.
+Use regional ingress-to-first-command timings, separate carrier miss from
+RootFS cache miss, and measure idle overhead as well as successful startup.
+
+The separation follows [Agones ready buffers](https://agones.dev/site/docs/reference/fleetautoscaler/),
+[ECS request-based capacity, warmup and bounded steps](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-scaling-behavior.html),
+and [Karpenter disruption controls](https://karpenter.sh/docs/concepts/disruption/).
+Only the control principles apply: Sandbox0 must not adopt eviction-based
+consolidation for live persistent sandboxes or reintroduce Kubernetes runtime
+dependencies.
+
 All workers are disposable. PostgreSQL owns leases, fences, enrollment,
 metering projection state, and lifecycle decisions. S3 owns RootFS and volume
 data. `/var/lib/sandbox0`, `/opt/nomad`, local NBD state, branches, downloads,

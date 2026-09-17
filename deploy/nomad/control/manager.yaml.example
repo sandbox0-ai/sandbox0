@@ -27,15 +27,24 @@ node_pool_autoscaler:
   max_elastic_nodes: 299
   node_cpu_millicores: 14000
   node_memory_bytes: 60129542144
+  # Minimum ready carriers required to admit a new worker, not its total capacity.
   warm_slots_per_node: 8
+  # Match the actual new-worker carrier profile (including NBD and IP limits).
+  # Fixed-worker capacity is observed independently and is not capped here.
+  elastic_slots_per_node: 8
   headroom_cpu_millicores: 1000
   headroom_memory_bytes: 1073741824
   headroom_slots: 1
-  demand_ttl: 2m
+  demand_ttl: 5m
   interval: 10s
   controller_lease_ttl: 30s
   scale_in_stabilization: 10m
   scale_out_cooldown: 30s
+  scale_in_cooldown: 1m
+  scale_out_warmup: 5m
+  max_scale_out_step: 2
+  max_pending_nodes: 2
+  max_scale_in_step: 1
   lifecycle_interval: 10s
   lifecycle_heartbeat: 2m
   scale_out_enrollment_timeout: 20m

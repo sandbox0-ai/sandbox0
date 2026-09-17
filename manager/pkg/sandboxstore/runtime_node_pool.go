@@ -302,13 +302,15 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			WHERE cluster_id = $2 AND heartbeat_expires_at > NOW()
 			ORDER BY node_uid, updated_at DESC
 		), lease_usage AS (
-			SELECT cluster_id, node_id, node_uid, node_boot_id,
+			-- Removal protection follows durable leases across expired heartbeats
+			-- and predecessor boots. Liveness must never erase cleanup obligations.
+			SELECT cluster_id, node_id, node_uid,
 				COALESCE(SUM(cpu_millicores), 0)::bigint AS used_cpu,
 				COALESCE(SUM(memory_bytes), 0)::bigint AS used_memory,
 				COUNT(*)::integer AS active_leases
 			FROM manager.runtime_resource_leases
 			WHERE cluster_id = $2 AND lease_state = 'active'
-			GROUP BY cluster_id, node_id, node_uid, node_boot_id
+			GROUP BY cluster_id, node_id, node_uid
 		), slot_usage AS (
 			SELECT cluster_id, node_id, node_uid,
 				COUNT(*) FILTER (
@@ -342,10 +344,9 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			AND capacity.node_id = instance.nomad_node_id
 			AND capacity.node_uid = instance.node_uid
 		LEFT JOIN lease_usage AS leases
-			ON leases.cluster_id = capacity.cluster_id
-			AND leases.node_id = capacity.node_id
-			AND leases.node_uid = capacity.node_uid
-			AND leases.node_boot_id = capacity.node_boot_id
+			ON leases.cluster_id = instance.cluster_id
+			AND leases.node_id = instance.nomad_node_id
+			AND leases.node_uid = instance.node_uid
 		LEFT JOIN slot_usage AS slots
 			ON slots.cluster_id = instance.cluster_id
 			AND slots.node_id = instance.nomad_node_id
@@ -381,6 +382,13 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			NOW()
 		FROM manager.runtime_node_pool_demands
 		WHERE pool_id = $1 AND cluster_id = $2 AND expires_at > NOW()
+			-- A retry may succeed before its pressure TTL expires. Its resource
+			-- lease is already counted below; never count the same operation twice.
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.runtime_slots AS acquired
+				WHERE acquired.cluster_id = runtime_node_pool_demands.cluster_id
+					AND acquired.claim_operation_id = runtime_node_pool_demands.operation_id
+			)
 	`, poolID, state.ClusterID).Scan(
 		&snapshot.DemandCPUMillicores, &snapshot.DemandMemoryBytes,
 		&snapshot.DemandSlots, &snapshot.AuthorityObservedAt,
@@ -444,6 +452,12 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 							AND elastic_node.node_uid = slot.node_uid
 							AND elastic_node.pool_kind = 'elastic'
 							AND elastic_node.state <> 'revoked'
+					)
+					AND NOT EXISTS (
+						SELECT 1 FROM manager.runtime_node_fences AS fence
+						WHERE fence.cluster_id = slot.cluster_id
+							AND fence.node_id = slot.node_id AND fence.node_uid = slot.node_uid
+							AND fence.state IN ('warming', 'draining', 'revoked')
 					)
 			)
 		FROM live_capacity AS capacity

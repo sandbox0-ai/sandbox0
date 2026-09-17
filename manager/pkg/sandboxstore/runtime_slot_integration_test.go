@@ -69,11 +69,28 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		ClaimTTL:                  time.Minute,
 		Resources:                 runtimeSlotTestResources(),
 	}
+	// A failed attempt is pressure only until this exact operation acquires a
+	// lease. The pressure row may remain for its TTL, including a late recorder.
+	demand := &RuntimeNodePoolDemandRequest{
+		PoolID: "elastic", OperationID: acquire.OperationID, ClusterID: acquire.ClusterID,
+		CPUMillicores: acquire.Resources.CPUMillicores, MemoryBytes: acquire.Resources.MemoryBytes,
+		Slots: 1, TTL: 5 * time.Minute,
+	}
+	require.NoError(t, store.RecordRuntimeNodePoolDemand(ctx, demand))
+	beforeClaim, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.Equal(t, 1, beforeClaim.DemandSlots)
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateClaiming, claimed.State)
 	require.Equal(t, registration.AllocationID, claimed.AllocationID)
 	assertPoolDemand(1)
+	require.NoError(t, store.RecordRuntimeNodePoolDemand(ctx, demand))
+	afterClaim, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.Zero(t, afterClaim.DemandSlots)
+	require.Zero(t, afterClaim.DemandCPUMillicores)
+	require.Zero(t, afterClaim.DemandMemoryBytes)
 	claimRetry, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
 	require.Equal(t, claimed.ID, claimRetry.ID)

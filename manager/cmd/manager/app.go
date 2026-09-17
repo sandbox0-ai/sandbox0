@@ -48,16 +48,25 @@ func (a *managerApp) Run() {
 		return
 	}
 	if a.nodePoolAutoscaler != nil {
+		lastCapacityLimited := false
 		go a.nodePoolAutoscaler.Run(a.ctx, func(decision nodepoolautoscaler.Decision, err error) {
 			fields := []zap.Field{
 				zap.String("action", decision.Action),
 				zap.Int("current_elastic", decision.CurrentElastic),
 				zap.Int("target_elastic", decision.TargetElastic),
+				zap.Int("applied_elastic", decision.AppliedElastic),
+				zap.Int("required_nodes", decision.RequiredNodes),
+				zap.Bool("capacity_limited", decision.CapacityLimited),
 			}
 			if err != nil {
 				a.logger.Warn("Sandbox node pool reconcile failed", append(fields, zap.Error(err))...)
 				return
 			}
+			if decision.Action != "not_leader" && decision.CapacityLimited != lastCapacityLimited {
+				a.logger.Warn("Sandbox node pool capacity limit state changed", fields...)
+				lastCapacityLimited = decision.CapacityLimited
+			}
+			a.logger.Debug("Sandbox node pool capacity decision", fields...)
 			if decision.Action == "scale_out" || decision.Action == "scale_in" {
 				a.logger.Info("Sandbox node pool desired capacity changed", fields...)
 			}

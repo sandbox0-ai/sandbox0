@@ -129,6 +129,23 @@ func TestBusyElasticNodesCannotBeVirtuallyPackedOntoFixedNode(t *testing.T) {
 	require.Equal(t, []int{1}, cloud.sets)
 }
 
+func TestBusyLeaseFloorCannotAuthorizePurchasesAboveOperatorCeiling(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 1}
+	w := testWorker(t, store, cloud)
+	w.config.MaxElasticNodes = 1
+	store.snapshot.ClusterFixedUsableSlots = 512
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
+		{PoolKind: "elastic", State: "active", ActiveLeases: 1, ProviderReady: true, CapacityLive: true},
+		{PoolKind: "elastic", State: "draining", ActiveLeases: 1},
+	}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, d.TargetElastic, "unreleased leases still protect their node")
+	require.True(t, d.CapacityLimited)
+	require.Equal(t, "scale_out_capacity_limit", d.Action)
+	require.Empty(t, cloud.sets, "cleanup obligations are not permission to buy above the ceiling")
+}
+
 func TestCapacityLimitReportsUnavailableFixedNode(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{}
 	w := testWorker(t, store, cloud)

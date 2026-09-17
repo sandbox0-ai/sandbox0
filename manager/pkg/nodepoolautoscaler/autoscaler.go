@@ -227,6 +227,12 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 			}
 			decision.LowPressureAt = time.Time{}
 		}
+		// Durable leases may retain a target above a lowered ceiling or after
+		// provider loss. That protects cleanup custody, not replacement purchases.
+		if current >= w.config.MaxElasticNodes {
+			decision.Action = "scale_out_capacity_limit"
+			return decision, nil
+		}
 		if !snapshot.State.LastScaleOutAt.IsZero() && w.config.ScaleOutCooldown > 0 &&
 			now.Sub(snapshot.State.LastScaleOutAt) < w.config.ScaleOutCooldown {
 			decision.Action = "scale_out_cooldown"
@@ -234,7 +240,7 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 		}
 		// Include instances which have not registered yet by subtracting observed
 		// ready workers from cloud desired capacity, rather than counting only DB rows.
-		applied := min(target, current+w.config.MaxScaleOutStep, readyElastic+w.config.MaxPendingNodes)
+		applied := min(target, w.config.MaxElasticNodes, current+w.config.MaxScaleOutStep, readyElastic+w.config.MaxPendingNodes)
 		if applied <= current {
 			decision.Action = "scale_out_pending_budget"
 			return decision, nil

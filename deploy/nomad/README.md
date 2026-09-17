@@ -145,7 +145,8 @@ obligations are retained independently. A live in-progress drain blocks another
 scale-in pass.
 Running sandboxes are not migrated to make an aggregate packing calculation
 come true: busy elastic nodes remain protected even after an operator lowers
-the purchase ceiling. The lifecycle transaction remains the final authority
+the purchase ceiling. Retained historical leases never authorize purchases above
+that ceiling. The lifecycle transaction remains the final authority
 against claim/drain races. A default minimum of zero is cost-oriented, not a
 guarantee of instant capacity for bursts or fixed-node failures. Compute quota
 rejections are distinct from node shortage and must not trigger purchases.

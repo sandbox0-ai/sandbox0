@@ -387,6 +387,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			AND NOT EXISTS (
 				SELECT 1 FROM manager.runtime_slots AS acquired
 				WHERE acquired.cluster_id = runtime_node_pool_demands.cluster_id
+					AND acquired.claim_operation_id <> ''
 					AND acquired.claim_operation_id = runtime_node_pool_demands.operation_id
 			)
 	`, poolID, state.ClusterID).Scan(

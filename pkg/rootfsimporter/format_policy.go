@@ -12,17 +12,16 @@ func ImageImportFormat(configured int) (int, error) {
 	if configured == 0 {
 		return rootfsblock.DescriptorVersion, nil
 	}
-	if configured != rootfsblock.DescriptorVersion && configured != rootfsblock.CompressedFormatVersion {
-		return 0, fmt.Errorf("unsupported image import format_generation %d: want 1 or 2", configured)
+	if configured != rootfsblock.DescriptorVersion {
+		return 0, fmt.Errorf("unsupported image import format_generation %d: want 2", configured)
 	}
 	return configured, nil
 }
 
 // NormalizeBlockOptions binds builder defaults to the durable format generation.
-// Keep the legacy v1 zero encoding intact: it participates in import identities.
 func NormalizeBlockOptions(formatGeneration int, options rootfsblock.BuildOptions) (rootfsblock.BuildOptions, error) {
-	if formatGeneration <= 0 {
-		return rootfsblock.BuildOptions{}, fmt.Errorf("RootFS format generation must be positive")
+	if formatGeneration != rootfsblock.DescriptorVersion {
+		return rootfsblock.BuildOptions{}, fmt.Errorf("RootFS format generation must be 2")
 	}
 	if formatGeneration == rootfsblock.CompressedFormatVersion && options.FormatVersion == 0 {
 		options.FormatVersion = rootfsblock.CompressedFormatVersion

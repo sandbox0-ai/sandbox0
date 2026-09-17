@@ -198,13 +198,16 @@ still exceed the remaining cache capacity and cause remote reads on subsequent
 claims. Measure new sandboxes with retained node caches separately from empty
 node caches; neither case alone establishes a production latency guarantee.
 
-The default durable importer still publishes format-one RootFS generations.
-The opt-in format-two block-map library stores compressed range addresses in
-authenticated mappings and retains decoded checksum verification and shared
-source admission. This implementation is not a production activation or a
-two-second startup result. Privileged lifecycle, populated-size/mapping-depth,
-and production-width claim plus first-command acceptance remain outstanding;
-do not equate a large sparse logical device with a fully populated RootFS.
+The durable importer publishes Format2 RootFS generations, with compressed range
+addresses in authenticated mappings, decoded checksum verification and shared
+source admission. Format1 is no longer supported; migrate retained Format1 data
+before upgrading. Already reclaimed external terminal proofs retain their exact
+historical descriptor bytes for the existing 48-hour replay window. Their
+binding and physical cleanup evidence are checked without opening an old-format
+RootFS; active sessions still require a supported format. Format activation does
+not establish a startup latency result:
+measure privileged lifecycle, populated size, mapping depth, and production-width
+claim plus first-command performance separately.
 
 Incremental RootFS publication and batch materialization now rewrite only
 affected mapping paths, retaining untouched immutable child locators. Batch

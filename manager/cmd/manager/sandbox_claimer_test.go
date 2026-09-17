@@ -12,7 +12,7 @@ import (
 )
 
 func TestSandboxRuntimeClaimConfigPreservesImportGeometryPolicy(t *testing.T) {
-	for _, configured := range []int{0, 1 << 20, 8 << 20} {
+	for _, configured := range []int{0, 16 << 10, 64 << 10} {
 		t.Run(fmt.Sprint(configured), func(t *testing.T) {
 			catalog := &nomadclaim.RuntimeClassCatalog{}
 			cfg := &config.ManagerConfig{RootFSImporter: config.RootFSImporterConfig{

@@ -91,15 +91,15 @@ func TestWorkerEnsuresExactSizeForEveryUniquePlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 	imports := &fakeImports{ready: map[string]bool{
-		artifactKey(digest.String(), amd64, 1, 8<<30): true,
-	}, readyRefs: map[string]string{artifactKey(digest.String(), amd64, 1, 8<<30): image}}
+		artifactKey(digest.String(), amd64, 2, 8<<30): true,
+	}, readyRefs: map[string]string{artifactKey(digest.String(), amd64, 2, 8<<30): image}}
 	worker, err := New(Config{
 		Sources: &fakeSources{items: []templatestore.ImageSource{{
 			Cursor: templatestore.ImageSourceCursor{Scope: "team", TeamID: "team-1", TemplateID: "default"},
 			Image:  image,
 		}}},
 		Imports: imports, Platforms: []sandboxstore.RootFSArtifactPlatform{arm64, amd64, arm64},
-		FormatGeneration: 1,
+		FormatGeneration: 2,
 		ProcdProtocol:    "sandbox0.procd.v1",
 		ProcdDigest:      "sha256:" + strings.Repeat("b", 64),
 		PageSize:         10,
@@ -139,14 +139,14 @@ func TestWorkerSelectsExactImageImportGeometry(t *testing.T) {
 		configured, readyRange              int
 		otherReference, missing, wantImport bool
 	}{
-		{name: "default_reuses_8m", readyRange: 8 << 20},
-		{name: "default_reuses_1m", readyRange: 1 << 20},
-		{name: "default_builds_8m", missing: true, wantImport: true},
-		{name: "strict_1m_rejects_8m", configured: 1 << 20, readyRange: 8 << 20, wantImport: true},
-		{name: "strict_1m_reuses_1m", configured: 1 << 20, readyRange: 1 << 20},
-		{name: "strict_8m_rejects_1m", configured: 8 << 20, readyRange: 1 << 20, wantImport: true},
-		{name: "strict_reference", configured: 1 << 20, readyRange: 1 << 20, otherReference: true, wantImport: true},
-		{name: "default_reference", readyRange: 8 << 20, otherReference: true, wantImport: true},
+		{name: "default_reuses_64k", readyRange: 64 << 10},
+		{name: "default_reuses_16k", readyRange: 16 << 10},
+		{name: "default_builds_64k", missing: true, wantImport: true},
+		{name: "strict_16k_rejects_64k", configured: 16 << 10, readyRange: 64 << 10, wantImport: true},
+		{name: "strict_16k_reuses_16k", configured: 16 << 10, readyRange: 16 << 10},
+		{name: "strict_64k_rejects_16k", configured: 64 << 10, readyRange: 16 << 10, wantImport: true},
+		{name: "strict_reference", configured: 16 << 10, readyRange: 16 << 10, otherReference: true, wantImport: true},
+		{name: "default_reference", readyRange: 64 << 10, otherReference: true, wantImport: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := "registry.example/runtime@sha256:" + strings.Repeat("a", 64)
@@ -155,7 +155,7 @@ func TestWorkerSelectsExactImageImportGeometry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := artifactKey(sourceDigest.String(), platform, 1, 16<<30)
+			key := artifactKey(sourceDigest.String(), platform, 2, 16<<30)
 			readyRef := image
 			if tc.otherReference {
 				readyRef = "other.example/runtime@" + sourceDigest.String()
@@ -167,7 +167,7 @@ func TestWorkerSelectsExactImageImportGeometry(t *testing.T) {
 			cfg := Config{
 				Sources: &fakeSources{items: []templatestore.ImageSource{{Cursor: templatestore.ImageSourceCursor{Scope: "public", TemplateID: "image"}, Image: image, EphemeralStorage: "16Gi"}}},
 				Imports: imports, Platforms: []sandboxstore.RootFSArtifactPlatform{platform},
-				FormatGeneration: 1, ProcdProtocol: "sandbox0.procd.v3", ProcdDigest: "sha256:" + strings.Repeat("b", 64),
+				FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3", ProcdDigest: "sha256:" + strings.Repeat("b", 64),
 				BlockOptions: rootfsblock.BuildOptions{DataRangeBytes: tc.configured},
 			}
 			worker, err := New(cfg)
@@ -212,7 +212,7 @@ func TestWorkerRejectsInvalidImportGeometryBeforeScanning(t *testing.T) {
 			imports := &fakeImports{}
 			worker, err := New(Config{
 				Sources: &fakeSources{}, Imports: imports, Platforms: []sandboxstore.RootFSArtifactPlatform{{OS: "linux", Architecture: "amd64"}},
-				FormatGeneration: 1, BlockOptions: rootfsblock.BuildOptions{DataRangeBytes: dataRange},
+				FormatGeneration: 2, BlockOptions: rootfsblock.BuildOptions{DataRangeBytes: dataRange},
 			})
 			if err == nil || worker != nil || len(imports.lookups) != 0 || len(imports.begun) != 0 {
 				t.Fatalf("invalid geometry accepted: %v", err)
@@ -282,8 +282,8 @@ func TestWorkerReadyOperationRequiresSelectableArtifact(t *testing.T) {
 		errAfterBegin                                 error
 	}{
 		{name: "unknown_provenance"},
-		{name: "wrong_geometry", readyRange: 8 << 20},
-		{name: "wrong_reference", readyRange: 1 << 20, otherReference: true},
+		{name: "wrong_geometry", readyRange: 64 << 10},
+		{name: "wrong_reference", readyRange: 16 << 10, otherReference: true},
 		{name: "nil_artifact", nilAfterBegin: true},
 		{name: "selector_unavailable", errAfterBegin: errors.New("metadata temporarily unavailable")},
 		{name: "publication_raced_lookup", publishOnBegin: true},
@@ -295,7 +295,7 @@ func TestWorkerReadyOperationRequiresSelectableArtifact(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := artifactKey(pinned.String(), platform, 1, 16<<30)
+			key := artifactKey(pinned.String(), platform, 2, 16<<30)
 			readyRef := image
 			if tc.otherReference {
 				readyRef = "mirror.example/runtime@" + pinned.String()
@@ -307,8 +307,8 @@ func TestWorkerReadyOperationRequiresSelectableArtifact(t *testing.T) {
 			worker, err := New(Config{
 				Sources: &fakeSources{items: []templatestore.ImageSource{{Cursor: templatestore.ImageSourceCursor{Scope: "public", TemplateID: "image"}, Image: image, EphemeralStorage: "16Gi"}}},
 				Imports: imports, Platforms: []sandboxstore.RootFSArtifactPlatform{platform},
-				FormatGeneration: 1, ProcdProtocol: "sandbox0.procd.v3", ProcdDigest: "sha256:" + strings.Repeat("b", 64),
-				BlockOptions: rootfsblock.BuildOptions{DataRangeBytes: 1 << 20},
+				FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3", ProcdDigest: "sha256:" + strings.Repeat("b", 64),
+				BlockOptions: rootfsblock.BuildOptions{DataRangeBytes: 16 << 10},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -317,7 +317,7 @@ func TestWorkerReadyOperationRequiresSelectableArtifact(t *testing.T) {
 			if len(imports.begun) != 1 || len(imports.lookups) != 2 {
 				t.Fatalf("ready operation was not reselected: lookups=%d imports=%d", len(imports.lookups), len(imports.begun))
 			}
-			if imports.lookups[0] != imports.lookups[1] || imports.lookups[1].ImportDataRangeBytes != 1<<20 || imports.lookups[1].SourceOCIRef != image {
+			if imports.lookups[0] != imports.lookups[1] || imports.lookups[1].ImportDataRangeBytes != 16<<10 || imports.lookups[1].SourceOCIRef != image {
 				t.Fatalf("reselection changed exact requirements: %+v", imports.lookups)
 			}
 			if result.Ensured != 0 {
@@ -334,7 +334,7 @@ func TestWorkerReadyOperationRequiresSelectableArtifact(t *testing.T) {
 			}
 			// A subsequent verified metadata repair becomes usable through the
 			// ordinary selector, without resetting or replacing the operation.
-			imports.readyRanges[key], imports.readyRefs[key] = 1<<20, image
+			imports.readyRanges[key], imports.readyRefs[key] = 16<<10, image
 			imports.nilAfterBegin, imports.errAfterBegin = false, nil
 			result, err = worker.RunOnce(t.Context())
 			if err != nil || result.Ready != 1 || result.Failed != 0 || len(imports.begun) != 1 {
@@ -353,7 +353,7 @@ func TestWorkerAdvancesPastMalformedHistoricalTemplate(t *testing.T) {
 	worker, err := New(Config{
 		Sources: sources, Imports: imports,
 		Platforms:        []sandboxstore.RootFSArtifactPlatform{{OS: "linux", Architecture: "amd64"}},
-		FormatGeneration: 1, ProcdProtocol: "sandbox0.procd.v1",
+		FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v1",
 		ProcdDigest: "sha256:" + strings.Repeat("d", 64), PageSize: 1,
 	})
 	if err != nil {

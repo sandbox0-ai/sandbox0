@@ -16,7 +16,7 @@ func newClaimServiceFixtureWithImportGeometry(t *testing.T, dataRange int) claim
 	var err error
 	fixture.service, err = New(fixture.config)
 	require.NoError(t, err)
-	legacyRange := 8 << 20
+	legacyRange := 64 << 10
 	fixture.store.artifact.ImportDataRangeBytes = &legacyRange
 	return fixture
 }
@@ -28,14 +28,14 @@ func TestClaimImageImportGeometryPolicy(t *testing.T) {
 		otherReference, wantUnavailable bool
 	}{
 		{name: "default_accepts_unknown_provenance"},
-		{name: "default_accepts_8m", readyRange: 8 << 20},
-		{name: "default_accepts_1m", readyRange: 1 << 20},
-		{name: "strict_1m_rejects_8m", configured: 1 << 20, readyRange: 8 << 20, wantUnavailable: true},
-		{name: "strict_1m_accepts_1m", configured: 1 << 20, readyRange: 1 << 20},
-		{name: "strict_1m_rejects_unknown_provenance", configured: 1 << 20, wantUnavailable: true},
-		{name: "strict_8m_rejects_1m", configured: 8 << 20, readyRange: 1 << 20, wantUnavailable: true},
-		{name: "strict_exact_reference", configured: 1 << 20, readyRange: 1 << 20, otherReference: true, wantUnavailable: true},
-		{name: "default_exact_reference", readyRange: 8 << 20, otherReference: true, wantUnavailable: true},
+		{name: "default_accepts_64k", readyRange: 64 << 10},
+		{name: "default_accepts_16k", readyRange: 16 << 10},
+		{name: "strict_16k_rejects_64k", configured: 16 << 10, readyRange: 64 << 10, wantUnavailable: true},
+		{name: "strict_16k_accepts_16k", configured: 16 << 10, readyRange: 16 << 10},
+		{name: "strict_16k_rejects_unknown_provenance", configured: 16 << 10, wantUnavailable: true},
+		{name: "strict_64k_rejects_16k", configured: 64 << 10, readyRange: 16 << 10, wantUnavailable: true},
+		{name: "strict_exact_reference", configured: 16 << 10, readyRange: 16 << 10, otherReference: true, wantUnavailable: true},
+		{name: "default_exact_reference", readyRange: 64 << 10, otherReference: true, wantUnavailable: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newClaimServiceFixtureWithImportGeometry(t, tc.configured)
@@ -75,7 +75,7 @@ func TestClaimImageImportGeometryPolicy(t *testing.T) {
 
 func TestClaimImportGeometryRejectsInvalidBuildOptions(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
-	for _, dataRange := range []int{-1, (1 << 20) + 1, 3 << 20, rootfsblock.MaxDataRangeBytes + rootfsblock.LogicalBlockSize} {
+	for _, dataRange := range []int{-1, (16 << 10) + 1, 3 << 20, rootfsblock.MaxDataRangeBytes + rootfsblock.LogicalBlockSize} {
 		t.Run(fmt.Sprint(dataRange), func(t *testing.T) {
 			cfg := fixture.config
 			cfg.RootFSImportDataRangeBytes = dataRange
@@ -89,7 +89,7 @@ func TestClaimImportGeometryRejectsInvalidBuildOptions(t *testing.T) {
 }
 
 func TestClaimImportGeometryDoesNotChangeSnapshotRequirements(t *testing.T) {
-	fixture := newClaimServiceFixtureWithImportGeometry(t, 1<<20)
+	fixture := newClaimServiceFixtureWithImportGeometry(t, 16<<10)
 	spec := fixture.config.Templates.(*fakeTemplateStore).template.Spec
 	requirements, err := fixture.service.rootFSArtifactRequirements(spec, fixture.store.artifact.FormatGeneration)
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestClaimImportGeometryDoesNotChangeSnapshotRequirements(t *testing.T) {
 func TestClaimImportGeometryPreservesExistingPausedRuntime(t *testing.T) {
 	fixture := newClaimServiceFixtureWithImportGeometry(t, 0)
 	sandboxID := preparePausedNomadResume(t, fixture)
-	fixture.config.RootFSImportDataRangeBytes = 1 << 20
+	fixture.config.RootFSImportDataRangeBytes = 16 << 10
 	var err error
 	fixture.service, err = New(fixture.config)
 	require.NoError(t, err)

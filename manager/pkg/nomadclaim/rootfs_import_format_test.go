@@ -23,7 +23,7 @@ func setClaimImportFormat(t *testing.T, fixture *claimServiceFixture, format int
 }
 
 func TestClaimImageImportFormatPolicy(t *testing.T) {
-	for _, policy := range []int{0, 1, 2} {
+	for _, policy := range []int{0, 2} {
 		for _, available := range []int{1, 2} {
 			t.Run(fmt.Sprintf("policy-%d-ready-%d", policy, available), func(t *testing.T) {
 				fixture := newClaimServiceFixture(t)
@@ -32,7 +32,7 @@ func TestClaimImageImportFormatPolicy(t *testing.T) {
 				response, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
 					TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "format-claim",
 				})
-				want := max(policy, 1)
+				want := 2
 				require.Len(t, fixture.store.artifactRequirements, 1)
 				require.Equal(t, want, fixture.store.artifactRequirements[0].FormatGeneration)
 				require.Empty(t, fixture.store.digestArtifactRequirements, "image claims must not fall back to old formats")
@@ -56,7 +56,7 @@ func TestClaimImageImportFormatPolicy(t *testing.T) {
 func TestClaimImportFormatRejectsInvalidPolicy(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	for _, test := range []struct{ format, dataRange int }{
-		{-1, 0}, {3, 0}, {10005, 0}, {2, 1 << 20}, {2, -1}, {2, rootfsblock.CompressedDataRangeBytes + 4096},
+		{-1, 0}, {1, 0}, {3, 0}, {10005, 0}, {2, 1 << 20}, {2, -1}, {2, rootfsblock.CompressedDataRangeBytes + 4096},
 	} {
 		t.Run(fmt.Sprint(test), func(t *testing.T) {
 			cfg := fixture.config
@@ -89,14 +89,14 @@ func committedFormatFixture(t *testing.T, format int) claimServiceFixture {
 }
 
 func TestClaimImportFormatPreservesCommittedSources(t *testing.T) {
-	for _, persisted := range []int{1, 2} {
+	for _, persisted := range []int{2} {
 		for _, source := range []string{"snapshot", "captured-template", "capture-metadata"} {
 			t.Run(fmt.Sprintf("format-%d-%s", persisted, source), func(t *testing.T) {
 				fixture := committedFormatFixture(t, persisted)
 				// A host/importer upgrade must not invalidate the executable already
 				// authenticated by a snapshot's immutable base artifact.
 				fixture.config.RootFSProcdDigest = "sha256:" + strings.Repeat("e", 64)
-				setClaimImportFormat(t, &fixture, 3-persisted)
+				setClaimImportFormat(t, &fixture, 0)
 				tpl := fixture.config.Templates.(*fakeTemplateStore).template
 				if source == "capture-metadata" {
 					metadata, err := fixture.service.nomadTemplateCaptureMetadata(t.Context(), fixture.store,
@@ -138,7 +138,7 @@ func TestClaimImportFormatPreservesCommittedSources(t *testing.T) {
 }
 
 func TestClaimImportFormatPreservesResumeAcrossPolicyChanges(t *testing.T) {
-	for _, persisted := range []int{1, 2} {
+	for _, persisted := range []int{2} {
 		t.Run(fmt.Sprint(persisted), func(t *testing.T) {
 			fixture := newClaimServiceFixture(t)
 			setClaimImportFormat(t, &fixture, persisted)
@@ -146,7 +146,7 @@ func TestClaimImportFormatPreservesResumeAcrossPolicyChanges(t *testing.T) {
 			sandboxID := preparePausedNomadResume(t, fixture)
 			expectedGeneration := fixture.store.resumeCandidate.SourceGenerationID
 			fixture.config.RootFSProcdDigest = "sha256:" + strings.Repeat("e", 64)
-			setClaimImportFormat(t, &fixture, 3-persisted)
+			setClaimImportFormat(t, &fixture, 0)
 			fixture.store.artifactRequirements = nil
 			fixture.store.digestArtifactRequirements = nil
 			resumed, err := fixture.service.ResumePausedSandboxRuntime(t.Context(), sandboxID)
@@ -164,15 +164,15 @@ func TestClaimImportFormatPreservesResumeAcrossPolicyChanges(t *testing.T) {
 func TestClaimImportFormatPolicyCannotOverrideSnapshotAttestation(t *testing.T) {
 	for _, target := range []string{"snapshot", "generation", "artifact"} {
 		t.Run(target, func(t *testing.T) {
-			fixture := committedFormatFixture(t, 1)
+			fixture := committedFormatFixture(t, 2)
 			setClaimImportFormat(t, &fixture, 2)
 			switch target {
 			case "snapshot":
-				fixture.store.snapshot.FormatGeneration = 2
+				fixture.store.snapshot.FormatGeneration = 1
 			case "generation":
-				fixture.store.generation.FormatGeneration = 2
+				fixture.store.generation.FormatGeneration = 1
 			case "artifact":
-				fixture.store.artifact.FormatGeneration = 2
+				fixture.store.artifact.FormatGeneration = 1
 			}
 			_, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
 				TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "changed-attestation",

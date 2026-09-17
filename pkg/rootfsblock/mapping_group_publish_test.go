@@ -17,7 +17,7 @@ func TestMappingPublicationPolicyValidation(t *testing.T) {
 	for _, version := range []int{0, 1, 2} {
 		for _, policy := range []string{"", ContiguousMappingV1, "unknown"} {
 			_, err := NormalizeBuildOptions(BuildOptions{FormatVersion: version, MappingGroupPolicy: policy})
-			if policy == "" || version == 2 && policy == ContiguousMappingV1 {
+			if version != 1 && (policy == "" || policy == ContiguousMappingV1) {
 				require.NoError(t, err)
 			} else {
 				require.Error(t, err)

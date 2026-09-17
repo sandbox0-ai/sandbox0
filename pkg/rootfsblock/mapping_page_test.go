@@ -9,7 +9,8 @@ import (
 
 func TestMappingPageRoundTrip(t *testing.T) {
 	page := MappingPage{
-		Level: 0, StartBlock: 10, BlockCount: 8,
+		Version: MappingPageVersion,
+		Level:   0, StartBlock: 10, BlockCount: 8,
 		Entries: []MappingEntry{{
 			LogicalStart: 12, BlockCount: 2, Kind: MappingEntryData,
 			Object: ObjectRange{Key: "packs/base.pack", Offset: 4096, Length: 8192,

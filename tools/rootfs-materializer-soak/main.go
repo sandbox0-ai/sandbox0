@@ -696,7 +696,7 @@ func seedFixture(
 		Spec: rootfsimporter.OperationSpec{
 			SourceOCIRef:     sourceRef,
 			Platform:         platform,
-			FormatGeneration: 1,
+			FormatGeneration: 2,
 			ProcdProtocol:    "sandbox0.procd.soak.v1",
 			ProcdDigest:      procdDigest.String(),
 			LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
@@ -710,7 +710,7 @@ func seedFixture(
 		OS: platform.OS, Architecture: platform.Architecture, Variant: platform.Variant,
 	}
 	requirements := sandboxstore.ReadyRootFSArtifactRequirements{
-		FormatGeneration: 1,
+		FormatGeneration: 2,
 		LogicalSizeBytes: rootfsartifact.MinimumLogicalSizeBytes,
 		ProcdProtocol:    "sandbox0.procd.soak.v1",
 		ProcdDigest:      procdDigest.String(),

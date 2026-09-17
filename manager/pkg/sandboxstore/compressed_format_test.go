@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -45,7 +46,7 @@ func TestDurableGenerationRequiresMatchingCompressedFormat(t *testing.T) {
 		generation        int
 		valid             bool
 	}{
-		{1, 1, true}, {1, 3, true}, {1, 2, false},
+		{1, 1, false}, {1, 3, false}, {1, 2, false},
 		{2, 2, true}, {2, 1, false}, {2, 3, false},
 	} {
 		t.Run(fmt.Sprintf("descriptor-%d-generation-%d", test.descriptorVersion, test.generation), func(t *testing.T) {
@@ -54,7 +55,9 @@ func TestDurableGenerationRequiresMatchingCompressedFormat(t *testing.T) {
 			require.NoError(t, err)
 			descriptor.Version = test.descriptorVersion
 			descriptor.MappingRoot.Version = test.descriptorVersion
-			payload, err := rootfsblock.EncodeDescriptor(descriptor)
+			// Use raw JSON to exercise rejection of retired stored descriptors;
+			// the current encoder itself no longer permits Format1 output.
+			payload, err := json.Marshal(descriptor)
 			require.NoError(t, err)
 			generation := &RootFSGeneration{
 				ID: "compressed-generation", FilesystemID: "compressed-filesystem", ParentGenerationID: "parent",
@@ -67,7 +70,7 @@ func TestDurableGenerationRequiresMatchingCompressedFormat(t *testing.T) {
 			if test.valid {
 				require.NoError(t, err)
 			} else {
-				require.ErrorContains(t, err, "format generation")
+				require.Error(t, err)
 			}
 		})
 	}

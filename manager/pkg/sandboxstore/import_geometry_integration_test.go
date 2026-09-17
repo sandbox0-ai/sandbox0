@@ -33,16 +33,16 @@ func TestReadyRootFSArtifactGeometrySelectionIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, legacy.ArtifactDigest, selected.ArtifactDigest)
 	strict := requirements
-	strict.ImportDataRangeBytes = 1 << 20
+	strict.ImportDataRangeBytes = 16 << 10
 	strict.SourceOCIRef = legacy.SourceOCIRef
 	_, err = selectSource(strict)
 	require.ErrorIs(t, err, ErrRootFSBaseArtifactNotFound, "unknown is not an inferred geometry")
 
-	one := publishGeometrySelectionFixture(t, store, legacy, "one", 1<<20)
-	eight := publishGeometrySelectionFixture(t, store, legacy, "eight", 8<<20)
+	one := publishGeometrySelectionFixture(t, store, legacy, "one", 16<<10)
+	eight := publishGeometrySelectionFixture(t, store, legacy, "eight", 64<<10)
 	alias := *legacy
 	alias.SourceOCIRef = "mirror.example/same@" + legacy.SourceOCIDigest
-	aliased := publishGeometrySelectionFixture(t, store, &alias, "alias", 1<<20)
+	aliased := publishGeometrySelectionFixture(t, store, &alias, "alias", 16<<10)
 	for index, artifact := range []*RootFSBaseArtifact{one, eight, aliased, legacy} {
 		_, err := pool.Exec(ctx, `UPDATE manager.rootfs_base_artifacts SET created_at = $2 WHERE artifact_digest = $1`,
 			artifact.ArtifactDigest, time.Date(2026, 1, 1, 0, 0, index, 0, time.UTC))
@@ -53,7 +53,7 @@ func TestReadyRootFSArtifactGeometrySelectionIntegration(t *testing.T) {
 	require.Equal(t, legacy.ArtifactDigest, selected.ArtifactDigest, "legacy zero policy keeps latest-compatible behavior")
 	selected, err = selectSource(strict)
 	require.NoError(t, err)
-	require.Equal(t, one.ArtifactDigest, selected.ArtifactDigest, "newer 8 MiB, alias, and unknown artifacts must not displace the exact 1 MiB source")
+	require.Equal(t, one.ArtifactDigest, selected.ArtifactDigest, "newer 64 KiB, alias, and unknown artifacts must not displace the exact 16 KiB source")
 	strict.SourceOCIRef = ""
 	selected, err = selectSource(strict)
 	require.NoError(t, err)
@@ -63,11 +63,11 @@ func TestReadyRootFSArtifactGeometrySelectionIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, aliased.ArtifactDigest, selected.ArtifactDigest)
 	strict.SourceOCIRef = legacy.SourceOCIRef
-	strict.ImportDataRangeBytes = 8 << 20
+	strict.ImportDataRangeBytes = 64 << 10
 	selected, err = selectSource(strict)
 	require.NoError(t, err)
 	require.Equal(t, eight.ArtifactDigest, selected.ArtifactDigest)
-	strict.ImportDataRangeBytes = 2 << 20
+	strict.ImportDataRangeBytes = 32 << 10
 	_, err = selectSource(strict)
 	require.ErrorIs(t, err, ErrRootFSBaseArtifactNotFound)
 	strict.SourceOCIRef = "registry.example/other@" + digest.FromString("other").String()
@@ -80,7 +80,7 @@ func TestReadyRootFSArtifactGeometrySelectionIntegration(t *testing.T) {
 		require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
 	}
 	for _, policy := range []ReadyRootFSArtifactRequirements{
-		{ImportDataRangeBytes: 1 << 20}, {SourceOCIRef: legacy.SourceOCIRef},
+		{ImportDataRangeBytes: 16 << 10}, {SourceOCIRef: legacy.SourceOCIRef},
 	} {
 		_, err = store.GetReadyRootFSBaseArtifactByDigest(ctx, legacy.ArtifactDigest, legacy.Platform, policy)
 		require.ErrorContains(t, err, "source selection filters are not allowed")
@@ -140,12 +140,12 @@ func TestRootFSImportGeometryPublicationRetryAndGCIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	begin, result, reference := rootFSImportTestFixture(t, "geometry-retry")
-	begin.Spec.BlockOptions.DataRangeBytes = 1 << 20
+	begin.Spec.BlockOptions.DataRangeBytes = 16 << 10
 	operation, lease := prepareGeometryImport(t, store, begin, reference)
 	publication := &PublishReadyRootFSImportRequest{Lease: lease, Result: result}
 	artifact, err := store.PublishReadyRootFSImport(ctx, publication)
 	require.NoError(t, err)
-	require.Equal(t, 1<<20, *artifact.ImportDataRangeBytes)
+	require.Equal(t, 16<<10, *artifact.ImportDataRangeBytes)
 	replay, err := store.PublishReadyRootFSImport(ctx, publication)
 	require.NoError(t, err)
 	require.Equal(t, artifact, replay)
@@ -153,17 +153,17 @@ func TestRootFSImportGeometryPublicationRetryAndGCIntegration(t *testing.T) {
 	// Even the same attestation cannot acquire a conflicting import geometry.
 	other := *begin
 	other.OperationID += "-conflict"
-	other.Spec.BlockOptions.DataRangeBytes = 8 << 20
+	other.Spec.BlockOptions.DataRangeBytes = 64 << 10
 	_, otherLease := prepareGeometryImport(t, store, &other, reference)
 	_, err = store.PublishReadyRootFSImport(ctx, &PublishReadyRootFSImportRequest{Lease: otherLease, Result: result})
 	require.ErrorIs(t, err, ErrRootFSBaseArtifactConflict)
 	require.NoError(t, store.AbandonRootFSImport(ctx, otherLease, "conflicting geometry fixture"))
 
-	_, err = pool.Exec(ctx, `UPDATE manager.rootfs_import_operations SET block_data_range_bytes = $2 WHERE operation_id = $1`, operation.ID, 8<<20)
+	_, err = pool.Exec(ctx, `UPDATE manager.rootfs_import_operations SET block_data_range_bytes = $2 WHERE operation_id = $1`, operation.ID, 64<<10)
 	require.NoError(t, err)
 	_, err = store.PublishReadyRootFSImport(ctx, publication)
 	require.ErrorIs(t, err, ErrRootFSImportConflict, "a changed durable spec cannot silently pass a publication retry")
-	_, err = pool.Exec(ctx, `UPDATE manager.rootfs_import_operations SET block_data_range_bytes = $2, updated_at = NOW() - INTERVAL '1 hour' WHERE operation_id = $1`, operation.ID, 1<<20)
+	_, err = pool.Exec(ctx, `UPDATE manager.rootfs_import_operations SET block_data_range_bytes = $2, updated_at = NOW() - INTERVAL '1 hour' WHERE operation_id = $1`, operation.ID, 16<<10)
 	require.NoError(t, err)
 	garbage, err := store.ReconcileRootFSImportGarbage(ctx, time.Minute, 10)
 	require.NoError(t, err)
@@ -173,17 +173,17 @@ func TestRootFSImportGeometryPublicationRetryAndGCIntegration(t *testing.T) {
 	selected, err := store.GetReadyRootFSBaseArtifact(ctx, artifact.SourceOCIDigest, artifact.Platform, ReadyRootFSArtifactRequirements{
 		FormatGeneration: artifact.FormatGeneration, LogicalSizeBytes: artifact.LogicalSizeBytes,
 		ProcdProtocol: artifact.ProcdProtocol, ProcdDigest: artifact.ProcdDigest,
-		ImportDataRangeBytes: 1 << 20, SourceOCIRef: artifact.SourceOCIRef,
+		ImportDataRangeBytes: 16 << 10, SourceOCIRef: artifact.SourceOCIRef,
 	})
 	require.NoError(t, err)
 	require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
-	require.Equal(t, 1<<20, *selected.ImportDataRangeBytes)
+	require.Equal(t, 16<<10, *selected.ImportDataRangeBytes)
 	assertGeometryImmutable(t, pool, artifact.ArtifactDigest)
 }
 
 func assertGeometryImmutable(t *testing.T, pool *pgxpool.Pool, artifactDigest string) {
 	t.Helper()
-	for _, value := range []any{nil, 0, 4097, 8 << 20} {
+	for _, value := range []any{nil, 0, 4097, 64 << 10} {
 		_, err := pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = $2 WHERE artifact_digest = $1`, artifactDigest, value)
 		require.ErrorContains(t, err, "immutable", fmt.Sprintf("value %v", value))
 	}
@@ -217,11 +217,11 @@ func TestRootFSImportGeometryRollingPublisherRecoveryIntegration(t *testing.T) {
 			selected, err := store.GetReadyRootFSBaseArtifact(t.Context(), result.SourceOCIDigest.String(), platform, ReadyRootFSArtifactRequirements{
 				FormatGeneration: begin.Spec.FormatGeneration, LogicalSizeBytes: begin.Spec.LogicalSizeBytes,
 				ProcdProtocol: begin.Spec.ProcdProtocol, ProcdDigest: begin.Spec.ProcdDigest,
-				ImportDataRangeBytes: 1 << 20, SourceOCIRef: begin.Spec.SourceOCIRef,
+				ImportDataRangeBytes: 16 << 10, SourceOCIRef: begin.Spec.SourceOCIRef,
 			})
 			require.NoError(t, err, "an old publisher after migration must not strand strict discovery on the same ready operation")
 			require.Equal(t, artifactDigest, selected.ArtifactDigest)
-			require.Equal(t, 1<<20, *selected.ImportDataRangeBytes)
+			require.Equal(t, 16<<10, *selected.ImportDataRangeBytes)
 			assertGeometryImmutable(t, pool, artifactDigest)
 		})
 	}
@@ -230,7 +230,7 @@ func TestRootFSImportGeometryRollingPublisherRecoveryIntegration(t *testing.T) {
 func insertRollingGeometryFixture(t *testing.T, pool *pgxpool.Pool, store *PGSandboxStore, suffix string) (*BeginRootFSImportRequest, rootfsimporter.BuildResult, RootFSImportLease, string) {
 	t.Helper()
 	begin, result, reference := rootFSImportTestFixture(t, "rolling-"+suffix)
-	begin.Spec.BlockOptions.DataRangeBytes = 1 << 20
+	begin.Spec.BlockOptions.DataRangeBytes = 16 << 10
 	_, lease := prepareGeometryImport(t, store, begin, reference)
 	artifactDigest := insertPreGeometryArtifact(t, pool, begin, result)
 	_, err := pool.Exec(t.Context(), `INSERT INTO manager.rootfs_base_artifact_objects (artifact_digest, object_key) VALUES ($1, $2)`, artifactDigest, reference.Key)
@@ -252,7 +252,7 @@ func TestRootFSImportGeometryUnknownRetryFailsClosedIntegration(t *testing.T) {
 	begin, result, lease, artifactDigest := insertRollingGeometryFixture(t, pool, store, "ambiguous")
 	other := *begin
 	other.OperationID += "-different"
-	other.Spec.BlockOptions.DataRangeBytes = 8 << 20
+	other.Spec.BlockOptions.DataRangeBytes = 64 << 10
 	insertPreGeometryReadyOperation(t, store, pool, &other, artifactDigest)
 	_, err := store.BeginRootFSImport(t.Context(), begin)
 	require.ErrorIs(t, err, ErrRootFSImportConflict)
@@ -277,11 +277,11 @@ func TestRootFSImportGeometryUnknownRetryFailsClosedIntegration(t *testing.T) {
 	var validGeometry *int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT import_data_range_bytes FROM manager.rootfs_base_artifacts WHERE artifact_digest = $1`, validDigest).Scan(&validGeometry))
 	require.NotNil(t, validGeometry)
-	require.Equal(t, 1<<20, *validGeometry)
+	require.Equal(t, 16<<10, *validGeometry)
 	var geometry *int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT import_data_range_bytes FROM manager.rootfs_base_artifacts WHERE artifact_digest = $1`, artifactDigest).Scan(&geometry))
 	require.Nil(t, geometry)
-	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = $2 WHERE artifact_digest = $1`, artifactDigest, 1<<20)
+	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = $2 WHERE artifact_digest = $1`, artifactDigest, 16<<10)
 	require.ErrorContains(t, err, "provenance")
 	_, err = store.PublishReadyRootFSImport(t.Context(), &PublishReadyRootFSImportRequest{
 		Lease: RootFSImportLease{OperationID: begin.OperationID, WorkerID: "legacy", Token: strings.Repeat("a", 64)}, Result: result,
@@ -294,12 +294,12 @@ func TestRootFSImportGeometryPromotionChecksImmutableInputsIntegration(t *testin
 	store := NewPGSandboxStore(pool)
 	_, _, _, artifactDigest := insertRollingGeometryFixture(t, pool, store, "immutable-inputs")
 	_, err := pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts
-		SET import_data_range_bytes = 1048576, source_oci_ref = 'registry.example/changed@' || source_oci_digest
+		SET import_data_range_bytes = 16384, source_oci_ref = 'registry.example/changed@' || source_oci_digest
 		WHERE artifact_digest = $1`, artifactDigest)
 	require.ErrorContains(t, err, "provenance")
-	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = 8388608 WHERE artifact_digest = $1`, artifactDigest)
+	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = 65536 WHERE artifact_digest = $1`, artifactDigest)
 	require.ErrorContains(t, err, "provenance", "a valid range with the wrong provenance cannot be promoted")
-	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = 1048576 WHERE artifact_digest = $1`, artifactDigest)
+	_, err = pool.Exec(t.Context(), `UPDATE manager.rootfs_base_artifacts SET import_data_range_bytes = 16384 WHERE artifact_digest = $1`, artifactDigest)
 	require.NoError(t, err, "matching unanimous provenance permits only NULL to known")
 	assertGeometryImmutable(t, pool, artifactDigest)
 }

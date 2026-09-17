@@ -67,7 +67,7 @@ func TestPathCopyPreparationCancellationDoesNotPublish(t *testing.T) {
 }
 
 func TestPathCopyGenerationsPreserveSparseAndDenseImages(t *testing.T) {
-	for _, version := range []int{DescriptorVersion, CompressedFormatVersion} {
+	for _, version := range []int{CompressedFormatVersion} {
 		for _, fanout := range []int{2, 4} {
 			t.Run(fmt.Sprintf("format-%d-fanout-%d", version, fanout), func(t *testing.T) {
 				store := newMemoryObjects()

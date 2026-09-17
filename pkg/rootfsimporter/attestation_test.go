@@ -30,7 +30,7 @@ import (
 
 func TestBuildResultAttestBindsProcdAndBlockIdentity(t *testing.T) {
 	result := readyAttestationTestBuildResult(t)
-	attestation, payload, artifactDigest, err := result.Attest(3, "procd-http-v1")
+	attestation, payload, artifactDigest, err := result.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	require.Equal(t, digest.FromBytes(payload), artifactDigest)
 	require.NotEqual(t, result.DescriptorDigest, artifactDigest)
@@ -42,37 +42,36 @@ func TestBuildResultAttestBindsProcdAndBlockIdentity(t *testing.T) {
 	require.Equal(t, attestation, decoded)
 
 	changedProtocol := result
-	_, _, changedProtocolDigest, err := changedProtocol.Attest(3, "procd-http-v2")
+	_, _, changedProtocolDigest, err := changedProtocol.Attest(2, "procd-http-v2")
 	require.NoError(t, err)
 	require.NotEqual(t, artifactDigest, changedProtocolDigest)
 	changedProcd := result
 	changedProcd.ProcdDigest = digest.FromString("other-procd")
-	_, _, changedProcdDigest, err := changedProcd.Attest(3, "procd-http-v1")
+	_, _, changedProcdDigest, err := changedProcd.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	require.NotEqual(t, artifactDigest, changedProcdDigest)
-	_, _, changedFormatDigest, err := result.Attest(4, "procd-http-v1")
-	require.NoError(t, err)
-	require.NotEqual(t, artifactDigest, changedFormatDigest)
+	_, _, _, err = result.Attest(4, "procd-http-v1")
+	require.Error(t, err, "unknown format generations cannot be published")
 	changedManifest := result
 	changedManifest.ManifestDigest = digest.FromString("other-manifest")
-	_, _, changedManifestDigest, err := changedManifest.Attest(3, "procd-http-v1")
+	_, _, changedManifestDigest, err := changedManifest.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	require.NotEqual(t, artifactDigest, changedManifestDigest)
 	changedPlatform := result
 	changedPlatform.Platform.Variant = "v8"
-	_, _, changedPlatformDigest, err := changedPlatform.Attest(3, "procd-http-v1")
+	_, _, changedPlatformDigest, err := changedPlatform.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	require.NotEqual(t, artifactDigest, changedPlatformDigest)
 	changedReference := result
 	changedReference.SourceOCIRef = "registry.example/mirror@" + result.SourceOCIDigest.String()
-	_, _, changedReferenceDigest, err := changedReference.Attest(3, "procd-http-v1")
+	_, _, changedReferenceDigest, err := changedReference.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	require.NotEqual(t, artifactDigest, changedReferenceDigest)
 }
 
 func TestDecodeReadyArtifactAttestationRejectsUnknownTrailingAndNonCanonicalJSON(t *testing.T) {
 	result := readyAttestationTestBuildResult(t)
-	_, payload, _, err := result.Attest(1, "procd-http-v1")
+	_, payload, _, err := result.Attest(2, "procd-http-v1")
 	require.NoError(t, err)
 	unknown := append(append([]byte(nil), payload[:len(payload)-1]...), []byte(`,"unknown":true}`)...)
 	_, err = DecodeReadyArtifactAttestation(unknown)
@@ -87,10 +86,10 @@ func TestDecodeReadyArtifactAttestationRejectsUnknownTrailingAndNonCanonicalJSON
 
 func TestBuildResultAttestRejectsMissingProtocolAndInvalidResult(t *testing.T) {
 	result := readyAttestationTestBuildResult(t)
-	_, _, _, err := result.Attest(1, "")
+	_, _, _, err := result.Attest(2, "")
 	require.ErrorContains(t, err, "procd protocol")
 	result.SourceOCIRef = "registry.example/unpinned:latest"
-	_, _, _, err = result.Attest(1, "procd-http-v1")
+	_, _, _, err = result.Attest(2, "procd-http-v1")
 	require.ErrorContains(t, err, "source reference")
 }
 

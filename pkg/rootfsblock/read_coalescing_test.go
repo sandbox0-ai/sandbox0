@@ -17,7 +17,7 @@ func TestReaderRetainsVerifiedRangeForOneDemandWithoutCache(t *testing.T) {
 	_, err = reader.ReadAt(actual, 0)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
-	require.Equal(t, 2, store.count(pack), "one data GET per demanded range, not per 4 KiB block")
+	require.Equal(t, 1, store.count(pack), "adjacent Format2 ranges share one verified coalesced GET")
 }
 
 func TestReaderRetainedRangeRespectsCompositeTail(t *testing.T) {
@@ -33,7 +33,7 @@ func TestReaderRetainedRangeRespectsCompositeTail(t *testing.T) {
 	_, err = reader.ReadAt(actual, 0)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
-	require.Equal(t, 2, store.count(pack))
+	require.Equal(t, 1, store.count(pack))
 }
 
 func TestBranchCoalescesVerifiedCleanSpansAndStopsAtJournalOverrides(t *testing.T) {
@@ -85,7 +85,7 @@ func TestBranchCoalescedReadPreservesHolesAndCorruptionBoundary(t *testing.T) {
 
 func coalescingFixture(t *testing.T) (*rangeTestStore, Descriptor, []byte, string) {
 	t.Helper()
-	const rangeBytes = 32 * LogicalBlockSize
+	const rangeBytes = CompressedDataRangeBytes
 	logical := append(bytes.Repeat([]byte{1}, rangeBytes), bytes.Repeat([]byte{2}, rangeBytes)...)
 	builder := newBuildTestStore()
 	built, err := BuildMaterializedGeneration(t.Context(), bytes.NewReader(logical), int64(len(logical)), builder, BuildOptions{

@@ -54,7 +54,7 @@ func TestMappingGroupInternalGeometry(t *testing.T) {
 			case "missing-target":
 				p.Entries = p.Entries[1:]
 			case "legacy":
-				p.Version = MappingPageVersion
+				p.Version = 1
 			case "cache-disabled":
 				copyReader.cache, err = NewReadCache(0)
 			case "cache-small":

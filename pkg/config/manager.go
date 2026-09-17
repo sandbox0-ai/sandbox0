@@ -200,7 +200,7 @@ type RootFSMaintenanceConfig struct {
 // immutable block artifact worker.
 type RootFSImporterConfig struct {
 	// FormatGeneration selects new image artifacts, not existing snapshots.
-	// Zero preserves format 1; format 2 requires upgraded readers on all nodes.
+	// Zero selects format 2. Format 1 is retired and rejected.
 	FormatGeneration int `yaml:"format_generation" json:"-"`
 	// DataRangeBytes opts image imports and selection into an exact geometry.
 	// Zero preserves legacy artifact selection and the default build geometry.

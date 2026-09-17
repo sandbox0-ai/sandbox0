@@ -185,7 +185,7 @@ func readyRootFSBaseArtifactTestRequest() *PutReadyRootFSBaseArtifactRequest {
 		SourceOCIRef:     "registry.example/sandbox@sha256:" + strings.Repeat("b", 64),
 		SourceOCIDigest:  "sha256:" + strings.Repeat("b", 64),
 		BaseBlockRoot:    rootDigest,
-		FormatGeneration: 1,
+		FormatGeneration: 2,
 		Platform:         RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		ProcdProtocol:    "sandbox0.procd.test.v1",
 		ProcdDigest:      "sha256:" + strings.Repeat("c", 64),

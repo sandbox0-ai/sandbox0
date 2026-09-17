@@ -1031,7 +1031,19 @@ func recoverySessionFromRecord(key string, current record, live bool) (RecoveryS
 		if stage.Identity.WriterGrantToken != "" {
 			return RecoverySession{}, fmt.Errorf("RootFS recovery record %q contains a raw writer token", key)
 		}
-		if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+		// Reclaimed external proofs outlive executable format support. Preserve
+		// their exact descriptor bytes and binding digest until normal expiry,
+		// without allowing an old descriptor into any active recovery path.
+		terminal, err := reclaimedExternalProof(current)
+		if err != nil {
+			return RecoverySession{}, err
+		}
+		if terminal && !live {
+			err = stage.ValidateTerminalBinding()
+		} else {
+			err = stage.ValidateDurableBinding()
+		}
+		if err != nil || stage.Generation == nil {
 			return RecoverySession{}, fmt.Errorf("validate RootFS recovery binding %q: %v", key, err)
 		}
 		binding, err := stage.BindingDigest()
@@ -1635,7 +1647,7 @@ func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.I
 // grant/proof lookup: both regional records may expire while a node is offline.
 func (m *Manager) ForgetExpiredExternalTerminal(request rootfshandoff.StageRequest, now time.Time) (bool, error) {
 	request = request.WithoutWriterGrantToken()
-	if err := request.ValidateDurableBinding(); err != nil {
+	if err := request.ValidateTerminalBinding(); err != nil {
 		return false, fmt.Errorf("validate external proof expiry binding: %w", err)
 	}
 	if now.IsZero() {
@@ -1652,20 +1664,8 @@ func (m *Manager) ForgetExpiredExternalTerminal(request rootfshandoff.StageReque
 		if _, err := recoverySessionFromRecord(request.Parent, current, false); err != nil {
 			return false, fmt.Errorf("validate external proof recovery binding: %w", err)
 		}
-		if current.CrashFence == nil || !current.CrashFence.External || current.CrashFence.Result == nil ||
-			!current.BranchRemoved || current.RetireOperationID != "" || current.DirtyTailPressure != nil {
-			return false, nil
-		}
-		proof := current.CrashFence.Result
-		if err := proof.Validate(); err != nil {
-			return false, fmt.Errorf("validate external physical proof: %w: %w", err, errdefs.ErrFailedPrecondition)
-		}
-		if current.State != stateTombstoned || proof.Parent != current.Parent || proof.RootFSID != current.RootFSID ||
-			proof.WriterEpoch != current.WriterEpoch || proof.OperationID != current.CrashFence.OperationID ||
-			proof.BindingDigest != current.BindingDigest || proof.BranchPath != current.BranchPath ||
-			proof.DevicePath != current.DevicePath || proof.DeviceBound != (current.DevicePath != "") ||
-			(current.DevicePath != "" && (current.DeviceAllocationID == "" || !current.DeviceReservationReleased)) {
-			return false, fmt.Errorf("external physical proof does not match its reclaimed session: %w", errdefs.ErrFailedPrecondition)
+		if terminal, err := reclaimedExternalProof(current); err != nil || !terminal {
+			return false, err
 		}
 		expiresAt, eligible, err := externalProofQuietUntil(current)
 		if err != nil {
@@ -1673,6 +1673,27 @@ func (m *Manager) ForgetExpiredExternalTerminal(request rootfshandoff.StageReque
 		}
 		return eligible && !now.Before(expiresAt), nil
 	})
+}
+
+// reclaimedExternalProof checks the exact physical evidence before an opaque
+// historical descriptor may be retained or expired. It grants no live access.
+func reclaimedExternalProof(current record) (bool, error) {
+	if current.CrashFence == nil || !current.CrashFence.External || current.CrashFence.Result == nil ||
+		!current.BranchRemoved || current.RetireOperationID != "" || current.DirtyTailPressure != nil {
+		return false, nil
+	}
+	proof := current.CrashFence.Result
+	if err := proof.Validate(); err != nil {
+		return false, fmt.Errorf("validate external physical proof: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	if current.State != stateTombstoned || proof.Parent != current.Parent || proof.RootFSID != current.RootFSID ||
+		proof.WriterEpoch != current.WriterEpoch || proof.OperationID != current.CrashFence.OperationID ||
+		proof.BindingDigest != current.BindingDigest || proof.BranchPath != current.BranchPath ||
+		proof.DevicePath != current.DevicePath || proof.DeviceBound != (current.DevicePath != "") ||
+		(current.DevicePath != "" && (current.DeviceAllocationID == "" || !current.DeviceReservationReleased)) {
+		return false, fmt.Errorf("external physical proof does not match its reclaimed session: %w", errdefs.ErrFailedPrecondition)
+	}
+	return true, nil
 }
 
 // forgetTerminal serializes the physical absence check, optional expiry policy,

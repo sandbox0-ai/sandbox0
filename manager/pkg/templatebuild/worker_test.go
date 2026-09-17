@@ -229,7 +229,7 @@ func templateBuildWorkerTestCapture(build *template.TemplateBuild) *TemplateBuil
 		Version: CaptureMetadataVersion, SnapshotID: build.SnapshotID,
 		StorageFormat:    template.RootFSTemplateStorageFormatBlockCOWV1,
 		HeadGenerationID: "generation-1", SourceOCIDigest: digest.FromString("source").String(),
-		BaseArtifactDigest: digest.FromString("artifact").String(), FormatGeneration: 1,
+		BaseArtifactDigest: digest.FromString("artifact").String(), FormatGeneration: 2,
 		Platform:   ocispec.Platform{OS: "linux", Architecture: "amd64"},
 		CapturedAt: time.Unix(100, 0).UTC(),
 	}

@@ -1,12 +1,13 @@
 # RootFS block-map formats
 
-The default durable importer remains on format one. Manager's
-`rootfs_importer.format_generation: 2` opts new image imports and claims into
-directly addressed compressed ranges after all manager, ctld and driver readers
-have been upgraded. This is not a completed production rollout or cold-start
-acceptance result. Existing sources retain their committed format even when the
-new-image policy changes. The new-image policy does not admit the
-private diagnostic format 10005 or depend on its object namespaces and overlays.
+Format2 is the only supported durable RootFS format. Omitted importer and builder
+format settings select Format2. Format1 descriptors, mappings and explicit import
+policies are rejected. Retained Format1 data must be migrated before deploying
+this version; changing its version field alone is not a valid migration.
+
+Data and mapping ranges are independently addressed and may be compressed.
+Incompressible ranges remain raw within Format2. Format support does not establish
+a cold-start latency guarantee; full command-ready acceptance remains separate.
 
 ## Address and integrity domains
 

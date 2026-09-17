@@ -39,9 +39,9 @@ func TestMappingGeometryDiagnosticDependentReads(t *testing.T) {
 		coldMappingGets  int
 		coldMappingBytes int64
 	}{
-		{1024, 1, 76, 2, 207700},
-		{512, 1, 151, 2, 125032},
-		{256, 2, 303, 3, 96984},
+		{1024, 1, 76, 2, 9702},
+		{512, 1, 151, 2, 14045},
+		{256, 2, 303, 3, 22415},
 	} {
 		t.Run(fmt.Sprintf("entries-%d", test.fanout), func(t *testing.T) {
 			store := newBuildTestStore()

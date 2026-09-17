@@ -319,7 +319,7 @@ func testNodeChannelRunningForkCheckpoint(
 			Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: fork.TargetGenerationID,
 			FilesystemID: fork.TargetSandboxID, SourceOCIDigest: digest.FromString("source-image").String(),
 			BaseArtifactDigest: digest.FromString("base-artifact").String(), BaseBlockRoot: root,
-			CurrentBlockHead: root, WriterEpoch: stage.Identity.WriterEpoch, FormatGeneration: 1,
+			CurrentBlockHead: root, WriterEpoch: stage.Identity.WriterEpoch, FormatGeneration: 2,
 			DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 2, Descriptor: descriptor,
 		},
 		Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),

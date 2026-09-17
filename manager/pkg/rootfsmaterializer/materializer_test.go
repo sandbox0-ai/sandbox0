@@ -190,7 +190,7 @@ func compositeMaterializerGeneration(
 	return sandboxstore.RootFSGeneration{
 		ID: id, DurabilityState: sandboxstore.RootFSGenerationStateCompositeDurable,
 		LocatorVersion: locatorVersion, Descriptor: payload, CreatedAt: createdAt,
-		FormatGeneration: 1, MaterializationTeamID: teamID,
+		FormatGeneration: 2, MaterializationTeamID: teamID,
 		MaterializationPackLane: sandboxstore.RootFSMaterializationPackLane(teamID, 1),
 	}
 }

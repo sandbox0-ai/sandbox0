@@ -120,7 +120,7 @@ func TestCompressedRangesUseExistingEncryptedContextStore(t *testing.T) {
 func TestCompressedRangeEncryptedReadAmplification(t *testing.T) {
 	_, _, expected, _ := compressedFixture(t, 1024)
 	observed := make(map[string]int64)
-	for _, version := range []int{DescriptorVersion, CompressedFormatVersion} {
+	for _, version := range []int{CompressedFormatVersion} {
 		for _, frameBytes := range []int64{64 << 10, 16 << 10} {
 			t.Run(fmt.Sprintf("format%d/frame%d", version, frameBytes), func(t *testing.T) {
 				plain := newBuildTestStore()
@@ -150,7 +150,6 @@ func TestCompressedRangeEncryptedReadAmplification(t *testing.T) {
 			})
 		}
 	}
-	require.Less(t, observed["2/65536"], observed["1/65536"])
 	require.Less(t, observed["2/16384"], observed["2/65536"], "compression does not remove encrypted-frame amplification")
 }
 
@@ -349,7 +348,7 @@ func TestCompressedMappingVersionAndViewBounds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, page, decoded)
 	legacy := page
-	legacy.Version = 0
+	legacy.Version = 1
 	_, err = EncodeMappingPage(legacy)
 	require.Error(t, err)
 	for _, offset := range []uint32{1, CompressedDataRangeBytes} {
@@ -365,7 +364,7 @@ func TestCompressedMappingVersionAndViewBounds(t *testing.T) {
 		require.Error(t, err)
 	}
 	bad := bytes.Clone(payload)
-	binary.BigEndian.PutUint16(bad[8:10], MappingPageVersion)
+	binary.BigEndian.PutUint16(bad[8:10], 1)
 	_, err = DecodeMappingPage(bad)
 	require.Error(t, err)
 }

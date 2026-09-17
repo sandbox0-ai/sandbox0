@@ -92,6 +92,27 @@ type GenerationDescriptor struct {
 }
 
 func (d GenerationDescriptor) Validate() error {
+	if err := d.validateEnvelope(); err != nil {
+		return err
+	}
+	blockDescriptor, err := rootfsblock.DecodeDescriptor(d.Descriptor)
+	if err != nil {
+		return fmt.Errorf("block descriptor: %w", err)
+	}
+	if err := rootfsblock.ValidateFormatBinding(d.FormatGeneration, blockDescriptor.Version); err != nil {
+		return err
+	}
+	if blockDescriptor.MappingRoot.RootDigest != d.CurrentBlockHead {
+		return fmt.Errorf("block descriptor mapping root does not match current_block_head")
+	}
+	if d.DurabilityState == "s3_materialized" && blockDescriptor.CompositeTail != nil ||
+		d.DurabilityState == "composite_durable" && blockDescriptor.CompositeTail == nil {
+		return fmt.Errorf("block descriptor tail does not match durability_state")
+	}
+	return nil
+}
+
+func (d GenerationDescriptor) validateEnvelope() error {
 	if d.Version != GenerationDescriptorVersion {
 		return fmt.Errorf("unsupported generation descriptor version %d", d.Version)
 	}
@@ -121,20 +142,6 @@ func (d GenerationDescriptor) Validate() error {
 	}
 	if len(d.Descriptor) == 0 || len(d.Descriptor) > GenerationDescriptorMaxBytes {
 		return fmt.Errorf("descriptor must contain 1..%d bytes", GenerationDescriptorMaxBytes)
-	}
-	blockDescriptor, err := rootfsblock.DecodeDescriptor(d.Descriptor)
-	if err != nil {
-		return fmt.Errorf("block descriptor: %w", err)
-	}
-	if err := rootfsblock.ValidateFormatBinding(d.FormatGeneration, blockDescriptor.Version); err != nil {
-		return err
-	}
-	if blockDescriptor.MappingRoot.RootDigest != d.CurrentBlockHead {
-		return fmt.Errorf("block descriptor mapping root does not match current_block_head")
-	}
-	if d.DurabilityState == "s3_materialized" && blockDescriptor.CompositeTail != nil ||
-		d.DurabilityState == "composite_durable" && blockDescriptor.CompositeTail == nil {
-		return fmt.Errorf("block descriptor tail does not match durability_state")
 	}
 	return nil
 }
@@ -621,16 +628,24 @@ type Mount struct {
 }
 
 func (r StageRequest) Validate() error {
-	return r.validate(true)
+	return r.validate(true, false)
 }
 
 // ValidateDurableBinding validates the immutable Stage binding after the raw
 // writer token has been deliberately removed from node-local durable state.
 func (r StageRequest) ValidateDurableBinding() error {
-	return r.validate(false)
+	return r.validate(false, false)
 }
 
-func (r StageRequest) validate(requireWriterToken bool) error {
+// ValidateTerminalBinding validates an opaque historical binding envelope. It
+// does not establish terminal authority or validate an executable RootFS. Use
+// only with independently verified exact terminal evidence; active recovery,
+// Stage and Consume must continue to validate the supported block format.
+func (r StageRequest) ValidateTerminalBinding() error {
+	return r.validate(false, true)
+}
+
+func (r StageRequest) validate(requireWriterToken, terminalOnly bool) error {
 	if r.BindingVersion != WriterBindingVersion {
 		return fmt.Errorf("unsupported binding_version %d", r.BindingVersion)
 	}
@@ -665,7 +680,13 @@ func (r StageRequest) validate(requireWriterToken bool) error {
 		return fmt.Errorf("writer_epoch must be positive")
 	}
 	if r.Generation != nil {
-		if err := r.Generation.Validate(); err != nil {
+		var err error
+		if terminalOnly {
+			err = r.Generation.validateEnvelope()
+		} else {
+			err = r.Generation.Validate()
+		}
+		if err != nil {
 			return fmt.Errorf("generation: %w", err)
 		}
 		if r.Generation.GenerationID != r.InitialGeneration ||

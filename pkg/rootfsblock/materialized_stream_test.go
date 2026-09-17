@@ -35,8 +35,8 @@ func TestMaterializedMappingPublishedBeforeImageEOF(t *testing.T) {
 }
 
 // These identities were captured from the pre-streaming implementation. They
-// cover empty roots, fanout boundaries, sparse gaps, trailing zeros and both
-// formats, independently of the new tree construction algorithm.
+// cover empty roots, fanout boundaries, sparse gaps and trailing zeros in
+// Format2, independently of the new tree construction algorithm.
 func TestMaterializedGenerationPreservesGoldenPublication(t *testing.T) {
 	var cases []struct {
 		Version       int    `json:"version"`
@@ -50,7 +50,7 @@ func TestMaterializedGenerationPreservesGoldenPublication(t *testing.T) {
 	raw, err := os.ReadFile("testdata/materialized_golden.json")
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &cases))
-	require.Len(t, cases, 72)
+	require.Len(t, cases, 36)
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("version-%d/fanout-%d/entries-%d", tc.Version, tc.Fanout, tc.NonzeroRanges), func(t *testing.T) {
 			payload := make([]byte, (tc.NonzeroRanges*3+7)*LogicalBlockSize)

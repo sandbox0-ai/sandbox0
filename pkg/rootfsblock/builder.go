@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultDataRangeBytes = 8 << 20
+	DefaultDataRangeBytes = CompressedDataRangeBytes
 	DefaultPackBytes      = 64 << 20
 	DefaultPageEntries    = 1024
 )
@@ -26,7 +26,7 @@ type ImmutableObjectPublisher interface {
 }
 
 type BuildOptions struct {
-	// Zero retains the version-one publication identity and defaults.
+	// Zero selects the current durable Format2 defaults.
 	FormatVersion      int `json:",omitempty"`
 	DataRangeBytes     int
 	PackBytes          int
@@ -239,14 +239,11 @@ func (b *generationBuilder) publishPack(pending []pendingDataEntry) ([]MappingEn
 	payload := make([]byte, 0, size)
 	entries := make([]MappingEntry, len(pending))
 	for index, item := range pending {
-		data := item.data
-		if b.options.formatVersion() == CompressedFormatVersion {
-			var err error
-			data, item.entry.Object, err = b.encoder.encode(b.ctx, item.data)
-			if err != nil {
-				return nil, err
-			}
+		data, object, err := b.encoder.encode(b.ctx, item.data)
+		if err != nil {
+			return nil, err
 		}
+		item.entry.Object = object
 		item.entry.Object.Offset = int64(len(payload))
 		entries[index] = item.entry
 		payload = append(payload, data...)
@@ -326,13 +323,9 @@ func (b *generationBuilder) prepareMappingPage(page MappingPage) (publishedPage,
 	if err != nil {
 		return publishedPage{}, err
 	}
-	stored := payload
-	object := ObjectRange{Length: int64(len(payload)), Checksum: digest.FromBytes(payload).String()}
-	if b.options.formatVersion() == CompressedFormatVersion {
-		stored, object, err = b.encoder.encode(b.ctx, payload)
-		if err != nil {
-			return publishedPage{}, err
-		}
+	stored, object, err := b.encoder.encode(b.ctx, payload)
+	if err != nil {
+		return publishedPage{}, err
 	}
 	return publishedPage{
 		start: page.StartBlock, count: page.BlockCount, level: page.Level, payload: payload,
@@ -372,20 +365,17 @@ func (b *generationBuilder) publish(kind string, payload []byte) (string, error)
 // NormalizeBuildOptions applies production defaults and validates immutable
 // block publication bounds.
 func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
+	if options.FormatVersion == 0 {
+		options.FormatVersion = DescriptorVersion
+	}
 	if options.MappingGroupPolicy != "" && (options.MappingGroupPolicy != ContiguousMappingV1 || options.FormatVersion != CompressedFormatVersion) {
 		return BuildOptions{}, fmt.Errorf("unsupported mapping group policy or format")
 	}
-	if options.FormatVersion == DescriptorVersion {
-		options.FormatVersion = 0
-	}
-	if options.FormatVersion != 0 && options.FormatVersion != CompressedFormatVersion {
+	if options.FormatVersion != DescriptorVersion {
 		return BuildOptions{}, fmt.Errorf("unsupported build format version %d", options.FormatVersion)
 	}
 	if options.DataRangeBytes == 0 {
 		options.DataRangeBytes = DefaultDataRangeBytes
-		if options.formatVersion() == CompressedFormatVersion {
-			options.DataRangeBytes = CompressedDataRangeBytes
-		}
 	}
 	if options.PackBytes == 0 {
 		options.PackBytes = DefaultPackBytes
@@ -402,7 +392,7 @@ func NormalizeBuildOptions(options BuildOptions) (BuildOptions, error) {
 	if options.DataRangeBytes <= 0 || options.DataRangeBytes > MaxDataRangeBytes || options.DataRangeBytes%LogicalBlockSize != 0 {
 		return BuildOptions{}, fmt.Errorf("data range must be a positive block-aligned value no greater than %d", MaxDataRangeBytes)
 	}
-	if options.formatVersion() == CompressedFormatVersion && options.DataRangeBytes > CompressedDataRangeBytes {
+	if options.DataRangeBytes > CompressedDataRangeBytes {
 		return BuildOptions{}, fmt.Errorf("compressed data range exceeds %d bytes", CompressedDataRangeBytes)
 	}
 	if options.PackBytes < options.DataRangeBytes || options.PackBytes > DefaultPackBytes ||

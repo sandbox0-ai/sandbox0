@@ -99,6 +99,10 @@ type RuntimeNodePoolSnapshot struct {
 	ClusterActiveLeases     int
 	ClusterReadySlots       int
 	ClusterFixedUsableSlots int
+	ClusterFixedCPU         int64
+	ClusterFixedMemory      int64
+	PlacementNodes          []RuntimeNodePlacementCapacity
+	DemandShapes            []RuntimeNodePoolDemandShape
 	// Workload demand excludes retiring slots. Their resource leases remain
 	// fully accounted above and continue to prevent physical node removal.
 	ClusterWorkloadCPU    int64
@@ -479,6 +483,9 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 		&snapshot.ClusterFixedUsableSlots,
 	); err != nil {
 		return nil, fmt.Errorf("query runtime node pool cluster usage: %w", err)
+	}
+	if err := s.loadRuntimeNodePoolPlacement(ctx, snapshot); err != nil {
+		return nil, err
 	}
 	return snapshot, nil
 }

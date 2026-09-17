@@ -317,11 +317,6 @@ func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, in
 	requiredCPU := snapshot.ClusterWorkloadCPU + snapshot.DemandCPUMillicores + w.config.HeadroomCPUMillicores
 	requiredMemory := snapshot.ClusterWorkloadMemory + snapshot.DemandMemoryBytes + w.config.HeadroomMemoryBytes
 	requiredSlots := snapshot.ClusterWorkloadSlots + snapshot.DemandSlots + w.config.HeadroomSlots
-	requiredResourceNodes := max(
-		ceilDiv(requiredCPU, w.config.NodeCPUMillicores),
-		ceilDiv(requiredMemory, w.config.NodeMemoryBytes),
-		w.config.FixedNodes,
-	)
 	// With the supported single fixed worker, any usable carrier proves a live
 	// fixed node. A retiring carrier must not erase that node's CPU/memory credit,
 	// but only its actual usable carriers can cover the slot requirement.
@@ -330,19 +325,57 @@ func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, in
 	if fixedUsableSlots > 0 {
 		liveFixedNodes = 1
 	}
+	fixedCPU, fixedMemory := snapshot.ClusterFixedCPU, snapshot.ClusterFixedMemory
+	if liveFixedNodes == 0 {
+		fixedCPU, fixedMemory = 0, 0
+	} else {
+		// Legacy snapshots without a physical-capacity projection retain their
+		// homogeneous baseline. The PG store reports the actual admission budget.
+		if fixedCPU <= 0 {
+			fixedCPU = w.config.NodeCPUMillicores
+		}
+		if fixedMemory <= 0 {
+			fixedMemory = w.config.NodeMemoryBytes
+		}
+	}
 	elastic := max(
-		requiredResourceNodes-liveFixedNodes,
+		ceilDiv(requiredCPU-fixedCPU, w.config.NodeCPUMillicores),
+		ceilDiv(requiredMemory-fixedMemory, w.config.NodeMemoryBytes),
 		ceilDiv(int64(requiredSlots)-int64(fixedUsableSlots), int64(w.config.ElasticSlotsPerNode)),
+		w.config.FixedNodes-liveFixedNodes,
 	)
 	// Live sandboxes cannot be consolidated by pretending their leases can move
 	// to the fixed worker. Lifecycle hooks remain the final race-safe authority.
-	busyElastic := 0
+	busyElastic, readyElastic := 0, 0
 	for _, node := range snapshot.Nodes {
 		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State != sandboxstore.RuntimeNodeInstanceRevoked && node.ActiveLeases > 0 {
 			busyElastic++
 		}
+		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive {
+			readyElastic++
+		}
 	}
 	elastic = max(elastic, busyElastic)
+	for _, demand := range snapshot.DemandShapes {
+		// Add a progress floor only for a request a fresh worker can actually
+		// satisfy. In-flight nodes already cover readyElastic+1, preventing
+		// repeated purchases for the same fragmentation during enrollment.
+		if demand.CPUMillicores > w.config.NodeCPUMillicores || demand.MemoryBytes > w.config.NodeMemoryBytes || demand.Slots > w.config.ElasticSlotsPerNode {
+			continue
+		}
+		fits := false
+		for _, node := range snapshot.PlacementNodes {
+			if node.PhysicalCPU >= demand.CPUMillicores && node.PhysicalMemory >= demand.MemoryBytes &&
+				node.FreeCPU >= demand.CPUMillicores && node.FreeMemory >= demand.MemoryBytes && node.ReadySlots >= demand.Slots {
+				fits = true
+				break
+			}
+		}
+		if !fits {
+			elastic = max(elastic, readyElastic+1)
+			break
+		}
+	}
 	requiredNodes := liveFixedNodes + elastic
 	elastic = min(max(elastic, w.config.MinElasticNodes), w.config.MaxElasticNodes)
 	// A lowered operator ceiling limits new purchases, not existing workloads.

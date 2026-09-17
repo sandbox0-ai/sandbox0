@@ -107,6 +107,18 @@ capped by either setting. Never advertise hypothetical carrier capacity: the
 corresponding job groups, node profile, NBD pool and network must exist first.
 This change does not dynamically grow a 30-carrier node to 200 carriers.
 
+The fixed worker contributes its observed admission CPU/memory budget separately
+from the elastic worker shape. A density-profile fixed worker must not cause a
+purchase merely because its leases exceed the smaller elastic budget. Physical
+per-request validation and ctld pressure protection remain unchanged.
+
+Unsatisfied demand also retains its indivisible CPU/memory/slot shape. When no
+live, unfenced node can fit a request that is within the configured fresh-worker
+budget, a placement-progress floor requests one worker beyond the ready elastic
+set. An already-enrolling worker covers that floor, so the same fragmented
+request cannot repeatedly purchase workers while enrollment is in progress.
+This is bounded progress, not optimal bin-packing or live workload migration.
+
 The controller uses leased workload CPU/memory and slots, unsatisfied claim
 pressure, and explicit `headroom_*`; it does not use guest CPU utilization as
 permission to overcommit. Retiring workloads are excluded from new workload
@@ -161,9 +173,10 @@ releasing IP/NBD resources. Reducing a Nomad metadata watermark can invalidate
 an active system allocation and is **not** an acceptable live shrink protocol.
 Persist desired inventory in the existing regional/node authority boundaries;
 do not add another independent capacity truth or treat speculative inventory
-as claim-ready. Also account for per-node fragmentation and impossible request
-shapes, not only aggregate free CPU/memory. These are prerequisites for the
-adaptive controller, not capabilities claimed by the current static profile.
+as claim-ready. The resource-fragmentation progress floor does not yet provide
+compatibility-specific inventory planning or an optimal placement strategy.
+These remain prerequisites for the adaptive controller, not capabilities
+claimed by the current static profile.
 
 Acceptance must cover 200 carriers with resources for only 30 guests, 30
 carriers with resources for 200, mixed security classes, failed claim followed

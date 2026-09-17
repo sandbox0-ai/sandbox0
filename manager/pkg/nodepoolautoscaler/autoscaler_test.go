@@ -36,9 +36,6 @@ func (f *fakeStore) UpdateRuntimeNodePoolScaleState(_ context.Context, _ string,
 	if direction == "in" {
 		f.state.LastScaleInAt = testNow
 	}
-	if direction == "in" {
-		f.state.LastScaleInAt = testNow
-	}
 	f.updates = append(f.updates, f.state)
 	return &f.state, nil
 }

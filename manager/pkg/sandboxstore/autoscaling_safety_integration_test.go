@@ -34,6 +34,9 @@ func TestAutoscalingRetainsLeasesWhenCapacityHeartbeatExpiresIntegration(t *test
 	snapshot, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
 	require.NoError(t, err)
 	require.Zero(t, snapshot.ClusterFixedUsableSlots)
+	require.Empty(t, snapshot.PlacementNodes)
+	require.Zero(t, snapshot.ClusterFixedCPU)
+	require.Zero(t, snapshot.ClusterFixedMemory)
 	_, err = pool.Exec(ctx, `DELETE FROM manager.runtime_node_fences WHERE node_uid=$1`, registration.NodeUID)
 	require.NoError(t, err)
 	_, err = store.AcquireRuntimeSlot(ctx, &AcquireRuntimeSlotRequest{

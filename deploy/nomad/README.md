@@ -138,7 +138,11 @@ then tune from measurements of create bursts, worker readiness, and idle cost:
 | `demand_ttl` | `5m` | Bounded pressure signal; this is not a durable waiting queue |
 | `headroom_*` | Workload-dependent | Reserve capacity for arrivals during measured node preparation time |
 
-An enrolling worker and a live in-progress drain block another scale-in pass.
+An enrolling worker blocks scale-in while healthy admitted workers do not yet
+cover the provider's current desired count. Historical enrollment records cannot
+block an otherwise fully ready pool forever; their identity and cleanup
+obligations are retained independently. A live in-progress drain blocks another
+scale-in pass.
 Running sandboxes are not migrated to make an aggregate packing calculation
 come true: busy elastic nodes remain protected even after an operator lowers
 the purchase ceiling. The lifecycle transaction remains the final authority

@@ -89,6 +89,30 @@ func TestExpiredPressureCannotCancelWarmingNodes(t *testing.T) {
 	}
 }
 
+func TestHistoricalEnrollmentCannotBlockFullyReadyDesiredCapacity(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
+	w := testWorker(t, store, cloud)
+	w.config.MaxScaleInStep = 1
+	store.snapshot.ClusterFixedUsableSlots = 512
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
+		{PoolKind: "elastic", State: "enrolling"},
+		{PoolKind: "elastic", State: "active", ProviderReady: false},
+		{PoolKind: "elastic", State: "active", CapacityLive: true, ProviderReady: true, ActiveLeases: 1},
+		{PoolKind: "elastic", State: "active", CapacityLive: true, ProviderReady: true},
+	}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "scale_in_stabilizing", d.Action)
+	require.Empty(t, cloud.sets)
+	store.state.LowPressureSince = testNow.Add(-11 * time.Minute)
+	d, err = w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, d.TargetElastic)
+	require.Equal(t, []int{1}, cloud.sets)
+	// Historical records and their cleanup obligations are not revoked or erased.
+	require.Equal(t, "enrolling", store.snapshot.Nodes[0].State)
+}
+
 func TestBusyElasticNodesCannotBeVirtuallyPackedOntoFixedNode(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
 	w := testWorker(t, store, cloud)

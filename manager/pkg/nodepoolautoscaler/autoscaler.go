@@ -210,6 +210,13 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	}
 	decision.CapacityLimited = required > liveFixed+w.config.MaxElasticNodes
 	now := w.config.Now().UTC()
+	readyElastic := 0
+	for _, node := range snapshot.Nodes {
+		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
+			node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive {
+			readyElastic++
+		}
+	}
 
 	if target > current {
 		// Renewed pressure invalidates the quiet window even when purchase rate
@@ -224,13 +231,6 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 			now.Sub(snapshot.State.LastScaleOutAt) < w.config.ScaleOutCooldown {
 			decision.Action = "scale_out_cooldown"
 			return decision, nil
-		}
-		readyElastic := 0
-		for _, node := range snapshot.Nodes {
-			if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
-				node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive {
-				readyElastic++
-			}
 		}
 		// Include instances which have not registered yet by subtracting observed
 		// ready workers from cloud desired capacity, rather than counting only DB rows.
@@ -269,7 +269,11 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 			decision.Action = "scale_in_waiting_for_drain"
 			return decision, nil
 		}
-		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
+		// Old enrollment records remain until their independent cleanup finishes.
+		// They cannot represent pending desired capacity once healthy, admitted
+		// workers cover the provider's entire current desired count. This only
+		// permits normal fenced scale-in; it never revokes historical identity.
+		if readyElastic < current && node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
 			(node.State == sandboxstore.RuntimeNodeInstanceEnrolling ||
 				(node.State == sandboxstore.RuntimeNodeInstanceActive && !node.ProviderReady)) {
 			decision.Action = "scale_in_waiting_for_enrollment"

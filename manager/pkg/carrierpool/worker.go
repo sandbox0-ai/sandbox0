@@ -93,9 +93,10 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 			if n.Pending != pending {
 				continue
 			}
-			if n.Pending && n.Retiring && len(n.Groups) > 8 {
+			if n.Pending && (n.StaleIdentity || (n.Retiring && len(n.Groups) > 8)) {
 				// Revocation proves node lifecycle cleanup. Replace an interrupted
-				// refill with a fenced membership-only retirement intent.
+				// refill with retirement, or rebind to an admitted successor boot
+				// only after the store proves all predecessor custody is gone.
 				if err := w.prepare(ctx, &n); err != nil {
 					return 0, err
 				}

@@ -62,7 +62,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
             WHERE c.cluster_id=$1 AND (c.heartbeat_expires_at>NOW() OR r.pending OR
                 (cardinality(r.allowed_groups)>8 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
                     WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked')))
-            ORDER BY c.node_id,(r.pending AND r.node_boot_id=c.node_boot_id) DESC NULLS LAST,c.updated_at DESC)
+            ORDER BY c.node_id,(c.heartbeat_expires_at>NOW()) DESC,c.updated_at DESC)
         SELECT c.cluster_id,c.node_id,c.node_uid,c.node_boot_id,
             GREATEST(0,COALESCE(NULLIF(c.admission_cpu_millicores,0),c.cpu_millicores)-
                 (SELECT COALESCE(SUM(cpu_millicores),0) FROM manager.runtime_resource_leases
@@ -172,6 +172,10 @@ func (s *PGSandboxStore) BeginRuntimeCarrierResize(ctx context.Context, n Runtim
             allowed_groups=EXCLUDED.allowed_groups,retained_allocations=EXCLUDED.retained_allocations,
             max_carriers=EXCLUDED.max_carriers,compatibility_capacity=EXCLUDED.compatibility_capacity,updated_at=NOW()
 		WHERE manager.runtime_carrier_resizes.revision=$6 AND (NOT manager.runtime_carrier_resizes.pending
+			OR (manager.runtime_carrier_resizes.node_uid=EXCLUDED.node_uid
+				AND manager.runtime_carrier_resizes.node_boot_id<>EXCLUDED.node_boot_id
+				AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases l WHERE l.cluster_id=$1 AND l.node_uid=$3
+					AND l.node_boot_id=manager.runtime_carrier_resizes.node_boot_id AND l.lease_state='active'))
 			OR (cardinality(EXCLUDED.allowed_groups)=8 AND cardinality(EXCLUDED.retained_allocations)=0
 				AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f WHERE f.cluster_id=$1 AND f.node_id=$2
 					AND f.node_uid=$3 AND f.state='revoked')))

@@ -197,3 +197,41 @@ func TestRevokedNodeCanReplaceInterruptedRefillOnlyWithRetirementIntegration(t *
 	require.NoError(t, err)
 	require.Empty(t, nodes, "completed retirement leaves the active reconciliation set")
 }
+
+func TestCarrierResizeRebindsAdmittedSuccessorWithoutDiscardingOldCustodyIntegration(t *testing.T) {
+	s, request, n := carrierResizeFixture(t)
+	_, err := s.AcquireRuntimeSlot(t.Context(), request)
+	require.NoError(t, err)
+	n.Revision, err = s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{"carrier-allocation-a", "carrier-allocation-b"})
+	require.NoError(t, err)
+	_, err = s.pool.Exec(t.Context(), `UPDATE manager.runtime_node_capacities SET heartbeat_expires_at=NOW()-INTERVAL '1 minute';
+		INSERT INTO manager.runtime_node_capacities(cluster_id,node_id,node_uid,node_boot_id,cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,heartbeat_expires_at)
+		SELECT cluster_id,node_id,node_uid,'successor-boot',cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,NOW()+INTERVAL '1 minute'
+		FROM manager.runtime_node_capacities`)
+	require.NoError(t, err)
+	nodes, err := s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "successor-boot", nodes[0].NodeBootID)
+	require.True(t, nodes[0].Pending)
+	require.True(t, nodes[0].StaleIdentity)
+	_, err = s.BeginRuntimeCarrierResize(t.Context(), nodes[0], 128, carrierBaseline(), []string{})
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict, "reboot alone never releases predecessor custody")
+}
+
+func TestEmptyCarrierResizeCanRebindAdmittedSuccessorIntegration(t *testing.T) {
+	s, _, n := carrierResizeFixture(t)
+	n.Revision, _ = s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{"carrier-allocation-a", "carrier-allocation-b"})
+	require.Positive(t, n.Revision)
+	_, err := s.pool.Exec(t.Context(), `UPDATE manager.runtime_node_capacities SET heartbeat_expires_at=NOW()-INTERVAL '1 minute';
+		INSERT INTO manager.runtime_node_capacities(cluster_id,node_id,node_uid,node_boot_id,cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,heartbeat_expires_at)
+		SELECT cluster_id,node_id,node_uid,'successor-boot',cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,NOW()+INTERVAL '1 minute'
+		FROM manager.runtime_node_capacities`)
+	require.NoError(t, err)
+	nodes, err := s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	revision, err := s.BeginRuntimeCarrierResize(t.Context(), nodes[0], 128, carrierBaseline(), []string{})
+	require.NoError(t, err)
+	require.Greater(t, revision, n.Revision)
+	require.Error(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil), "predecessor completion must remain fenced")
+}

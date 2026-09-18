@@ -106,3 +106,30 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 		require.Error(t, err, variable)
 	}
 }
+
+func TestAdaptiveCarrierCatalogKeepsOnlyEnrollmentAnchorsUnconditional(t *testing.T) {
+	body, err := os.ReadFile("warm-slot.nomad")
+	require.NoError(t, err)
+	anchors, extra := 0, 0
+	for shard := range nomadinventory.WarmJobShardCount {
+		job, err := jobspec2.ParseWithConfig(&jobspec2.ParseConfig{Path: "warm-slot.nomad", Body: body, Strict: true,
+			ArgVars: []string{"standard_slots=240", "privileged_slots=16", "adaptive_carriers=true", fmt.Sprintf("warm_shard=%d", shard)}})
+		require.NoError(t, err)
+		job.Canonicalize()
+		require.Equal(t, "v1", job.Meta["sandbox0_adaptive_carriers"])
+		for _, g := range job.TaskGroups {
+			if len(g.Constraints) == 0 {
+				anchors++
+				continue
+			}
+			extra++
+			require.Len(t, g.Constraints, 2)
+			require.Equal(t, ">=", g.Constraints[0].Operand)
+			require.Equal(t, "${node.unique.id}", g.Constraints[1].LTarget)
+			require.Equal(t, "set_contains_any", g.Constraints[1].Operand)
+			require.Equal(t, "00000000-0000-0000-0000-000000000000", g.Constraints[1].RTarget)
+		}
+	}
+	require.Equal(t, 8, anchors)
+	require.Equal(t, 248, extra)
+}

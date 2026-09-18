@@ -2,6 +2,7 @@ package nodepoollifecycle
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,6 +85,9 @@ func (n *NomadClient) CarrierCatalog(ctx context.Context, node string) ([]string
 		if err != nil || id.String() != node {
 			return nil, fmt.Errorf("invalid carrier node identity")
 		}
+		if _, reserved, identityErr := carrierEpochMember(id); identityErr != nil || reserved {
+			return nil, fmt.Errorf("carrier node identity is reserved")
+		}
 		var host struct {
 			ID, NodePool string
 			Meta         map[string]string
@@ -157,10 +161,66 @@ func carrierMembers(value string) (map[string]bool, error) {
 			return nil, fmt.Errorf("invalid carrier node membership")
 		}
 		result[member] = true
+		if epoch, reserved, memberErr := carrierEpochMember(id); memberErr != nil {
+			return nil, memberErr
+		} else if reserved && epoch > 0 {
+			delete(result, member)
+			continue
+		}
 	}
 	delete(result, carrierEmptyNodes)
 	if len(result) > 300 {
 		return nil, fmt.Errorf("carrier node membership exceeds bound")
+	}
+	return result, nil
+}
+
+func carrierEpochMarker(revision int64) (string, error) {
+	if revision <= 0 {
+		return "", fmt.Errorf("invalid carrier constraint epoch")
+	}
+	value := uint64(revision)
+	return fmt.Sprintf("%08x-%04x-%04x-0000-000000000000",
+		value>>32, (value>>16)&0xffff, value&0xffff), nil
+}
+
+func carrierEpochMember(id uuid.UUID) (epoch int64, reserved bool, err error) {
+	if binary.BigEndian.Uint64(id[8:]) != 0 {
+		return 0, false, nil
+	}
+	value := binary.BigEndian.Uint64(id[:8])
+	if value == 0 {
+		return 0, true, nil
+	}
+	if value > uint64(^uint64(0)>>1) {
+		return 0, true, fmt.Errorf("carrier constraint epoch exceeds bound")
+	}
+	return int64(value), true, nil
+}
+
+func carrierGroupEpoch(group carrierGroup) (int64, error) {
+	result := int64(0)
+	if len(group.Constraints) != 2 {
+		return result, nil
+	}
+	markers := 0
+	for _, member := range strings.Split(group.Constraints[1].RTarget, ",") {
+		id, err := uuid.Parse(member)
+		if err != nil || id.String() != member {
+			return 0, fmt.Errorf("invalid carrier constraint epoch membership")
+		}
+		epoch, reserved, err := carrierEpochMember(id)
+		if err != nil {
+			return 0, err
+		}
+		if !reserved || epoch == 0 {
+			continue
+		}
+		if markers != 0 {
+			return 0, fmt.Errorf("carrier constraint has multiple epochs")
+		}
+		markers++
+		result = epoch
 	}
 	return result, nil
 }
@@ -250,40 +310,33 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 		if err := json.Unmarshal(raw["TaskGroups"], &taskGroups); err != nil {
 			return err
 		}
-		// Job-level metadata is shared by every task group in a shard. Updating
-		// its epoch there would make Nomad replace even unchanged allocations,
-		// leaving a live regional heartbeat briefly pointing at a removed socket.
-		// Read the legacy job epoch for compatibility, but fence only with
-		// metadata attached to the groups whose membership actually changes.
+		// Job-level metadata is shared by every task group in a shard. Keep it
+		// immutable for compatibility, and fence newer writes with a reserved
+		// non-node member in the placement set. An existing real node remains a
+		// matching set member, so preserving its allocation needs no task update.
 		for _, group := range taskGroups {
-			var groupMeta map[string]string
-			if value := group["Meta"]; value != nil {
-				if err := json.Unmarshal(value, &groupMeta); err != nil {
+			var identity carrierGroup
+			if err := json.Unmarshal(group["Name"], &identity.Name); err != nil {
+				return err
+			}
+			if value := group["Constraints"]; value != nil {
+				if err := json.Unmarshal(value, &identity.Constraints); err != nil {
 					return err
 				}
 			}
-			value := groupMeta[key]
-			if value == "" {
-				continue
-			}
-			groupEpoch, parseErr := strconv.ParseInt(value, 10, 64)
-			if parseErr != nil || groupEpoch <= 0 {
-				return fmt.Errorf("invalid carrier group epoch")
+			groupEpoch, groupEpochErr := carrierGroupEpoch(identity)
+			if groupEpochErr != nil {
+				return groupEpochErr
 			}
 			if groupEpoch > previous {
-				previous = groupEpoch
-				previousOwner = groupMeta["sandbox0_carrier_node"]
-			} else if groupEpoch == previous && groupMeta["sandbox0_carrier_node"] != previousOwner {
-				return fmt.Errorf("carrier epoch has conflicting owners")
+				previousOwner = ""
 			}
-			if groupEpoch == previous && previousOwner != node {
-				return fmt.Errorf("carrier epoch belongs to another node")
-			}
+			previous = max(previous, groupEpoch)
 		}
 		if previous > revision {
 			return fmt.Errorf("stale carrier resize revision")
 		}
-		if previous == revision && previousOwner != node {
+		if previous == revision && previousOwner != "" && previousOwner != node {
 			return fmt.Errorf("carrier epoch belongs to another node")
 		}
 		changed := false
@@ -325,26 +378,14 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 				names = append(names, member)
 			}
 			sort.Strings(names)
+			marker, markerErr := carrierEpochMarker(revision)
+			if markerErr != nil {
+				return markerErr
+			}
+			names = append(names, marker)
+			sort.Strings(names)
 			constraints[1].RTarget = strings.Join(names, ",")
-			if len(names) == 0 {
-				constraints[1].RTarget = carrierEmptyNodes
-			}
 			group["Constraints"], err = json.Marshal(constraints)
-			if err != nil {
-				return err
-			}
-			var groupMeta map[string]string
-			if value := group["Meta"]; value != nil {
-				if err := json.Unmarshal(value, &groupMeta); err != nil {
-					return err
-				}
-			}
-			if groupMeta == nil {
-				groupMeta = map[string]string{}
-			}
-			groupMeta[key] = strconv.FormatInt(revision, 10)
-			groupMeta["sandbox0_carrier_node"] = node
-			group["Meta"], err = json.Marshal(groupMeta)
 			if err != nil {
 				return err
 			}

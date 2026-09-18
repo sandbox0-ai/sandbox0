@@ -77,12 +77,30 @@ func TestCarrierPlansAreCASFencedAndPreserveRuntimeFields(t *testing.T) {
 	for index, raw := range current["TaskGroups"].([]any) {
 		require.Equal(t, "exact", raw.(map[string]any)["UnrelatedRuntimeField"].(map[string]any)["preserve"])
 		groupMeta, _ := raw.(map[string]any)["Meta"].(map[string]any)
+		require.Empty(t, groupMeta)
+		groupConstraints := raw.(map[string]any)["Constraints"].([]any)
+		epoch := int64(0)
+		if len(groupConstraints) == 2 {
+			first := groupConstraints[0].(map[string]any)
+			second := groupConstraints[1].(map[string]any)
+			var err error
+			epoch, err = carrierGroupEpoch(carrierGroup{
+				Name: fmt.Sprintf("warm-%d", index),
+				Constraints: []carrierConstraint{
+					{RTarget: first["RTarget"].(string)},
+					{RTarget: second["RTarget"].(string)},
+				},
+			})
+			require.NoError(t, err)
+		}
 		if index == 8 {
-			require.Equal(t, map[string]any{
-				"sandbox0_carrier_epoch": "10", "sandbox0_carrier_node": testCarrierNode,
-			}, groupMeta)
+			require.Equal(t, int64(10), epoch)
+			second := groupConstraints[1].(map[string]any)
+			members, memberErr := carrierMembers(second["RTarget"].(string))
+			require.NoError(t, memberErr)
+			require.True(t, members[testCarrierNode])
 		} else {
-			require.Empty(t, groupMeta["sandbox0_carrier_epoch"], "unchanged carrier must not be invalidated")
+			require.Zero(t, epoch, "unchanged carrier must not be invalidated")
 		}
 	}
 	conflict = true

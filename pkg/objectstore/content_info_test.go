@@ -123,7 +123,7 @@ func TestHeadContentIsMetadataNotPayloadAuthentication(t *testing.T) {
 	require.ErrorContains(t, err, "decrypt object chunk")
 }
 
-func TestHeadContentRejectsMalformedEnvelopeAndHonorsLegacyMode(t *testing.T) {
+func TestHeadContentRejectsMalformedEnvelope(t *testing.T) {
 	base := NewMemoryStore(t.Name())
 	cfg := EncryptionConfig{Enabled: true, KeyEncryptor: reversibleTestEncryptor{}, ChunkSize: 8}
 	store := Encrypting(base, cfg).(*encryptedStore)
@@ -134,9 +134,6 @@ func TestHeadContentRejectsMalformedEnvelopeAndHonorsLegacyMode(t *testing.T) {
 	require.NoError(t, base.Put("plain", bytes.NewReader([]byte("legacy payload"))))
 	_, err = HeadContent(store, "plain")
 	require.ErrorContains(t, err, "required encrypted-object header")
-	info, err := HeadContent(EncryptingLegacyReadCompatible(base, cfg), "plain")
-	require.NoError(t, err)
-	require.Equal(t, int64(len("legacy payload")), info.Size)
 	require.NoError(t, store.Put("valid", bytes.NewReader([]byte("payload"))))
 	header, _, _, err := store.readEncryptedObjectHeader(context.Background(), "valid", false)
 	require.NoError(t, err)

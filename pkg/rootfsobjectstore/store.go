@@ -1,7 +1,7 @@
 // Package rootfsobjectstore constructs the regional RootFS object store from
 // the shared manager/ctld configuration, including optional envelope
-// encryption. Runtime services and one-time migration tools must use the same
-// constructor so credentials and encryption cannot drift.
+// encryption. Runtime services share this constructor so credentials and
+// encryption cannot drift.
 package rootfsobjectstore
 
 import (
@@ -18,24 +18,12 @@ func Create(
 	cfg config.RootFSObjectStorageConfig,
 	observer objectstore.RequestObserver,
 ) (objectstore.Store, error) {
-	return create(cfg, observer, false)
-}
-
-// CreateLegacyReadCompatible constructs the one-time migration source reader
-// for regions that enabled object encryption after some legacy layers already
-// existed. Callers must independently verify every plaintext object's size and
-// digest; target and active runtime stores must continue to use Create.
-func CreateLegacyReadCompatible(
-	cfg config.RootFSObjectStorageConfig,
-	observer objectstore.RequestObserver,
-) (objectstore.Store, error) {
-	return create(cfg, observer, true)
+	return create(cfg, observer)
 }
 
 func create(
 	cfg config.RootFSObjectStorageConfig,
 	observer objectstore.RequestObserver,
-	allowLegacyPlaintext bool,
 ) (objectstore.Store, error) {
 	store, err := objectstore.Create(objectstore.Config{
 		Type: cfg.Type, Bucket: cfg.Bucket, Region: cfg.Region, Endpoint: cfg.Endpoint,
@@ -45,20 +33,19 @@ func create(
 	if err != nil {
 		return nil, err
 	}
-	return wrapEncryption(store, cfg, allowLegacyPlaintext)
+	return WrapEncryption(store, cfg)
 }
 
 func WrapEncryption(
 	store objectstore.Store,
 	cfg config.RootFSObjectStorageConfig,
 ) (objectstore.Store, error) {
-	return wrapEncryption(store, cfg, false)
+	return wrapEncryption(store, cfg)
 }
 
 func wrapEncryption(
 	store objectstore.Store,
 	cfg config.RootFSObjectStorageConfig,
-	allowLegacyPlaintext bool,
 ) (objectstore.Store, error) {
 	if store == nil || !cfg.ObjectEncryptionEnabled {
 		return store, nil
@@ -75,14 +62,10 @@ func wrapEncryption(
 		Enabled: true, Algorithm: cfg.ObjectEncryptionAlgo, KeyEncryptor: keyEncryptor,
 		ChunkSize: rootFSObjectChunkSize,
 	}
-	if allowLegacyPlaintext {
-		return objectstore.EncryptingLegacyReadCompatible(store, encryption), nil
-	}
 	// RootFS keys identify immutable content. Conditional publishers verify
 	// collisions and readers independently verify block/descriptor digests. GC can
 	// delete/recreate a key with a new envelope; the wrapper refreshes stale crypto
 	// once before plaintext delivery and authenticates the replacement frames.
-	// Keep migration readers above uncached because their source can be rewritten.
 	return objectstore.EncryptingImmutable(store, encryption, objectstore.EncryptedHeaderCacheConfig{
 		MaxEntries: 1024,
 		MaxBytes:   8 << 20,

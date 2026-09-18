@@ -2,8 +2,8 @@
 
 Format2 is the only supported durable RootFS format. Omitted importer and builder
 format settings select Format2. Format1 descriptors, mappings and explicit import
-policies are rejected. Retained Format1 data must be migrated before deploying
-this version; changing its version field alone is not a valid migration.
+policies are rejected. Retained Format1 data must have been migrated before
+deploying this version; changing its version field alone is not a valid migration.
 
 Data and mapping ranges are independently addressed and may be compressed.
 Incompressible ranges remain raw within Format2. Format support does not establish

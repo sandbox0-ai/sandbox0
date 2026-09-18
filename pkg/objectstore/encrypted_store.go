@@ -39,12 +39,11 @@ type EncryptionConfig struct {
 }
 
 type encryptedStore struct {
-	store               Store
-	cfg                 EncryptionConfig
-	allowPlaintextReads bool
-	headerCache         *encryptedHeaderCache
-	parallelReadsOnce   sync.Once
-	parallelReads       chan struct{}
+	store             Store
+	cfg               EncryptionConfig
+	headerCache       *encryptedHeaderCache
+	parallelReadsOnce sync.Once
+	parallelReads     chan struct{}
 }
 
 type encryptedObjectHeader struct {
@@ -72,24 +71,12 @@ func Encrypting(store Store, cfg EncryptionConfig) Store {
 // delivery. Data is retried only when the encryption header has actually changed.
 // Use conditional creates and verify collisions; plaintext digests still need
 // independent verification. Mutations through this wrapper invalidate its cache,
-// but cannot invalidate other wrappers. Generic or migration stores must use
-// Encrypting or EncryptingLegacyReadCompatible instead.
+// but cannot invalidate other wrappers. Generic stores must use Encrypting.
 func EncryptingImmutable(store Store, cfg EncryptionConfig, cache EncryptedHeaderCacheConfig) Store {
 	if store == nil || !cfg.enabled() {
 		return store
 	}
 	return &encryptedStore{store: store, cfg: cfg, headerCache: newEncryptedHeaderCache(cache)}
-}
-
-// EncryptingLegacyReadCompatible preserves encrypted writes but also reads
-// objects created before envelope encryption was enabled. It exists only for
-// bounded migration readers that independently verify plaintext digests; new
-// runtime readers must use Encrypting and reject plaintext objects.
-func EncryptingLegacyReadCompatible(store Store, cfg EncryptionConfig) Store {
-	if store == nil || !cfg.enabled() {
-		return store
-	}
-	return &encryptedStore{store: store, cfg: cfg, allowPlaintextReads: true}
 }
 
 func (c EncryptionConfig) enabled() bool {
@@ -134,9 +121,6 @@ func (c EncryptionConfig) chunkSize() int64 {
 func (s *encryptedStore) String() string {
 	if s == nil || s.store == nil {
 		return "encrypted(<nil>)"
-	}
-	if s.allowPlaintextReads {
-		return "legacy-read-compatible-encrypted(" + s.store.String() + ")"
 	}
 	return "encrypted(" + s.store.String() + ")"
 }
@@ -395,9 +379,6 @@ func (s *encryptedStore) loadEncryptedObjectMetadataWithProbe(ctx context.Contex
 		return nil, err
 	}
 	if !encrypted {
-		if s.allowPlaintextReads {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("object %q is missing the required encrypted-object header", key)
 	}
 	if err := ctx.Err(); err != nil {

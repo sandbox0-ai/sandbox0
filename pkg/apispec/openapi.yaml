@@ -222,6 +222,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: SSO is not licensed for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Provider not found
           content:
@@ -261,6 +267,12 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "401":
           description: OIDC authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: SSO is not licensed for this deployment
           content:
             application/json:
               schema:
@@ -308,6 +320,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeviceLoginStartResponse"
+        "403":
+          description: SSO is not licensed for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Provider not found or device login unsupported
           content:
@@ -341,6 +359,12 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "401":
           description: Device login expired, declined, or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: SSO is not licensed for this deployment
           content:
             application/json:
               schema:

@@ -59,9 +59,6 @@ func (s *encryptedStore) HeadContent(key string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	if metadata == nil { // Explicit legacy-plaintext migration reader only.
-		return info, nil
-	}
 	size, err := encryptedContentSize(info.Size, metadata.headerEnd, metadata.header.ChunkSize, int64(metadata.aead.Overhead()))
 	if err != nil {
 		return Info{}, fmt.Errorf("stat encrypted object %q: %w", key, err)

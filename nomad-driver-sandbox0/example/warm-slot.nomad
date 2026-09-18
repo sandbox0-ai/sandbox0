@@ -34,12 +34,22 @@ variable "warm_shard" {
   }
 }
 
+variable "adaptive_carriers" {
+  type        = bool
+  description = "Manager owns versioned per-node membership beyond the eight enrollment carriers"
+  default     = false
+}
+
 job "sandbox0-warm-slots" {
   id          = var.warm_shard == 0 ? "sandbox0-warm-slots" : format("sandbox0-warm-slots-shard-%02d", var.warm_shard)
   name        = var.warm_shard == 0 ? "sandbox0-warm-slots" : format("sandbox0-warm-slots-shard-%02d", var.warm_shard)
   datacenters = [var.datacenter]
   node_pool   = "sandbox0"
   type        = "system"
+
+  meta {
+    sandbox0_adaptive_carriers = var.adaptive_carriers ? "v1" : "disabled"
+  }
 
   constraint {
     attribute = "${meta.sandbox0_dedicated}"
@@ -74,6 +84,18 @@ job "sandbox0-warm-slots" {
           attribute = group.value.security_class == "standard" ? "${meta.sandbox0_standard_carriers}" : "${meta.sandbox0_privileged_carriers}"
           operator  = ">="
           value     = format("%d", group.value.index + 1)
+        }
+      }
+
+      # A zero UUID places no extra carriers until the regional controller
+      # grants membership. Per-node density metadata remains an independent
+      # NBD/IP/host ceiling. Changes use Nomad's JobModifyIndex CAS.
+      dynamic "constraint" {
+        for_each = var.adaptive_carriers && group.value.index >= (group.value.security_class == "standard" ? 6 : 2) ? [1] : []
+        content {
+          attribute = "${node.unique.id}"
+          operator  = "set_contains_any"
+          value     = "00000000-0000-0000-0000-000000000000"
         }
       }
 

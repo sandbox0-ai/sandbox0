@@ -46,13 +46,14 @@ type RuntimeNodePoolState struct {
 }
 
 type RuntimeNodePoolDemandRequest struct {
-	PoolID        string
-	OperationID   string
-	ClusterID     string
-	CPUMillicores int64
-	MemoryBytes   int64
-	Slots         int
-	TTL           time.Duration
+	CompatibilityDigest string
+	PoolID              string
+	OperationID         string
+	ClusterID           string
+	CPUMillicores       int64
+	MemoryBytes         int64
+	Slots               int
+	TTL                 time.Duration
 }
 
 // RuntimeNodePoolNodeUsage joins provider membership to the regional capacity
@@ -99,6 +100,10 @@ type RuntimeNodePoolSnapshot struct {
 	ClusterActiveLeases     int
 	ClusterReadySlots       int
 	ClusterFixedUsableSlots int
+	ClusterFixedCPU         int64
+	ClusterFixedMemory      int64
+	PlacementNodes          []RuntimeNodePlacementCapacity
+	DemandShapes            []RuntimeNodePoolDemandShape
 	// Workload demand excludes retiring slots. Their resource leases remain
 	// fully accounted above and continue to prevent physical node removal.
 	ClusterWorkloadCPU    int64
@@ -266,19 +271,20 @@ func (s *PGSandboxStore) RecordRuntimeNodePoolDemand(
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO manager.runtime_node_pool_demands (
 			pool_id, operation_id, cluster_id, cpu_millicores,
-			memory_bytes, slots, expires_at
+			memory_bytes, slots, expires_at,compatibility_digest
 		) VALUES ($1, $2, $3, $4, $5, $6,
-			NOW() + ($7::double precision * INTERVAL '1 millisecond'))
+			NOW() + ($7::double precision * INTERVAL '1 millisecond'),$8)
 		ON CONFLICT (pool_id, operation_id) DO UPDATE
 		SET cpu_millicores = EXCLUDED.cpu_millicores,
 			memory_bytes = EXCLUDED.memory_bytes,
 			slots = EXCLUDED.slots,
+			compatibility_digest = EXCLUDED.compatibility_digest,
 			expires_at = EXCLUDED.expires_at,
 			updated_at = NOW()
 		WHERE manager.runtime_node_pool_demands.cluster_id = EXCLUDED.cluster_id
 	`, normalized.PoolID, normalized.OperationID, normalized.ClusterID,
 		normalized.CPUMillicores, normalized.MemoryBytes, normalized.Slots,
-		normalized.TTL.Milliseconds())
+		normalized.TTL.Milliseconds(), normalized.CompatibilityDigest)
 	if err != nil {
 		return fmt.Errorf("record runtime node pool demand: %w", err)
 	}
@@ -302,13 +308,15 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			WHERE cluster_id = $2 AND heartbeat_expires_at > NOW()
 			ORDER BY node_uid, updated_at DESC
 		), lease_usage AS (
-			SELECT cluster_id, node_id, node_uid, node_boot_id,
+			-- Removal protection follows durable leases across expired heartbeats
+			-- and predecessor boots. Liveness must never erase cleanup obligations.
+			SELECT cluster_id, node_id, node_uid,
 				COALESCE(SUM(cpu_millicores), 0)::bigint AS used_cpu,
 				COALESCE(SUM(memory_bytes), 0)::bigint AS used_memory,
 				COUNT(*)::integer AS active_leases
 			FROM manager.runtime_resource_leases
 			WHERE cluster_id = $2 AND lease_state = 'active'
-			GROUP BY cluster_id, node_id, node_uid, node_boot_id
+			GROUP BY cluster_id, node_id, node_uid
 		), slot_usage AS (
 			SELECT cluster_id, node_id, node_uid,
 				COUNT(*) FILTER (
@@ -342,10 +350,9 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			AND capacity.node_id = instance.nomad_node_id
 			AND capacity.node_uid = instance.node_uid
 		LEFT JOIN lease_usage AS leases
-			ON leases.cluster_id = capacity.cluster_id
-			AND leases.node_id = capacity.node_id
-			AND leases.node_uid = capacity.node_uid
-			AND leases.node_boot_id = capacity.node_boot_id
+			ON leases.cluster_id = instance.cluster_id
+			AND leases.node_id = instance.nomad_node_id
+			AND leases.node_uid = instance.node_uid
 		LEFT JOIN slot_usage AS slots
 			ON slots.cluster_id = instance.cluster_id
 			AND slots.node_id = instance.nomad_node_id
@@ -381,6 +388,14 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			NOW()
 		FROM manager.runtime_node_pool_demands
 		WHERE pool_id = $1 AND cluster_id = $2 AND expires_at > NOW()
+			-- A retry may succeed before its pressure TTL expires. Its resource
+			-- lease is already counted below; never count the same operation twice.
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.runtime_slots AS acquired
+				WHERE acquired.cluster_id = runtime_node_pool_demands.cluster_id
+					AND acquired.claim_operation_id <> ''
+					AND acquired.claim_operation_id = runtime_node_pool_demands.operation_id
+			)
 	`, poolID, state.ClusterID).Scan(
 		&snapshot.DemandCPUMillicores, &snapshot.DemandMemoryBytes,
 		&snapshot.DemandSlots, &snapshot.AuthorityObservedAt,
@@ -445,6 +460,12 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 							AND elastic_node.pool_kind = 'elastic'
 							AND elastic_node.state <> 'revoked'
 					)
+					AND NOT EXISTS (
+						SELECT 1 FROM manager.runtime_node_fences AS fence
+						WHERE fence.cluster_id = slot.cluster_id
+							AND fence.node_id = slot.node_id AND fence.node_uid = slot.node_uid
+							AND fence.state IN ('warming', 'draining', 'revoked')
+					)
 			)
 		FROM live_capacity AS capacity
 		LEFT JOIN manager.runtime_resource_leases AS lease
@@ -464,6 +485,9 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 		&snapshot.ClusterFixedUsableSlots,
 	); err != nil {
 		return nil, fmt.Errorf("query runtime node pool cluster usage: %w", err)
+	}
+	if err := s.loadRuntimeNodePoolPlacement(ctx, snapshot); err != nil {
+		return nil, err
 	}
 	return snapshot, nil
 }
@@ -1456,6 +1480,12 @@ func normalizeRuntimeNodePoolDemand(request *RuntimeNodePoolDemandRequest) (*Run
 		return nil, fmt.Errorf("runtime node pool demand TTL must be between one second and 30 minutes")
 	}
 	normalized.TTL = time.Duration(normalized.TTL.Milliseconds()) * time.Millisecond
+	if normalized.CompatibilityDigest != "" {
+		normalized.CompatibilityDigest, err = normalizeRuntimeSlotDigest("compatibility_digest", normalized.CompatibilityDigest)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &normalized, nil
 }
 

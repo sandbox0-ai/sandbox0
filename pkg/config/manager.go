@@ -61,6 +61,7 @@ type ManagerConfig struct {
 	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 	NodeAuthority       NodeAuthorityConfig       `yaml:"node_authority" json:"-"`
 	NodePoolAutoscaler  NodePoolAutoscalerConfig  `yaml:"node_pool_autoscaler" json:"-"`
+	CarrierPool         CarrierPoolConfig         `yaml:"carrier_pool" json:"-"`
 
 	// Metering configures the optional region usage ledger.
 	Metering MeteringConfig `yaml:"metering" json:"metering"`
@@ -79,6 +80,17 @@ type ManagerConfig struct {
 	CredentialStore             CredentialStoreConfig    `yaml:"credential_store" json:"-"`
 }
 
+// CarrierPoolConfig bounds adaptive per-node warm inventory independently of
+// sandbox admission resources and the cloud worker count.
+type CarrierPoolConfig struct {
+	Enabled      bool     `yaml:"enabled" json:"-"`
+	Maximum      int      `yaml:"maximum" json:"-"`
+	LowWatermark int      `yaml:"low_watermark" json:"-"`
+	Spare        int      `yaml:"spare" json:"-"`
+	ShrinkAfter  Duration `yaml:"shrink_after" json:"-"`
+	Interval     Duration `yaml:"interval" json:"-"`
+}
+
 // NodePoolAutoscalerConfig controls the single fixed worker plus Aliyun ESS
 // elastic worker pool. Exact 1 + (0..299) bounds are validated by manager.
 type NodePoolAutoscalerConfig struct {
@@ -95,6 +107,7 @@ type NodePoolAutoscalerConfig struct {
 	NodeCPUMillicores         int64                `yaml:"node_cpu_millicores" json:"-"`
 	NodeMemoryBytes           int64                `yaml:"node_memory_bytes" json:"-"`
 	WarmSlotsPerNode          int                  `yaml:"warm_slots_per_node" json:"-"`
+	ElasticSlotsPerNode       int                  `yaml:"elastic_slots_per_node" json:"-"`
 	HeadroomCPUMillicores     int64                `yaml:"headroom_cpu_millicores" json:"-"`
 	HeadroomMemoryBytes       int64                `yaml:"headroom_memory_bytes" json:"-"`
 	HeadroomSlots             int                  `yaml:"headroom_slots" json:"-"`
@@ -103,6 +116,11 @@ type NodePoolAutoscalerConfig struct {
 	ControllerLeaseTTL        Duration             `yaml:"controller_lease_ttl" json:"-"`
 	ScaleInStabilization      Duration             `yaml:"scale_in_stabilization" json:"-"`
 	ScaleOutCooldown          Duration             `yaml:"scale_out_cooldown" json:"-"`
+	ScaleInCooldown           Duration             `yaml:"scale_in_cooldown" json:"-"`
+	ScaleOutWarmup            Duration             `yaml:"scale_out_warmup" json:"-"`
+	MaxScaleOutStep           int                  `yaml:"max_scale_out_step" json:"-"`
+	MaxScaleInStep            int                  `yaml:"max_scale_in_step" json:"-"`
+	MaxPendingNodes           int                  `yaml:"max_pending_nodes" json:"-"`
 	LifecycleInterval         Duration             `yaml:"lifecycle_interval" json:"-"`
 	LifecycleHeartbeat        Duration             `yaml:"lifecycle_heartbeat" json:"-"`
 	ScaleOutEnrollmentTimeout Duration             `yaml:"scale_out_enrollment_timeout" json:"-"`

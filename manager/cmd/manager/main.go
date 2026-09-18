@@ -140,6 +140,10 @@ func main() {
 	}
 
 	sandboxStore := sandboxstore.NewPGSandboxStore(pool)
+	carrierPool, err := configureCarrierPool(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure adaptive carrier pool", zap.Error(err))
+	}
 	nodePoolAutoscaler, err := configureNodePoolAutoscaler(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox node pool autoscaler", zap.Error(err))
@@ -483,6 +487,7 @@ func main() {
 		nodeAuthority:          managerNodeAuthority,
 		nodeEnrollment:         nodeEnrollment,
 		nodePoolAutoscaler:     nodePoolAutoscaler,
+		carrierPool:            carrierPool,
 		nodePoolLifecycle:      nodePoolLifecycle,
 		rootFSMaterializer:     rootFSCompositeMaterializer,
 		rootFSImportDiscovery:  rootFSImportDiscovery,

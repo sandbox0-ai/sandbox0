@@ -37,10 +37,16 @@ func configureNodePoolAutoscaler(
 		MaxElasticNodes:   nodePool.MaxElasticNodes,
 		NodeCPUMillicores: nodePool.NodeCPUMillicores,
 		NodeMemoryBytes:   nodePool.NodeMemoryBytes, WarmSlotsPerNode: nodePool.WarmSlotsPerNode,
+		ElasticSlotsPerNode:   nodePool.ElasticSlotsPerNode,
 		HeadroomCPUMillicores: nodePool.HeadroomCPUMillicores,
 		HeadroomMemoryBytes:   nodePool.HeadroomMemoryBytes, HeadroomSlots: nodePool.HeadroomSlots,
 		Interval: nodePool.Interval.Duration, ControllerLeaseTTL: nodePool.ControllerLeaseTTL.Duration,
 		ScaleInStabilization: nodePool.ScaleInStabilization.Duration,
 		ScaleOutCooldown:     nodePool.ScaleOutCooldown.Duration,
+		ScaleInCooldown:      nodePool.ScaleInCooldown.Duration,
+		ScaleOutWarmup:       nodePool.ScaleOutWarmup.Duration,
+		MaxScaleOutStep:      nodePool.MaxScaleOutStep,
+		MaxScaleInStep:       nodePool.MaxScaleInStep,
+		MaxPendingNodes:      nodePool.MaxPendingNodes,
 	})
 }

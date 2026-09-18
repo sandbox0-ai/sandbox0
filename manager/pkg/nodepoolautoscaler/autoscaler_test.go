@@ -65,6 +65,7 @@ func testWorker(t *testing.T, store *fakeStore, cloud *fakeCloud) *Worker {
 		HeadroomCPUMillicores: 1000, HeadroomMemoryBytes: 1 << 30, HeadroomSlots: 1,
 		Interval: time.Second, ControllerLeaseTTL: 3 * time.Second,
 		ScaleInStabilization: 10 * time.Minute, Now: func() time.Time { return testNow },
+		MaxScaleOutStep: 299, MaxScaleInStep: 299, MaxPendingNodes: 299,
 	})
 	require.NoError(t, err)
 	return worker
@@ -162,7 +163,7 @@ func TestPartialFixedCapacityCreditsResourcesAndExactUsableSlots(t *testing.T) {
 		{name: "memory deficit still adds an elastic node", fixedSlots: 7, usedMemory: 54 << 30, demandMemory: (1 << 30) + 1, wantElastic: 1, wantRequired: 2},
 		{name: "unavailable fixed node receives no resource credit", wantElastic: 1, wantRequired: 1},
 		{name: "extra slots cannot credit a second fixed node", fixedSlots: 16, demandCPU: 14000, wantElastic: 1, wantRequired: 2},
-		{name: "extra slots cannot exceed configured fixed slot capacity", fixedSlots: 16, demandSlots: 8, wantElastic: 1, wantRequired: 2},
+		{name: "extra fixed slots are real capacity, not elastic readiness", fixedSlots: 16, demandSlots: 8, wantRequired: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, cloud := &fakeStore{}, &fakeCloud{}

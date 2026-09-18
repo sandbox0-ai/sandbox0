@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
@@ -30,6 +31,7 @@ type managerApp struct {
 	nodeAuthority          *nodeauthority.Component
 	nodeEnrollment         *nodeenrollment.Server
 	nodePoolAutoscaler     *nodepoolautoscaler.Worker
+	carrierPool            *carrierpool.Worker
 	nodePoolLifecycle      *nodepoollifecycle.Worker
 	rootFSMaterializer     *rootfsmaterializer.Worker
 	rootFSImportDiscovery  *rootfsimportdiscovery.Worker
@@ -48,21 +50,42 @@ func (a *managerApp) Run() {
 		return
 	}
 	if a.nodePoolAutoscaler != nil {
+		lastCapacityLimited := false
 		go a.nodePoolAutoscaler.Run(a.ctx, func(decision nodepoolautoscaler.Decision, err error) {
 			fields := []zap.Field{
 				zap.String("action", decision.Action),
 				zap.Int("current_elastic", decision.CurrentElastic),
 				zap.Int("target_elastic", decision.TargetElastic),
+				zap.Int("applied_elastic", decision.AppliedElastic),
+				zap.Int("required_nodes", decision.RequiredNodes),
+				zap.Bool("capacity_limited", decision.CapacityLimited),
 			}
 			if err != nil {
 				a.logger.Warn("Sandbox node pool reconcile failed", append(fields, zap.Error(err))...)
 				return
 			}
+			if decision.Action != "not_leader" && decision.CapacityLimited != lastCapacityLimited {
+				a.logger.Warn("Sandbox node pool capacity limit state changed", fields...)
+				lastCapacityLimited = decision.CapacityLimited
+			}
+			a.logger.Debug("Sandbox node pool capacity decision", fields...)
 			if decision.Action == "scale_out" || decision.Action == "scale_in" {
 				a.logger.Info("Sandbox node pool desired capacity changed", fields...)
 			}
 		})
 		a.logger.Info("Sandbox node pool autoscaler started")
+	}
+	if a.carrierPool != nil {
+		go a.carrierPool.Run(a.ctx, func(changed int, err error) {
+			if err != nil {
+				a.logger.Warn("Adaptive carrier reconcile failed", zap.Error(err))
+				return
+			}
+			if changed > 0 {
+				a.logger.Info("Adaptive carrier reconcile progressed", zap.Int("nodes", changed))
+			}
+		})
+		a.logger.Info("Adaptive carrier controller started")
 	}
 	if a.nodePoolLifecycle != nil {
 		go a.nodePoolLifecycle.Run(a.ctx, func(result nodepoollifecycle.Result, err error) {

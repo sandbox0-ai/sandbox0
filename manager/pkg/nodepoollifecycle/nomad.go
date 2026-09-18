@@ -188,16 +188,23 @@ func (n *NomadClient) request(
 		return err
 	}
 	defer response.Body.Close()
-	limited := io.LimitReader(response.Body, 2<<20)
+	limited := io.LimitReader(response.Body, (2<<20)+1)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		payload, _ := io.ReadAll(limited)
-		return fmt.Errorf("nomad returned %s: %s", response.Status,
-			strings.TrimSpace(string(payload)))
+		return fmt.Errorf("nomad returned HTTP %d", response.StatusCode)
 	}
-	if responseBody == nil {
-		_, err = io.Copy(io.Discard, limited)
+	if response.Header.Get("X-Nomad-NextToken") != "" ||
+		(response.Header.Get("X-Nomad-Results-Filtered-By-ACLs") != "" && response.Header.Get("X-Nomad-Results-Filtered-By-ACLs") != "false") {
+		return errors.New("nomad returned incomplete catalog")
+	}
+	payload, err := io.ReadAll(limited)
+	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(limited)
-	return decoder.Decode(responseBody)
+	if len(payload) > 2<<20 {
+		return errors.New("nomad response exceeds bound")
+	}
+	if responseBody == nil {
+		return nil
+	}
+	return json.Unmarshal(payload, responseBody)
 }

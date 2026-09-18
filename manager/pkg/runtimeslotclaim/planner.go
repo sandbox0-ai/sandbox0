@@ -256,7 +256,7 @@ func New(config Config) (*Planner, error) {
 			return nil, errors.New("runtime node demand pool ID is required and bounded")
 		}
 		if demandTTL == 0 {
-			demandTTL = 2 * time.Minute
+			demandTTL = 5 * time.Minute
 		}
 		if demandTTL < time.Second || demandTTL > 30*time.Minute {
 			return nil, errors.New("runtime node demand TTL must be between one second and 30 minutes")
@@ -406,6 +406,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 				PoolID: p.demandPoolID, OperationID: normalized.OperationID,
 				ClusterID: normalized.ClusterID, CPUMillicores: normalized.Resources.CPUMillicores,
 				MemoryBytes: normalized.Resources.MemoryBytes, Slots: 1, TTL: p.demandTTL,
+				CompatibilityDigest: normalized.CompatibilityDigest,
 			})
 		}
 		return nil, fmt.Errorf("acquire runtime slot: %w", err)

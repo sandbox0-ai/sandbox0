@@ -20,6 +20,7 @@ type Allocation struct {
 	NodeID         string `json:"NodeID"`
 	ID             string `json:"ID"`
 	JobID          string `json:"JobID"`
+	TaskGroup      string `json:"TaskGroup"`
 	Namespace      string `json:"Namespace"`
 	ClientStatus   string `json:"ClientStatus"`
 	DesiredStatus  string `json:"DesiredStatus"`

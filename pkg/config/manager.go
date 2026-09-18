@@ -61,6 +61,7 @@ type ManagerConfig struct {
 	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 	NodeAuthority       NodeAuthorityConfig       `yaml:"node_authority" json:"-"`
 	NodePoolAutoscaler  NodePoolAutoscalerConfig  `yaml:"node_pool_autoscaler" json:"-"`
+	CarrierPool         CarrierPoolConfig         `yaml:"carrier_pool" json:"-"`
 
 	// Metering configures the optional region usage ledger.
 	Metering MeteringConfig `yaml:"metering" json:"metering"`
@@ -77,6 +78,17 @@ type ManagerConfig struct {
 	EgressAuthDefaultResolveTTL Duration                 `yaml:"egress_auth_default_resolve_ttl" json:"-"`
 	EgressAuthStaticAuth        []StaticEgressAuthConfig `yaml:"egress_auth_static_auth" json:"-"`
 	CredentialStore             CredentialStoreConfig    `yaml:"credential_store" json:"-"`
+}
+
+// CarrierPoolConfig bounds adaptive per-node warm inventory independently of
+// sandbox admission resources and the cloud worker count.
+type CarrierPoolConfig struct {
+	Enabled      bool     `yaml:"enabled" json:"-"`
+	Maximum      int      `yaml:"maximum" json:"-"`
+	LowWatermark int      `yaml:"low_watermark" json:"-"`
+	Spare        int      `yaml:"spare" json:"-"`
+	ShrinkAfter  Duration `yaml:"shrink_after" json:"-"`
+	Interval     Duration `yaml:"interval" json:"-"`
 }
 
 // NodePoolAutoscalerConfig controls the single fixed worker plus Aliyun ESS

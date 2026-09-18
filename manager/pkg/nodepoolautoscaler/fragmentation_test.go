@@ -96,3 +96,22 @@ func TestMixedNodeBudgetsPreserveCPUAndMemoryPairing(t *testing.T) {
 	// Free CPU on the fixed worker cannot be paired with memory on the elastic worker.
 	require.Equal(t, 2, d.TargetElastic)
 }
+
+func TestCompatibilityShortageCannotBorrowAnotherClassInventory(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	w := testWorker(t, store, cloud)
+	w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots = 0, 0, 0
+	store.snapshot.ClusterFixedUsableSlots = 256
+	store.snapshot.ClusterFixedCPU, store.snapshot.ClusterFixedMemory = 14000, 56<<30
+	store.snapshot.DemandShapes = []sandboxstore.RuntimeNodePoolDemandShape{{CompatibilityDigest: "privileged", CPUMillicores: 1000, MemoryBytes: 1 << 30, Slots: 1}}
+	store.snapshot.PlacementNodes = []sandboxstore.RuntimeNodePlacementCapacity{{PhysicalCPU: 14000, PhysicalMemory: 56 << 30,
+		FreeCPU: 14000, FreeMemory: 56 << 30, ReadySlots: 240, ReadyByCompatibility: map[string]int{"standard": 240}}}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, d.TargetElastic)
+	require.Equal(t, []int{1}, cloud.sets)
+	// A progressing local refill can cover this class without another purchase.
+	store.snapshot.PlacementNodes[0].ReadyByCompatibility["privileged"] = 2
+	target, _ := w.target(&store.snapshot)
+	require.Zero(t, target)
+}

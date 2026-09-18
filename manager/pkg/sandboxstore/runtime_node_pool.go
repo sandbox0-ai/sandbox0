@@ -46,13 +46,14 @@ type RuntimeNodePoolState struct {
 }
 
 type RuntimeNodePoolDemandRequest struct {
-	PoolID        string
-	OperationID   string
-	ClusterID     string
-	CPUMillicores int64
-	MemoryBytes   int64
-	Slots         int
-	TTL           time.Duration
+	CompatibilityDigest string
+	PoolID              string
+	OperationID         string
+	ClusterID           string
+	CPUMillicores       int64
+	MemoryBytes         int64
+	Slots               int
+	TTL                 time.Duration
 }
 
 // RuntimeNodePoolNodeUsage joins provider membership to the regional capacity
@@ -270,19 +271,20 @@ func (s *PGSandboxStore) RecordRuntimeNodePoolDemand(
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO manager.runtime_node_pool_demands (
 			pool_id, operation_id, cluster_id, cpu_millicores,
-			memory_bytes, slots, expires_at
+			memory_bytes, slots, expires_at,compatibility_digest
 		) VALUES ($1, $2, $3, $4, $5, $6,
-			NOW() + ($7::double precision * INTERVAL '1 millisecond'))
+			NOW() + ($7::double precision * INTERVAL '1 millisecond'),$8)
 		ON CONFLICT (pool_id, operation_id) DO UPDATE
 		SET cpu_millicores = EXCLUDED.cpu_millicores,
 			memory_bytes = EXCLUDED.memory_bytes,
 			slots = EXCLUDED.slots,
+			compatibility_digest = EXCLUDED.compatibility_digest,
 			expires_at = EXCLUDED.expires_at,
 			updated_at = NOW()
 		WHERE manager.runtime_node_pool_demands.cluster_id = EXCLUDED.cluster_id
 	`, normalized.PoolID, normalized.OperationID, normalized.ClusterID,
 		normalized.CPUMillicores, normalized.MemoryBytes, normalized.Slots,
-		normalized.TTL.Milliseconds())
+		normalized.TTL.Milliseconds(), normalized.CompatibilityDigest)
 	if err != nil {
 		return fmt.Errorf("record runtime node pool demand: %w", err)
 	}
@@ -1478,6 +1480,12 @@ func normalizeRuntimeNodePoolDemand(request *RuntimeNodePoolDemandRequest) (*Run
 		return nil, fmt.Errorf("runtime node pool demand TTL must be between one second and 30 minutes")
 	}
 	normalized.TTL = time.Duration(normalized.TTL.Milliseconds()) * time.Millisecond
+	if normalized.CompatibilityDigest != "" {
+		normalized.CompatibilityDigest, err = normalizeRuntimeSlotDigest("compatibility_digest", normalized.CompatibilityDigest)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &normalized, nil
 }
 

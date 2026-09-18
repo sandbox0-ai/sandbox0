@@ -375,8 +375,12 @@ func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, in
 		}
 		fits := false
 		for _, node := range snapshot.PlacementNodes {
+			readySlots := node.ReadySlots
+			if demand.CompatibilityDigest != "" {
+				readySlots = node.ReadyByCompatibility[demand.CompatibilityDigest]
+			}
 			if node.PhysicalCPU >= demand.CPUMillicores && node.PhysicalMemory >= demand.MemoryBytes &&
-				node.FreeCPU >= demand.CPUMillicores && node.FreeMemory >= demand.MemoryBytes && node.ReadySlots >= demand.Slots {
+				node.FreeCPU >= demand.CPUMillicores && node.FreeMemory >= demand.MemoryBytes && readySlots >= demand.Slots {
 				fits = true
 				break
 			}

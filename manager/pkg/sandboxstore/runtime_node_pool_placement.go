@@ -8,19 +8,21 @@ import (
 // RuntimeNodePoolDemandShape preserves indivisible requests. Aggregate free
 // resources on separate hosts are not interchangeable for one sandbox.
 type RuntimeNodePoolDemandShape struct {
-	CPUMillicores int64
-	MemoryBytes   int64
-	Slots         int
+	CompatibilityDigest string
+	CPUMillicores       int64
+	MemoryBytes         int64
+	Slots               int
 }
 
 // RuntimeNodePlacementCapacity is a read-only projection of existing authority,
 // not another admission ledger. Physical limits still constrain each request.
 type RuntimeNodePlacementCapacity struct {
-	PhysicalCPU    int64
-	PhysicalMemory int64
-	FreeCPU        int64
-	FreeMemory     int64
-	ReadySlots     int
+	ReadyByCompatibility map[string]int
+	PhysicalCPU          int64
+	PhysicalMemory       int64
+	FreeCPU              int64
+	FreeMemory           int64
+	ReadySlots           int
 }
 
 func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snapshot *RuntimeNodePoolSnapshot) error {
@@ -46,6 +48,38 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 			COALESCE(NULLIF(live.admission_memory_bytes, 0), live.memory_bytes),
 			COALESCE(leases.cpu, 0)::bigint, COALESCE(leases.memory, 0)::bigint,
 			COALESCE(ready.count, 0), COALESCE(leases.count, 0),
+			COALESCE((SELECT resize.max_carriers FROM manager.runtime_carrier_resizes resize
+				JOIN manager.runtime_carrier_controllers controller USING(cluster_id)
+				WHERE resize.cluster_id=live.cluster_id AND resize.node_id=live.node_id
+					AND resize.node_uid=live.node_uid AND resize.node_boot_id=live.node_boot_id
+					AND controller.heartbeat_expires_at>NOW()
+					AND (resize.updated_at>NOW()-INTERVAL '2 minutes' OR (NOT resize.pending AND
+						(SELECT COUNT(*) FROM manager.runtime_slots s WHERE s.cluster_id=resize.cluster_id
+						 AND s.node_id=resize.node_id AND s.node_uid=resize.node_uid AND s.node_boot_id=resize.node_boot_id
+						 AND NOT s.carrier_retired AND s.heartbeat_expires_at>NOW()
+						 AND s.state IN ('fastpath_ready','claiming','starting','active'))>=cardinality(resize.allowed_groups)))),0),
+			COALESCE((SELECT jsonb_object_agg(compatibility_digest,count) FROM (
+				SELECT compatibility_digest,COUNT(*)::integer AS count FROM manager.runtime_slots slot
+				WHERE slot.cluster_id=live.cluster_id AND slot.node_id=live.node_id AND slot.node_uid=live.node_uid
+					AND slot.node_boot_id=live.node_boot_id AND slot.state='fastpath_ready'
+					AND slot.heartbeat_expires_at>NOW() AND NOT slot.carrier_retired GROUP BY compatibility_digest
+			) compatibility_ready),'{}'::jsonb),
+			COALESCE((SELECT resize.compatibility_capacity FROM manager.runtime_carrier_resizes resize
+				JOIN manager.runtime_carrier_controllers controller USING(cluster_id)
+				WHERE resize.cluster_id=live.cluster_id AND resize.node_id=live.node_id
+					AND resize.node_uid=live.node_uid AND resize.node_boot_id=live.node_boot_id
+					AND controller.heartbeat_expires_at>NOW()
+					AND (resize.updated_at>NOW()-INTERVAL '2 minutes' OR (NOT resize.pending AND
+						(SELECT COUNT(*) FROM manager.runtime_slots s WHERE s.cluster_id=resize.cluster_id
+						 AND s.node_id=resize.node_id AND s.node_uid=resize.node_uid AND s.node_boot_id=resize.node_boot_id
+						 AND NOT s.carrier_retired AND s.heartbeat_expires_at>NOW()
+						 AND s.state IN ('fastpath_ready','claiming','starting','active'))>=cardinality(resize.allowed_groups)))),'{}'::jsonb),
+			COALESCE((SELECT jsonb_object_agg(compatibility_digest,count) FROM (
+				SELECT slot.compatibility_digest,COUNT(*)::integer AS count FROM manager.runtime_resource_leases lease
+				JOIN manager.runtime_slots slot ON slot.slot_id=lease.slot_id
+				WHERE lease.cluster_id=live.cluster_id AND lease.node_id=live.node_id AND lease.node_uid=live.node_uid
+					AND lease.lease_state='active' GROUP BY slot.compatibility_digest
+			) compatibility_used),'{}'::jsonb),
 			EXISTS (SELECT 1 FROM manager.runtime_node_instances AS instance
 				WHERE instance.cluster_id = live.cluster_id AND instance.nomad_node_id = live.node_id
 					AND instance.node_uid = live.node_uid AND instance.pool_kind = 'elastic'
@@ -65,11 +99,25 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 		var node RuntimeNodePlacementCapacity
 		var admissionCPU, admissionMemory, usedCPU, usedMemory, activeLeases int64
 		var elastic bool
+		var adaptiveMaximum int
+		var compatibilityMaximum, compatibilityUsed map[string]int
 		if err := rows.Scan(&node.PhysicalCPU, &node.PhysicalMemory, &admissionCPU, &admissionMemory,
-			&usedCPU, &usedMemory, &node.ReadySlots, &activeLeases, &elastic); err != nil {
+			&usedCPU, &usedMemory, &node.ReadySlots, &activeLeases, &adaptiveMaximum, &node.ReadyByCompatibility, &compatibilityMaximum, &compatibilityUsed, &elastic); err != nil {
 			return fmt.Errorf("scan runtime node placement capacity: %w", err)
 		}
 		node.FreeCPU, node.FreeMemory = max(0, admissionCPU-usedCPU), max(0, admissionMemory-usedMemory)
+		// Only a live controller and exact-boot provisioned carrier ceiling earn
+		// this credit. Requests still must fit indivisible physical resources; a
+		// stuck resize loses credit after two minutes instead of hiding demand.
+		if adaptiveMaximum > 0 {
+			node.ReadySlots = max(node.ReadySlots, adaptiveMaximum-int(activeLeases))
+			if !elastic {
+				snapshot.ClusterFixedUsableSlots = max(snapshot.ClusterFixedUsableSlots, adaptiveMaximum)
+			}
+		}
+		for digest, maximum := range compatibilityMaximum {
+			node.ReadyByCompatibility[digest] = max(node.ReadyByCompatibility[digest], min(node.ReadySlots, maximum-compatibilityUsed[digest]))
+		}
 		snapshot.PlacementNodes = append(snapshot.PlacementNodes, node)
 		if !elastic && (node.ReadySlots > 0 || activeLeases > 0) {
 			snapshot.ClusterFixedCPU += admissionCPU
@@ -82,7 +130,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 	// Collapse repeated shapes, while preserving the CPU/memory pair. Combining
 	// independently maximal dimensions could invent a request that never existed.
 	demands, err := s.pool.Query(ctx, `
-		SELECT DISTINCT cpu_millicores, memory_bytes, slots
+		SELECT DISTINCT cpu_millicores, memory_bytes, slots,compatibility_digest
 		FROM manager.runtime_node_pool_demands AS demand
 		WHERE pool_id = $1 AND cluster_id = $2 AND expires_at > NOW()
 			AND NOT EXISTS (SELECT 1 FROM manager.runtime_slots AS acquired
@@ -95,7 +143,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 	defer demands.Close()
 	for demands.Next() {
 		var demand RuntimeNodePoolDemandShape
-		if err := demands.Scan(&demand.CPUMillicores, &demand.MemoryBytes, &demand.Slots); err != nil {
+		if err := demands.Scan(&demand.CPUMillicores, &demand.MemoryBytes, &demand.Slots, &demand.CompatibilityDigest); err != nil {
 			return fmt.Errorf("scan runtime node pool demand shape: %w", err)
 		}
 		snapshot.DemandShapes = append(snapshot.DemandShapes, demand)

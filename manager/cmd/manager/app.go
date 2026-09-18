@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
@@ -30,6 +31,7 @@ type managerApp struct {
 	nodeAuthority          *nodeauthority.Component
 	nodeEnrollment         *nodeenrollment.Server
 	nodePoolAutoscaler     *nodepoolautoscaler.Worker
+	carrierPool            *carrierpool.Worker
 	nodePoolLifecycle      *nodepoollifecycle.Worker
 	rootFSMaterializer     *rootfsmaterializer.Worker
 	rootFSImportDiscovery  *rootfsimportdiscovery.Worker
@@ -72,6 +74,18 @@ func (a *managerApp) Run() {
 			}
 		})
 		a.logger.Info("Sandbox node pool autoscaler started")
+	}
+	if a.carrierPool != nil {
+		go a.carrierPool.Run(a.ctx, func(changed int, err error) {
+			if err != nil {
+				a.logger.Warn("Adaptive carrier reconcile failed", zap.Error(err))
+				return
+			}
+			if changed > 0 {
+				a.logger.Info("Adaptive carrier reconcile progressed", zap.Int("nodes", changed))
+			}
+		})
+		a.logger.Info("Adaptive carrier controller started")
 	}
 	if a.nodePoolLifecycle != nil {
 		go a.nodePoolLifecycle.Run(a.ctx, func(result nodepoollifecycle.Result, err error) {

@@ -569,10 +569,15 @@ func selectRuntimeSlotResourceLease(
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 				WHERE state = $1
+					AND NOT carrier_retired
 					AND heartbeat_expires_at > NOW()
 					AND compatibility_digest = $2
 					AND ($3 = '' OR cluster_id = $3)
 					AND slot_id <> ALL($6::text[])
+					AND NOT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes AS resize
+						WHERE resize.cluster_id = runtime_slots.cluster_id
+							AND resize.node_id = runtime_slots.node_id AND resize.pending
+							AND NOT (runtime_slots.allocation_id = ANY(resize.retained_allocations)))
 					AND NOT EXISTS (
 						SELECT 1
 						FROM manager.runtime_node_fences AS fence
@@ -641,6 +646,16 @@ func selectRuntimeSlotResourceLease(
 		}
 		if err != nil {
 			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		// Recheck after acquiring the capacity lock: resize preparation uses the
+		// same lock and may have committed while this claim waited for it.
+		var resizing bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
+			WHERE cluster_id=$1 AND node_id=$2 AND pending AND NOT ($3=ANY(retained_allocations)))`, slot.ClusterID, slot.NodeID, slot.AllocationID).Scan(&resizing); err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if resizing {
+			continue
 		}
 		var usedCPU, usedMemory int64
 		if err := tx.QueryRow(ctx, `

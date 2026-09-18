@@ -11,7 +11,6 @@ import (
 	"time"
 
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
-	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/require"
 )
 
@@ -361,8 +360,9 @@ func TestRuntimeSlotNodeCapacityPreventsOversubscriptionAndReleasesAfterCleanupP
 func testRuntimeSlotAdmissionBudget(t *testing.T, admissionCPU, admissionMemory int64, admitted int) {
 	t.Helper()
 	ctx := context.Background()
-	// This fixture also exercises migration 56's drain-before-rollback contract.
-	pool := newSandboxStoreIntegrationPoolAt(t, 56)
+	// Claims use the current schema; the independent migration-56 rollback
+	// guard below is exercised directly inside an isolated SQL transaction.
+	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	registration := runtimeSlotTestRegistration("unused", "unused")
 	_, err := store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{
@@ -494,8 +494,23 @@ func testRuntimeSlotAdmissionBudget(t *testing.T, admissionCPU, admissionMemory 
 	})
 	require.ErrorIs(t, err, ErrRuntimeSlotConflict, "a reconnect must not resize admission within the same boot")
 	if admissionCPU > 0 || admissionMemory > 0 {
+		migration, readErr := storemigrations.FS.ReadFile("00056_runtime_admission_budgets.sql")
+		require.NoError(t, readErr)
+		sections := strings.Split(string(migration), "-- +goose Down")
+		require.Len(t, sections, 2)
+		applySection := func(sql string) error {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err = tx.Exec(ctx, sql); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		down := func() error {
-			return migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
+			return applySection(sections[1])
 		}
 		require.ErrorContains(t, down(), "Drain overcommitted nodes", "rollback must preserve active admission leases")
 		for index := range fixtures {
@@ -512,7 +527,7 @@ func testRuntimeSlotAdmissionBudget(t *testing.T, admissionCPU, admissionMemory 
 			require.NoError(t, err)
 		}
 		require.NoError(t, down(), "fully drained nodes permit rollback")
-		applySandboxStoreMigrationsThrough(t, pool, 56)
+		require.NoError(t, applySection(sections[0]))
 		restored, err := store.GetRuntimeNodeCapacity(ctx, registration.ClusterID, registration.NodeID, registration.NodeUID, registration.NodeBootID)
 		require.NoError(t, err)
 		require.Equal(t, restored.CPUMillicores, restored.AdmissionCPUMillicores)

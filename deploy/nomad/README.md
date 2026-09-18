@@ -102,10 +102,13 @@ security classes, and carrier inventory independently constrain admission.
 `warm_slots_per_node` is the new-worker admission readiness threshold.
 `elastic_slots_per_node` describes the provisioned carrier capacity of one new
 elastic worker; when omitted it falls back to the legacy readiness value.
-The fixed worker contributes its **observed** usable carriers without being
-capped by either setting. Never advertise hypothetical carrier capacity: the
-corresponding job groups, node profile, NBD pool and network must exist first.
-This change does not dynamically grow a 30-carrier node to 200 carriers.
+Without adaptive inventory, the fixed worker contributes its **observed** usable
+carriers without being capped by either setting. With `carrier_pool.enabled`,
+the cloud scaler may credit the exact-boot, provisioned carrier ceiling while
+the carrier controller is healthy. This is replenishable inventory, not a
+claim-ready slot: claims still require an authenticated ready allocation and
+an atomic CPU/memory lease. The corresponding job catalog, node profile, NBD
+pool and network must exist first.
 
 The fixed worker contributes its observed admission CPU/memory budget separately
 from the elastic worker shape. A density-profile fixed worker must not cause a
@@ -158,30 +161,48 @@ must be observable as disabled growth, even with `enabled: true`. Inspect
 `scale_in_waiting_for_enrollment`, and `scale_in_waiting_for_drain` before
 changing limits to bypass a stalled lifecycle.
 
-### Carrier inventory roadmap and acceptance boundary
+### Adaptive carrier inventory and acceptance boundary
 
-The current Nomad system-job family replenishes consumed/failed carriers to a
-configured node profile. It is not an adaptive ready-buffer controller. Two
-different time scales are needed before enabling adaptive inventory:
+The opt-in regional carrier controller adjusts the existing Nomad system-job
+family's per-node membership. It separates two time scales:
 
 1. A node-local ready buffer, bounded by claim burst rate times carrier refill
    latency and by real free resources, per compatibility/security class.
 2. A regional compute reserve, bounded by net new workload demand during the
    much longer ECS/bootstrap/admission interval. In-flight nodes count once.
 
-Grow node-local inventory before purchasing a worker when truthful capacity is
-available, but never suppress a genuine resource shortage indefinitely while
-waiting for carrier repair. A safe implementation must bind every adjustment
-to node UID/boot, atomically retire only idle unleased slots against concurrent
-claims, and retain terminal cleanup proofs before stopping allocations or
-releasing IP/NBD resources. Reducing a Nomad metadata watermark can invalidate
-an active system allocation and is **not** an acceptable live shrink protocol.
-Persist desired inventory in the existing regional/node authority boundaries;
-do not add another independent capacity truth or treat speculative inventory
-as claim-ready. The resource-fragmentation progress floor does not yet provide
-compatibility-specific inventory planning or an optimal placement strategy.
-These remain prerequisites for the adaptive controller, not capabilities
-claimed by the current static profile.
+The initial policy uses a combined ceiling of 256 carriers (240 standard, 16
+privileged), an idle target of 16, standard low watermark 8, and a privileged
+ready reserve of 2. Surplus above 32 must persist for two minutes before shrink.
+The eight enrollment anchors and every busy or cleanup-owned group are retained,
+including high ordinals without retaining their unused lower-ordinal prefix.
+No extra idle buffer is added when CPU is fully leased or less than 64 MiB is
+free. These inventory hints never increase the guest admission budget.
+
+Resize intent is persisted in PostgreSQL, bound to node UID/boot and serialized
+with claim capacity locks. Only allocations outside the retained set are fenced
+during a resize; existing retained carriers continue serving. Nomad updates use
+`EnforceIndex` compare-and-swap and monotonic shard revisions. Removed carriers
+must stop before their old ready rows are permanently retired; the normal
+terminal reconciler still owns physical cleanup and resource-release proofs.
+New groups must be running in Nomad and registered ready before refill completes.
+A pending refill loses cloud-capacity credit after two minutes; controller
+heartbeat expiry also falls back to observed capacity. Failed repair therefore
+cannot suppress genuine cloud scale-out indefinitely.
+
+Compatibility-specific demand and ready inventory prevent spare standard
+carriers from hiding a privileged shortage. This is bounded placement progress,
+not an optimal packing algorithm or live workload migration. Node metadata
+defines a physical ceiling and is not lowered to perform live shrink.
+
+Migration from a static profile requires a durable drain of all affected
+allocations. Install the adaptive job family and resource/network profile with
+cloud purchases and adaptive reconciliation disabled, then enable a bounded
+canary. Runtime rollouts preserve existing memberships and revision metadata.
+The reference physical profile admits 14 CPU / 56 GiB, uses 288 fixed-node NBD
+devices (320 kernel devices), and gives elastic workers a `/23` allocation subnet.
+This ceiling does not promise 256 simultaneous guests: requested CPU/memory,
+security class, IP and device availability still constrain the actual count.
 
 Acceptance must cover 200 carriers with resources for only 30 guests, 30
 carriers with resources for 200, mixed security classes, failed claim followed

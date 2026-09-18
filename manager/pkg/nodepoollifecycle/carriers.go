@@ -245,15 +245,46 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 				return fmt.Errorf("invalid carrier epoch")
 			}
 		}
-		if previous > revision {
-			return fmt.Errorf("stale carrier resize revision")
-		}
-		if previous == revision && meta["sandbox0_carrier_node"] != node {
-			return fmt.Errorf("carrier epoch belongs to another node")
-		}
+		previousOwner := meta["sandbox0_carrier_node"]
 		var taskGroups []map[string]json.RawMessage
 		if err := json.Unmarshal(raw["TaskGroups"], &taskGroups); err != nil {
 			return err
+		}
+		// Job-level metadata is shared by every task group in a shard. Updating
+		// its epoch there would make Nomad replace even unchanged allocations,
+		// leaving a live regional heartbeat briefly pointing at a removed socket.
+		// Read the legacy job epoch for compatibility, but fence only with
+		// metadata attached to the groups whose membership actually changes.
+		for _, group := range taskGroups {
+			var groupMeta map[string]string
+			if value := group["Meta"]; value != nil {
+				if err := json.Unmarshal(value, &groupMeta); err != nil {
+					return err
+				}
+			}
+			value := groupMeta[key]
+			if value == "" {
+				continue
+			}
+			groupEpoch, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr != nil || groupEpoch <= 0 {
+				return fmt.Errorf("invalid carrier group epoch")
+			}
+			if groupEpoch > previous {
+				previous = groupEpoch
+				previousOwner = groupMeta["sandbox0_carrier_node"]
+			} else if groupEpoch == previous && groupMeta["sandbox0_carrier_node"] != previousOwner {
+				return fmt.Errorf("carrier epoch has conflicting owners")
+			}
+			if groupEpoch == previous && previousOwner != node {
+				return fmt.Errorf("carrier epoch belongs to another node")
+			}
+		}
+		if previous > revision {
+			return fmt.Errorf("stale carrier resize revision")
+		}
+		if previous == revision && previousOwner != node {
+			return fmt.Errorf("carrier epoch belongs to another node")
 		}
 		changed := false
 		for _, group := range taskGroups {
@@ -302,6 +333,21 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 			if err != nil {
 				return err
 			}
+			var groupMeta map[string]string
+			if value := group["Meta"]; value != nil {
+				if err := json.Unmarshal(value, &groupMeta); err != nil {
+					return err
+				}
+			}
+			if groupMeta == nil {
+				groupMeta = map[string]string{}
+			}
+			groupMeta[key] = strconv.FormatInt(revision, 10)
+			groupMeta["sandbox0_carrier_node"] = node
+			group["Meta"], err = json.Marshal(groupMeta)
+			if err != nil {
+				return err
+			}
 		}
 		// Unchanged shards need no registration: any delayed earlier mutation
 		// carries the pre-acknowledgement JobModifyIndex and therefore cannot
@@ -309,12 +355,6 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 		// for every high-density shard on each small ready-buffer refill.
 		if !changed {
 			continue
-		}
-		meta[key] = strconv.FormatInt(revision, 10)
-		meta["sandbox0_carrier_node"] = node
-		raw["Meta"], err = json.Marshal(meta)
-		if err != nil {
-			return err
 		}
 		raw["TaskGroups"], err = json.Marshal(taskGroups)
 		if err != nil {

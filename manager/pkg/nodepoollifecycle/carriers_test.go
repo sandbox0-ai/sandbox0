@@ -21,8 +21,9 @@ func TestCarrierPlansAreCASFencedAndPreserveRuntimeFields(t *testing.T) {
 		}
 		groups = append(groups, map[string]any{"Name": fmt.Sprintf("warm-%d", i), "Constraints": constraints, "UnrelatedRuntimeField": map[string]string{"preserve": "exact"}})
 	}
+	jobMeta := map[string]string{"sandbox0_adaptive_carriers": "v1", "operator": "preserved"}
 	current := map[string]any{"ID": "warm", "Type": "system", "NodePool": "sandbox0", "Namespace": "default", "JobModifyIndex": 1,
-		"Meta": map[string]string{"sandbox0_adaptive_carriers": "v1", "operator": "preserved"}, "TaskGroups": groups, "UnrelatedJobField": "preserved"}
+		"Meta": jobMeta, "TaskGroups": groups, "UnrelatedJobField": "preserved"}
 	posts := 0
 	conflict := false
 	client := newInventoryTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -69,9 +70,20 @@ func TestCarrierPlansAreCASFencedAndPreserveRuntimeFields(t *testing.T) {
 	require.ErrorContains(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 9, allowed), "stale")
 	require.ErrorContains(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 10, append(allowed, "warm-9")), "conflicting intent")
 	require.Equal(t, "preserved", current["UnrelatedJobField"])
-	require.Equal(t, "preserved", current["Meta"].(map[string]any)["operator"])
-	for _, raw := range current["TaskGroups"].([]any) {
+	currentJobMeta := current["Meta"].(map[string]any)
+	require.Equal(t, "preserved", currentJobMeta["operator"])
+	require.Equal(t, "v1", currentJobMeta["sandbox0_adaptive_carriers"])
+	require.NotContains(t, currentJobMeta, "sandbox0_carrier_epoch", "job metadata is shared by unchanged task groups and must not change")
+	for index, raw := range current["TaskGroups"].([]any) {
 		require.Equal(t, "exact", raw.(map[string]any)["UnrelatedRuntimeField"].(map[string]any)["preserve"])
+		groupMeta, _ := raw.(map[string]any)["Meta"].(map[string]any)
+		if index == 8 {
+			require.Equal(t, map[string]any{
+				"sandbox0_carrier_epoch": "10", "sandbox0_carrier_node": testCarrierNode,
+			}, groupMeta)
+		} else {
+			require.Empty(t, groupMeta["sandbox0_carrier_epoch"], "unchanged carrier must not be invalidated")
+		}
 	}
 	conflict = true
 	require.ErrorContains(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 11, append(allowed, "warm-9")), "HTTP 409")

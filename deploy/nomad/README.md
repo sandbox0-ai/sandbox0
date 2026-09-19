@@ -227,23 +227,39 @@ wakes the carrier controller immediately; the periodic reconcile remains a
 fallback. Compatible pending demand raises spare inventory above the normal
 low watermark, distributed across physical request fit and unleased resources.
 
-For known scheduled workloads, configure absolute `carrier_pool.prewarm_windows`.
+For known scheduled workloads, configure `carrier_pool.prewarm_windows`.
 Choose the start early enough to cover observed node enrollment and carrier
 readiness time. Windows require the node pool autoscaler and authenticated
 enrollment. They feed the existing demand ledger, so the same placement and
 cloud node ceilings apply. For example:
 
 ```yaml
-   carrier_pool:
-       prewarm_windows:
-           - name: scheduled-agent-batch
-             start: "2026-10-01T09:50:00Z"
-             end: "2026-10-01T10:10:00Z"
-             security_class: standard
-             slots: 100
-             cpu_millicores: 1000
-             memory_bytes: 1073741824
+    carrier_pool:
+        prewarm_windows:
+            - name: one-time-agent-batch
+              start: "2026-10-01T09:50:00Z"
+              end: "2026-10-01T10:10:00Z"
+              slots: 100
+              cpu_millicores: 1000
+              memory_bytes: 1073741824
+            - name: recurring-agent-batch
+              cron: "50 12 * * FRI"
+              duration: 30m
+              slots: 100
+              cpu_millicores: 1000
+              memory_bytes: 1073741824
 ```
+
+Choose either `start`/`end` for one occurrence or `cron`/`duration` for a
+recurring window; mixing the forms is rejected. Cron uses five fields
+(minute, hour, day of month, month, day of week), always in UTC, with standard
+lists, ranges, and steps. Seconds, timezone overrides, and `@` descriptors are
+not supported. Cron duration must be between one minute and 24 hours.
+The controller evaluates current windows during its existing reconcile loop;
+there is no separate scheduling service or catch-up queue. A restart within an
+active window resumes renewal. Missed windows are skipped, and overlapping
+occurrences of one plan renew the same demand without multiplying its quantity.
+
 
 Each entry describes spare capacity for that many requests of the given shape;
 it does not grant a team quota or reserve specific nodes. At most 32 windows

@@ -80,11 +80,13 @@ type ManagerConfig struct {
 	CredentialStore             CredentialStoreConfig    `yaml:"credential_store" json:"-"`
 }
 
-// CarrierPrewarmWindow declares an absolute window of planned capacity demand.
+// CarrierPrewarmWindow declares either an absolute or a UTC cron demand window.
 type CarrierPrewarmWindow struct {
 	Name          string    `yaml:"name" json:"-"`
 	Start         time.Time `yaml:"start" json:"-"`
 	End           time.Time `yaml:"end" json:"-"`
+	Cron          string    `yaml:"cron" json:"-"`
+	Duration      Duration  `yaml:"duration" json:"-"`
 	Slots         int       `yaml:"slots" json:"-"`
 	CPUMillicores int64     `yaml:"cpu_millicores" json:"-"`
 	MemoryBytes   int64     `yaml:"memory_bytes" json:"-"`

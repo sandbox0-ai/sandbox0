@@ -45,7 +45,7 @@ func configureCarrierPool(cfg *config.ManagerConfig, store carrierpool.Store) (*
 		if class == "" {
 			class = "standard"
 		}
-		windows = append(windows, carrierpool.PrewarmWindow{Name: v.Name, Start: v.Start, End: v.End, Slots: v.Slots, CPUMillicores: v.CPUMillicores, MemoryBytes: v.MemoryBytes, SecurityClass: class})
+		windows = append(windows, carrierpool.PrewarmWindow{Name: v.Name, Start: v.Start, End: v.End, Cron: v.Cron, Duration: v.Duration.Duration, Slots: v.Slots, CPUMillicores: v.CPUMillicores, MemoryBytes: v.MemoryBytes, SecurityClass: class})
 	}
 	if len(windows) > 0 && !cfg.NodePoolAutoscaler.Enabled {
 		return nil, fmt.Errorf("planned prewarm requires an enabled node pool autoscaler")

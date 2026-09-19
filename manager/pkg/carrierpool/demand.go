@@ -3,8 +3,10 @@ package carrierpool
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 )
 
@@ -14,23 +16,64 @@ type demandStore interface {
 }
 
 // PrewarmWindow describes operator-planned spare capacity, not a reservation or
-// an exception to team quotas. Times are absolute so missed schedules expire.
+// an exception to team quotas. Missed occurrences never trigger catch-up work.
 type PrewarmWindow struct {
 	Name                       string
 	Start, End                 time.Time
+	Cron                       string
+	Duration                   time.Duration
 	Slots                      int
 	CPUMillicores, MemoryBytes int64
 	SecurityClass              string
+	schedule                   cron.Schedule
+}
+
+func (w *PrewarmWindow) compile() error {
+	if w.Cron == "" {
+		if w.Duration != 0 || w.Start.IsZero() || !w.End.After(w.Start) || w.End.Sub(w.Start) > 24*time.Hour {
+			return fmt.Errorf("absolute prewarm requires start/end within 24 hours")
+		}
+		return nil
+	}
+	if !w.Start.IsZero() || !w.End.IsZero() || w.Duration < time.Minute || w.Duration > 24*time.Hour || len(w.Cron) > 256 || len(strings.Fields(w.Cron)) != 5 {
+		return fmt.Errorf("cron prewarm requires five UTC fields and duration between one minute and 24 hours, without start/end")
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse("CRON_TZ=UTC " + w.Cron)
+	if err != nil || schedule.Next(time.Now().UTC()).IsZero() {
+		return fmt.Errorf("invalid or unsatisfiable prewarm cron expression")
+	}
+	w.schedule = schedule
+	return nil
+}
+
+// activeEnd checks one bounded lookback, without jobs, timers, or scheduler
+// state. Overlapping occurrences renew the same demand rather than adding
+// capacity repeatedly. The earliest still-active occurrence is sufficient to
+// bound the renewal TTL; later ones are reconsidered on the next reconcile.
+func (w PrewarmWindow) activeEnd(now time.Time) (time.Time, bool) {
+	if w.schedule != nil {
+		start := w.schedule.Next(now.UTC().Add(-w.Duration))
+		if start.IsZero() || start.After(now) {
+			return time.Time{}, false
+		}
+		return start.Add(w.Duration), true
+	}
+	return w.End, !now.Before(w.Start) && now.Before(w.End)
 }
 
 func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrierNode) (map[string]map[string]int, error) {
+	return w.demandAt(ctx, nodes, time.Now())
+}
+
+func (w *Worker) demandAt(ctx context.Context, nodes []sandboxstore.RuntimeCarrierNode, now time.Time) (map[string]map[string]int, error) {
 	store, ok := w.store.(demandStore)
 	if !ok {
 		return nil, nil
 	}
-	now := time.Now()
 	for _, window := range w.config.PrewarmWindows {
-		if now.Before(window.Start) || !now.Before(window.End) {
+		end, active := window.activeEnd(now)
+		if !active {
 			continue
 		}
 		digest := w.config.StandardDigest
@@ -42,7 +85,7 @@ func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrier
 		err := store.RecordRuntimeNodePoolDemand(ctx, &sandboxstore.RuntimeNodePoolDemandRequest{
 			PoolID: w.config.PoolID, ClusterID: w.config.ClusterID, OperationID: "carrier-prewarm/" + window.Name,
 			CompatibilityDigest: digest, CPUMillicores: window.CPUMillicores, MemoryBytes: window.MemoryBytes,
-			Slots: window.Slots, TTL: max(time.Second, min(30*time.Second, time.Until(window.End))),
+			Slots: window.Slots, TTL: max(time.Second, min(30*time.Second, end.Sub(now))),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("record planned carrier demand: %w", err)

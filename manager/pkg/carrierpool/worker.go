@@ -63,9 +63,14 @@ func New(store Store, nomad Nomad, c Config) (*Worker, error) {
 		return nil, fmt.Errorf("too many prewarm windows")
 	}
 	names := map[string]bool{}
-	for _, window := range c.PrewarmWindows {
-		if c.PoolID == "" || window.Name == "" || len(window.Name) > 80 || names[window.Name] || window.Start.IsZero() || !window.End.After(window.Start) || window.End.Sub(window.Start) > 24*time.Hour || window.Slots < 1 || window.Slots > 1024 || window.CPUMillicores < 1 || window.MemoryBytes < 64<<20 || (window.SecurityClass != "standard" && window.SecurityClass != "privileged") {
+	c.PrewarmWindows = append([]PrewarmWindow(nil), c.PrewarmWindows...)
+	for i := range c.PrewarmWindows {
+		window := &c.PrewarmWindows[i]
+		if c.PoolID == "" || window.Name == "" || len(window.Name) > 80 || names[window.Name] || window.Slots < 1 || window.Slots > 1024 || window.CPUMillicores < 1 || window.MemoryBytes < 64<<20 || (window.SecurityClass != "standard" && window.SecurityClass != "privileged") {
 			return nil, fmt.Errorf("invalid carrier prewarm window")
+		}
+		if err := window.compile(); err != nil {
+			return nil, err
 		}
 		names[window.Name] = true
 		if _, ok := store.(demandStore); !ok {

@@ -112,3 +112,67 @@ func TestRuntimeRolloutRefreshesStaleCapacityBeforeDemandRefill(t *testing.T) {
 	require.Len(t, s.node.Groups, 62)
 	require.True(t, s.node.Pending, "new groups still require authenticated readiness")
 }
+
+func TestCronPrewarmCalendarAndExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		name, expression, now, end string
+		duration                   time.Duration
+		active                     bool
+	}{
+		{"weekly start", "50 12 * * FRI", "2026-09-25T12:50:00Z", "2026-09-25T13:20:00Z", 30 * time.Minute, true},
+		{"weekly before", "50 12 * * FRI", "2026-09-25T12:49:59Z", "", 30 * time.Minute, false},
+		{"weekly end", "50 12 * * FRI", "2026-09-25T13:20:00Z", "", 30 * time.Minute, false},
+		{"missed weeks", "50 12 * * FRI", "2026-10-23T13:00:00Z", "2026-10-23T13:20:00Z", 30 * time.Minute, true},
+		{"hourly UTC despite input offset", "0 * * * *", "2026-09-25T21:05:00+08:00", "2026-09-25T13:10:00Z", 10 * time.Minute, true},
+		{"daily across midnight", "55 23 * * *", "2026-09-26T00:05:00Z", "2026-09-26T00:15:00Z", 20 * time.Minute, true},
+		{"month boundary", "0 0 1 * *", "2026-10-01T00:05:00Z", "2026-10-01T00:10:00Z", 10 * time.Minute, true},
+		{"steps and overlap", "*/5 * * * *", "2026-09-25T12:07:00Z", "2026-09-25T12:10:00Z", 10 * time.Minute, true},
+		{"leap day", "0 0 29 FEB *", "2028-02-29T00:05:00Z", "2028-02-29T00:10:00Z", 10 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := PrewarmWindow{Cron: tc.expression, Duration: tc.duration}
+			require.NoError(t, w.compile())
+			now, err := time.Parse(time.RFC3339, tc.now)
+			require.NoError(t, err)
+			end, active := w.activeEnd(now)
+			require.Equal(t, tc.active, active)
+			if active {
+				require.Equal(t, tc.end, end.UTC().Format(time.RFC3339))
+			}
+		})
+	}
+}
+
+func TestCronPrewarmRejectsAmbiguousOrUnsupportedSchedules(t *testing.T) {
+	for _, expression := range []string{"@every 1m", "@weekly", "0 0 0 * * *", "CRON_TZ=Asia/Shanghai 0 * * * *", "60 * * * *", "0 0 31 FEB *"} {
+		w := PrewarmWindow{Cron: expression, Duration: time.Minute}
+		require.Error(t, w.compile(), expression)
+	}
+	for _, w := range []PrewarmWindow{
+		{Cron: "* * * * *"}, {Cron: "* * * * *", Duration: 25 * time.Hour},
+		{Cron: "* * * * *", Duration: time.Minute, Start: time.Now()},
+		{Start: time.Now(), End: time.Now().Add(time.Hour), Duration: time.Minute},
+	} {
+		require.Error(t, w.compile())
+	}
+}
+
+func TestCronPrewarmRenewalUsesOneBoundedDemandAndStopsAtExpiry(t *testing.T) {
+	s := &plannedStore{}
+	w, err := New(s, &fakeNomad{}, Config{ClusterID: "cluster", PoolID: "pool", StandardDigest: "std", Maximum: 128, LowWatermark: 8, Spare: 16, ShrinkAfter: time.Minute, Interval: time.Second,
+		PrewarmWindows: []PrewarmWindow{{Name: "batch", Cron: "0 * * * *", Duration: 10 * time.Minute, Slots: 100, CPUMillicores: 150, MemoryBytes: 128 << 20, SecurityClass: "standard"}}})
+	require.NoError(t, err)
+	now := time.Date(2026, 9, 25, 12, 9, 50, 0, time.UTC)
+	_, err = w.demandAt(t.Context(), nil, now)
+	require.NoError(t, err)
+	require.Len(t, s.records, 1)
+	require.Equal(t, 10*time.Second, s.records[0].TTL)
+	_, err = w.demandAt(t.Context(), nil, now.Add(10*time.Second))
+	require.NoError(t, err)
+	require.Len(t, s.records, 1)
+	_, err = w.demandAt(t.Context(), nil, now.Add(time.Hour))
+	require.NoError(t, err)
+	require.Len(t, s.records, 2)
+	require.Equal(t, s.records[0].OperationID, s.records[1].OperationID)
+	require.Equal(t, 100, s.records[1].Slots)
+}

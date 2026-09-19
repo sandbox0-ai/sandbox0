@@ -16,8 +16,24 @@ type fakeStore struct {
 	firstObservedAt      time.Time
 	actionState          string
 	finished             map[string]string
+	proofs               map[string]map[string]any
 	admissionSlots       []int
 	heartbeatReservation func(time.Duration) bool
+	durableActions       []*sandboxstore.RuntimeNodeLifecycleAction
+	acquired             map[string]*sandboxstore.RuntimeNodeLifecycleAction
+	terminalized         map[string]int
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func cloneLifecycleAction(action *sandboxstore.RuntimeNodeLifecycleAction) *sandboxstore.RuntimeNodeLifecycleAction {
+	if action == nil {
+		return nil
+	}
+	copied := *action
+	return &copied
 }
 
 func (s *fakeStore) ReserveRuntimeNodeLifecycleHeartbeat(_ context.Context, _, _ string, interval time.Duration) (bool, error) {
@@ -74,9 +90,90 @@ func (s *fakeStore) AbandonRuntimeNodeEnrollment(_ context.Context, _, instanceI
 
 func (s *fakeStore) ObserveRuntimeNodeLifecycleAction(_ context.Context, request *sandboxstore.ObserveRuntimeNodeLifecycleActionRequest) (*sandboxstore.RuntimeNodeLifecycleAction, error) {
 	s.observed++
-	return &sandboxstore.RuntimeNodeLifecycleAction{
-		Token: request.Token, State: s.actionState, FirstObservedAt: s.firstObservedAt,
-	}, nil
+	if s.acquired == nil {
+		s.acquired = make(map[string]*sandboxstore.RuntimeNodeLifecycleAction)
+	}
+	action := s.acquired[request.Token]
+	if action == nil {
+		action = &sandboxstore.RuntimeNodeLifecycleAction{
+			Token: request.Token, ProviderInstanceIDs: request.ProviderInstanceIDs,
+			FirstObservedAt: s.firstObservedAt, RecoveryDeadlineAt: request.RecoveryDeadline,
+		}
+		s.acquired[request.Token] = action
+	}
+	action.ProviderInstanceIDs = request.ProviderInstanceIDs
+	action.RecoveryDeadlineAt = request.RecoveryDeadline
+	action.State = s.actionState
+	return cloneLifecycleAction(action), nil
+}
+
+func (s *fakeStore) ListRuntimeNodeLifecycleActions(context.Context, string) ([]*sandboxstore.RuntimeNodeLifecycleAction, error) {
+	return s.durableActions, nil
+}
+
+func (s *fakeStore) AcquireRuntimeNodeLifecycleAction(_ context.Context, _, token, owner string, _ time.Duration) (*sandboxstore.RuntimeNodeLifecycleAction, error) {
+	if s.acquired == nil {
+		s.acquired = make(map[string]*sandboxstore.RuntimeNodeLifecycleAction)
+	}
+	for _, durable := range s.durableActions {
+		if durable.Token != token {
+			continue
+		}
+		action := cloneLifecycleAction(durable)
+		action.RecoveryOwnerID = owner
+		action.RecoveryEpoch++
+		action.RecoveryLeaseExpiresAt = ptrTime(time.Now().Add(time.Minute))
+		s.acquired[token] = action
+		return cloneLifecycleAction(action), nil
+	}
+	return nil, nil
+}
+
+func (s *fakeStore) ObserveRuntimeNodeLifecycleProviderAction(_ context.Context, _, token, _ string, _ int64, present bool) (*sandboxstore.RuntimeNodeLifecycleAction, error) {
+	action := s.acquired[token]
+	if action == nil {
+		return nil, errors.New("fake recovery action is not acquired")
+	}
+	previousActionAbsentSince := action.ProviderActionAbsentSince
+	action.ProviderActionLastObservedAt = nil
+	action.ProviderActionAbsentSince = nil
+	if !present {
+		if previousActionAbsentSince == nil {
+			action.ProviderActionAbsentSince = ptrTime(time.Now())
+		} else {
+			action.ProviderActionAbsentSince = previousActionAbsentSince
+		}
+	}
+	return cloneLifecycleAction(action), nil
+}
+
+func (s *fakeStore) ObserveRuntimeNodeLifecycleProviderInstances(_ context.Context, _, token, _ string, _ int64, absent bool) (*sandboxstore.RuntimeNodeLifecycleAction, error) {
+	action := s.acquired[token]
+	if action == nil || action.ProviderActionAbsentSince == nil {
+		return nil, errors.New("fake provider action absence is not observed")
+	}
+	previousInstanceAbsentSince := action.ProviderInstanceAbsentSince
+	action.ProviderInstanceAbsentSince = nil
+	if absent {
+		if previousInstanceAbsentSince == nil {
+			action.ProviderInstanceAbsentSince = ptrTime(time.Now())
+		} else {
+			action.ProviderInstanceAbsentSince = previousInstanceAbsentSince
+		}
+	}
+	return cloneLifecycleAction(action), nil
+}
+
+func (s *fakeStore) TerminalizeRuntimeSlotsForProviderAbsentInstance(_ context.Context, _, instanceID, _, _ string, _ int64, _ []byte) (int, error) {
+	if s.terminalized == nil {
+		s.terminalized = make(map[string]int)
+	}
+	s.terminalized[instanceID]++
+	if node, ok := s.nodes[instanceID]; ok {
+		node.NonterminalSlots = 0
+		s.nodes[instanceID] = node
+	}
+	return 1, nil
 }
 
 func (s *fakeStore) BeginRuntimeNodeLifecycleActionCleanup(_ context.Context, _ string) error {
@@ -86,12 +183,42 @@ func (s *fakeStore) BeginRuntimeNodeLifecycleActionCleanup(_ context.Context, _ 
 	return nil
 }
 
+func (s *fakeStore) BeginRuntimeNodeLifecycleActionCleanupForOwner(_ context.Context, _, token, owner string, epoch int64) error {
+	action := s.acquired[token]
+	if action == nil || action.RecoveryOwnerID != owner || action.RecoveryEpoch != epoch {
+		return errors.New("fake recovery lease is not current")
+	}
+	if action.State == "pending" {
+		action.State = "draining"
+	}
+	return nil
+}
+
 func (s *fakeStore) CompleteRuntimeNodeLifecycleAction(_ context.Context, token, state string) error {
+	return s.CompleteRuntimeNodeLifecycleActionWithProof(context.Background(), token, state,
+		map[string]string{"source": "legacy_completion"})
+}
+
+func (s *fakeStore) CompleteRuntimeNodeLifecycleActionWithProof(_ context.Context, token, state string, proof any) error {
 	if s.finished == nil {
 		s.finished = make(map[string]string)
 	}
 	s.finished[token] = state
+	if s.proofs == nil {
+		s.proofs = make(map[string]map[string]any)
+	}
+	if object, ok := proof.(map[string]any); ok {
+		s.proofs[token] = object
+	}
 	return nil
+}
+
+func (s *fakeStore) CompleteRuntimeNodeLifecycleActionRecovery(_ context.Context, _, token, owner string, epoch int64, state string, proof any) error {
+	action := s.acquired[token]
+	if action == nil || action.RecoveryOwnerID != owner || action.RecoveryEpoch != epoch {
+		return errors.New("fake recovery lease is not current")
+	}
+	return s.CompleteRuntimeNodeLifecycleActionWithProof(context.Background(), token, state, proof)
 }
 
 type fakeCloud struct {
@@ -101,6 +228,7 @@ type fakeCloud struct {
 	protected                   map[string]bool
 	deleted                     []string
 	inService                   map[string]bool
+	attached                    map[string]bool
 	heartbeatTimeouts           []time.Duration
 	protectionError             error
 	heartbeatCountsAtProtection []int
@@ -112,6 +240,14 @@ func (c *fakeCloud) ElasticInstancesInService(_ context.Context, ids []string) (
 	result := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		result[id] = c.inService[id]
+	}
+	return result, nil
+}
+
+func (c *fakeCloud) ElasticInstancesAttached(_ context.Context, ids []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		result[id] = c.attached[id]
 	}
 	return result, nil
 }
@@ -225,6 +361,10 @@ func (n *fakeNomad) FenceAndStopWarmAllocations(_ context.Context, nodeID string
 }
 
 func (*fakeNomad) NodeHasNonterminalAllocations(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (*fakeNomad) NodeHasNonWarmNonterminalAllocations(context.Context, string) (bool, error) {
 	return false, nil
 }
 
@@ -370,6 +510,158 @@ func TestStaleActiveWarmingScaleOutDrainsThenAbandons(t *testing.T) {
 	require.Equal(t, []string{"i-1"}, cloud.deleted)
 	require.NotContains(t, store.nodes, "i-1")
 	require.Equal(t, LifecycleAbandon, cloud.completed["token"])
+}
+
+func TestDurableScaleOutRecoversAfterProviderActionAndInstanceDisappear(t *testing.T) {
+	now := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+			"i-1": {
+				ProviderInstanceID: "i-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic,
+				State: sandboxstore.RuntimeNodeInstanceActive, NodeID: "node-1",
+				AllocationCIDR: "172.28.0.0/23", NonterminalSlots: 368,
+			},
+		},
+		durableActions: []*sandboxstore.RuntimeNodeLifecycleAction{{
+			Token: "token", PoolID: "elastic", LifecycleHookID: "out", Transition: TransitionScaleOut,
+			State: "pending", ProviderInstanceIDs: []string{"i-1"},
+			FirstObservedAt: now.Add(-time.Hour), RecoveryDeadlineAt: now.Add(-time.Minute),
+			ProviderActionAbsentSince:   ptrTime(now.Add(-time.Minute)),
+			ProviderInstanceAbsentSince: ptrTime(now.Add(-time.Minute)),
+		}},
+	}
+	cloud := &fakeCloud{}
+	worker, nomad := testWorker(t, store, cloud)
+	worker.config.Now = func() time.Time { return now }
+	worker.config.ProviderAbsenceGrace = time.Second
+
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Recovered)
+	require.Equal(t, 1, store.terminalized["i-1"])
+	require.NotContains(t, store.nodes, "i-1")
+	require.Equal(t, []string{"node-1"}, nomad.purged)
+	require.Empty(t, nomad.fenced, "a provider-absent node must not probe or fence its dead client")
+	require.Equal(t, []string{"i-1"}, cloud.deleted)
+	require.Equal(t, "abandoned", store.finished["token"])
+	require.Empty(t, cloud.completed, "a vanished provider action cannot be completed again")
+	require.Equal(t, "provider_action_and_instances_absent", store.proofs["token"]["source"])
+}
+
+func TestDurableRecoveryDoesNotRunWhileProviderActionIsPresent(t *testing.T) {
+	now := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+			"i-1": {ProviderInstanceID: "i-1", State: sandboxstore.RuntimeNodeInstanceActive},
+		},
+		durableActions: []*sandboxstore.RuntimeNodeLifecycleAction{{
+			Token: "token", LifecycleHookID: "out", Transition: TransitionScaleOut,
+			State: "pending", ProviderInstanceIDs: []string{"i-1"},
+			FirstObservedAt: now, RecoveryDeadlineAt: now.Add(-time.Minute),
+			ProviderActionAbsentSince:   ptrTime(now.Add(-time.Minute)),
+			ProviderInstanceAbsentSince: ptrTime(now.Add(-time.Minute)),
+		}},
+	}
+	cloud := &fakeCloud{actions: []Action{{Token: "token", HookID: "out", InstanceIDs: []string{"i-1"}}}}
+	worker, _ := testWorker(t, store, cloud)
+	worker.config.Now = func() time.Time { return now }
+
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, result.Recovered)
+	require.Contains(t, store.nodes, "i-1")
+	require.Empty(t, store.finished)
+	require.Nil(t, store.acquired["token"].ProviderActionAbsentSince)
+}
+
+func TestDurableRecoveryWaitsUntilEveryProviderInstanceIsAbsent(t *testing.T) {
+	now := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+			"i-1": {ProviderInstanceID: "i-1", State: sandboxstore.RuntimeNodeInstanceActive},
+		},
+		durableActions: []*sandboxstore.RuntimeNodeLifecycleAction{{
+			Token: "token", LifecycleHookID: "out", Transition: TransitionScaleOut,
+			State: "pending", ProviderInstanceIDs: []string{"i-1"},
+			FirstObservedAt: now.Add(-time.Hour), RecoveryDeadlineAt: now.Add(-time.Minute),
+			ProviderActionAbsentSince:   ptrTime(now.Add(-time.Minute)),
+			ProviderInstanceAbsentSince: ptrTime(now.Add(-time.Minute)),
+		}},
+	}
+	cloud := &fakeCloud{attached: map[string]bool{"i-1": true}}
+	worker, _ := testWorker(t, store, cloud)
+	worker.config.Now = func() time.Time { return now }
+	worker.config.ProviderAbsenceGrace = time.Second
+
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, result.Recovered)
+	require.Contains(t, store.nodes, "i-1")
+	require.Nil(t, store.acquired["token"].ProviderInstanceAbsentSince)
+	require.Empty(t, store.finished)
+}
+
+func TestDurableRecoveryRefusesActiveLeaseCustody(t *testing.T) {
+	now := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+			"i-1": {
+				ProviderInstanceID: "i-1", State: sandboxstore.RuntimeNodeInstanceActive,
+				NodeID: "node-1", ActiveLeases: 1,
+			},
+		},
+		durableActions: []*sandboxstore.RuntimeNodeLifecycleAction{{
+			Token: "token", LifecycleHookID: "out", Transition: TransitionScaleOut,
+			State: "pending", ProviderInstanceIDs: []string{"i-1"},
+			FirstObservedAt: now.Add(-time.Hour), RecoveryDeadlineAt: now.Add(-time.Minute),
+			ProviderActionAbsentSince:   ptrTime(now.Add(-time.Minute)),
+			ProviderInstanceAbsentSince: ptrTime(now.Add(-time.Minute)),
+		}},
+	}
+	cloud := &fakeCloud{}
+	worker, _ := testWorker(t, store, cloud)
+	worker.config.Now = func() time.Time { return now }
+	worker.config.ProviderAbsenceGrace = time.Second
+
+	_, err := worker.Reconcile(context.Background())
+	require.ErrorContains(t, err, "unexpectedly owns active leases")
+	require.Contains(t, store.nodes, "i-1")
+	require.Empty(t, store.finished)
+	require.True(t, cloud.protected["i-1"], "lease custody must retain provider protection")
+}
+
+func TestDurableScaleInRecoversAfterProviderActionAndInstanceDisappear(t *testing.T) {
+	now := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		nodes: map[string]sandboxstore.RuntimeNodePoolNodeUsage{
+			"i-1": {
+				ProviderInstanceID: "i-1", State: sandboxstore.RuntimeNodeInstanceActive,
+				NodeID: "node-1", AllocationCIDR: "172.28.0.0/23", NonterminalSlots: 102,
+			},
+		},
+		durableActions: []*sandboxstore.RuntimeNodeLifecycleAction{{
+			Token: "token", LifecycleHookID: "in", Transition: TransitionScaleIn,
+			State: "pending", ProviderInstanceIDs: []string{"i-1"},
+			FirstObservedAt: now.Add(-time.Hour), RecoveryDeadlineAt: now.Add(-time.Minute),
+			ProviderActionAbsentSince:   ptrTime(now.Add(-time.Minute)),
+			ProviderInstanceAbsentSince: ptrTime(now.Add(-time.Minute)),
+		}},
+	}
+	cloud := &fakeCloud{}
+	worker, nomad := testWorker(t, store, cloud)
+	worker.config.Now = func() time.Time { return now }
+	worker.config.ProviderAbsenceGrace = time.Second
+
+	result, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Recovered)
+	require.NotContains(t, store.nodes, "i-1")
+	require.Equal(t, 1, store.terminalized["i-1"])
+	require.Equal(t, []string{"node-1"}, nomad.purged)
+	require.Empty(t, nomad.fenced)
+	require.Equal(t, []string{"i-1"}, cloud.deleted)
+	require.Equal(t, "completed", store.finished["token"])
+	require.Empty(t, cloud.completed)
 }
 
 func TestStaleScaleOutRefusesNodeWithUnexpectedLease(t *testing.T) {

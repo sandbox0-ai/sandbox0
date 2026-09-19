@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodepoollifecycle"
@@ -43,11 +44,19 @@ func configureNodePoolLifecycle(
 	if err != nil {
 		return nil, err
 	}
+	ownerID, err := os.Hostname()
+	if err != nil {
+		return nil, fmt.Errorf("resolve node pool lifecycle owner identity: %w", err)
+	}
+	if strings.TrimSpace(ownerID) == "" {
+		return nil, fmt.Errorf("resolve node pool lifecycle owner identity: hostname is empty")
+	}
 	return nodepoollifecycle.New(store, cloud, nomad, nodepoollifecycle.Config{
 		PoolID: nodePool.PoolID, ScaleOutHookID: nodePool.ScaleOutHookID,
 		ScaleInHookID: nodePool.ScaleInHookID, WarmSlotsPerNode: nodePool.WarmSlotsPerNode,
 		Interval:                  nodePool.LifecycleInterval.Duration,
 		HeartbeatTimeout:          nodePool.LifecycleHeartbeat.Duration,
 		ScaleOutEnrollmentTimeout: nodePool.ScaleOutEnrollmentTimeout.Duration,
+		OwnerID:                   ownerID,
 	})
 }

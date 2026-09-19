@@ -179,6 +179,17 @@ including high ordinals without retaining their unused lower-ordinal prefix.
 No extra idle buffer is added when CPU is fully leased or less than 64 MiB is
 free. These inventory hints never increase the guest admission budget.
 
+Scale-out and scale-in lifecycle cleanup is driven by durable PostgreSQL
+actions, not solely by the provider's current lifecycle-action queue. Each
+nonterminal action has a bounded recovery deadline and a fenced owner/epoch.
+If a successful provider enumeration no longer sees the action and every child
+ECS instance is absent from the exact scaling group, manager records both
+absence timestamps, waits the bounded grace period, retires only expired and
+unclaimed warm carriers with a proof digest, rejects remaining lease or
+non-warm-allocation custody, removes the route, purges Nomad identity, revokes
+the node, and writes a terminal convergence receipt. This closes the former
+window where an expired provider token could strand a durable cleanup action.
+
 Resize intent is persisted in PostgreSQL, bound to node UID/boot and serialized
 with claim capacity locks. Only allocations outside the retained set are fenced
 during a resize; existing retained carriers continue serving. Nomad updates use

@@ -107,9 +107,12 @@ func (a *managerApp) Run() {
 				zap.Int("observed", result.Observed),
 				zap.Int("completed", result.Completed),
 				zap.Int("rolled_back", result.RolledBack),
+				zap.Int("recovered", result.Recovered),
 			}
 			if err != nil {
 				a.logger.Warn("Sandbox node lifecycle reconcile failed", append(fields, zap.Error(err))...)
+			} else if result.Recovered > 0 {
+				a.logger.Info("Sandbox node lifecycle recovery progressed", fields...)
 			}
 		})
 		a.logger.Info("Sandbox node lifecycle controller started")

@@ -123,6 +123,22 @@ func (n *NomadClient) NodeHasNonterminalAllocations(ctx context.Context, nodeID 
 	return false, nil
 }
 
+func (n *NomadClient) NodeHasNonWarmNonterminalAllocations(ctx context.Context, nodeID string) (bool, error) {
+	allocations, err := n.allocations(ctx, nodeID)
+	if err != nil {
+		return false, err
+	}
+	for _, allocation := range allocations {
+		if allocation.terminal() ||
+			(nomadinventory.IsWarmJob(n.warmJobID, allocation.JobID) &&
+				(allocation.Namespace == "" || allocation.Namespace == "default")) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (n *NomadClient) PurgeNode(ctx context.Context, nodeID string) error {
 	return n.request(ctx, http.MethodPut, "/v1/node/"+url.PathEscape(nodeID)+"/purge", nil, nil)
 }

@@ -235,6 +235,33 @@ func TestAliyunProtectionExcludesPendingRemovingAndMissingInstances(t *testing.T
 	require.Len(t, client.protectionRequests, 2)
 }
 
+func TestAliyunLifecycleDistinguishesAttachedFromInServiceInstances(t *testing.T) {
+	client := &lifecycleESSStub{describeNodes: func(request *ess.DescribeScalingInstancesRequest) (*ess.DescribeScalingInstancesResponse, error) {
+		response := ess.CreateDescribeScalingInstancesResponse()
+		for _, id := range *request.InstanceId {
+			state := map[string]string{"pending": "Pending:Wait", "ready": "InService", "missing": ""}[id]
+			if state != "" {
+				response.ScalingInstances.ScalingInstance = append(response.ScalingInstances.ScalingInstance,
+					ess.ScalingInstance{InstanceId: id, ScalingGroupId: "asg-1", LifecycleState: state})
+			}
+		}
+		return response, nil
+	}}
+	cloud, err := newAliyunCloud(client, lifecycleVPCStub{}, "asg-1", []string{"rt-1"})
+	require.NoError(t, err)
+	ids := []string{"pending", "ready", "missing"}
+	inService, err := cloud.ElasticInstancesInService(context.Background(), ids)
+	require.NoError(t, err)
+	attached, err := cloud.ElasticInstancesAttached(context.Background(), ids)
+	require.NoError(t, err)
+	require.False(t, inService["pending"])
+	require.True(t, inService["ready"])
+	require.False(t, inService["missing"])
+	require.True(t, attached["pending"], "provider absence means no longer attached, not merely not yet InService")
+	require.True(t, attached["ready"])
+	require.False(t, attached["missing"])
+}
+
 type allocationRouteVPCStub struct {
 	t        *testing.T
 	response *vpc.DescribeRouteEntryListResponse

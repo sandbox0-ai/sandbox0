@@ -1,8 +1,10 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -153,15 +155,23 @@ type ActivateRuntimeNodeRequest struct {
 }
 
 type RuntimeNodeLifecycleAction struct {
-	Token               string
-	PoolID              string
-	LifecycleHookID     string
-	ProviderInstanceIDs []string
-	Transition          string
-	State               string
-	FirstObservedAt     time.Time
-	CompletedAt         time.Time
-	UpdatedAt           time.Time
+	Token                        string
+	PoolID                       string
+	LifecycleHookID              string
+	ProviderInstanceIDs          []string
+	Transition                   string
+	State                        string
+	FirstObservedAt              time.Time
+	CompletedAt                  time.Time
+	UpdatedAt                    time.Time
+	RecoveryOwnerID              string
+	RecoveryEpoch                int64
+	RecoveryLeaseExpiresAt       *time.Time
+	RecoveryDeadlineAt           time.Time
+	ProviderActionLastObservedAt *time.Time
+	ProviderActionAbsentSince    *time.Time
+	ProviderInstanceAbsentSince  *time.Time
+	ConvergenceProof             []byte
 }
 
 type ObserveRuntimeNodeLifecycleActionRequest struct {
@@ -170,6 +180,7 @@ type ObserveRuntimeNodeLifecycleActionRequest struct {
 	LifecycleHookID     string
 	ProviderInstanceIDs []string
 	Transition          string
+	RecoveryDeadline    time.Time
 }
 
 func (s RuntimeNodeDrainStatus) SafeToStop() bool {
@@ -945,7 +956,11 @@ func (s *PGSandboxStore) CompleteReadyRuntimeNodeScaleOutActions(
 	}
 	_, err := s.pool.Exec(ctx, `
 		UPDATE manager.runtime_node_lifecycle_actions AS action
-		SET state = 'completed', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+		SET state = 'completed', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW(),
+			convergence_proof = COALESCE(action.convergence_proof, JSONB_BUILD_OBJECT(
+				'source', 'all_children_provider_ready',
+				'transition', action.transition
+			))
 		WHERE action.pool_id = $1
 			AND action.transition = 'scale_out'
 			AND action.state = 'pending'
@@ -1221,9 +1236,11 @@ func (s *PGSandboxStore) ObserveRuntimeNodeLifecycleAction(
 	if normalized.Token == "" || len(normalized.Token) > 512 || normalized.PoolID == "" ||
 		normalized.LifecycleHookID == "" || len(normalized.LifecycleHookID) > 256 ||
 		len(normalized.ProviderInstanceIDs) == 0 || len(normalized.ProviderInstanceIDs) > 299 ||
-		(normalized.Transition != "scale_out" && normalized.Transition != "scale_in") {
+		(normalized.Transition != "scale_out" && normalized.Transition != "scale_in") ||
+		normalized.RecoveryDeadline.IsZero() {
 		return nil, fmt.Errorf("runtime node lifecycle action identity is invalid")
 	}
+	normalized.RecoveryDeadline = normalized.RecoveryDeadline.UTC()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, err
@@ -1231,17 +1248,23 @@ func (s *PGSandboxStore) ObserveRuntimeNodeLifecycleAction(
 	defer tx.Rollback(ctx) //nolint:errcheck
 	row := tx.QueryRow(ctx, `
 		INSERT INTO manager.runtime_node_lifecycle_actions (
-			lifecycle_action_token, pool_id, lifecycle_hook_id, transition, state
-		) VALUES ($1, $2, $3, $4, 'pending')
+			lifecycle_action_token, pool_id, lifecycle_hook_id, transition, state,
+			recovery_deadline_at
+		) VALUES ($1, $2, $3, $4, 'pending', $5)
 		ON CONFLICT (lifecycle_action_token) DO UPDATE
-		SET updated_at = NOW()
+		SET updated_at = NOW(),
+			recovery_deadline_at = manager.runtime_node_lifecycle_actions.recovery_deadline_at
 		WHERE manager.runtime_node_lifecycle_actions.pool_id = EXCLUDED.pool_id
 			AND manager.runtime_node_lifecycle_actions.lifecycle_hook_id = EXCLUDED.lifecycle_hook_id
 			AND manager.runtime_node_lifecycle_actions.transition = EXCLUDED.transition
 		RETURNING lifecycle_action_token, pool_id, lifecycle_hook_id,
 			transition, state, first_observed_at,
-			completed_at, updated_at
-	`, normalized.Token, normalized.PoolID, normalized.LifecycleHookID, normalized.Transition)
+			completed_at, updated_at, recovery_owner_id, recovery_epoch,
+			recovery_lease_expires_at, recovery_deadline_at,
+			provider_action_last_observed_at, provider_action_absent_since,
+			provider_instance_absent_since, convergence_proof
+	`, normalized.Token, normalized.PoolID, normalized.LifecycleHookID,
+		normalized.Transition, normalized.RecoveryDeadline)
 	action, err := scanRuntimeNodeLifecycleAction(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("runtime node lifecycle token conflicts with durable identity")
@@ -1319,17 +1342,31 @@ func (s *PGSandboxStore) CompleteRuntimeNodeLifecycleAction(
 	ctx context.Context,
 	token, state string,
 ) error {
+	return s.CompleteRuntimeNodeLifecycleActionWithProof(ctx, token, state,
+		map[string]string{"source": "legacy_completion"})
+}
+
+func (s *PGSandboxStore) CompleteRuntimeNodeLifecycleActionWithProof(
+	ctx context.Context,
+	token, state string,
+	proof any,
+) error {
 	token = strings.TrimSpace(token)
 	state = strings.TrimSpace(state)
-	if token == "" || (state != "completed" && state != "abandoned") {
+	proofPayload, err := marshalRuntimeNodeLifecycleProof(proof)
+	if err != nil {
+		return err
+	}
+	if token == "" || (state != "completed" && state != "abandoned") || proofPayload == nil {
 		return fmt.Errorf("runtime node lifecycle completion is invalid")
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE manager.runtime_node_lifecycle_actions
-		SET state = $2, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+		SET state = $2, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW(),
+			convergence_proof = COALESCE(convergence_proof, $3::jsonb)
 		WHERE lifecycle_action_token = $1
 			AND (state IN ('pending', 'draining') OR state = $2)
-	`, token, state)
+	`, token, state, proofPayload)
 	if err != nil {
 		return fmt.Errorf("complete runtime node lifecycle action: %w", err)
 	}
@@ -1337,6 +1374,18 @@ func (s *PGSandboxStore) CompleteRuntimeNodeLifecycleAction(
 		return fmt.Errorf("runtime node lifecycle action is not completable")
 	}
 	return nil
+}
+
+func marshalRuntimeNodeLifecycleProof(proof any) ([]byte, error) {
+	if proof == nil {
+		return nil, nil
+	}
+	payload, err := json.Marshal(proof)
+	if err != nil || !json.Valid(payload) || len(payload) > 16<<10 ||
+		!bytes.HasPrefix(payload, []byte("{")) {
+		return nil, fmt.Errorf("runtime node lifecycle convergence proof is invalid")
+	}
+	return payload, nil
 }
 
 // BeginRuntimeNodeLifecycleActionCleanup durably blocks late enrollment
@@ -1369,13 +1418,22 @@ func (s *PGSandboxStore) BeginRuntimeNodeLifecycleActionCleanup(
 
 func scanRuntimeNodeLifecycleAction(row pgx.Row) (*RuntimeNodeLifecycleAction, error) {
 	action := &RuntimeNodeLifecycleAction{}
-	var completedAt *time.Time
+	var completedAt, recoveryLeaseExpiresAt, providerActionLastObservedAt *time.Time
+	var providerActionAbsentSince, providerInstanceAbsentSince *time.Time
 	err := row.Scan(&action.Token, &action.PoolID, &action.LifecycleHookID,
 		&action.Transition, &action.State,
-		&action.FirstObservedAt, &completedAt, &action.UpdatedAt)
+		&action.FirstObservedAt, &completedAt, &action.UpdatedAt,
+		&action.RecoveryOwnerID, &action.RecoveryEpoch,
+		&recoveryLeaseExpiresAt, &action.RecoveryDeadlineAt,
+		&providerActionLastObservedAt, &providerActionAbsentSince,
+		&providerInstanceAbsentSince, &action.ConvergenceProof)
 	if completedAt != nil {
 		action.CompletedAt = *completedAt
 	}
+	action.RecoveryLeaseExpiresAt = recoveryLeaseExpiresAt
+	action.ProviderActionLastObservedAt = providerActionLastObservedAt
+	action.ProviderActionAbsentSince = providerActionAbsentSince
+	action.ProviderInstanceAbsentSince = providerInstanceAbsentSince
 	return action, err
 }
 

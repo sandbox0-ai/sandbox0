@@ -571,6 +571,17 @@ it to `true` so the system job creates carriers. PostgreSQL must retain a
 separate `warming` claim fence until the provider confirms scale-out; Nomad
 metadata alone is not provider admission.
 
+PostgreSQL lifecycle actions are also the recovery source after a provider
+lifecycle token disappears. Every nonterminal action carries a bounded recovery
+deadline, a fenced recovery owner and epoch, and a terminal convergence receipt.
+When a successful provider enumeration no longer observes the token and every
+child instance is absent from the exact scaling-group inventory, manager waits a
+bounded observation grace period, retires only expired unclaimed warm carriers
+with a provider-absence proof, rejects nodes that still own leases or non-warm
+Nomad allocations, removes the route, purges the Nomad identity, revokes the
+node, and closes the durable action. The provider queue can accelerate this
+path, but it can no longer be the only way to resume cleanup.
+
 ## Gateway Identity And Routing
 
 For self-hosted regional-gateway, configure:

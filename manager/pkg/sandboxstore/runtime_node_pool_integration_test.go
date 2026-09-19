@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -39,6 +40,7 @@ func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
 	actionRequest := &ObserveRuntimeNodeLifecycleActionRequest{
 		Token: "ready-recovery-token", PoolID: "elastic", LifecycleHookID: "hook-out",
 		ProviderInstanceIDs: []string{"i-1"}, Transition: "scale_out",
+		RecoveryDeadline: time.Now().Add(20 * time.Minute),
 	}
 	_, err = store.ObserveRuntimeNodeLifecycleAction(ctx, actionRequest)
 	require.NoError(t, err)
@@ -170,6 +172,7 @@ func TestAbandonedScaleOutBlocksLateEnrollmentAndReleasesCIDRIntegration(t *test
 		&ObserveRuntimeNodeLifecycleActionRequest{
 			Token: "scale-out-token", PoolID: "elastic", LifecycleHookID: "hook-out",
 			ProviderInstanceIDs: []string{"i-stale"}, Transition: "scale_out",
+			RecoveryDeadline: time.Now().Add(20 * time.Minute),
 		})
 	require.NoError(t, err)
 	require.Equal(t, "pending", action.State)

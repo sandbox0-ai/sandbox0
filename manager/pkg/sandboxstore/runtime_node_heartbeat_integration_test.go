@@ -12,14 +12,14 @@ import (
 
 func TestRuntimeNodeLifecycleHeartbeatBudgetSurvivesConcurrentReplicasIntegration(t *testing.T) {
 	ctx := context.Background()
-	// Pin the migration whose irreversible down contract is asserted below.
-	pool := newSandboxStoreIntegrationPoolAt(t, 57)
+	pool := newSandboxStoreIntegrationPoolAt(t, 60)
 	store := NewPGSandboxStore(pool)
 	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", "nomad")
 	require.NoError(t, err)
 	request := &ObserveRuntimeNodeLifecycleActionRequest{
 		Token: "heartbeat-budget", PoolID: "elastic", LifecycleHookID: "hook-out",
 		ProviderInstanceIDs: []string{"i-1"}, Transition: "scale_out",
+		RecoveryDeadline: time.Now().Add(20 * time.Minute),
 	}
 	_, err = store.ObserveRuntimeNodeLifecycleAction(ctx, request)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestRuntimeNodeLifecycleHeartbeatBudgetSurvivesConcurrentReplicasIntegratio
 	require.Equal(t, RuntimeNodeLifecycleHeartbeatMaxAttempts, attempts)
 	err = migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS),
 		migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
-	require.ErrorContains(t, err, "Lifecycle heartbeat budgets cannot be rolled back")
+	require.ErrorContains(t, err, "Durable lifecycle recovery receipts cannot be rolled back")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT heartbeat_attempts FROM manager.runtime_node_lifecycle_actions WHERE lifecycle_action_token = $1`, request.Token).Scan(&attempts))
 	require.Equal(t, RuntimeNodeLifecycleHeartbeatMaxAttempts, attempts)
 	// Exhaustion must not prevent the controller from completing cleanup.

@@ -30,7 +30,37 @@ func (c *AliyunCloud) ElasticInstancesInService(
 	ctx context.Context,
 	instanceIDs []string,
 ) (map[string]bool, error) {
-	result := make(map[string]bool, len(instanceIDs))
+	states, err := c.ElasticInstanceStates(ctx, instanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]bool, len(states))
+	for instanceID, state := range states {
+		result[instanceID] = state == "InService" || state == "Protected"
+	}
+	return result, nil
+}
+
+func (c *AliyunCloud) ElasticInstancesAttached(
+	ctx context.Context,
+	instanceIDs []string,
+) (map[string]bool, error) {
+	states, err := c.ElasticInstanceStates(ctx, instanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]bool, len(states))
+	for instanceID := range states {
+		result[instanceID] = true
+	}
+	return result, nil
+}
+
+func (c *AliyunCloud) ElasticInstanceStates(
+	ctx context.Context,
+	instanceIDs []string,
+) (map[string]string, error) {
+	states := make(map[string]string, len(instanceIDs))
 	for start := 0; start < len(instanceIDs); start += 20 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -50,10 +80,10 @@ func (c *AliyunCloud) ElasticInstancesInService(
 			if instance.ScalingGroupId != c.scalingGroupID || !slices.Contains(chunk, instance.InstanceId) {
 				return nil, errors.New("aliyun returned an unexpected elastic instance")
 			}
-			result[instance.InstanceId] = instance.LifecycleState == "InService" || instance.LifecycleState == "Protected"
+			states[instance.InstanceId] = instance.LifecycleState
 		}
 	}
-	return result, nil
+	return states, nil
 }
 
 type aliyunLifecycleVPC interface {

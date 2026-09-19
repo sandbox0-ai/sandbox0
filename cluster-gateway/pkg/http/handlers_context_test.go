@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -511,4 +512,65 @@ func newGetProcdURLTestManager(t *testing.T) (string, *getProcdURLManagerSpy, *i
 		manager.Close()
 	}
 	return manager.URL, spy, tokenGen, cleanup
+}
+
+// Exercise the actual regional proxy -> cluster handler -> manager -> procd path.
+// Startup outlasts the ordinary proxy budget but must not fail the first access.
+func TestCreateContextAutoResumeThroughRegionalProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/contexts" {
+			t.Errorf("unexpected procd path %s", r.URL.Path)
+		}
+		_ = spec.WriteSuccess(w, http.StatusCreated, map[string]any{"id": "ctx-resumed"})
+	}))
+	defer procd.Close()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "cluster-gateway", PrivateKey: key, TTL: time.Minute})
+	var resumed atomic.Bool
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			select {
+			case <-time.After(100 * time.Millisecond):
+				resumed.Store(true)
+				w.WriteHeader(http.StatusOK)
+			case <-r.Context().Done():
+				return
+			}
+			return
+		}
+		sb := mgr.Sandbox{ID: "sb-1", TeamID: "team-a", UserID: "user-a", Status: mgr.SandboxStatusPaused, AutoResume: true}
+		if resumed.Load() {
+			sb.Status = mgr.SandboxStatusRunning
+			sb.InternalAddr = procd.URL
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, sb)
+	}))
+	defer manager.Close()
+	cfg := &config.ClusterGatewayConfig{}
+	cfg.ProxyTimeout.Duration = 50 * time.Millisecond
+	server := &Server{cfg: cfg, managerClient: client.NewManagerClient(manager.URL, gen, zap.NewNop(), time.Second), internalAuthGen: gen, logger: zap.NewNop(), httpClient: &http.Client{Timeout: cfg.ProxyTimeout.Duration}}
+	cluster := gin.New()
+	cluster.POST("/api/v1/sandboxes/:id/contexts", func(c *gin.Context) {
+		auth := &gatewayauthn.AuthContext{TeamID: "team-a", UserID: "user-a"}
+		c.Set("auth_context", auth)
+		c.Request = c.Request.WithContext(gatewayauthn.WithAuthContext(c.Request.Context(), auth))
+		server.createContext(c)
+	})
+	upstream := httptest.NewServer(cluster)
+	defer upstream.Close()
+	regionalProxy, err := proxy.NewRouter(upstream.URL, zap.NewNop(), 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regional := gin.New()
+	regional.POST("/api/v1/sandboxes/:id/contexts", regionalProxy.ProxyToTarget)
+	rec := httptest.NewRecorder()
+	regional.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sb-1/contexts", strings.NewReader(`{"type":"cmd","cmd":{"command":["true"]}}`)))
+	if rec.Code != http.StatusCreated || !resumed.Load() {
+		t.Fatalf("status=%d resumed=%v body=%s", rec.Code, resumed.Load(), rec.Body.String())
+	}
 }

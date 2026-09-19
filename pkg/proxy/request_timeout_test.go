@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -74,5 +75,47 @@ func TestAcquisitionTimeoutIsBoundedAndPreservesEarlierDeadline(t *testing.T) {
 		if requestUpstreamTimeout(req, 10*time.Second) != 10*time.Second {
 			t.Fatalf("unexpected extension for %s", path)
 		}
+	}
+}
+
+func TestAutoResumeRoutesUseAcquisitionBudget(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         bool
+	}{
+		{"POST", "/api/v1/sandboxes/sb/contexts", true},
+		{"GET", "/api/v1/sandboxes/sb/contexts/ctx", true},
+		{"POST", "/api/v1/sandboxes/sb/contexts/ctx/exec", true},
+		{"PUT", "/api/v1/sandboxes/sb/sessions/session/desired-state", true},
+		{"GET", "/api/v1/sandboxes/sb/files/list", true},
+		{"DELETE", "/api/v1/sandboxes/sb/files", true},
+		{"POST", "/api/v1/sandboxes/sb/previews", true},
+		{"PUT", "/api/v1/sandboxes/sb/previews/preview", true},
+		{"DELETE", "/api/v1/sandboxes/sb/previews/preview", false},
+		{"GET", "/api/v1/sandboxes/sb", false},
+		{"GET", "/api/v1/sandboxes/sb/observability/logs", false},
+		{"PUT", "/api/v1/sandboxes/sb/network", false},
+		{"GET", "/api/v1/sandboxes//files", false},
+		{"GET", "/api/v1/sandboxes/sb/files-other", false},
+		{"OPTIONS", "/api/v1/sandboxes/sb/contexts", false},
+		{"GET", "/api/v1/contexts", false},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			want := 10 * time.Second
+			if tc.want {
+				want = RuntimeAcquisitionTimeout
+			}
+			if got := requestUpstreamTimeout(req, 10*time.Second); got != want {
+				t.Fatalf("timeout = %v, want %v", got, want)
+			}
+			client := &http.Client{Timeout: 10 * time.Second}
+			if got := ClientForRequest(client, req).Timeout; got != want {
+				t.Fatalf("client timeout = %v, want %v", got, want)
+			}
+			if got := requestUpstreamTimeout(WithLongLivedRequestRequest(req), 10*time.Second); got != 0 {
+				t.Fatalf("stream timeout = %v", got)
+			}
+		})
 	}
 }

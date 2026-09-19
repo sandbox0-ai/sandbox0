@@ -1,0 +1,137 @@
+name: Update Coding Agent Template
+
+on:
+  schedule:
+    - cron: '23 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-coding-agent-template
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      due: ${{ steps.cadence.outputs.due }}
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+      artifact: ${{ steps.source.outputs.artifact }}
+    steps:
+      # UTC epoch days avoid cron's */3 day-of-month reset at month boundaries.
+      - name: Check three-day cadence
+        id: cadence
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == workflow_dispatch ]] || (( $(date -u +%s) / 86400 % 3 == 0 )); then
+            echo 'due=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.cadence.outputs.due == 'true'
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        if: steps.cadence.outputs.due == 'true'
+        with:
+          node-version: '22'
+      - name: Resolve exact harness versions
+        id: source
+        if: steps.cadence.outputs.due == 'true'
+        run: |
+          set -euo pipefail
+          node --test manager/procd/coding-agents/update.test.mjs
+          node manager/procd/coding-agents/update.mjs
+          git diff --check
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=coding-agent-auto-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "artifact=coding-agent-dependencies-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.cadence.outputs.due == 'true'
+        with:
+          name: ${{ steps.source.outputs.artifact }}
+          path: |
+            manager/procd/coding-agents/package.json
+            manager/procd/coding-agents/package-lock.json
+            manager/procd/coding-agents/THIRD_PARTY.md
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.due == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: manager/procd/coding-agents
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The Dockerfile runs every CLI's --version after npm ci on each native arch.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: manager/procd/Dockerfile.coding-agent
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          provenance: false
+          tags: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.commit }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: manager/procd/coding-agents
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish verified multi-architecture image and release receipt
+        run: |
+          set -euo pipefail
+          source="sandbox0ai/otemplates:${VERSION}"
+          docker buildx imagetools create -t "$source" "${source}-amd64" "${source}-arm64"
+          manifest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}')"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+          jq -n --arg version "$VERSION" --arg source "$source" \
+            --arg image "sandbox0ai/otemplates@${digest}" --arg commit "$SOURCE_COMMIT" \
+            '{version: $version, source: $source, image: $image, commit: $commit}' > coding-agent-release.json
+          # A release is the promotion signal. Partial/failed builds never reach infra.
+          gh release create "$VERSION" coding-agent-release.json \
+            manager/procd/coding-agents/package.json \
+            manager/procd/coding-agents/package-lock.json \
+            manager/procd/coding-agents/THIRD_PARTY.md \
+            --target "$SOURCE_COMMIT" --title "$VERSION" --latest=false \
+            --notes 'Automated coding-agent template refresh. Both native architecture builds passed CLI smoke checks. Existing sandbox RootFS generations are unchanged.'
+          cat coding-agent-release.json >> "$GITHUB_STEP_SUMMARY"

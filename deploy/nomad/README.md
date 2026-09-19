@@ -253,6 +253,13 @@ carrier shrink stabilization apply. No benchmark account or schedule is built
 into the controller. Record actual command-ready capacity before starting a
 scheduled batch; a desired count or successful Nomad job update is insufficient.
 
+Set `repeat_weekly: true` on a window to repeat its start and duration every
+seven days, anchored to the original timestamps in UTC. The first occurrence
+never starts before `start`; expired occurrences are skipped without catch-up.
+The same 24-hour duration and 30-second demand expiry bounds apply each week.
+Local daylight saving changes do not shift the UTC schedule. Removing the
+window stops future renewals and leaves ordinary scale-in stabilization intact.
+
 Compatibility-specific demand and ready inventory prevent spare standard
 carriers from hiding a privileged shortage. This is bounded placement progress,
 not an optimal packing algorithm or live workload migration. Node metadata

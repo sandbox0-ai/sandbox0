@@ -14,13 +14,29 @@ type demandStore interface {
 }
 
 // PrewarmWindow describes operator-planned spare capacity, not a reservation or
-// an exception to team quotas. Times are absolute so missed schedules expire.
+// an exception to team quotas. Recurrence uses fixed UTC weeks; missed windows
+// never accumulate demand or trigger catch-up work.
 type PrewarmWindow struct {
 	Name                       string
 	Start, End                 time.Time
+	RepeatWeekly               bool
 	Slots                      int
 	CPUMillicores, MemoryBytes int64
 	SecurityClass              string
+}
+
+// activeEnd computes only the current occurrence, without durable scheduler
+// state. The demand ledger's short TTL handles restart and schedule removal.
+func (w PrewarmWindow) activeEnd(now time.Time) (time.Time, bool) {
+	if now.Before(w.Start) {
+		return time.Time{}, false
+	}
+	end := w.End
+	if w.RepeatWeekly {
+		const week = 7 * 24 * time.Hour
+		end = end.Add((now.Sub(w.Start) / week) * week)
+	}
+	return end, now.Before(end)
 }
 
 func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrierNode) (map[string]map[string]int, error) {
@@ -30,7 +46,8 @@ func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrier
 	}
 	now := time.Now()
 	for _, window := range w.config.PrewarmWindows {
-		if now.Before(window.Start) || !now.Before(window.End) {
+		end, active := window.activeEnd(now)
+		if !active {
 			continue
 		}
 		digest := w.config.StandardDigest
@@ -42,7 +59,7 @@ func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrier
 		err := store.RecordRuntimeNodePoolDemand(ctx, &sandboxstore.RuntimeNodePoolDemandRequest{
 			PoolID: w.config.PoolID, ClusterID: w.config.ClusterID, OperationID: "carrier-prewarm/" + window.Name,
 			CompatibilityDigest: digest, CPUMillicores: window.CPUMillicores, MemoryBytes: window.MemoryBytes,
-			Slots: window.Slots, TTL: max(time.Second, min(30*time.Second, time.Until(window.End))),
+			Slots: window.Slots, TTL: max(time.Second, min(30*time.Second, time.Until(end))),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("record planned carrier demand: %w", err)

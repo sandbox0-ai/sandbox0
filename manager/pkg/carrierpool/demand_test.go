@@ -112,3 +112,43 @@ func TestRuntimeRolloutRefreshesStaleCapacityBeforeDemandRefill(t *testing.T) {
 	require.Len(t, s.node.Groups, 62)
 	require.True(t, s.node.Pending, "new groups still require authenticated readiness")
 }
+
+func TestWeeklyPrewarmSkipsMissedOccurrencesAndExpiresAtBoundary(t *testing.T) {
+	start := time.Date(2026, time.September, 25, 12, 50, 0, 0, time.UTC)
+	window := PrewarmWindow{Start: start, End: start.Add(30 * time.Minute), RepeatWeekly: true}
+	for _, tc := range []struct {
+		name   string
+		now    time.Time
+		active bool
+		end    time.Time
+	}{
+		{"before anchor", start.Add(-time.Second), false, time.Time{}},
+		{"first start", start, true, window.End},
+		{"first end", window.End, false, window.End},
+		{"between weeks", start.Add(24 * time.Hour), false, window.End},
+		{"next start", start.Add(7 * 24 * time.Hour), true, window.End.Add(7 * 24 * time.Hour)},
+		{"restart weeks later", start.Add(5*7*24*time.Hour + 10*time.Minute), true, window.End.Add(5 * 7 * 24 * time.Hour)},
+		{"later end", window.End.Add(5 * 7 * 24 * time.Hour), false, window.End.Add(5 * 7 * 24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			end, active := window.activeEnd(tc.now)
+			require.Equal(t, tc.active, active)
+			require.Equal(t, tc.end, end)
+		})
+	}
+	window.RepeatWeekly = false
+	_, active := window.activeEnd(start.Add(7 * 24 * time.Hour))
+	require.False(t, active)
+}
+
+func TestWeeklyPrewarmRenewsCurrentOccurrenceWithBoundedTTL(t *testing.T) {
+	now := time.Now()
+	s := &plannedStore{}
+	w := &Worker{store: s, config: Config{PoolID: "pool", ClusterID: "cluster", StandardDigest: "std", PrewarmWindows: []PrewarmWindow{{Name: "weekly", Start: now.Add(-14*24*time.Hour - time.Minute), End: now.Add(-14*24*time.Hour + 10*time.Second), RepeatWeekly: true, Slots: 100, CPUMillicores: 150, MemoryBytes: 128 << 20}}}}
+	_, err := w.demand(t.Context(), nil)
+	require.NoError(t, err)
+	require.Len(t, s.records, 1)
+	require.Equal(t, "carrier-prewarm/weekly", s.records[0].OperationID)
+	require.Greater(t, s.records[0].TTL, time.Second)
+	require.LessOrEqual(t, s.records[0].TTL, 10*time.Second)
+}

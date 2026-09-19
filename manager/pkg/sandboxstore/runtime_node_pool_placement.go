@@ -128,10 +128,11 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("scan runtime node placement capacity: %w", err)
 	}
-	// Collapse repeated shapes, while preserving the CPU/memory pair. Combining
-	// independently maximal dimensions could invent a request that never existed.
+	// Placement checks one indivisible request per distinct CPU/memory pair.
+	// The aggregate projection already counts batch quantities; requiring a whole
+	// batch on one node would buy extra nodes even when distributed capacity fits.
 	demands, err := s.pool.Query(ctx, `
-		SELECT DISTINCT cpu_millicores, memory_bytes, slots,compatibility_digest
+		SELECT DISTINCT cpu_millicores, memory_bytes, 1 AS slots,compatibility_digest
 		FROM manager.runtime_node_pool_demands AS demand
 		WHERE pool_id = $1 AND cluster_id = $2 AND expires_at > NOW()
 			AND NOT EXISTS (SELECT 1 FROM manager.runtime_slots AS acquired

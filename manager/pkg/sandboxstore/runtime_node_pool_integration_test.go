@@ -235,3 +235,31 @@ func TestRuntimeNodeReservationsPreserveNetworksAcrossDensityProfilesIntegration
 	require.NoError(t, err)
 	require.Equal(t, original.AllocationCIDR, retry.AllocationCIDR, "retries retain the enrolled node network")
 }
+
+func TestPlannedBatchDemandSnapshotCountsEveryRequestIntegration(t *testing.T) {
+	ctx := t.Context()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	_, err := store.EnsureRuntimeNodePoolState(ctx, "elastic", "nomad")
+	require.NoError(t, err)
+	for _, r := range []*RuntimeNodePoolDemandRequest{
+		{PoolID: "elastic", ClusterID: "nomad", OperationID: "carrier-prewarm/batch", CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 100, TTL: time.Minute},
+		{PoolID: "elastic", ClusterID: "nomad", OperationID: "single-claim", CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 1, TTL: time.Minute},
+	} {
+		require.NoError(t, store.RecordRuntimeNodePoolDemand(ctx, r))
+		require.NoError(t, store.RecordRuntimeNodePoolDemand(ctx, r))
+	}
+	snapshot, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.EqualValues(t, 15150, snapshot.DemandCPUMillicores)
+	require.EqualValues(t, 101*(128<<20), snapshot.DemandMemoryBytes)
+	require.Equal(t, 101, snapshot.DemandSlots)
+	require.Equal(t, []RuntimeNodePoolDemandShape{{CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 1}}, snapshot.DemandShapes, "a batch is multiple placeable requests, not one indivisible 100-slot request")
+	_, err = pool.Exec(ctx, `UPDATE manager.runtime_node_pool_demands SET expires_at=NOW()-INTERVAL '1 second' WHERE operation_id='carrier-prewarm/batch'`)
+	require.NoError(t, err)
+	snapshot, err = store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.EqualValues(t, 150, snapshot.DemandCPUMillicores)
+	require.EqualValues(t, 128<<20, snapshot.DemandMemoryBytes)
+	require.Equal(t, 1, snapshot.DemandSlots)
+}

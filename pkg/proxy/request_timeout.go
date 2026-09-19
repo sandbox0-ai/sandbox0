@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// RuntimeAcquisitionTimeout bounds capacity acquisition and guest startup.
+const RuntimeAcquisitionTimeout = 45 * time.Second
+
 type upstreamTimeoutDisabledKey struct{}
 type longLivedRequestKey struct{}
 
@@ -117,21 +120,38 @@ func IsTimeoutError(err error) bool {
 }
 
 // Runtime acquisition can spend 30 seconds waiting for capacity before guest
-// startup. Give these exact control routes a bounded 45-second upstream budget
+// startup. Give acquisition and auto-resume runtime routes a bounded 45-second upstream budget
 // at every gateway hop. An earlier caller deadline or cancellation still wins.
 func requestUpstreamTimeout(req *http.Request, defaultTimeout time.Duration) time.Duration {
 	timeout := EffectiveUpstreamTimeout(req.Context(), defaultTimeout)
-	if timeout <= 0 || req.Method != http.MethodPost || req.URL == nil {
+	if timeout <= 0 || req.URL == nil {
 		return timeout
 	}
 	path := req.URL.Path
-	acquisition := path == "/api/v1/sandboxes"
+	acquisition := req.Method == http.MethodPost && path == "/api/v1/sandboxes"
 	if tail, ok := strings.CutPrefix(path, "/api/v1/sandboxes/"); ok {
 		id, action, found := strings.Cut(tail, "/")
-		acquisition = found && id != "" && (action == "resume" || action == "fork")
+		acquisition = found && id != "" && req.Method == http.MethodPost && (action == "resume" || action == "fork")
+		if found && id != "" && runtimeAccessMayResume(req.Method, action) {
+			acquisition = true
+		}
 	}
 	if acquisition {
-		return max(timeout, 45*time.Second)
+		return max(timeout, RuntimeAcquisitionTimeout)
 	}
 	return timeout
+}
+
+// Runtime APIs resolve a live procd and may synchronously resume the sandbox.
+// Keep metadata, observability and unrelated control routes on their normal budget.
+func runtimeAccessMayResume(method, action string) bool {
+	resource, _, _ := strings.Cut(action, "/")
+	switch resource {
+	case "contexts", "sessions", "files":
+		return method == http.MethodGet || method == http.MethodPost || method == http.MethodPut || method == http.MethodDelete
+	case "previews":
+		return method == http.MethodPost || method == http.MethodPut
+	default:
+		return false
+	}
 }

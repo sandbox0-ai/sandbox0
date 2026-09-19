@@ -193,3 +193,15 @@ and sockets do not survive.
     Preserve logical process identity and replayable events across reconnects.
   </Card>
 </CardGroup>
+
+### Gateway timeout budget
+
+Runtime API requests for contexts, sessions, files, and preview creation or renewal
+may synchronously wake a sandbox. Gateway upstream proxies allow at least 45 seconds
+for these requests, as they do for explicit create, resume, and fork requests.
+Cluster-gateway bounds its manager resume call to 45 seconds, including when the
+access will become a long-lived stream. An earlier caller deadline or cancellation
+still applies. Metadata requests retain the ordinary proxy timeout, and runtime
+operations after startup retain their normal procd timeout. The default 60-second
+gateway write timeout accommodates this startup budget; custom ingress or client
+timeouts must also allow time for resume.

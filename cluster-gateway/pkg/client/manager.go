@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -186,6 +187,11 @@ func (c *ManagerClient) TerminateSandbox(ctx context.Context, sandboxID, userID,
 
 // ResumeSandbox asks manager to resume a paused sandbox and waits for it to become active.
 func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
+	// Auto-resume also runs behind direct cluster ingress and streaming requests.
+	// Bound startup independently of stream lifetime, preserving caller cancellation.
+	ctx, cancel := context.WithTimeout(ctx, proxy.RuntimeAcquisitionTimeout)
+	defer cancel()
+
 	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})
 	if err != nil {
 		return fmt.Errorf("generate internal token: %w", err)

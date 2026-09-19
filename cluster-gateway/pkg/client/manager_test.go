@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,5 +113,29 @@ func TestResumeSandboxDoesNotMarkTransportUncertaintyAsDefinitiveFailure(t *test
 	}
 	if errors.Is(err, ErrSandboxResumeFailed) {
 		t.Fatalf("ResumeSandbox() error = %v, do not want ErrSandboxResumeFailed", err)
+	}
+}
+
+type resumeDeadlineTransport struct{ t *testing.T }
+
+func (rt resumeDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	deadline, ok := req.Context().Deadline()
+	remaining := time.Until(deadline)
+	if !ok || remaining <= 44*time.Second || remaining > 45*time.Second {
+		rt.t.Errorf("resume deadline = %v", remaining)
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+}
+
+func TestResumeSandboxBoundsStartupWithoutCallerDeadline(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "cluster-gateway", PrivateKey: key, TTL: time.Minute})
+	c := NewManagerClient("http://manager", gen, zap.NewNop(), time.Second)
+	c.httpClient.Transport = resumeDeadlineTransport{t: t}
+	if err := c.ResumeSandbox(context.Background(), "sb", "user", "team"); err != nil {
+		t.Fatal(err)
 	}
 }

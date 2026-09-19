@@ -40,12 +40,15 @@ type Config struct {
 	Spare            int
 	ShrinkAfter      time.Duration
 	Interval         time.Duration
+	PoolID           string
+	PrewarmWindows   []PrewarmWindow
 }
 
 type Worker struct {
 	store  Store
 	nomad  Nomad
 	config Config
+	wake   chan struct{}
 }
 
 var errUnchanged = errors.New("carrier placement is unchanged")
@@ -56,7 +59,32 @@ func New(store Store, nomad Nomad, c Config) (*Worker, error) {
 		c.ShrinkAfter < time.Minute || c.Interval < time.Second {
 		return nil, fmt.Errorf("invalid adaptive carrier configuration")
 	}
-	return &Worker{store: store, nomad: nomad, config: c}, nil
+	if len(c.PrewarmWindows) > 32 {
+		return nil, fmt.Errorf("too many prewarm windows")
+	}
+	names := map[string]bool{}
+	for _, window := range c.PrewarmWindows {
+		if c.PoolID == "" || window.Name == "" || len(window.Name) > 80 || names[window.Name] || window.Start.IsZero() || !window.End.After(window.Start) || window.End.Sub(window.Start) > 24*time.Hour || window.Slots < 1 || window.Slots > 1024 || window.CPUMillicores < 1 || window.MemoryBytes < 64<<20 || (window.SecurityClass != "standard" && window.SecurityClass != "privileged") {
+			return nil, fmt.Errorf("invalid carrier prewarm window")
+		}
+		names[window.Name] = true
+		if _, ok := store.(demandStore); !ok {
+			return nil, fmt.Errorf("prewarm requires durable demand store")
+		}
+	}
+	return &Worker{store: store, nomad: nomad, config: c, wake: make(chan struct{}, 1)}, nil
+}
+
+// RequestReconcile coalesces request-path pressure; it never runs Nomad work on
+// an HTTP handler and is safe when adaptive carriers are disabled.
+func (w *Worker) RequestReconcile() {
+	if w == nil {
+		return
+	}
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (w *Worker) Run(ctx context.Context, report func(int, error)) {
@@ -69,6 +97,7 @@ func (w *Worker) Run(ctx context.Context, report func(int, error)) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-w.wake:
 		}
 	}
 }
@@ -88,6 +117,10 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 	if err != nil {
 		return 0, err
 	}
+	targets, err := w.demand(ctx, nodes)
+	if err != nil {
+		return 0, err
+	}
 	for _, pending := range []bool{true, false} {
 		for _, n := range nodes {
 			if n.Pending != pending {
@@ -97,7 +130,7 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 				// Revocation proves node lifecycle cleanup. Replace an interrupted
 				// refill with retirement, or rebind to an admitted successor boot
 				// only after the store proves all predecessor custody is gone.
-				if err := w.prepare(ctx, &n); err != nil {
+				if err := w.prepare(ctx, &n, targets[n.NodeID]); err != nil {
 					return 0, err
 				}
 			}
@@ -120,11 +153,20 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 							(n.ReadyByCompatibility[priv] < 2 && counts["privileged"] < n.CompatibilityCapacity[priv])) &&
 						(len(n.Groups) < ceiling || n.Ready > 0)
 				}
+				for class, count := range targets[n.NodeID] {
+					digest := w.config.StandardDigest
+					if class == "privileged" {
+						digest = w.config.PrivilegedDigest
+					}
+					if count > n.ReadyByCompatibility[digest] {
+						grow = true
+					}
+				}
 				shrink := n.Ready > 2*w.config.Spare && n.SurplusSince != nil && time.Since(*n.SurplusSince) >= w.config.ShrinkAfter
 				if !grow && !shrink && n.Revision != 0 && !n.Retiring && !n.StaleIdentity {
 					continue
 				}
-				if err := w.prepare(ctx, &n); err != nil {
+				if err := w.prepare(ctx, &n, targets[n.NodeID]); err != nil {
 					if errors.Is(err, errUnchanged) {
 						continue
 					}
@@ -140,7 +182,7 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 	return 0, nil
 }
 
-func (w *Worker) prepare(ctx context.Context, n *sandboxstore.RuntimeCarrierNode) error {
+func (w *Worker) prepare(ctx context.Context, n *sandboxstore.RuntimeCarrierNode, demand map[string]int) error {
 	previousGroups, previousCapacity, previousMaximum := n.Groups, n.CompatibilityCapacity, n.MaxCarriers
 	catalogNode := n.NodeID
 	if n.Retiring {
@@ -193,7 +235,7 @@ func (w *Worker) prepare(ctx context.Context, n *sandboxstore.RuntimeCarrierNode
 	for digest, count := range n.CompatibilityCapacity {
 		n.CompatibilityCapacity[digest] = min(count, n.MaxCarriers)
 	}
-	n.Groups, err = Plan(catalog, busy, w.config.Spare, n.MaxCarriers, n.FreeCPU, n.FreeMemory)
+	n.Groups, err = planDemand(catalog, busy, w.config.Spare, n.MaxCarriers, n.FreeCPU, n.FreeMemory, demand)
 	if err != nil {
 		return err
 	}

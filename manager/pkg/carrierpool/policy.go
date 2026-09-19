@@ -46,8 +46,19 @@ func baseline(name string) bool {
 // lower ordinals. Baseline carriers remain available for enrollment/recovery.
 // Only spare carriers are bounded by currently unleased CPU and memory.
 func Plan(catalog, busy []string, spare, maximum int, freeCPU, freeMemory int64) ([]string, error) {
+	return planDemand(catalog, busy, spare, maximum, freeCPU, freeMemory, nil)
+}
+
+// planDemand increases compatible spare inventory for waiting or planned work.
+// These are inventory hints, never grants of CPU or memory.
+func planDemand(catalog, busy []string, spare, maximum int, freeCPU, freeMemory int64, demand map[string]int) ([]string, error) {
 	if spare < 0 || spare > 128 || maximum < 8 || maximum > 576 {
 		return nil, fmt.Errorf("invalid carrier policy")
+	}
+	for class, count := range demand {
+		if (class != "standard" && class != "privileged") || count < 0 || count > 576 {
+			return nil, fmt.Errorf("invalid compatible carrier demand")
+		}
 	}
 	known := map[string]bool{}
 	selected := map[string]bool{}
@@ -81,8 +92,11 @@ func Plan(catalog, busy []string, spare, maximum int, freeCPU, freeMemory int64)
 	// still checks the indivisible request against physical and leased resources.
 	if freeCPU <= 0 || freeMemory < 64<<20 {
 		spare = 0
+		demand = nil
 	}
-	target := min(maximum, max(8, len(occupied)+spare))
+	standardSpare := max(max(0, spare-2), demand["standard"])
+	privilegedSpare := max(min(2, spare), demand["privileged"])
+	target := min(maximum, max(8, len(occupied)+standardSpare+privilegedSpare))
 	counts := map[string]int{}
 	wanted := map[string]int{}
 	for g := range selected {
@@ -93,10 +107,8 @@ func Plan(catalog, busy []string, spare, maximum int, freeCPU, freeMemory int64)
 		class, _, _ := GroupIndex(g)
 		wanted[class]++
 	}
-	if spare > 0 {
-		wanted["privileged"] += min(2, spare)
-		wanted["standard"] += max(0, spare-2)
-	}
+	wanted["privileged"] += privilegedSpare
+	wanted["standard"] += standardSpare
 	candidates := append([]string(nil), catalog...)
 	sort.Slice(candidates, func(i, j int) bool {
 		ci, ii, _ := GroupIndex(candidates[i])

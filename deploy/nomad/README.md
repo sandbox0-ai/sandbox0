@@ -205,6 +205,52 @@ the purchase when any decision input changed. A pressureless fixed-node
 replacement is also debounced for two reconcile intervals, so a normal carrier
 refill cannot immediately purchase an unnecessary elastic worker.
 
+Claims with available team quota wait for capacity for up to 30 seconds by
+default (or half `node_authority.claim.claim_ttl`, whichever is smaller). Set
+`node_authority.claim.capacity_wait_timeout` to a positive duration no greater
+than half the claim TTL. Client cancellation or an earlier request deadline
+ends the wait. Startup runs after acquisition, so client and gateway timeouts
+must cover both capacity waiting and runtime startup. Quota rejection remains
+immediate; exhausting the capacity wait returns the existing capacity-unavailable
+response. Unfinished claim reservations follow the existing expiry/recovery
+protocol; cancellation does not prematurely free an uncertain resource lease.
+
+Each manager bounds queued requests with `capacity_wait_max_pending` (default
+1024) and `capacity_wait_max_pending_per_team` (default 256), both under
+`node_authority.claim`. It rotates retry opportunities between teams with at
+most eight concurrent database retries. These are local scheduling bounds;
+PostgreSQL retains regional quota, operation identity, and resource authority.
+Internal retries reuse the same operation and resource request. Capacity pressure
+wakes the carrier controller immediately; the periodic reconcile remains a
+fallback. Compatible pending demand raises spare inventory above the normal
+low watermark, distributed across physical request fit and unleased resources.
+
+For known scheduled workloads, configure absolute `carrier_pool.prewarm_windows`.
+Choose the start early enough to cover observed node enrollment and carrier
+readiness time. Windows require the node pool autoscaler and authenticated
+enrollment. They feed the existing demand ledger, so the same placement and
+cloud node ceilings apply. For example:
+
+```yaml
+   carrier_pool:
+       prewarm_windows:
+           - name: scheduled-agent-batch
+             start: "2026-10-01T09:50:00Z"
+             end: "2026-10-01T10:10:00Z"
+             security_class: standard
+             slots: 100
+             cpu_millicores: 1000
+             memory_bytes: 1073741824
+```
+
+Each entry describes spare capacity for that many requests of the given shape;
+it does not grant a team quota or reserve specific nodes. At most 32 windows
+are accepted, each lasting at most 24 hours with at most 1024 slots. Pressure
+expires within 30 seconds after renewal stops, then ordinary scale-in and
+carrier shrink stabilization apply. No benchmark account or schedule is built
+into the controller. Record actual command-ready capacity before starting a
+scheduled batch; a desired count or successful Nomad job update is insufficient.
+
 Compatibility-specific demand and ready inventory prevent spare standard
 carriers from hiding a privileged shortage. This is bounded placement progress,
 not an optimal packing algorithm or live workload migration. Node metadata

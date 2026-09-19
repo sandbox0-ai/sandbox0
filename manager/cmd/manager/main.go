@@ -289,6 +289,7 @@ func main() {
 	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
 	sandboxRuntime, err := buildSandboxRuntime(cfg, sandboxRuntimeBackendDependencies{
 		nodeAuthority:   managerNodeAuthority,
+		capacityWake:    carrierPool.RequestReconcile,
 		store:           sandboxStore,
 		quotaLimits:     quotaRepo,
 		templates:       templateStore,

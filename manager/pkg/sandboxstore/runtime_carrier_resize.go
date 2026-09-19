@@ -13,6 +13,7 @@ import (
 type RuntimeCarrierNode struct {
 	ClusterID, NodeID, NodeUID, NodeBootID string
 	FreeCPU, FreeMemory                    int64
+	PhysicalCPU, PhysicalMemory            int64
 	Ready                                  int
 	Revision                               int64
 	Pending                                bool
@@ -63,7 +64,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
                 (cardinality(r.allowed_groups)>8 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
                     WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked')))
             ORDER BY c.node_id,(c.heartbeat_expires_at>NOW()) DESC,c.updated_at DESC)
-        SELECT c.cluster_id,c.node_id,c.node_uid,c.node_boot_id,
+        SELECT c.cluster_id,c.node_id,c.node_uid,c.node_boot_id,c.cpu_millicores,c.memory_bytes,
             GREATEST(0,COALESCE(NULLIF(c.admission_cpu_millicores,0),c.cpu_millicores)-
                 (SELECT COALESCE(SUM(cpu_millicores),0) FROM manager.runtime_resource_leases
                  WHERE cluster_id=c.cluster_id AND node_uid=c.node_uid AND lease_state='active'))::bigint,
@@ -98,7 +99,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
 	var result []RuntimeCarrierNode
 	for rows.Next() {
 		var n RuntimeCarrierNode
-		if err := rows.Scan(&n.ClusterID, &n.NodeID, &n.NodeUID, &n.NodeBootID, &n.FreeCPU, &n.FreeMemory,
+		if err := rows.Scan(&n.ClusterID, &n.NodeID, &n.NodeUID, &n.NodeBootID, &n.PhysicalCPU, &n.PhysicalMemory, &n.FreeCPU, &n.FreeMemory,
 			&n.Ready, &n.Revision, &n.Pending, &n.Groups, &n.MaxCarriers, &n.CompletedAt, &n.Retiring, &n.CompatibilityCapacity, &n.SurplusSince, &n.StaleIdentity, &n.ReadyByCompatibility); err != nil {
 			return nil, err
 		}
@@ -280,4 +281,27 @@ func (s *PGSandboxStore) CompleteRuntimeCarrierResize(ctx context.Context, n Run
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// ListRuntimeCarrierDemand projects still-unfulfilled pressure from the existing
+// regional demand ledger. One operation is counted once, including HTTP retries.
+func (s *PGSandboxStore) ListRuntimeCarrierDemand(ctx context.Context, cluster string) ([]RuntimeNodePoolDemandShape, error) {
+	rows, err := s.pool.Query(ctx, `SELECT compatibility_digest,cpu_millicores,memory_bytes,LEAST(SUM(slots),4096)::integer
+ FROM manager.runtime_node_pool_demands d WHERE cluster_id=$1 AND expires_at>NOW()
+ AND NOT EXISTS(SELECT 1 FROM manager.runtime_slots s WHERE s.cluster_id=d.cluster_id AND s.claim_operation_id=d.operation_id)
+ GROUP BY compatibility_digest,cpu_millicores,memory_bytes
+ ORDER BY cpu_millicores DESC,memory_bytes DESC,compatibility_digest LIMIT 1024`, cluster)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []RuntimeNodePoolDemandShape
+	for rows.Next() {
+		var d RuntimeNodePoolDemandShape
+		if err := rows.Scan(&d.CompatibilityDigest, &d.CPUMillicores, &d.MemoryBytes, &d.Slots); err != nil {
+			return nil, err
+		}
+		result = append(result, d)
+	}
+	return result, rows.Err()
 }

@@ -51,12 +51,22 @@ type RuntimeMetricTarget struct {
 	SeriesEpoch       string `json:"series_epoch"`
 }
 
-// RuntimeMetricSample is one stock-runsc observation made only after the node
-// runtime has revalidated the target against its current durable binding.
+// RuntimeMetricMemoryCgroup is the host cgroup-v2 memory observation used to
+// derive fields that stock runsc does not expose. The two values are read from
+// the same resource cgroup, but the kernel does not update them atomically.
+type RuntimeMetricMemoryCgroup struct {
+	CurrentBytes      uint64 `json:"current_bytes"`
+	InactiveFileBytes uint64 `json:"inactive_file_bytes"`
+}
+
+// RuntimeMetricSample is one stock-runsc and resource-cgroup observation made
+// only after the node runtime has revalidated the target against its current
+// durable binding.
 type RuntimeMetricSample struct {
-	Version    int        `json:"version"`
-	ObservedAt time.Time  `json:"observed_at"`
-	Stats      RunscStats `json:"stats"`
+	Version      int                        `json:"version"`
+	ObservedAt   time.Time                  `json:"observed_at"`
+	Stats        RunscStats                 `json:"stats"`
+	MemoryCgroup *RuntimeMetricMemoryCgroup `json:"memory_cgroup,omitempty"`
 }
 
 // Validate checks the sample against the exact target requested by the
@@ -73,6 +83,12 @@ func (s RuntimeMetricSample) Validate(target RuntimeMetricTarget) error {
 	}
 	if err := s.Stats.Validate(target.RunscContainerID); err != nil {
 		return fmt.Errorf("runsc stats: %w", err)
+	}
+	if s.MemoryCgroup != nil {
+		limit := uint64(target.MemoryMiB) << 20
+		if s.MemoryCgroup.CurrentBytes > limit || s.MemoryCgroup.InactiveFileBytes > limit {
+			return fmt.Errorf("memory cgroup values exceed the target memory limit")
+		}
 	}
 	return nil
 }

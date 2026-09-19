@@ -223,3 +223,44 @@ func TestRuntimeMetricBundleRejectsChangedAssignmentAndUnsafePaths(t *testing.T)
 		})
 	}
 }
+
+func TestRuntimeMetricMemoryCgroupHostPathConfinement(t *testing.T) {
+	path, err := runtimeMetricMemoryCgroupHostPath("/sandbox0/s0-lease", "")
+	require.NoError(t, err)
+	require.Equal(t, "/sys/fs/cgroup/sandbox0/s0-lease", path)
+
+	path, err = runtimeMetricMemoryCgroupHostPath("", "")
+	require.NoError(t, err)
+	require.Empty(t, path)
+
+	for _, cgroupsPath := range []string{
+		"sandbox0/s0-lease", "/sandbox0/s0-lease/", "/sandbox0/nested/s0-lease",
+		"/other/s0-lease", "/sandbox0", "/sandbox0/../sandbox0/s0-lease",
+	} {
+		_, err := runtimeMetricMemoryCgroupHostPath(cgroupsPath, "")
+		require.Error(t, err, "cgroups path %q must be rejected", cgroupsPath)
+	}
+}
+
+func TestReadRuntimeMetricMemoryCgroup(t *testing.T) {
+	path := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(path, "memory.current"), []byte("1024\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(path, "memory.stat"), []byte("anon 4096\ninactive_file 256\n"), 0o600))
+
+	memory, err := readRuntimeMetricMemoryCgroup(path)
+	require.NoError(t, err)
+	require.Equal(t, &RuntimeMetricMemoryCgroup{CurrentBytes: 1024, InactiveFileBytes: 256}, memory)
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	require.NoError(t, os.Symlink(path, linked))
+	_, err = readRuntimeMetricMemoryCgroup(linked)
+	require.ErrorIs(t, err, errdefs.ErrPermissionDenied)
+
+	require.NoError(t, os.WriteFile(filepath.Join(path, "memory.stat"), []byte("inactive_file 1\ninactive_file 2\n"), 0o600))
+	_, err = readRuntimeMetricMemoryCgroup(path)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+
+	require.NoError(t, os.WriteFile(filepath.Join(path, "memory.stat"), []byte("anon 4096\n"), 0o600))
+	_, err = readRuntimeMetricMemoryCgroup(path)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}

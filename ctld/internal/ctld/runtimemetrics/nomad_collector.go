@@ -230,6 +230,7 @@ func (c *NomadCollector) Collect(ctx context.Context) (result CollectResult, err
 		sample, ok := projectGVisorRuntimeSample(
 			item.target,
 			item.sample.Stats,
+			item.sample.MemoryCgroup,
 			c.regionID,
 			c.clusterID,
 			item.sample.ObservedAt,

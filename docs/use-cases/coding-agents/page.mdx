@@ -24,6 +24,27 @@ s0 sandbox exec "$SANDBOX_ID" -- \
 Use the SDK file and command helpers when the agent needs structured reads,
 writes, directory listings, or long-running command contexts.
 
+## Template Updates
+
+The `Update Coding Agent Template` workflow refreshes the npm `latest` stable
+versions of Codex, Claude Code, OpenCode, Pi, and Playwright CLI every three UTC
+days. A daily schedule checks UTC epoch days, so the interval does not reset at
+month boundaries. Maintainers can also run it manually.
+
+The workflow records exact dependency versions, the lockfile, and the package
+inventory in a shared build artifact and release assets without bypassing main
+branch protection. Both native amd64 and arm64 image builds must pass
+the Dockerfile's CLI startup checks before an immutable, uniquely tagged release
+receipt is published. The infrastructure refresh workflow consumes completed
+receipts and updates the `coding-agent` template image pin used by Sandpi.
+Infrastructure CI prepares the image using the active region's RootFS importer
+policy, waits for attested artifacts, and updates the public `coding-agent`
+template in ali-ue1. Failed imports leave the previous template unchanged.
+
+Updating the template affects new sandboxes after deployment. Existing sandbox
+RootFS generations retain their installed harness versions across pause/resume;
+they require an explicit in-place upgrade or paused RootFS rebase.
+
 ## Durability Boundary
 
 The writable rootfs is tied to the sandbox identity. Pause/resume preserves it;

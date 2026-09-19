@@ -26,6 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test coding-agent dependency updater
+        run: node --test manager/procd/coding-agents/update.test.mjs
+
       - name: Restore infra build cache
         uses: ./.github/actions/restore-infra-build-cache
         with:

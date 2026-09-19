@@ -47,6 +47,8 @@ type RuntimeNodePoolState struct {
 	AuthorityObservedAt time.Time
 }
 
+// RuntimeNodePoolDemandRequest describes Slots requests of the same per-request
+// CPU/memory shape. Planned batches use multiple slots; ordinary claims use one.
 type RuntimeNodePoolDemandRequest struct {
 	CompatibilityDigest string
 	PoolID              string
@@ -394,8 +396,8 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 		return nil, fmt.Errorf("scan runtime node pool nodes: %w", err)
 	}
 	if err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE(SUM(cpu_millicores), 0)::bigint,
-			COALESCE(SUM(memory_bytes), 0)::bigint,
+		SELECT COALESCE(SUM(cpu_millicores * slots), 0)::bigint,
+			COALESCE(SUM(memory_bytes * slots), 0)::bigint,
 			COALESCE(SUM(slots), 0)::integer,
 			NOW()
 		FROM manager.runtime_node_pool_demands

@@ -115,3 +115,26 @@ func TestCompatibilityShortageCannotBorrowAnotherClassInventory(t *testing.T) {
 	target, _ := w.target(&store.snapshot)
 	require.Zero(t, target)
 }
+
+func TestPlannedBatchGrowsPhysicalCapacityWithoutRequiringOneHost(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	w := testWorker(t, store, cloud)
+	w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots = 0, 0, 0
+	store.snapshot.ClusterFixedUsableSlots = 256
+	store.snapshot.ClusterFixedCPU, store.snapshot.ClusterFixedMemory = 14000, 56<<30
+	store.snapshot.ClusterWorkloadCPU, store.snapshot.ClusterWorkloadMemory, store.snapshot.ClusterWorkloadSlots = 1000, 2<<30, 1
+	store.snapshot.DemandCPUMillicores, store.snapshot.DemandMemoryBytes, store.snapshot.DemandSlots = 15000, 100*(128<<20), 100
+	store.snapshot.DemandShapes = []sandboxstore.RuntimeNodePoolDemandShape{{CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 1}}
+	store.snapshot.PlacementNodes = []sandboxstore.RuntimeNodePlacementCapacity{{PhysicalCPU: 14000, PhysicalMemory: 56 << 30, FreeCPU: 13000, FreeMemory: 54 << 30, ReadySlots: 86}}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, d.TargetElastic)
+	require.Equal(t, []int{1}, cloud.sets)
+	// Two live nodes can share the batch even when neither has 100 ready carriers.
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{{PoolKind: "elastic", State: "active", CapacityLive: true, ProviderReady: true}}
+	store.snapshot.PlacementNodes = append(store.snapshot.PlacementNodes, sandboxstore.RuntimeNodePlacementCapacity{PhysicalCPU: 14000, PhysicalMemory: 56 << 30, FreeCPU: 14000, FreeMemory: 56 << 30, ReadySlots: 14})
+	d, err = w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, d.TargetElastic)
+	require.Len(t, cloud.sets, 1)
+}

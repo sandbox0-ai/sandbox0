@@ -11,7 +11,7 @@
       "compatibility": {
         "version": 2,
         "architecture": "amd64",
-        "driver_version": "0.1.0",
+        "driver_version": "0.2.0",
         "runsc_version": "runsc release-20260820.0",
         "platform": "systrap",
         "overlay2": "none",
@@ -33,7 +33,7 @@
       "compatibility": {
         "version": 2,
         "architecture": "amd64",
-        "driver_version": "0.1.0",
+        "driver_version": "0.2.0",
         "runsc_version": "runsc release-20260820.0",
         "platform": "systrap",
         "overlay2": "none",

@@ -335,3 +335,28 @@ func TestRouterProxyToTargetMapsMaxBytesErrorToRequestTooLarge(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", resp.StatusCode, http.StatusRequestEntityTooLarge, string(body))
 	}
 }
+
+func TestRouterAllowsAcquisitionBeyondOrdinaryProxyBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer upstream.Close()
+	router, err := NewRouter(upstream.URL, zap.NewNop(), 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	engine.POST("/api/v1/sandboxes", router.ProxyToTarget)
+	server := httptest.NewServer(engine)
+	defer server.Close()
+	resp, err := server.Client().Post(server.URL+"/api/v1/sandboxes", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("capacity wait was cut short: %d", resp.StatusCode)
+	}
+}

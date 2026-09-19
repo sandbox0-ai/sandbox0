@@ -209,8 +209,10 @@ Claims with available team quota wait for capacity for up to 30 seconds by
 default (or half `node_authority.claim.claim_ttl`, whichever is smaller). Set
 `node_authority.claim.capacity_wait_timeout` to a positive duration no greater
 than half the claim TTL. Client cancellation or an earlier request deadline
-ends the wait. Startup runs after acquisition, so client and gateway timeouts
-must cover both capacity waiting and runtime startup. Quota rejection remains
+ends the wait. Startup runs after acquisition. Shared gateway proxies give exact create, resume,
+and fork routes at least 45 seconds (30 seconds waiting plus startup time), while
+preserving earlier caller deadlines. External proxies and clients must also cover
+both phases. Quota rejection remains
 immediate; exhausting the capacity wait returns the existing capacity-unavailable
 response. Unfinished claim reservations follow the existing expiry/recovery
 protocol; cancellation does not prematurely free an uncertain resource lease.

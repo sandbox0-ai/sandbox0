@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -76,7 +77,7 @@ func ApplyRequestTimeout(req *http.Request, defaultTimeout time.Duration) (*http
 	if req == nil {
 		return nil, func() {}
 	}
-	timeout := EffectiveUpstreamTimeout(req.Context(), defaultTimeout)
+	timeout := requestUpstreamTimeout(req, defaultTimeout)
 	if timeout <= 0 {
 		return req, func() {}
 	}
@@ -91,12 +92,16 @@ func ClientForRequest(client *http.Client, req *http.Request) *http.Client {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if req == nil || client.Timeout <= 0 || !UpstreamTimeoutDisabled(req.Context()) {
+	if req == nil || client.Timeout <= 0 {
 		return client
 	}
-	withoutTimeout := *client
-	withoutTimeout.Timeout = 0
-	return &withoutTimeout
+	timeout := requestUpstreamTimeout(req, client.Timeout)
+	if timeout == client.Timeout {
+		return client
+	}
+	adjusted := *client
+	adjusted.Timeout = timeout
+	return &adjusted
 }
 
 // IsTimeoutError reports whether err was caused by an upstream timeout.
@@ -109,4 +114,24 @@ func IsTimeoutError(err error) bool {
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// Runtime acquisition can spend 30 seconds waiting for capacity before guest
+// startup. Give these exact control routes a bounded 45-second upstream budget
+// at every gateway hop. An earlier caller deadline or cancellation still wins.
+func requestUpstreamTimeout(req *http.Request, defaultTimeout time.Duration) time.Duration {
+	timeout := EffectiveUpstreamTimeout(req.Context(), defaultTimeout)
+	if timeout <= 0 || req.Method != http.MethodPost || req.URL == nil {
+		return timeout
+	}
+	path := req.URL.Path
+	acquisition := path == "/api/v1/sandboxes"
+	if tail, ok := strings.CutPrefix(path, "/api/v1/sandboxes/"); ok {
+		id, action, found := strings.Cut(tail, "/")
+		acquisition = found && id != "" && (action == "resume" || action == "fork")
+	}
+	if acquisition {
+		return max(timeout, 45*time.Second)
+	}
+	return timeout
 }

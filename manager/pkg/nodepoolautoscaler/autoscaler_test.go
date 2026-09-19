@@ -11,10 +11,11 @@ import (
 )
 
 type fakeStore struct {
-	state    sandboxstore.RuntimeNodePoolState
-	snapshot sandboxstore.RuntimeNodePoolSnapshot
-	leader   bool
-	updates  []sandboxstore.RuntimeNodePoolState
+	state         sandboxstore.RuntimeNodePoolState
+	snapshot      sandboxstore.RuntimeNodePoolSnapshot
+	nextSnapshots []*sandboxstore.RuntimeNodePoolSnapshot
+	leader        bool
+	updates       []sandboxstore.RuntimeNodePoolState
 }
 
 func (f *fakeStore) EnsureRuntimeNodePoolState(context.Context, string, string) (*sandboxstore.RuntimeNodePoolState, error) {
@@ -24,6 +25,12 @@ func (f *fakeStore) AcquireRuntimeNodePoolControllerLease(context.Context, strin
 	return f.leader, nil
 }
 func (f *fakeStore) GetRuntimeNodePoolSnapshot(context.Context, string) (*sandboxstore.RuntimeNodePoolSnapshot, error) {
+	if len(f.nextSnapshots) > 0 {
+		snapshot := f.nextSnapshots[0]
+		f.nextSnapshots = f.nextSnapshots[1:]
+		snapshot.State = f.state
+		return snapshot, nil
+	}
 	f.snapshot.State = f.state
 	return &f.snapshot, nil
 }
@@ -41,11 +48,20 @@ func (f *fakeStore) UpdateRuntimeNodePoolScaleState(_ context.Context, _ string,
 }
 
 type fakeCloud struct {
-	desired int
-	sets    []int
+	desired     int
+	nextDesired *int
+	reads       int
+	sets        []int
 }
 
-func (f *fakeCloud) DesiredCapacity(context.Context) (int, error) { return f.desired, nil }
+func (f *fakeCloud) DesiredCapacity(context.Context) (int, error) {
+	f.reads++
+	if f.reads == 2 && f.nextDesired != nil {
+		f.desired = *f.nextDesired
+		f.nextDesired = nil
+	}
+	return f.desired, nil
+}
 func (f *fakeCloud) SetDesiredCapacity(_ context.Context, desired int) error {
 	f.desired = desired
 	f.sets = append(f.sets, desired)
@@ -68,6 +84,7 @@ func testWorker(t *testing.T, store *fakeStore, cloud *fakeCloud) *Worker {
 		MaxScaleOutStep: 299, MaxScaleInStep: 299, MaxPendingNodes: 299,
 	})
 	require.NoError(t, err)
+	worker.fixedReplacementSince = testNow.Add(-time.Hour)
 	return worker
 }
 
@@ -128,6 +145,74 @@ func TestUnavailableFixedNodeIsReplacedByElasticCapacity(t *testing.T) {
 	require.Equal(t, 1, decision.RequiredNodes)
 	require.Equal(t, 1, decision.TargetElastic)
 	require.Equal(t, []int{1}, cloud.sets)
+}
+
+func TestPressurelessFixedReplacementDebouncesTransientCarrierRefill(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	worker := testWorker(t, store, cloud)
+	worker.fixedReplacementSince = time.Time{}
+	worker.config.FixedReplacementDebounce = 20 * time.Second
+
+	decision, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out_stabilizing_fixed_replacement", decision.Action)
+	require.Equal(t, testNow, decision.FixedReplacementSince)
+	require.Empty(t, cloud.sets)
+
+	worker.config.Now = func() time.Time { return testNow.Add(19 * time.Second) }
+	decision, err = worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out_stabilizing_fixed_replacement", decision.Action)
+	require.Empty(t, cloud.sets)
+
+	worker.config.Now = func() time.Time { return testNow.Add(20 * time.Second) }
+	decision, err = worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out", decision.Action)
+	require.Equal(t, []int{1}, cloud.sets)
+}
+
+func TestScaleOutRereadsSnapshotBeforeProviderWrite(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	worker := testWorker(t, store, cloud)
+	pressure := sandboxstore.RuntimeNodePoolSnapshot{}
+	refilled := store.snapshot
+	refilled.ClusterFixedUsableSlots = 16
+	refilled.ClusterFixedAdaptiveSlots = 16
+	store.nextSnapshots = []*sandboxstore.RuntimeNodePoolSnapshot{&pressure, &refilled}
+
+	decision, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out_snapshot_changed", decision.Action)
+	require.Zero(t, decision.TargetElastic)
+	require.Equal(t, 1, decision.RequiredNodes)
+	require.Equal(t, 16, decision.FixedUsableSlots)
+	require.Equal(t, 16, decision.FixedAdaptiveSlots)
+	require.Zero(t, decision.ClusterWorkloadCPU)
+	require.Zero(t, decision.ClusterWorkloadMemory)
+	require.Zero(t, decision.ClusterWorkloadSlots)
+	require.Zero(t, decision.DemandCPUMillicores)
+	require.Zero(t, decision.DemandMemoryBytes)
+	require.Zero(t, decision.DemandSlots)
+	require.Empty(t, cloud.sets)
+}
+
+func TestScaleOutRereadsCloudDesiredCapacityBeforeProviderWrite(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	worker := testWorker(t, store, cloud)
+	pressure := sandboxstore.RuntimeNodePoolSnapshot{}
+	unchanged := pressure
+	store.nextSnapshots = []*sandboxstore.RuntimeNodePoolSnapshot{&pressure, &unchanged}
+	cloudDesired := 1
+	cloud.nextDesired = &cloudDesired
+
+	decision, err := worker.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out_cloud_changed", decision.Action)
+	require.Equal(t, 1, decision.CurrentElastic)
+	require.Equal(t, 1, decision.TargetElastic)
+	require.Equal(t, 1, decision.AppliedElastic)
+	require.Empty(t, cloud.sets)
 }
 
 func TestClaimedFixedCarrierStillCountsTowardBaseline(t *testing.T) {

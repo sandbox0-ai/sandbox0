@@ -42,6 +42,8 @@ node_pool_autoscaler:
   scale_out_cooldown: 30s
   scale_in_cooldown: 1m
   scale_out_warmup: 5m
+  # Debounce a pressureless replacement purchase while adaptive carriers refill.
+  fixed_replacement_debounce: 20s
   max_scale_out_step: 2
   max_pending_nodes: 2
   max_scale_in_step: 1

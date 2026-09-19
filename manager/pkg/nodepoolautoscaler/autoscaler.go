@@ -50,31 +50,41 @@ type Config struct {
 	// ElasticSlotsPerNode is the provisioned carrier capacity of a new elastic
 	// worker, not its minimum readiness threshold or a cap on the fixed worker.
 	// Zero preserves the legacy WarmSlotsPerNode capacity for existing configs.
-	ElasticSlotsPerNode   int
-	HeadroomCPUMillicores int64
-	HeadroomMemoryBytes   int64
-	HeadroomSlots         int
-	Interval              time.Duration
-	ControllerLeaseTTL    time.Duration
-	ScaleInStabilization  time.Duration
-	ScaleOutCooldown      time.Duration
-	ScaleInCooldown       time.Duration
-	ScaleOutWarmup        time.Duration
-	MaxScaleOutStep       int
-	MaxScaleInStep        int
-	MaxPendingNodes       int
-	Now                   func() time.Time
+	ElasticSlotsPerNode      int
+	HeadroomCPUMillicores    int64
+	HeadroomMemoryBytes      int64
+	HeadroomSlots            int
+	Interval                 time.Duration
+	ControllerLeaseTTL       time.Duration
+	ScaleInStabilization     time.Duration
+	ScaleOutCooldown         time.Duration
+	ScaleInCooldown          time.Duration
+	ScaleOutWarmup           time.Duration
+	FixedReplacementDebounce time.Duration
+	MaxScaleOutStep          int
+	MaxScaleInStep           int
+	MaxPendingNodes          int
+	Now                      func() time.Time
 }
 
 // Decision is one auditable reconcile result.
 type Decision struct {
-	CurrentElastic  int
-	TargetElastic   int
-	AppliedElastic  int
-	RequiredNodes   int
-	LowPressureAt   time.Time
-	Action          string
-	CapacityLimited bool
+	CurrentElastic        int
+	TargetElastic         int
+	AppliedElastic        int
+	RequiredNodes         int
+	FixedUsableSlots      int
+	FixedAdaptiveSlots    int
+	ClusterWorkloadCPU    int64
+	ClusterWorkloadMemory int64
+	ClusterWorkloadSlots  int
+	DemandCPUMillicores   int64
+	DemandMemoryBytes     int64
+	DemandSlots           int
+	LowPressureAt         time.Time
+	Action                string
+	CapacityLimited       bool
+	FixedReplacementSince time.Time
 }
 
 // Worker runs an active-active-safe desired-capacity loop.
@@ -82,6 +92,10 @@ type Worker struct {
 	store  Store
 	cloud  Cloud
 	config Config
+	// fixedReplacementSince is process-local because a controller restart may
+	// safely repeat the bounded debounce, while persisting another timestamp
+	// would expand the runtime node pool state contract.
+	fixedReplacementSince time.Time
 }
 
 // New validates capacity policy and constructs a Worker.
@@ -137,6 +151,9 @@ func New(store Store, cloud Cloud, config Config) (*Worker, error) {
 	if config.Interval == 0 {
 		config.Interval = defaultInterval
 	}
+	if config.FixedReplacementDebounce == 0 {
+		config.FixedReplacementDebounce = 2 * config.Interval
+	}
 	if config.ControllerLeaseTTL == 0 {
 		config.ControllerLeaseTTL = defaultLeaseTTL
 	}
@@ -146,7 +163,8 @@ func New(store Store, cloud Cloud, config Config) (*Worker, error) {
 	if config.Interval < time.Second || config.ControllerLeaseTTL < config.Interval ||
 		config.ControllerLeaseTTL > 5*time.Minute || config.ScaleInStabilization < time.Minute ||
 		config.ScaleOutCooldown < 0 || config.ScaleInCooldown < config.Interval ||
-		config.ScaleOutWarmup < config.Interval || config.ScaleOutWarmup > time.Hour {
+		config.ScaleOutWarmup < config.Interval || config.ScaleOutWarmup > time.Hour ||
+		config.FixedReplacementDebounce < config.Interval || config.FixedReplacementDebounce > 5*time.Minute {
 		return nil, errors.New("invalid node pool autoscaler timing policy")
 	}
 	if config.Now == nil {
@@ -171,6 +189,76 @@ func (w *Worker) Run(ctx context.Context, report func(Decision, error)) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (w *Worker) decision(current, target, applied, required int, snapshot *sandboxstore.RuntimeNodePoolSnapshot) Decision {
+	return Decision{
+		CurrentElastic: current, TargetElastic: target, AppliedElastic: applied,
+		RequiredNodes: required, LowPressureAt: snapshot.State.LowPressureSince,
+		FixedUsableSlots:      snapshot.ClusterFixedUsableSlots,
+		FixedAdaptiveSlots:    snapshot.ClusterFixedAdaptiveSlots,
+		ClusterWorkloadCPU:    snapshot.ClusterWorkloadCPU,
+		ClusterWorkloadMemory: snapshot.ClusterWorkloadMemory,
+		ClusterWorkloadSlots:  snapshot.ClusterWorkloadSlots,
+		DemandCPUMillicores:   snapshot.DemandCPUMillicores,
+		DemandMemoryBytes:     snapshot.DemandMemoryBytes,
+		DemandSlots:           snapshot.DemandSlots,
+		Action:                "stable",
+	}
+}
+
+// confirmScaleOutSnapshot closes the gap between reading PostgreSQL capacity
+// and changing the provider. Adaptive carrier refill can make a fixed worker
+// appear unusable for one query and become ready before ESS accepts the write;
+// any relevant change defers the purchase to the next bounded reconcile pass.
+func (w *Worker) confirmScaleOutSnapshot(
+	ctx context.Context,
+	snapshot *sandboxstore.RuntimeNodePoolSnapshot,
+	target, required int,
+) (*sandboxstore.RuntimeNodePoolSnapshot, bool, error) {
+	fresh, err := w.store.GetRuntimeNodePoolSnapshot(ctx, w.config.PoolID)
+	if err != nil {
+		return nil, false, err
+	}
+	freshTarget, freshRequired := w.target(fresh)
+	changed := target != freshTarget || required != freshRequired ||
+		!sameScaleOutInputs(snapshot, fresh)
+	return fresh, changed, nil
+}
+
+func sameScaleOutInputs(a, b *sandboxstore.RuntimeNodePoolSnapshot) bool {
+	if a.ClusterFixedUsableSlots != b.ClusterFixedUsableSlots ||
+		a.ClusterFixedAdaptiveSlots != b.ClusterFixedAdaptiveSlots ||
+		a.ClusterWorkloadCPU != b.ClusterWorkloadCPU ||
+		a.ClusterWorkloadMemory != b.ClusterWorkloadMemory ||
+		a.ClusterWorkloadSlots != b.ClusterWorkloadSlots ||
+		a.DemandCPUMillicores != b.DemandCPUMillicores ||
+		a.DemandMemoryBytes != b.DemandMemoryBytes ||
+		a.DemandSlots != b.DemandSlots ||
+		len(a.DemandShapes) != len(b.DemandShapes) || len(a.Nodes) != len(b.Nodes) {
+		return false
+	}
+	for i := range a.DemandShapes {
+		if a.DemandShapes[i] != b.DemandShapes[i] {
+			return false
+		}
+	}
+	for i := range a.Nodes {
+		aNode, bNode := a.Nodes[i], b.Nodes[i]
+		if aNode.PoolKind != bNode.PoolKind || aNode.State != bNode.State ||
+			aNode.ProviderReady != bNode.ProviderReady || aNode.CapacityLive != bNode.CapacityLive ||
+			aNode.ActiveLeases != bNode.ActiveLeases || aNode.ReadySlots != bNode.ReadySlots {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *Worker) pressurelessFixedReplacement(snapshot *sandboxstore.RuntimeNodePoolSnapshot) bool {
+	return snapshot.ClusterFixedUsableSlots == 0 &&
+		snapshot.ClusterWorkloadCPU == 0 && snapshot.ClusterWorkloadMemory == 0 &&
+		snapshot.ClusterWorkloadSlots == 0 && snapshot.DemandCPUMillicores == 0 &&
+		snapshot.DemandMemoryBytes == 0 && snapshot.DemandSlots == 0
 }
 
 // Reconcile performs one lease-protected desired-capacity decision.
@@ -199,11 +287,40 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 		return Decision{}, errors.New("cloud desired capacity is outside the supported pool boundary")
 	}
 	target, required := w.target(snapshot)
-	decision := Decision{
-		CurrentElastic: current, TargetElastic: target, AppliedElastic: current,
-		RequiredNodes: required, LowPressureAt: snapshot.State.LowPressureSince,
-		Action: "stable",
+	if target > current {
+		fresh, changed, err := w.confirmScaleOutSnapshot(ctx, snapshot, target, required)
+		if err != nil {
+			return Decision{}, err
+		}
+		freshTarget, freshRequired := w.target(fresh)
+		decision := w.decision(current, freshTarget, current, freshRequired, fresh)
+		if changed {
+			decision.Action = "scale_out_snapshot_changed"
+			if freshTarget <= current {
+				w.fixedReplacementSince = time.Time{}
+			}
+			return decision, nil
+		}
+		freshCurrent, err := w.cloud.DesiredCapacity(ctx)
+		if err != nil {
+			return Decision{}, fmt.Errorf("reread elastic desired capacity: %w", err)
+		}
+		if freshCurrent < 0 || freshCurrent > 299 {
+			return Decision{}, errors.New("reread cloud desired capacity is outside the supported pool boundary")
+		}
+		if freshCurrent != current {
+			decision.CurrentElastic = freshCurrent
+			decision.TargetElastic = freshTarget
+			decision.AppliedElastic = freshCurrent
+			decision.Action = "scale_out_cloud_changed"
+			if freshTarget <= freshCurrent {
+				w.fixedReplacementSince = time.Time{}
+			}
+			return decision, nil
+		}
+		snapshot, target, required = fresh, freshTarget, freshRequired
 	}
+	decision := w.decision(current, target, current, required, snapshot)
 	liveFixed := 0
 	if snapshot.ClusterFixedUsableSlots > 0 {
 		liveFixed = 1
@@ -219,6 +336,18 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	}
 
 	if target > current {
+		if w.pressurelessFixedReplacement(snapshot) {
+			if w.fixedReplacementSince.IsZero() {
+				w.fixedReplacementSince = now
+			}
+			if elapsed := now.Sub(w.fixedReplacementSince); elapsed < w.config.FixedReplacementDebounce {
+				decision.Action = "scale_out_stabilizing_fixed_replacement"
+				decision.FixedReplacementSince = w.fixedReplacementSince
+				return decision, nil
+			}
+		} else {
+			w.fixedReplacementSince = time.Time{}
+		}
 		// Renewed pressure invalidates the quiet window even when purchase rate
 		// limits prevent a provider update on this pass.
 		if !snapshot.State.LowPressureSince.IsZero() {
@@ -252,8 +381,10 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 			return decision, err
 		}
 		decision.Action, decision.AppliedElastic, decision.LowPressureAt = "scale_out", applied, time.Time{}
+		w.fixedReplacementSince = time.Time{}
 		return decision, nil
 	}
+	w.fixedReplacementSince = time.Time{}
 	if target == current {
 		if !snapshot.State.LowPressureSince.IsZero() || snapshot.State.DesiredNodes != current {
 			if _, err := w.store.UpdateRuntimeNodePoolScaleState(ctx, w.config.PoolID, current, time.Time{}, ""); err != nil {

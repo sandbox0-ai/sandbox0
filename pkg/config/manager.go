@@ -118,6 +118,7 @@ type NodePoolAutoscalerConfig struct {
 	ScaleOutCooldown          Duration             `yaml:"scale_out_cooldown" json:"-"`
 	ScaleInCooldown           Duration             `yaml:"scale_in_cooldown" json:"-"`
 	ScaleOutWarmup            Duration             `yaml:"scale_out_warmup" json:"-"`
+	FixedReplacementDebounce  Duration             `yaml:"fixed_replacement_debounce" json:"-"`
 	MaxScaleOutStep           int                  `yaml:"max_scale_out_step" json:"-"`
 	MaxScaleInStep            int                  `yaml:"max_scale_in_step" json:"-"`
 	MaxPendingNodes           int                  `yaml:"max_pending_nodes" json:"-"`

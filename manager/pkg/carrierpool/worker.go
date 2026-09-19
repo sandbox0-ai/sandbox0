@@ -162,8 +162,13 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 						grow = true
 					}
 				}
+				// A runtime rollout can change compatibility while retaining the
+				// exact same group membership. Old capacity keys must not suppress
+				// prepare forever: refresh through the normal durable resize proof.
+				refreshCompatibility := w.config.StandardDigest != "" && w.config.PrivilegedDigest != "" &&
+					(n.CompatibilityCapacity[w.config.StandardDigest] == 0 || n.CompatibilityCapacity[w.config.PrivilegedDigest] == 0)
 				shrink := n.Ready > 2*w.config.Spare && n.SurplusSince != nil && time.Since(*n.SurplusSince) >= w.config.ShrinkAfter
-				if !grow && !shrink && n.Revision != 0 && !n.Retiring && !n.StaleIdentity {
+				if !grow && !shrink && !refreshCompatibility && n.Revision != 0 && !n.Retiring && !n.StaleIdentity {
 					continue
 				}
 				if err := w.prepare(ctx, &n, targets[n.NodeID]); err != nil {

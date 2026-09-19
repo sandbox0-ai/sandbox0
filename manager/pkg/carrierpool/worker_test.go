@@ -26,12 +26,14 @@ func (s *fakeStore) RecordRuntimeCarrierSurplus(context.Context, string, int) er
 func (s *fakeStore) ListRuntimeCarrierNodes(context.Context, string) ([]sandboxstore.RuntimeCarrierNode, error) {
 	return []sandboxstore.RuntimeCarrierNode{s.node}, nil
 }
-func (s *fakeStore) BeginRuntimeCarrierResize(_ context.Context, _ sandboxstore.RuntimeCarrierNode, _ int, g, _ []string) (int64, error) {
+func (s *fakeStore) BeginRuntimeCarrierResize(_ context.Context, n sandboxstore.RuntimeCarrierNode, maximum int, g, _ []string) (int64, error) {
 	s.begun++
 	s.saved++
 	s.node.Pending = true
 	s.node.Revision++
 	s.node.Groups = g
+	s.node.CompatibilityCapacity = n.CompatibilityCapacity
+	s.node.MaxCarriers = maximum
 	return s.node.Revision, nil
 }
 func (s *fakeStore) RuntimeCarrierBusyAllocations(context.Context, sandboxstore.RuntimeCarrierNode) ([]string, error) {

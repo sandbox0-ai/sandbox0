@@ -86,3 +86,29 @@ func TestDemandTriggersRefillAboveLowWatermark(t *testing.T) {
 	require.Equal(t, 1, changed)
 	require.Len(t, s.node.Groups, 62)
 }
+
+func TestRuntimeRolloutRefreshesStaleCapacityBeforeDemandRefill(t *testing.T) {
+	n := demandNode("fixed")
+	n.FreeCPU = 64000
+	n.FreeMemory = 64 << 30
+	n.PhysicalMemory = 64 << 30
+	n.Revision = 7
+	n.CompatibilityCapacity = map[string]int{"old-standard": 126, "old-privileged": 2}
+	s := &plannedStore{fakeStore: fakeStore{node: n}}
+	nomad := &fakeNomad{}
+	materializePlan(&s.fakeStore, nomad)
+	w, err := New(s, nomad, Config{ClusterID: "cluster", StandardDigest: "std", PrivilegedDigest: "priv", Maximum: 128, LowWatermark: 8, Spare: 16, ShrinkAfter: time.Minute, Interval: time.Second})
+	require.NoError(t, err)
+	changed, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, changed)
+	require.Equal(t, map[string]int{"std": 126, "priv": 2}, s.node.CompatibilityCapacity)
+	require.ElementsMatch(t, n.Groups, s.node.Groups, "refresh preserves existing membership even above the low watermark")
+	require.False(t, s.node.Pending, "existing ready registrations complete the normal resize proof")
+	s.shapes = []sandboxstore.RuntimeNodePoolDemandShape{{CompatibilityDigest: "std", CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 60}}
+	changed, err = w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, changed)
+	require.Len(t, s.node.Groups, 62)
+	require.True(t, s.node.Pending, "new groups still require authenticated readiness")
+}

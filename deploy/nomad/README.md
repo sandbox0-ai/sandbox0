@@ -188,7 +188,11 @@ terminal reconciler still owns physical cleanup and resource-release proofs.
 New groups must be running in Nomad and registered ready before refill completes.
 A pending refill loses cloud-capacity credit after two minutes; controller
 heartbeat expiry also falls back to observed capacity. Failed repair therefore
-cannot suppress genuine cloud scale-out indefinitely.
+cannot suppress genuine cloud scale-out indefinitely. Before a scale-out write,
+manager re-reads the capacity snapshot and provider desired capacity, then defers
+the purchase when any decision input changed. A pressureless fixed-node
+replacement is also debounced for two reconcile intervals, so a normal carrier
+refill cannot immediately purchase an unnecessary elastic worker.
 
 Compatibility-specific demand and ready inventory prevent spare standard
 carriers from hiding a privileged shortage. This is bounded placement progress,

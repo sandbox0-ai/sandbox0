@@ -554,6 +554,13 @@ physical cleanup is proven, but do not create replacement workload demand.
 Cleanup backlog therefore cannot by itself purchase additional worker capacity.
 Unsatisfied claims and configured headroom still contribute to scale-out demand;
 scale-in still requires the normal stabilization and node drain protocol.
+Before a scale-out write, manager reads the PostgreSQL capacity snapshot and
+provider desired capacity again. If the target, fixed-node availability, workload,
+unsatisfied demand, node readiness, or provider capacity changed, it defers the
+purchase to the next bounded pass. A pressureless
+fixed-node replacement is additionally debounced for two reconcile intervals
+—20 seconds with the default interval—so a normal adaptive carrier refill cannot
+be mistaken for the fixed node disappearing.
 Aliyun route cleanup deletes only the verified immutable route entry ID and
 waits for route absence before releasing node identity or the allocation subnet.
 An accepted asynchronous delete request alone does not complete scale-in.

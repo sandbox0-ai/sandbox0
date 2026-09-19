@@ -117,30 +117,31 @@ func TestAdaptiveCapacityCreditRequiresHealthyControllerAndBoundedProgressIntegr
 	require.NoError(t, err)
 	n.Revision, err = s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{"carrier-allocation-a", "carrier-allocation-b"})
 	require.NoError(t, err)
-	assertSlots := func(expected int) {
+	assertSlots := func(expected, adaptiveExpected int) {
 		t.Helper()
 		snapshot, err := s.GetRuntimeNodePoolSnapshot(t.Context(), "elastic")
 		require.NoError(t, err)
 		require.Equal(t, expected, snapshot.ClusterFixedUsableSlots)
+		require.Equal(t, adaptiveExpected, snapshot.ClusterFixedAdaptiveSlots)
 		require.Equal(t, expected, snapshot.PlacementNodes[0].ReadySlots)
 	}
-	assertSlots(2)
+	assertSlots(2, 0)
 	require.NoError(t, s.HeartbeatRuntimeCarrierController(t.Context(), n.ClusterID, 30*time.Second))
-	assertSlots(128)
+	assertSlots(128, 128)
 	_, err = s.pool.Exec(t.Context(), `UPDATE manager.runtime_carrier_resizes SET updated_at=NOW()-INTERVAL '3 minutes'`)
 	require.NoError(t, err)
-	assertSlots(2)
+	assertSlots(2, 0)
 	_, err = s.pool.Exec(t.Context(), `UPDATE manager.runtime_carrier_resizes SET updated_at=NOW(); UPDATE manager.runtime_carrier_controllers SET heartbeat_expires_at=NOW()-INTERVAL '1 second'`)
 	require.NoError(t, err)
-	assertSlots(2)
+	assertSlots(2, 0)
 	// A completed plan whose actual inventory subsequently disappears also
 	// loses speculative credit; healthy controller liveness alone is not enough.
 	require.NoError(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil))
 	require.NoError(t, s.HeartbeatRuntimeCarrierController(t.Context(), n.ClusterID, 30*time.Second))
-	assertSlots(128)
+	assertSlots(128, 128)
 	_, err = s.pool.Exec(t.Context(), `UPDATE manager.runtime_carrier_resizes SET updated_at=NOW()-INTERVAL '3 minutes'`)
 	require.NoError(t, err)
-	assertSlots(2)
+	assertSlots(2, 0)
 }
 
 func TestCarrierReadinessAndSurplusRequireLiveExactBootIntegration(t *testing.T) {

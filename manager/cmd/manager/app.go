@@ -58,6 +58,15 @@ func (a *managerApp) Run() {
 				zap.Int("target_elastic", decision.TargetElastic),
 				zap.Int("applied_elastic", decision.AppliedElastic),
 				zap.Int("required_nodes", decision.RequiredNodes),
+				zap.Int("fixed_usable_slots", decision.FixedUsableSlots),
+				zap.Int("fixed_adaptive_slots", decision.FixedAdaptiveSlots),
+				zap.Int64("cluster_workload_cpu_millicores", decision.ClusterWorkloadCPU),
+				zap.Int64("cluster_workload_memory_bytes", decision.ClusterWorkloadMemory),
+				zap.Int("cluster_workload_slots", decision.ClusterWorkloadSlots),
+				zap.Int64("demand_cpu_millicores", decision.DemandCPUMillicores),
+				zap.Int64("demand_memory_bytes", decision.DemandMemoryBytes),
+				zap.Int("demand_slots", decision.DemandSlots),
+				zap.Time("fixed_replacement_since", decision.FixedReplacementSince),
 				zap.Bool("capacity_limited", decision.CapacityLimited),
 			}
 			if err != nil {
@@ -69,7 +78,12 @@ func (a *managerApp) Run() {
 				lastCapacityLimited = decision.CapacityLimited
 			}
 			a.logger.Debug("Sandbox node pool capacity decision", fields...)
-			if decision.Action == "scale_out" || decision.Action == "scale_in" {
+			switch decision.Action {
+			case "scale_out_snapshot_changed", "scale_out_cloud_changed":
+				a.logger.Info("Sandbox node pool scale-out deferred after capacity observation changed", fields...)
+			case "scale_out_stabilizing_fixed_replacement":
+				a.logger.Info("Sandbox node pool fixed replacement debounce active", fields...)
+			case "scale_out", "scale_in":
 				a.logger.Info("Sandbox node pool desired capacity changed", fields...)
 			}
 		})

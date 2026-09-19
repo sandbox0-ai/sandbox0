@@ -176,6 +176,7 @@ func TestNewPolicyDefaultsAndValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 10, w.config.MaxScaleOutStep)
 	require.Equal(t, 1, w.config.MaxScaleInStep)
+	require.Equal(t, 2*w.config.Interval, w.config.FixedReplacementDebounce)
 	for _, change := range []func(*Config){
 		func(c *Config) { c.ElasticSlotsPerNode = 7 },
 		func(c *Config) { c.ElasticSlotsPerNode = 577 },
@@ -184,6 +185,8 @@ func TestNewPolicyDefaultsAndValidation(t *testing.T) {
 		func(c *Config) { c.MaxPendingNodes = -1 },
 		func(c *Config) { c.ScaleInCooldown = -time.Second },
 		func(c *Config) { c.ScaleOutWarmup = 2 * time.Hour },
+		func(c *Config) { c.FixedReplacementDebounce = 500 * time.Millisecond },
+		func(c *Config) { c.FixedReplacementDebounce = 6 * time.Minute },
 	} {
 		c := base
 		change(&c)

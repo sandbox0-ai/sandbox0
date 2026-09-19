@@ -113,6 +113,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 			node.ReadySlots = max(node.ReadySlots, adaptiveMaximum-int(activeLeases))
 			if !elastic {
 				snapshot.ClusterFixedUsableSlots = max(snapshot.ClusterFixedUsableSlots, adaptiveMaximum)
+				snapshot.ClusterFixedAdaptiveSlots = max(snapshot.ClusterFixedAdaptiveSlots, adaptiveMaximum)
 			}
 		}
 		for digest, maximum := range compatibilityMaximum {

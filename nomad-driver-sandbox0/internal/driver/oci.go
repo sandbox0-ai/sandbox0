@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
@@ -118,8 +119,8 @@ func buildSpec(options specOptions) specs.Spec {
 	}
 
 	// /tmp must never enter the writable RootFS generation. Size its empty
-	// tmpfs from the committed memory lease, without allocating that memory.
-	// Actual pages remain charged to the sandbox's memory cgroup.
+	// tmpfs from the committed memory lease, without allocating that capacity.
+	// writeBundle selects disk backing; cached file pages can be reclaimed.
 	tmpBytes := int64(64 << 20)
 	if options.Resources != nil && options.Resources.MemoryLimitBytes > 0 {
 		tmpBytes = max(1<<20, options.Resources.MemoryLimitBytes/2)
@@ -207,6 +208,9 @@ var privilegedCapabilities = []string{
 func writeBundle(bundleDir string, spec specs.Spec) error {
 	if err := os.MkdirAll(filepath.Join(bundleDir, "rootfs"), 0o755); err != nil {
 		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
+	}
+	if err := gvisorcli.PrepareEphemeralTmp(bundleDir, &spec); err != nil {
+		return fmt.Errorf("prepare disk-backed runtime tmp: %w", err)
 	}
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {

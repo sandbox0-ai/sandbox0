@@ -15,6 +15,7 @@
 package driver
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -216,4 +217,30 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestWriteBundleUsesDiskBackedTmpWithTemplateCapacity(t *testing.T) {
+	bundle := t.TempDir()
+	spec := buildSpec(specOptions{Command: "/procd", EphemeralMounts: []runtimecontrol.EphemeralMount{{MountPath: "/tmp", SizeBytes: 256 << 20}}})
+	if err := writeBundle(bundle, spec); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(filepath.Join(bundle, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written specs.Spec
+	if err := json.Unmarshal(payload, &written); err != nil {
+		t.Fatal(err)
+	}
+	tmp := findOCIMount(written.Mounts, "/tmp")
+	if tmp == nil || tmp.Type != "bind" || tmp.Source != filepath.Join(bundle, "runtime-tmp") {
+		t.Fatalf("disk tmp mount = %#v", tmp)
+	}
+	if got := written.Annotations["dev.gvisor.spec.mount.sandbox0-tmp.options"]; !strings.Contains(got, "size=268435456") || !strings.Contains(got, "mode=1777") {
+		t.Fatalf("tmp mount options = %q", got)
+	}
+	if written.Root.Path != "rootfs" || written.Root.Readonly {
+		t.Fatalf("persistent root changed: %#v", written.Root)
+	}
 }

@@ -37,6 +37,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -1289,6 +1290,9 @@ func (d *nodeRuntime) cleanupJournaledRuntimeSlot(
 	if err := d.fenceJournalRunsc(ctx, registration.RunscContainerID); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
+	if err := d.cleanupRuntimeTmp(registration.StableMount, registration.RunscContainerID); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
 	if stableMount != "" {
 		if err := d.mounter.Unmount(stableMount); err != nil {
 			return protocol.NodeCleanupControlProof{}, err
@@ -2148,6 +2152,9 @@ func (d *nodeRuntime) fenceHostRuntime(
 	} else if !errdefs.IsNotFound(err) {
 		return CrashTaskObservation{}, fmt.Errorf("attest orphan gVisor container absence: %w", err)
 	}
+	if err := d.cleanupRuntimeTmp(consumer.StableMount, consumer.ContainerID); err != nil {
+		return CrashTaskObservation{}, err
+	}
 	if err := d.mounter.Unmount(consumer.StableMount); err != nil {
 		return CrashTaskObservation{}, err
 	}
@@ -2202,4 +2209,23 @@ func hostMountAttached(path string) (bool, error) {
 		return false, fmt.Errorf("scan host mountinfo: %w", err)
 	}
 	return false, nil
+}
+
+// cleanupRuntimeTmp validates the protected bundle independently of whether its
+// RootFS is still mounted. A deleted runsc state alone cannot prove disk release.
+func (d *nodeRuntime) cleanupRuntimeTmp(stableMount, containerID string) error {
+	bundle := filepath.Dir(stableMount)
+	if _, err := os.Lstat(filepath.Join(bundle, gvisorcli.EphemeralTmpDirectory)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	resolved, err := validateExistingPath(bundle, d.config.RootFSConsumerMountRoot)
+	if err != nil {
+		return fmt.Errorf("validate runtime tmp bundle: %w", err)
+	}
+	if resolved != bundle {
+		return errors.New("runtime tmp bundle is not canonical")
+	}
+	return gvisorcli.CleanupEphemeralTmp(bundle, containerID)
 }

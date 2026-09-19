@@ -143,7 +143,16 @@ publish both `standard` and `privileged` classes. The template
 `privileged` grants Linux capabilities only inside the gVisor guest kernel; it
 does not bypass runsc or expose host devices. Template `ephemeralMounts` become
 size-bounded guest tmpfs mounts and are intentionally absent from every
-durable RootFS generation.
+durable RootFS generation. Starting with driver version `0.2.0`, `/tmp` uses
+stock runsc's file-backed tmpfs mount hint; `/dev/shm` and other ephemeral
+mounts continue to use memory. Its backing file lives in the private OCI bundle
+on the Nomad allocation filesystem, outside the persistent RootFS. Keep that
+filesystem on disk and provision space for the aggregate `/tmp` limits of
+admitted sandboxes alongside other node storage. The default limit remains half
+the committed memory lease; a template may override it. File cache is charged to
+the sandbox cgroup but is reclaimable without swap. ctld confirms removal of the
+exact runtime's filestore before releasing the terminal lease, including when
+runsc died during deletion. Roll out matching driver and ctld binaries together.
 
 ## RootFS And Failure Safety
 

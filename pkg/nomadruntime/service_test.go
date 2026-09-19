@@ -1450,3 +1450,20 @@ func TestNomadAllocationSourceRetainsLaterPageAndFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeTmpCleanupValidatesBundleBeforeDiskRelease(t *testing.T) {
+	root := t.TempDir()
+	bundle := filepath.Join(root, "bundle")
+	dir := filepath.Join(bundle, "runtime-tmp")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	file := filepath.Join(dir, ".gvisor.filestore.runtime-a")
+	require.NoError(t, os.WriteFile(file, []byte("temporary"), 0o600))
+	daemon := &nodeRuntime{config: Config{RootFSConsumerMountRoot: t.TempDir()}}
+	require.Error(t, daemon.cleanupRuntimeTmp(filepath.Join(bundle, "rootfs"), "runtime-a"))
+	require.FileExists(t, file)
+	daemon.config.RootFSConsumerMountRoot = root
+	require.Error(t, daemon.cleanupRuntimeTmp(filepath.Join(bundle, "rootfs"), "runtime-b"))
+	require.FileExists(t, file)
+	require.NoError(t, daemon.cleanupRuntimeTmp(filepath.Join(bundle, "rootfs"), "runtime-a"))
+	require.NoDirExists(t, dir)
+}

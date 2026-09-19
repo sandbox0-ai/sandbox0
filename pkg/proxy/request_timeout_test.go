@@ -43,3 +43,36 @@ func TestClientForRequestPreservesDefaultTimeout(t *testing.T) {
 		t.Fatal("ClientForRequest() replaced the client for a normal request")
 	}
 }
+
+func TestAcquisitionTimeoutIsBoundedAndPreservesEarlierDeadline(t *testing.T) {
+	for _, path := range []string{"/api/v1/sandboxes", "/api/v1/sandboxes/sb/resume", "/api/v1/sandboxes/sb/fork"} {
+		req, _ := http.NewRequest(http.MethodPost, "http://upstream"+path, nil)
+		got, cancel := ApplyRequestTimeout(req, 10*time.Second)
+		deadline, ok := got.Context().Deadline()
+		if !ok || time.Until(deadline) < 44*time.Second || time.Until(deadline) > 45*time.Second {
+			t.Fatalf("unexpected acquisition deadline: %v", deadline)
+		}
+		cancel()
+		client := &http.Client{Timeout: 10 * time.Second}
+		if ClientForRequest(client, req).Timeout != 45*time.Second || client.Timeout != 10*time.Second {
+			t.Fatal("client deadline was not adjusted independently")
+		}
+		ctx, stop := context.WithTimeout(t.Context(), time.Second)
+		got, cancel = ApplyRequestTimeout(req.WithContext(ctx), 10*time.Second)
+		deadline, _ = got.Context().Deadline()
+		if time.Until(deadline) > time.Second {
+			t.Fatal("caller deadline extended")
+		}
+		stop()
+		if got.Context().Err() != context.Canceled {
+			t.Fatal("caller cancellation not propagated")
+		}
+		cancel()
+	}
+	for _, path := range []string{"/api/v1/sandboxes//resume", "/api/v1/sandboxes/sb/resume/extra", "/api/v1/sandboxes/sb/pause"} {
+		req, _ := http.NewRequest(http.MethodPost, "http://upstream"+path, nil)
+		if requestUpstreamTimeout(req, 10*time.Second) != 10*time.Second {
+			t.Fatalf("unexpected extension for %s", path)
+		}
+	}
+}

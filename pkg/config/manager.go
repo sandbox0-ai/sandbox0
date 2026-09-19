@@ -80,15 +80,26 @@ type ManagerConfig struct {
 	CredentialStore             CredentialStoreConfig    `yaml:"credential_store" json:"-"`
 }
 
-// CarrierPoolConfig bounds adaptive per-node warm inventory independently of
-// sandbox admission resources and the cloud worker count.
+// CarrierPrewarmWindow declares an absolute window of planned capacity demand.
+type CarrierPrewarmWindow struct {
+	Name          string    `yaml:"name" json:"-"`
+	Start         time.Time `yaml:"start" json:"-"`
+	End           time.Time `yaml:"end" json:"-"`
+	Slots         int       `yaml:"slots" json:"-"`
+	CPUMillicores int64     `yaml:"cpu_millicores" json:"-"`
+	MemoryBytes   int64     `yaml:"memory_bytes" json:"-"`
+	SecurityClass string    `yaml:"security_class" json:"-"`
+}
+
+// CarrierPoolConfig bounds warm inventory independently of sandbox resource leases.
 type CarrierPoolConfig struct {
-	Enabled      bool     `yaml:"enabled" json:"-"`
-	Maximum      int      `yaml:"maximum" json:"-"`
-	LowWatermark int      `yaml:"low_watermark" json:"-"`
-	Spare        int      `yaml:"spare" json:"-"`
-	ShrinkAfter  Duration `yaml:"shrink_after" json:"-"`
-	Interval     Duration `yaml:"interval" json:"-"`
+	PrewarmWindows []CarrierPrewarmWindow `yaml:"prewarm_windows" json:"-"`
+	Enabled        bool                   `yaml:"enabled" json:"-"`
+	Maximum        int                    `yaml:"maximum" json:"-"`
+	LowWatermark   int                    `yaml:"low_watermark" json:"-"`
+	Spare          int                    `yaml:"spare" json:"-"`
+	ShrinkAfter    Duration               `yaml:"shrink_after" json:"-"`
+	Interval       Duration               `yaml:"interval" json:"-"`
 }
 
 // NodePoolAutoscalerConfig controls the single fixed worker plus Aliyun ESS
@@ -285,10 +296,13 @@ type NodeAuthorityConfig struct {
 // RuntimeSlotClaimConfig controls the manager request path that binds logical
 // sandboxes to exact Nomad warm-slot compatibility classes.
 type RuntimeSlotClaimConfig struct {
-	ClassCatalogFile   string   `yaml:"class_catalog_file" json:"-"`
-	WriterTokenKeyFile string   `yaml:"writer_token_key_file" json:"-"`
-	ClaimTTL           Duration `yaml:"claim_ttl" json:"-"`
-	SLO                Duration `yaml:"slo" json:"-"`
+	CapacityWaitTimeout           Duration `yaml:"capacity_wait_timeout" json:"-"`
+	CapacityWaitMaxPending        int      `yaml:"capacity_wait_max_pending" json:"-"`
+	CapacityWaitMaxPendingPerTeam int      `yaml:"capacity_wait_max_pending_per_team" json:"-"`
+	ClassCatalogFile              string   `yaml:"class_catalog_file" json:"-"`
+	WriterTokenKeyFile            string   `yaml:"writer_token_key_file" json:"-"`
+	ClaimTTL                      Duration `yaml:"claim_ttl" json:"-"`
+	SLO                           Duration `yaml:"slo" json:"-"`
 }
 
 // NodeAuthorityIdentityConfig binds one verified certificate common name to
@@ -587,6 +601,9 @@ func applyRuntimeDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.NodeAuthority.Claim.ClaimTTL.Duration == 0 {
 		cfg.NodeAuthority.Claim.ClaimTTL = Duration{Duration: time.Minute}
+	}
+	if cfg.NodeAuthority.Claim.CapacityWaitTimeout.Duration == 0 {
+		cfg.NodeAuthority.Claim.CapacityWaitTimeout = Duration{Duration: min(30*time.Second, cfg.NodeAuthority.Claim.ClaimTTL.Duration/2)}
 	}
 	if cfg.NodeAuthority.Claim.SLO.Duration == 0 {
 		cfg.NodeAuthority.Claim.SLO = Duration{Duration: time.Second}

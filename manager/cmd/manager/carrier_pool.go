@@ -39,7 +39,18 @@ func configureCarrierPool(cfg *config.ManagerConfig, store carrierpool.Store) (*
 	if err != nil {
 		return nil, err
 	}
-	return carrierpool.New(store, nomad, carrierpool.Config{ClusterID: cfg.DefaultClusterId, Maximum: c.Maximum,
+	windows := make([]carrierpool.PrewarmWindow, 0, len(c.PrewarmWindows))
+	for _, v := range c.PrewarmWindows {
+		class := v.SecurityClass
+		if class == "" {
+			class = "standard"
+		}
+		windows = append(windows, carrierpool.PrewarmWindow{Name: v.Name, Start: v.Start, End: v.End, Slots: v.Slots, CPUMillicores: v.CPUMillicores, MemoryBytes: v.MemoryBytes, SecurityClass: class})
+	}
+	if len(windows) > 0 && !cfg.NodePoolAutoscaler.Enabled {
+		return nil, fmt.Errorf("planned prewarm requires an enabled node pool autoscaler")
+	}
+	return carrierpool.New(store, nomad, carrierpool.Config{ClusterID: cfg.DefaultClusterId, PoolID: cfg.NodePoolAutoscaler.PoolID, PrewarmWindows: windows, Maximum: c.Maximum,
 		StandardDigest: standard.CompatibilityDigest, PrivilegedDigest: privileged.CompatibilityDigest,
 		LowWatermark: c.LowWatermark, Spare: c.Spare, ShrinkAfter: c.ShrinkAfter.Duration, Interval: c.Interval.Duration})
 }

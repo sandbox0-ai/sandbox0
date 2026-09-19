@@ -18,6 +18,7 @@ import (
 
 type sandboxRuntimeBackendDependencies struct {
 	nodeAuthority   *nodeauthority.Component
+	capacityWake    func()
 	store           nomadclaim.Store
 	quotaLimits     nomadclaim.QuotaLimitStore
 	templates       templatestore.TemplateStore
@@ -55,7 +56,9 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		return nil, err
 	}
 	planner, err := deps.nodeAuthority.NewClaimPlanner(nodeauthority.ClaimPlannerConfig{
-		Prober: deps.prober, TokenGenerator: deps.tokenGenerator, Observer: deps.observer,
+		CapacityWait: runtimeslotclaim.CapacityWaitConfig{Timeout: claim.CapacityWaitTimeout.Duration, MaxPending: claim.CapacityWaitMaxPending, MaxPendingPerTeam: claim.CapacityWaitMaxPendingPerTeam},
+		CapacityWake: deps.capacityWake,
+		Prober:       deps.prober, TokenGenerator: deps.tokenGenerator, Observer: deps.observer,
 		WriterTokenKey: writerTokenKey, ClaimTTL: claim.ClaimTTL.Duration,
 		SLO: claim.SLO.Duration, Now: deps.now,
 		DemandPoolID: demandPoolID(cfg), DemandTTL: cfg.NodePoolAutoscaler.DemandTTL.Duration,

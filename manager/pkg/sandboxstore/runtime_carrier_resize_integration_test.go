@@ -236,3 +236,37 @@ func TestEmptyCarrierResizeCanRebindAdmittedSuccessorIntegration(t *testing.T) {
 	require.Greater(t, revision, n.Revision)
 	require.Error(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil), "predecessor completion must remain fenced")
 }
+
+func TestCarrierDemandAggregatesOnlyLiveUnfulfilledOperationsIntegration(t *testing.T) {
+	s, request, n := carrierResizeFixture(t)
+	_, err := s.EnsureRuntimeNodePoolState(t.Context(), "capacity-wait", n.ClusterID)
+	require.NoError(t, err)
+	for _, operation := range []string{request.OperationID, "waiting-second", "expired"} {
+		require.NoError(t, s.RecordRuntimeNodePoolDemand(t.Context(), &RuntimeNodePoolDemandRequest{
+			PoolID: "capacity-wait", ClusterID: n.ClusterID, OperationID: operation, CompatibilityDigest: request.CompatibilityDigest,
+			CPUMillicores: request.Resources.CPUMillicores, MemoryBytes: request.Resources.MemoryBytes, Slots: 1, TTL: time.Minute,
+		}))
+	}
+	_, err = s.pool.Exec(t.Context(), `UPDATE manager.runtime_node_pool_demands SET expires_at=NOW()-INTERVAL '1 second' WHERE operation_id='expired'`)
+	require.NoError(t, err)
+	shapes, err := s.ListRuntimeCarrierDemand(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, shapes, 1)
+	require.Equal(t, 2, shapes[0].Slots)
+	// Repeated pressure for the same operation does not multiply its capacity.
+	require.NoError(t, s.RecordRuntimeNodePoolDemand(t.Context(), &RuntimeNodePoolDemandRequest{PoolID: "capacity-wait", ClusterID: n.ClusterID, OperationID: request.OperationID, CompatibilityDigest: request.CompatibilityDigest, CPUMillicores: request.Resources.CPUMillicores, MemoryBytes: request.Resources.MemoryBytes, Slots: 1, TTL: time.Minute}))
+	_, err = s.AcquireRuntimeSlot(t.Context(), request)
+	require.NoError(t, err)
+	shapes, err = s.ListRuntimeCarrierDemand(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, shapes, 1)
+	require.Equal(t, 1, shapes[0].Slots)
+	shapes, err = s.ListRuntimeCarrierDemand(t.Context(), "other-cluster")
+	require.NoError(t, err)
+	require.Empty(t, shapes)
+	nodes, err := s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Positive(t, nodes[0].PhysicalCPU)
+	require.Positive(t, nodes[0].PhysicalMemory)
+}

@@ -66,6 +66,8 @@ type Config struct {
 // ClaimPlannerConfig provides the non-listener dependencies needed by the
 // request path. Node and network delivery are always the component's own hub.
 type ClaimPlannerConfig struct {
+	CapacityWait   runtimeslotclaim.CapacityWaitConfig
+	CapacityWake   func()
 	Prober         runtimeslotclaim.CommandProber
 	TokenGenerator runtimeslotclaim.TokenGenerator
 	Observer       runtimeslotclaim.Observer
@@ -380,6 +382,7 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 		return nil, fmt.Errorf("node authority is not initialized")
 	}
 	return runtimeslotclaim.New(runtimeslotclaim.Config{
+		CapacityWait: config.CapacityWait, CapacityWake: config.CapacityWake,
 		Store: c.store, Network: c.hub, Node: c.hub,
 		Prober: config.Prober, TokenGenerator: config.TokenGenerator,
 		Observer: config.Observer, WriterTokenKey: config.WriterTokenKey,

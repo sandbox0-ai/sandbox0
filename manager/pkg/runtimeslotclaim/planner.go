@@ -152,6 +152,8 @@ type Observer interface {
 // Config wires regional authorities to authenticated network, node, and procd
 // execution boundaries.
 type Config struct {
+	CapacityWait   CapacityWaitConfig
+	CapacityWake   func()
 	Store          Store
 	Network        NetworkPreparer
 	Node           NodeExecutor
@@ -203,6 +205,8 @@ type Result struct {
 
 // Planner executes one region-authoritative Nomad warm-slot claim.
 type Planner struct {
+	capacityQueue  *capacityQueue
+	capacityWake   func()
 	store          Store
 	network        NetworkPreparer
 	node           NodeExecutor
@@ -230,6 +234,9 @@ func New(config Config) (*Planner, error) {
 	claimTTL := config.ClaimTTL
 	if claimTTL == 0 {
 		claimTTL = defaultClaimTTL
+	}
+	if config.CapacityWait.Timeout > claimTTL/2 {
+		return nil, errors.New("capacity wait must leave at least half the claim reservation lease for startup")
 	}
 	if claimTTL < time.Second || claimTTL > time.Minute {
 		return nil, errors.New("claim TTL must be between one second and one minute")
@@ -264,7 +271,12 @@ func New(config Config) (*Planner, error) {
 	} else {
 		config.DemandRecorder = nil
 	}
+	queue, err := newCapacityQueue(config.CapacityWait)
+	if err != nil {
+		return nil, err
+	}
 	return &Planner{
+		capacityQueue: queue, capacityWake: config.CapacityWake,
 		store: config.Store, network: config.Network, node: config.Node,
 		prober: config.Prober, tokenGenerator: config.TokenGenerator,
 		observer: config.Observer, writerTokenKey: append([]byte(nil), config.WriterTokenKey...),
@@ -391,7 +403,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	recordPhase(PhaseRootFSMetadata, phaseStarted, true)
 
 	phaseStarted = time.Now()
-	slot, err := p.store.AcquireRuntimeSlot(ctx, &sandboxstore.AcquireRuntimeSlotRequest{
+	slot, err := p.acquireCapacity(ctx, normalized.TeamID, &sandboxstore.AcquireRuntimeSlotRequest{
 		OperationID: normalized.OperationID, ClaimID: ids.claimID, SandboxID: normalized.SandboxID,
 		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
 		CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
@@ -401,7 +413,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	})
 	if err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
-		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && p.demandRecorder != nil {
+		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && p.demandRecorder != nil && p.capacityQueue == nil {
 			_ = p.demandRecorder.RecordRuntimeNodePoolDemand(ctx, &sandboxstore.RuntimeNodePoolDemandRequest{
 				PoolID: p.demandPoolID, OperationID: normalized.OperationID,
 				ClusterID: normalized.ClusterID, CPUMillicores: normalized.Resources.CPUMillicores,

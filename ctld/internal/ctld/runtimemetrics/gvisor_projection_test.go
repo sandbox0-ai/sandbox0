@@ -30,7 +30,7 @@ func TestProjectGVisorRuntimeSamplePreservesSupportedFieldsAndMarksUnsupported(t
 	stats := validGVisorStats(target.RunscContainerID)
 	tracker := &cpuUsageTracker{}
 	firstAt := time.Unix(100, 0)
-	first, ok := projectGVisorRuntimeSample(target, stats, "region-a", "cluster-a", firstAt, tracker)
+	first, ok := projectGVisorRuntimeSample(target, stats, nil, "region-a", "cluster-a", firstAt, tracker)
 	if !ok {
 		t.Fatal("first projection failed")
 	}
@@ -69,7 +69,7 @@ func TestProjectGVisorRuntimeSamplePreservesSupportedFieldsAndMarksUnsupported(t
 	}
 
 	stats.Data.CPU.Usage.Total += 500_000_000
-	second, ok := projectGVisorRuntimeSample(target, stats, "region-a", "cluster-a", firstAt.Add(time.Second), tracker)
+	second, ok := projectGVisorRuntimeSample(target, stats, nil, "region-a", "cluster-a", firstAt.Add(time.Second), tracker)
 	if !ok || second.CPU == nil || second.CPU.Usage == nil || *second.CPU.Usage != 0.5 ||
 		second.CPU.Utilization == nil || *second.CPU.Utilization != 0.25 {
 		t.Fatalf("second CPU projection = %+v, ok=%t", second.CPU, ok)
@@ -85,9 +85,9 @@ func TestProjectGVisorRuntimeSampleResetsCPUOnSeriesRotation(t *testing.T) {
 	stats := validGVisorStats(target.RunscContainerID)
 	tracker := &cpuUsageTracker{}
 	at := time.Unix(100, 0)
-	_, _ = projectGVisorRuntimeSample(target, stats, "region", "cluster", at, tracker)
+	_, _ = projectGVisorRuntimeSample(target, stats, nil, "region", "cluster", at, tracker)
 	stats.Data.CPU.Usage.Total += uint64(time.Second)
-	derived, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", at.Add(time.Second), tracker)
+	derived, ok := projectGVisorRuntimeSample(target, stats, nil, "region", "cluster", at.Add(time.Second), tracker)
 	if !ok || derived.CPU.Usage == nil {
 		t.Fatal("same series did not derive CPU usage")
 	}
@@ -97,7 +97,7 @@ func TestProjectGVisorRuntimeSampleResetsCPUOnSeriesRotation(t *testing.T) {
 	rotated.SeriesEpoch = nomadruntime.RuntimeMetricSeriesEpoch(
 		rotated.AllocationID, rotated.NodeBootID, rotated.LaunchAttempt, rotated.RunscContainerID,
 	)
-	reset, ok := projectGVisorRuntimeSample(rotated, stats, "region", "cluster", at.Add(2*time.Second), tracker)
+	reset, ok := projectGVisorRuntimeSample(rotated, stats, nil, "region", "cluster", at.Add(2*time.Second), tracker)
 	if !ok || reset.CPU.Usage != nil {
 		t.Fatalf("rotated series inherited CPU baseline: %+v, ok=%t", reset.CPU, ok)
 	}
@@ -109,24 +109,79 @@ func TestProjectGVisorRuntimeSampleResetsCPUOnSeriesRotation(t *testing.T) {
 	}
 }
 
+func TestProjectGVisorRuntimeSampleDerivesMemoryWorkingSet(t *testing.T) {
+	target := validGVisorMetricTarget()
+	stats := validGVisorStats(target.RunscContainerID)
+	limit := uint64(target.MemoryMiB) << 20
+	memoryCgroup := &nomadruntime.RuntimeMetricMemoryCgroup{
+		CurrentBytes: 3 << 30, InactiveFileBytes: 1 << 30,
+	}
+
+	sample, ok := projectGVisorRuntimeSample(
+		target, stats, memoryCgroup, "region", "cluster", time.Unix(100, 0), &cpuUsageTracker{},
+	)
+	if !ok || sample.Memory == nil {
+		t.Fatalf("memory projection failed: ok=%t memory=%+v", ok, sample.Memory)
+	}
+	if sample.Memory.UsageBytes == nil || *sample.Memory.UsageBytes != 512 ||
+		sample.Memory.WorkingSetBytes == nil || *sample.Memory.WorkingSetBytes != 2<<30 ||
+		sample.Memory.AvailableBytes == nil || *sample.Memory.AvailableBytes != 2<<30 ||
+		sample.Memory.LimitBytes == nil || *sample.Memory.LimitBytes != limit ||
+		sample.Memory.Utilization == nil || *sample.Memory.Utilization != 0.5 {
+		t.Fatalf("memory projection = %+v", sample.Memory)
+	}
+	for _, metric := range []sandboxobservability.RuntimeMetricName{
+		sandboxobservability.RuntimeMetricMemoryWorkingSet,
+		sandboxobservability.RuntimeMetricMemoryAvailable,
+		sandboxobservability.RuntimeMetricMemoryUtilization,
+	} {
+		if sampleMissingMetric(sample, metric) {
+			t.Fatalf("derived memory metric %q remains missing: %+v", metric, sample.Missing)
+		}
+	}
+
+	// memory.current and memory.stat are sampled separately. A reclaim can
+	// transiently leave inactive_file above current; working set clamps to zero.
+	memoryCgroup.CurrentBytes = 512
+	memoryCgroup.InactiveFileBytes = 1024
+	sample, ok = projectGVisorRuntimeSample(
+		target, stats, memoryCgroup, "region", "cluster", time.Unix(101, 0), &cpuUsageTracker{},
+	)
+	if !ok || sample.Memory == nil || sample.Memory.WorkingSetBytes == nil || *sample.Memory.WorkingSetBytes != 0 ||
+		sample.Memory.AvailableBytes == nil || *sample.Memory.AvailableBytes != limit ||
+		sample.Memory.Utilization == nil || *sample.Memory.Utilization != 0 {
+		t.Fatalf("clamped memory projection = %+v, ok=%t", sample.Memory, ok)
+	}
+
+	runtimeSample := nomadruntime.RuntimeMetricSample{
+		Version: nomadruntime.RuntimeMetricSampleVersion, ObservedAt: time.Unix(102, 0),
+		Stats: stats, MemoryCgroup: &nomadruntime.RuntimeMetricMemoryCgroup{
+			CurrentBytes: limit + 1, InactiveFileBytes: 0,
+		},
+	}
+	if err := runtimeSample.Validate(target); err == nil {
+		t.Fatal("validation accepted a cgroup sample outside the target memory limit")
+	}
+}
+
 func TestProjectGVisorRuntimeSampleRejectsCounterOverflowAndIdentityMismatch(t *testing.T) {
 	target := validGVisorMetricTarget()
 	stats := validGVisorStats(target.RunscContainerID)
 	tracker := &cpuUsageTracker{}
 	stats.Data.NetworkInterfaces = append(stats.Data.NetworkInterfaces,
 		&gvisorcli.RunscNetworkInterface{Name: "eth1", RxBytes: math.MaxUint64})
-	if _, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Unix(100, 0), tracker); ok {
+	if _, ok := projectGVisorRuntimeSample(target, stats, nil, "region", "cluster", time.Unix(100, 0), tracker); ok {
 		t.Fatal("projection accepted overflowing network counters")
 	}
 	stats = validGVisorStats(target.RunscContainerID)
 	stats.Data.CPU.Usage.Total += uint64(time.Second)
-	firstAccepted, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Unix(101, 0), tracker)
+	firstAccepted, ok := projectGVisorRuntimeSample(target, stats, nil, "region", "cluster", time.Unix(101, 0), tracker)
 	if !ok || firstAccepted.CPU.Usage != nil {
 		t.Fatalf("rejected sample advanced CPU baseline: %+v, ok=%t", firstAccepted.CPU, ok)
 	}
 
 	stats = validGVisorStats("another-runsc")
-	if _, ok := projectGVisorRuntimeSample(target, stats, "region", "cluster", time.Now(), &cpuUsageTracker{}); ok {
+	if _, ok := projectGVisorRuntimeSample(target, stats, nil, "region", "cluster", time.Now(), &cpuUsageTracker{}); ok {
 		t.Fatal("projection accepted another runsc identity")
 	}
 }

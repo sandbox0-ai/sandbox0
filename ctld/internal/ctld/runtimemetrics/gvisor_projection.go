@@ -27,6 +27,7 @@ import (
 func projectGVisorRuntimeSample(
 	target nomadruntime.RuntimeMetricTarget,
 	stats gvisorcli.RunscStats,
+	memoryCgroup *nomadruntime.RuntimeMetricMemoryCgroup,
 	regionID, clusterID string,
 	observedAt time.Time,
 	tracker *cpuUsageTracker,
@@ -47,7 +48,7 @@ func projectGVisorRuntimeSample(
 	// Validate every fallible counter aggregation before advancing the CPU
 	// baseline. Rejected samples must not affect the next derived CPU value.
 	projectGVisorCPU(&sample, target, stats.Data.CPU.Usage, observedAt, tracker)
-	projectGVisorMemory(&sample, target, stats.Data.Memory)
+	projectGVisorMemory(&sample, target, stats.Data.Memory, memoryCgroup)
 	processCount := stats.Data.Pids.Current
 	sample.Process = &sandboxobservability.RuntimeProcessValues{Count: &processCount}
 	sample.RootFSWritable = &sandboxobservability.RuntimeRootFSWritableValues{}
@@ -92,16 +93,30 @@ func projectGVisorMemory(
 	sample *sandboxobservability.RuntimeSample,
 	target nomadruntime.RuntimeMetricTarget,
 	memory gvisorcli.RunscMemory,
+	memoryCgroup *nomadruntime.RuntimeMetricMemoryCgroup,
 ) {
 	limit := uint64(target.MemoryMiB) << 20
 	usage := memory.Usage.Usage
 	values := &sandboxobservability.RuntimeMemoryValues{UsageBytes: &usage, LimitBytes: &limit}
-	appendMissing(sample, sandboxobservability.RuntimeMetricMemoryWorkingSet, nil,
-		sandboxobservability.RuntimeMetricMissingUnsupported, "stock runsc stats do not expose memory working set")
-	appendMissing(sample, sandboxobservability.RuntimeMetricMemoryAvailable, nil,
-		sandboxobservability.RuntimeMetricMissingUnsupported, "stock runsc stats do not expose available memory")
-	appendMissing(sample, sandboxobservability.RuntimeMetricMemoryUtilization, nil,
-		sandboxobservability.RuntimeMetricMissingUnsupported, "memory utilization requires working set, which stock runsc stats do not expose")
+	if memoryCgroup == nil {
+		appendMissing(sample, sandboxobservability.RuntimeMetricMemoryWorkingSet, nil,
+			sandboxobservability.RuntimeMetricMissingUnsupported, "runtime resource cgroup memory is unavailable")
+		appendMissing(sample, sandboxobservability.RuntimeMetricMemoryAvailable, nil,
+			sandboxobservability.RuntimeMetricMissingUnsupported, "runtime resource cgroup memory is unavailable")
+		appendMissing(sample, sandboxobservability.RuntimeMetricMemoryUtilization, nil,
+			sandboxobservability.RuntimeMetricMissingUnsupported, "memory utilization requires a resource cgroup working-set sample")
+	} else {
+		// cgroup-v2 working set follows memory.current - inactive_file. The
+		// two files are not updated atomically, so a reclaim race can make the
+		// subtraction negative; zero is the bounded result in that case.
+		inactiveFile := min(memoryCgroup.InactiveFileBytes, memoryCgroup.CurrentBytes)
+		workingSet := memoryCgroup.CurrentBytes - inactiveFile
+		available := limit - min(workingSet, limit)
+		utilization := float64(workingSet) / float64(limit)
+		values.WorkingSetBytes = &workingSet
+		values.AvailableBytes = &available
+		values.Utilization = &utilization
+	}
 	sample.Memory = values
 }
 

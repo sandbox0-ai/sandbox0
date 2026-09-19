@@ -23,7 +23,7 @@ Per-sandbox historical data is separate from [platform telemetry](/docs/sandbox/
 
 The metrics endpoint returns bounded, server-downsampled series ready for charts. The default query covers the last hour and requests CPU utilization, memory utilization, and network I/O. A query cannot span more than 30 days.
 
-On Nomad nodes, ctld samples stock `runsc` only after matching the current writer and carrier journals to the immutable OCI assignment. CPU and memory limits come from the applied sandbox resources. Each sample is revalidated against the same runtime identity after collection; retiring instances and expired consumer leases are excluded. A pause, resume, or new runtime generation starts a separate counter series.
+On Nomad nodes, ctld samples stock `runsc` and the sandbox's resource cgroup only after matching the current writer and carrier journals to the immutable OCI assignment. CPU and memory limits come from the applied sandbox resources. Memory usage comes from `runsc`; working set is derived from cgroup-v2 `memory.current` minus `inactive_file`, clamped to zero across a sampling race. Each sample is revalidated against the same runtime identity after collection; retiring instances and expired consumer leases are excluded. A pause, resume, or new runtime generation starts a separate counter series.
 
 ### Query Parameters
 
@@ -222,7 +222,7 @@ Current producers are:
 - cluster-gateway for authenticated Sandbox API access, including regional detail requests
 - the ctld network runtime for network attempts and results
 - manager for historical logs
-- node-local ctld collectors for sandbox-wide stock-runsc runtime samples,
+- node-local ctld collectors for sandbox-wide runsc and resource-cgroup runtime samples,
   collected every 15 seconds with jitter
 
 Historical queries return `503` when their backend is disabled or unavailable. The static metric catalog remains available so clients can build selectors without probing storage.

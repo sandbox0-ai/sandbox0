@@ -137,6 +137,14 @@ func TestRuntimeResourceCgroupRunscIntegration(t *testing.T) {
 		t.Fatalf("occupied RemoveAndConfirm() = %t, %v", absent, err)
 	}
 	assertRuntimeCgroupLeaseValues(t, path, lease)
+	memorySample, err := readRuntimeMetricMemoryCgroup(path)
+	if err != nil {
+		t.Fatalf("read runsc resource memory cgroup: %v", err)
+	}
+	if memorySample == nil || memorySample.CurrentBytes > uint64(lease.MemoryBytes) ||
+		memorySample.InactiveFileBytes > uint64(lease.MemoryBytes) {
+		t.Fatalf("runsc resource memory sample = %+v", memorySample)
+	}
 
 	throttledBefore := readCgroupStat(t, filepath.Join(path, "cpu.stat"), "nr_throttled")
 	deadline := time.Now().Add(30 * time.Second)

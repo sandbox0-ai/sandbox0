@@ -75,9 +75,10 @@ func distributeDemand(nodes []sandboxstore.RuntimeCarrierNode, shapes []sandboxs
 	for _, readyOnly := range []bool{true, false} {
 		for si, s := range shapes {
 			class := ""
-			if s.CompatibilityDigest == c.StandardDigest {
+			switch s.CompatibilityDigest {
+			case c.StandardDigest:
 				class = "standard"
-			} else if s.CompatibilityDigest == c.PrivilegedDigest {
+			case c.PrivilegedDigest:
 				class = "privileged"
 			}
 			if class == "" || s.CompatibilityDigest == "" || s.CPUMillicores <= 0 || s.MemoryBytes <= 0 {

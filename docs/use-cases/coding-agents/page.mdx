@@ -38,8 +38,9 @@ the Dockerfile's CLI startup checks before an immutable, uniquely tagged release
 receipt is published. The infrastructure refresh workflow consumes completed
 receipts and updates the `coding-agent` template image pin used by Sandpi.
 Infrastructure CI prepares the image using the active region's RootFS importer
-policy, waits for attested artifacts, and updates the public `coding-agent`
-template in ali-ue1. Failed imports leave the previous template unchanged.
+policy, waits for attested artifacts, and updates Sandpi's configured team-owned
+`coding-agent` template in ali-ue1. Failed imports leave the previous template
+unchanged. Updating a public template alone does not replace a team override.
 
 Updating the template affects new sandboxes after deployment. Existing sandbox
 RootFS generations retain their installed harness versions across pause/resume;

@@ -39,7 +39,7 @@ type managedSession struct {
 	mu            sync.Mutex
 	inputMu       sync.Mutex
 	record        Session
-	journal       *Journal
+	journal       sessionJournal
 	runtime       *attemptRuntime
 	restartTimes  []time.Time
 	restartCancel context.CancelFunc
@@ -118,14 +118,28 @@ func (s *Supervisor) loadPersistedSessionsLocked() error {
 			return err
 		}
 		openStartedAt := time.Now()
-		journal, err := OpenJournal(path, record.Spec.EventRetention, record.Cursor)
+		var journal sessionJournal
+		// A stopped session with no unfinished attempt cannot produce output during
+		// activation. Its event history is recovered only when it is actually used.
+		deferred := record.Phase == PhaseStopped && record.Spec.Lifecycle.DesiredState == DesiredStateStopped &&
+			(record.Attempt == nil || record.Attempt.FinishedAt != nil)
+		if deferred {
+			journal = &deferredJournal{path: path, retention: record.Spec.EventRetention, cursor: record.Cursor}
+		} else {
+			journal, err = OpenJournal(path, record.Spec.EventRetention, record.Cursor)
+		}
 		if err != nil {
 			closeLoaded()
 			return fmt.Errorf("open journal for %s: %w", record.ID, err)
 		}
 		stats := journal.Stats()
-		s.logger.Info("Opened session event journal",
+		message := "Opened session event journal"
+		if deferred {
+			message = "Deferred stopped session event journal"
+		}
+		s.logger.Info(message,
 			zap.String("session_id", record.ID),
+			zap.Bool("deferred", deferred),
 			zap.Duration("duration", time.Since(openStartedAt)),
 			zap.Int("format_version", stats.FormatVersion),
 			zap.Int("sealed_segments", stats.SealedSegments),
@@ -1239,6 +1253,14 @@ func (s *Supervisor) killAfterGrace(runtime *attemptRuntime, proc process.Proces
 func (s *Supervisor) recoverPersistedSession(managed *managedSession, runtimeGeneration int64) (bool, error) {
 	managed.mu.Lock()
 	defer managed.mu.Unlock()
+	// A terminal stopped session has no runtime resources to reconcile. Do not
+	// rewrite/fsync unchanged control state just to advance the in-memory view of
+	// its generation; the next actual mutation will persist that generation.
+	if managed.record.Phase == PhaseStopped && managed.record.Spec.Lifecycle.DesiredState == DesiredStateStopped &&
+		(managed.record.Attempt == nil || managed.record.Attempt.FinishedAt != nil) {
+		managed.record.RuntimeGeneration = runtimeGeneration
+		return false, nil
+	}
 	now := time.Now().UTC()
 	wasActive := managed.record.Phase == PhasePending || managed.record.Phase == PhaseStarting || managed.record.Phase == PhaseRunning || managed.record.Phase == PhasePaused || managed.record.Phase == PhaseBackoff || managed.record.Phase == PhaseSuspended
 	if managed.record.Attempt != nil && managed.record.Attempt.FinishedAt == nil {

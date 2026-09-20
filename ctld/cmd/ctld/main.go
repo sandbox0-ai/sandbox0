@@ -18,13 +18,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/procdassets"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 )
 
 var (
+	installProcdOnly         bool
+	printProcdDigest         bool
+	procdCacheDir            = procdartifact.DefaultCacheDir
+	expectedProcdDigest      string
 	httpAddr                 = ":8095"
 	nodeName                 = os.Getenv("NODE_NAME")
 	stateRoot                = "/var/lib/sandbox0/ctld"
@@ -54,6 +60,10 @@ var retainedPrimaryLeases struct {
 }
 
 func main() {
+	flag.BoolVar(&installProcdOnly, "install-procd", false, "install bundled procd and exit")
+	flag.BoolVar(&printProcdDigest, "procd-digest", false, "print bundled procd SHA-256 and exit")
+	flag.StringVar(&procdCacheDir, "procd-cache-dir", procdartifact.DefaultCacheDir, "immutable procd cache (must match driver)")
+	flag.StringVar(&expectedProcdDigest, "expected-procd-digest", "", "optional release digest assertion")
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and metrics")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "Nomad node name")
 	flag.StringVar(&stateRoot, "state-root", "/var/lib/sandbox0/ctld", "host-local root for ctld state")
@@ -74,6 +84,22 @@ func main() {
 }
 
 func run() error {
+	if printProcdDigest {
+		value, err := procdassets.Digest()
+		if err != nil {
+			return err
+		}
+		fmt.Println(value)
+		return nil
+	}
+	if installProcdOnly {
+		path, err := procdassets.Install(procdCacheDir, expectedProcdDigest)
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+	}
 	if haProbe != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -102,6 +128,13 @@ func run() error {
 	if nomadFactory == nil {
 		return fmt.Errorf("ctld Nomad runtime factory is required")
 	}
+	// Stage before either HA slot can become ready. Publishing immutable files
+	// does not require the primary lease and cannot replace a live mount.
+	path, err := procdassets.Install(procdCacheDir, expectedProcdDigest)
+	if err != nil {
+		return fmt.Errorf("stage bundled procd: %w", err)
+	}
+	log.Printf("Bundled procd ready: %s", path)
 	primaryFn := func(ctx context.Context, options primaryRunOptions) error {
 		options.ctldConfig = cfg
 		options.nomadRuntimeFactory = nomadFactory

@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
@@ -38,14 +39,16 @@ type EphemeralMount struct {
 // Assignment is the complete input that the Nomad driver passes to a fresh
 // procd process. The assignment cannot change during the process lifetime.
 type Assignment struct {
-	SandboxID               string            `json:"sandbox_id"`
-	TeamID                  string            `json:"team_id,omitempty"`
-	RuntimeGeneration       int64             `json:"runtime_generation"`
-	SecurityClass           string            `json:"security_class"`
-	EphemeralMounts         []EphemeralMount  `json:"ephemeral_mounts,omitempty"`
-	EnvVars                 map[string]string `json:"env_vars,omitempty"`
-	Webhook                 *WebhookConfig    `json:"webhook,omitempty"`
-	ResetCopiedSessionState bool              `json:"reset_copied_session_state,omitempty"`
+	// Procd is omitted only by legacy deployments executing the embedded binary.
+	Procd                   *procdartifact.Artifact `json:"procd,omitempty"`
+	SandboxID               string                  `json:"sandbox_id"`
+	TeamID                  string                  `json:"team_id,omitempty"`
+	RuntimeGeneration       int64                   `json:"runtime_generation"`
+	SecurityClass           string                  `json:"security_class"`
+	EphemeralMounts         []EphemeralMount        `json:"ephemeral_mounts,omitempty"`
+	EnvVars                 map[string]string       `json:"env_vars,omitempty"`
+	Webhook                 *WebhookConfig          `json:"webhook,omitempty"`
+	ResetCopiedSessionState bool                    `json:"reset_copied_session_state,omitempty"`
 }
 
 // Revision returns a deterministic assignment digest.
@@ -63,6 +66,11 @@ func (a Assignment) Revision() (string, error) {
 
 // Validate checks the immutable runtime identity.
 func (a Assignment) Validate() error {
+	if a.Procd != nil {
+		if err := a.Procd.Validate(); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(a.SandboxID) == "" {
 		return errors.New("sandbox id is required")
 	}

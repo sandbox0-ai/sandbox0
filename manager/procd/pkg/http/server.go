@@ -86,6 +86,10 @@ func NewServer(
 	}
 
 	s.setupRoutes()
+	s.httpServer = &http.Server{
+		Addr: fmt.Sprintf(":%d", cfg.HTTPPort), Handler: s.router,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second,
+	}
 	return s
 }
 
@@ -103,6 +107,7 @@ func (s *Server) setupRoutes() {
 	// Local-only API (localhost access only, no auth)
 	local := s.router.PathPrefix(apiV1Prefix).Subrouter()
 	local.Use(s.localhostOnlyMiddleware)
+	local.Use(s.runtimeReadyMiddleware)
 
 	webhookHandler := handlers.NewWebhookHandler(s.webhookDispatcher)
 	local.HandleFunc("/webhook/publish", webhookHandler.Publish).Methods("POST")
@@ -187,7 +192,9 @@ func (s *Server) commandReadyProbeHandler(w http.ResponseWriter, _ *http.Request
 
 func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.runtimeGate == nil || procdLifecycleControlRequest(r) {
+		// Activation now runs after listening. Even lifecycle controls must wait
+		// for owner binding and recovery; barrier bypass still applies afterward.
+		if s.runtimeGate == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -205,21 +212,18 @@ func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {
 
 // Start starts the HTTP server.
 func (s *Server) Start() error {
-	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
-
-	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // Disabled for long-running stream responses.
-		IdleTimeout:  120 * time.Second,
+	listener, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return err
 	}
+	return s.Serve(listener)
+}
 
-	s.logger.Info("Starting HTTP server",
-		zap.String("addr", addr),
-	)
-
-	return s.httpServer.ListenAndServe()
+// Serve starts accepting probes while runtime activation is still pending.
+// The existing runtimeReadyMiddleware continues to gate authenticated commands.
+func (s *Server) Serve(listener net.Listener) error {
+	s.logger.Info("Procd HTTP listener ready", zap.String("addr", listener.Addr().String()))
+	return s.httpServer.Serve(listener)
 }
 
 // Shutdown gracefully shuts down the server.

@@ -84,6 +84,15 @@ jobs:
           packages="$(go list -buildvcs=false ./... | grep -Ev '/tests/(e2e|integration)(/|$)')"
           GOTOOLCHAIN=go1.25.0+auto go test -buildvcs=false -race -count=1 $packages
 
+      - name: Verify ctld carries and installs procd without a sidecar file
+        shell: bash
+        run: |
+          sh scripts/build-ctld.sh "${RUNNER_TEMP}/ctld"
+          digest="$("${RUNNER_TEMP}/ctld" --procd-digest)"
+          installed="$(sudo "${RUNNER_TEMP}/ctld" --install-procd --expected-procd-digest "${digest}")"
+          test "sha256:$(sha256sum "${installed}" | cut -d' ' -f1)" = "${digest}"
+          test "$(stat -c %a "${installed}")" = 555
+
       - name: Enforce 100% billing admission statement coverage
         shell: bash
         run: |

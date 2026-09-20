@@ -77,7 +77,8 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 // separate from the immutable warm-slot runtime class catalog.
 func sandboxRuntimeClaimConfig(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies, planner *runtimeslotclaim.Planner) nomadclaim.Config {
 	return nomadclaim.Config{
-		Store: deps.store, Templates: deps.templates, RuntimeClasses: deps.runtimeClasses, Planner: planner,
+		RuntimeProcd: cfg.RuntimeProcd,
+		Store:        deps.store, Templates: deps.templates, RuntimeClasses: deps.runtimeClasses, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
 		PlannedRetire:   deps.nodeAuthority,
 		RunningFork:     deps.nodeAuthority,

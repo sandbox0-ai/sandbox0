@@ -34,6 +34,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -431,4 +432,25 @@ func testLimits() Limits {
 		panic(err)
 	}
 	return limits
+}
+
+func TestImporterPublishesStablePlaceholderWithoutEmbeddingRuntime(t *testing.T) {
+	fixture := newOCIImportFixture(t, []testLayerBlob{testLayer(t, testTarEntry{name: "workspace/data", body: "user data"})})
+	body, err := os.ReadFile("../procdartifact/rootfs-placeholder")
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(fixture.procdPath, 0755))
+	require.NoError(t, os.WriteFile(fixture.procdPath, body, 0555))
+	require.NoError(t, os.Chmod(fixture.procdPath, 0555))
+	fixture.procdDigest = digest.Digest(procdartifact.PlaceholderDigest())
+	result, err := fixture.importer(t, Limits{}).Import(t.Context(), fixture.request())
+	require.NoError(t, err)
+	defer os.RemoveAll(result.RootPath)
+	actual, err := os.ReadFile(filepath.Join(result.RootPath, "procd"))
+	require.NoError(t, err)
+	require.Equal(t, body, actual)
+	require.Less(t, len(actual), 1024)
+	require.Equal(t, fixture.procdDigest, result.ProcdDigest)
+	user, err := os.ReadFile(filepath.Join(result.RootPath, "workspace/data"))
+	require.NoError(t, err)
+	require.Equal(t, "user data", string(user))
 }

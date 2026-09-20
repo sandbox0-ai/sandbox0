@@ -21,7 +21,7 @@ func TestRuntimeReleaseUsesPublishedDeploymentLayout(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	metadata := `{"source_commit":"` + commit + `","target":{"os":"linux","architecture":"amd64"},"runsc":{"distribution":"official-stock"}}`
 	require.NoError(t, os.WriteFile(filepath.Join(release, "metadata.json"), []byte(metadata), 0o644))
-	for _, binary := range []string{"nomad", "node-bootstrap", "ctld", "runsc", "sandbox0-gvisor"} {
+	for _, binary := range []string{"nomad", "node-bootstrap", "ctld", "runsc", "sandbox0-gvisor", "procd"} {
 		require.NoError(t, os.WriteFile(filepath.Join(release, "bin", binary), []byte("fixture"), 0o755))
 	}
 	// Mirror bundle publication using the real checked-in deployment assets.

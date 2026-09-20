@@ -16,7 +16,12 @@ const (
 	sandboxIDFile           = "sandbox-id"
 )
 
+// sessionStateFormatVersion is independent of the procd executable version.
+// Zero denotes the original compatible format; unknown versions fail closed.
+const sessionStateFormatVersion = 1
+
 type persistedSession struct {
+	FormatVersion int `json:"format_version,omitempty"`
 	Session
 	InputReceipts []InputReceipt `json:"input_receipts,omitempty"`
 	CreationKey   string         `json:"creation_key,omitempty"`
@@ -58,6 +63,9 @@ func (s *FileStore) Load() ([]Session, error) {
 		var stored persistedSession
 		if err := json.Unmarshal(data, &stored); err != nil {
 			return nil, fmt.Errorf("decode session %s: %w", entry.Name(), err)
+		}
+		if stored.FormatVersion < 0 || stored.FormatVersion > sessionStateFormatVersion {
+			return nil, fmt.Errorf("session %s uses unsupported state format %d", entry.Name(), stored.FormatVersion)
 		}
 		if stored.ID == "" || stored.ID != entry.Name() {
 			return nil, fmt.Errorf("session state directory %s has mismatched id %q", entry.Name(), stored.ID)
@@ -138,6 +146,7 @@ func (s *FileStore) Save(value Session) error {
 		return fmt.Errorf("create session directory: %w", err)
 	}
 	stored := persistedSession{
+		FormatVersion: sessionStateFormatVersion,
 		Session:       cloneSession(value),
 		InputReceipts: append([]InputReceipt(nil), value.InputReceipts...),
 		CreationKey:   value.CreationKey,

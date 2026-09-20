@@ -27,6 +27,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
@@ -131,6 +132,7 @@ type pausedRebaseController interface {
 
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
+	RuntimeProcd           *procdartifact.Artifact
 	Store                  Store
 	Templates              templatestore.TemplateStore
 	RuntimeClasses         *RuntimeClassCatalog
@@ -158,6 +160,7 @@ type Config struct {
 
 // Service claims resource-neutral Nomad slots and binds exact resource leases.
 type Service struct {
+	runtimeProcd           *procdartifact.Artifact
 	store                  Store
 	templates              templatestore.TemplateStore
 	runtimeClasses         *RuntimeClassCatalog
@@ -185,6 +188,27 @@ type Service struct {
 
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
+	if config.RootFSProcdDigest == procdartifact.PlaceholderDigest() && config.RuntimeProcd == nil {
+		return nil, fmt.Errorf("placeholder RootFS artifacts require runtime_procd")
+	}
+	if config.RuntimeProcd != nil {
+		if config.RuntimeClasses == nil {
+			return nil, fmt.Errorf("runtime procd requires a runtime class catalog")
+		}
+		for _, class := range config.RuntimeClasses.classes {
+			if !class.Compatibility.SupportsMountedProcd() {
+				return nil, fmt.Errorf("runtime class %s does not support node-mounted procd", class.Name)
+			}
+		}
+		if config.RuntimeProcd.Digest == procdartifact.PlaceholderDigest() || config.RuntimeProcd.Protocol != config.RootFSProcdProtocol {
+			return nil, fmt.Errorf("runtime procd must be executable and match the RootFS session protocol")
+		}
+		if err := config.RuntimeProcd.Validate(); err != nil {
+			return nil, err
+		}
+		value := *config.RuntimeProcd
+		config.RuntimeProcd = &value
+	}
 	if config.Store == nil || config.Templates == nil || config.RuntimeClasses == nil ||
 		config.Planner == nil || config.Allocation == nil || config.PlannedRetire == nil || config.RunningFork == nil ||
 		config.PausedRebase == nil ||
@@ -230,7 +254,8 @@ func New(config Config) (*Service, error) {
 		config.Logger = zap.NewNop()
 	}
 	return &Service{
-		store: config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
+		runtimeProcd: config.RuntimeProcd,
+		store:        config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
 		planner: config.Planner, allocation: config.Allocation, plannedRetire: config.PlannedRetire,
 		runningFork:  config.RunningFork,
 		pausedRebase: config.PausedRebase,
@@ -532,7 +557,7 @@ func (s *Service) resumeNomadSandbox(
 	}
 
 	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
-	plan.assignment, err = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
+	plan.assignment, err = s.runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
 	if err != nil {
 		resumeErr := apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
@@ -691,7 +716,7 @@ func (s *Service) prepareNomadResumePlan(ctx context.Context, record *sandboxsto
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad credential binding semantics changed",
 			service.ErrSandboxLifecycleUnavailable)
 	}
-	assignment, err := runtimeAssignment(record.TemplateSpec, &req)
+	assignment, err := s.runtimeAssignment(record.TemplateSpec, &req)
 	if err != nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored runtime assignment is invalid: %v",
 			service.ErrSandboxLifecycleUnavailable, err)
@@ -983,7 +1008,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	}
 	storeBindings := credentialbinding.ToStore(credentials)
 	sanitizeNomadCredentialBindings(req.Config)
-	assignment, err := runtimeAssignment(tpl.Spec, &req)
+	assignment, err := s.runtimeAssignment(tpl.Spec, &req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
@@ -1533,3 +1558,17 @@ func sanitizeNomadCredentialBindings(config *sandboxstore.SandboxConfig) {
 
 var _ service.SandboxRuntime = (*Service)(nil)
 var _ service.SandboxHardExpiryTerminator = (*Service)(nil)
+
+// runtimeAssignment pins the executable before the planner reserves a slot.
+// The assignment revision is fenced by PostgreSQL and the driver on retries.
+func (s *Service) runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) (runtimecontrol.Assignment, error) {
+	a, err := runtimeAssignment(spec, req)
+	if err != nil {
+		return a, err
+	}
+	if s.runtimeProcd != nil {
+		value := *s.runtimeProcd
+		a.Procd = &value
+	}
+	return a, a.Validate()
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -180,16 +181,6 @@ func main() {
 		cfg.HTTPPort,
 		logger,
 	)
-	activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err = runtimeController.Activate(activationCtx, *runtimeAssignment)
-	activationCancel()
-	if err != nil {
-		logger.Fatal("Failed to activate runtime assignment", zap.Error(err))
-	}
-	logger.Info("Runtime assignment activated",
-		zap.String("sandbox_id", runtimeAssignment.SandboxID),
-		zap.Int64("runtime_generation", runtimeAssignment.RuntimeGeneration),
-	)
 
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
@@ -205,8 +196,21 @@ func main() {
 		runtimeController.CanServe,
 	)
 
+	// Bind and serve before loading historical session journals. Accepting a TCP
+	// connection does not publish command readiness; activation owns that gate.
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.HTTPPort))
+	if err != nil {
+		logger.Fatal("Failed to bind HTTP listener", zap.Error(err))
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(listener) }()
+
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	contextManager.StartCleanup(cleanupCtx, cfg.ContextCleanupInterval.Duration)
+
+	activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer activationCancel()
+	activationDone := make(chan struct{})
 
 	// Handle shutdown signals
 	done := make(chan bool, 1)
@@ -217,6 +221,9 @@ func main() {
 		sig := <-quit
 		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
 
+		// Do not close the session store concurrently with startup recovery.
+		activationCancel()
+		<-activationDone
 		cleanupCancel()
 		reaperCancel()
 
@@ -253,9 +260,20 @@ func main() {
 		done <- true
 	}()
 
-	// Start HTTP server
-	logger.Info("Procd HTTP server started")
-	if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	activationStarted := time.Now()
+	err = runtimeController.Activate(activationCtx, *runtimeAssignment)
+	close(activationDone)
+	activationCancel()
+	if err != nil {
+		logger.Fatal("Failed to activate runtime assignment", zap.Error(err))
+	}
+	logger.Info("Runtime assignment activated",
+		zap.Duration("duration", time.Since(activationStarted)),
+		zap.String("sandbox_id", runtimeAssignment.SandboxID),
+		zap.Int64("runtime_generation", runtimeAssignment.RuntimeGeneration),
+	)
+
+	if err := <-serveResult; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatal("HTTP server error", zap.Error(err))
 	}
 

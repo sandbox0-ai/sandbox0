@@ -9,6 +9,7 @@ The `coding-agent` template installs these pinned third-party packages:
 | `opencode-ai` | `1.18.25` | MIT |
 | `@earendil-works/pi-coding-agent` | `0.84.4` | MIT |
 | `@playwright/cli` | `0.1.19` | Apache-2.0 |
+| `ws` | `8.21.0` | MIT |
 | `ttyd` | `1.7.7` | MIT |
 
 This inventory does not replace the license and notice files distributed in each npm package. Review the current upstream terms before publishing a derived image, especially for packages that do not use an open-source license.

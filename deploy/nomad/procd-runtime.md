@@ -14,9 +14,10 @@ claim with a different executable is a conflicting assignment, never an implicit
 upgrade. Changing the manager policy affects new runtime generations only.
 
 Driver 0.3.0 or newer resolves the exact executable under
-`/var/lib/sandbox0/procd/sha256/<hex>/procd` (configurable using
+`/var/lib/sandbox0-procd/sha256/<hex>/procd` (configurable using
 `procd_artifact_dir`). Every path component must be root-owned, without symlinks
-or group/world write access. The executable is a non-writable regular file,
+or group/world write access. The cache is a sibling of service-owned
+`/var/lib/sandbox0`, so service users cannot replace a cache ancestor. The executable is a non-writable regular file,
 verified against the assigned digest before RootFS attachment and runsc launch.
 The OCI bundle binds only that file read-only at `/procd`, with `nosuid,nodev`.
 Neither the host directory nor host credentials are exposed to the guest. procd

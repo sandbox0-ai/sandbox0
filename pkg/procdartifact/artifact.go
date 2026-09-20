@@ -12,7 +12,7 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const DefaultCacheDir = "/var/lib/sandbox0/procd"
+const DefaultCacheDir = "/var/lib/sandbox0-procd"
 
 // Artifact pins the executable and its wire/persistent-state compatibility contract.
 // An existing runtime, including a memory checkpoint, must retain this exact pair.

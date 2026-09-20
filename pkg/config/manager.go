@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +24,8 @@ const (
 
 // ManagerConfig holds the configuration for the manager.
 type ManagerConfig struct {
+	// RuntimeProcd selects a node-provided executable independently of RootFS imports.
+	RuntimeProcd *procdartifact.Artifact `yaml:"runtime_procd" json:"-"`
 	// HTTP Server
 	HTTPPort int `yaml:"http_port" json:"httpPort"`
 

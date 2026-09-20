@@ -17,6 +17,7 @@ package driver
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,4 +244,21 @@ func TestWriteBundleUsesDiskBackedTmpWithTemplateCapacity(t *testing.T) {
 	if written.Root.Path != "rootfs" || written.Root.Readonly {
 		t.Fatalf("persistent root changed: %#v", written.Root)
 	}
+}
+
+func TestProcdMountOverridesRootFSWithoutExposingHostDirectory(t *testing.T) {
+	source := "/var/lib/sandbox0/procd/sha256/immutable/procd"
+	spec := buildSpec(specOptions{Command: "/procd", ProcdPath: source})
+	count := 0
+	for _, mount := range spec.Mounts {
+		if mount.Destination != "/procd" {
+			continue
+		}
+		count++
+		require.Equal(t, source, mount.Source)
+		require.Equal(t, "bind", mount.Type)
+		require.Equal(t, []string{"bind", "ro", "nosuid", "nodev"}, mount.Options)
+	}
+	require.Equal(t, 1, count)
+	require.Equal(t, []string{"/procd"}, spec.Process.Args)
 }

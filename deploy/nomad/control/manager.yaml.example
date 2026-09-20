@@ -93,6 +93,13 @@ rootfs_object_storage:
   access_key: ${SANDBOX0_S3_ACCESS_KEY}
   secret_key: ${SANDBOX0_S3_SECRET_KEY}
 
+# Enable only after the selected binary is installed on every eligible worker
+# and the runtime class catalog selects driver >= 0.3.0. See ../procd-runtime.md.
+# runtime_procd:
+#   digest: sha256:<real-procd-binary-digest>
+#   protocol: replace-with-procd-protocol
+# For node-provided procd, set the importer path/digest below to the fixed
+# release share/sandbox0/procd-placeholder, not the runtime executable.
 rootfs_importer:
   work_root: /var/lib/sandbox0/rootfs-importer
   procd_path: /usr/local/bin/procd

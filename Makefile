@@ -44,7 +44,11 @@ build: apispec
 		else \
 			mkdir -p "$$dir/bin"; out="$$dir/bin/$$bin"; \
 		fi; \
-		CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -buildvcs=false -v -o "$$out" "$$src" || exit 1; \
+		if [ "$$s" = "ctld" ]; then \
+			CGO_ENABLED=0 GOOS=$(GOOS) sh scripts/build-ctld.sh "$$out" || exit 1; \
+		else \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -buildvcs=false -v -o "$$out" "$$src" || exit 1; \
+		fi; \
 		if [ "$$s" = "procd" ]; then \
 			runner_out="$$(dirname "$$out")/python-runner"; \
 			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -buildvcs=false -v -o "$$runner_out" ./manager/cmd/python-runner || exit 1; \

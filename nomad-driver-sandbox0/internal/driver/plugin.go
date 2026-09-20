@@ -39,7 +39,7 @@ import (
 
 const (
 	PluginName                   = "sandbox0-gvisor"
-	PluginVersion                = "0.2.0"
+	PluginVersion                = "0.3.0"
 	taskHandleVersion            = 2
 	fingerprintPeriod            = 30 * time.Second
 	defaultRunscOperationTimeout = 30 * time.Second
@@ -67,6 +67,7 @@ var (
 			hclspec.NewAttr("runsc_operation_timeout_seconds", "number", false),
 			hclspec.NewLiteral(`30`),
 		),
+		"procd_artifact_dir": hclspec.NewDefault(hclspec.NewAttr("procd_artifact_dir", "string", false), hclspec.NewLiteral(`"/var/lib/sandbox0/procd"`)),
 		"control_dir": hclspec.NewDefault(
 			hclspec.NewAttr("control_dir", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/nomad-slots"`),
@@ -136,6 +137,7 @@ var (
 
 // PluginConfig is the node-wide driver configuration.
 type PluginConfig struct {
+	ProcdArtifactDir              string `codec:"procd_artifact_dir"`
 	RunscPath                     string `codec:"runsc_path"`
 	RunscRoot                     string `codec:"runsc_root"`
 	RunscOperationTimeoutSeconds  int64  `codec:"runsc_operation_timeout_seconds"`
@@ -209,6 +211,7 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
 		RunscPath:                    "/usr/local/bin/runsc",
+		ProcdArtifactDir:             "/var/lib/sandbox0/procd",
 		RunscRoot:                    "/run/sandbox0/runsc",
 		RunscOperationTimeoutSeconds: int64(defaultRunscOperationTimeout / time.Second),
 		ControlDir:                   "/run/sandbox0/nomad-slots",
@@ -446,6 +449,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		rootfsAllowedRoot:             rootfsAllowedRoot,
 		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		procdArtifactDir:              p.config.ProcdArtifactDir,
 		rootfs:                        rootfs,
 		procdPort:                     protocol.NomadProcdPort,
 		logger:                        p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
@@ -523,6 +527,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		rootfsAllowedRoot:             rootfsAllowedRoot,
 		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
+		procdArtifactDir:              p.config.ProcdArtifactDir,
 		rootfs:                        rootfs,
 		procdPort:                     protocol.NomadProcdPort,
 		logger:                        p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),

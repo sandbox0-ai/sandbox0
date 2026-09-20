@@ -61,3 +61,16 @@ func TestRuntimeCompatibilityRejectsAmbiguousClasses(t *testing.T) {
 		})
 	}
 }
+
+func TestMountedProcdRequiresCapableDriverButNotPerBinaryCarriers(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0", "0.3.0-beta", "garbage", "00.3.0"} {
+		if (RuntimeCompatibility{DriverVersion: version}).SupportsMountedProcd() {
+			t.Fatalf("accepted %s", version)
+		}
+	}
+	for _, version := range []string{"0.3.0", "0.4.0", "1.0.0"} {
+		if !(RuntimeCompatibility{DriverVersion: version}).SupportsMountedProcd() {
+			t.Fatalf("rejected %s", version)
+		}
+	}
+}

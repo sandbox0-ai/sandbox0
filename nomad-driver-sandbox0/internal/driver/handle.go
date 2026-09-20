@@ -34,6 +34,7 @@ import (
 	"github.com/hashicorp/nomad/drivers/shared/resolvconf"
 	"github.com/hashicorp/nomad/plugins/drivers"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -99,6 +100,7 @@ type taskHandleOptions struct {
 	mounter                       Mounter
 	rootfsAllowedRoot             string
 	resourceCgroupRoot            string
+	procdArtifactDir              string
 	procdInternalJWTPublicKeyFile string
 	rootfs                        RootFSRuntime
 	procdPort                     int
@@ -122,6 +124,7 @@ type taskHandle struct {
 	mounter                       Mounter
 	rootfsAllowedRoot             string
 	resourceCgroupRoot            string
+	procdArtifactDir              string
 	procdInternalJWTPublicKeyFile string
 	rootfs                        RootFSRuntime
 	procdPort                     int
@@ -295,6 +298,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		rootfsAllowedRoot:             options.rootfsAllowedRoot,
 		resourceCgroupRoot:            options.resourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: options.procdInternalJWTPublicKeyFile,
+		procdArtifactDir:              options.procdArtifactDir,
 		rootfs:                        options.rootfs,
 		procdPort:                     options.procdPort,
 		logger:                        logger,
@@ -414,6 +418,13 @@ func (h *taskHandle) writeClaimBundle(
 	args := h.driverConfig.Args
 	procdPort := h.procdPort
 	h.mu.Unlock()
+	var procdPath string
+	if assignment != nil && assignment.Procd != nil {
+		procdPath, err = procdartifact.Resolve(h.procdArtifactDir, *assignment.Procd)
+		if err != nil {
+			return fmt.Errorf("resolve assigned procd: %w", err)
+		}
+	}
 	var runtimeEnv []string
 	var ephemeralMounts []runtimecontrol.EphemeralMount
 	if assignment != nil {
@@ -433,6 +444,7 @@ func (h *taskHandle) writeClaimBundle(
 		ephemeralMounts = append([]runtimecontrol.EphemeralMount(nil), assignment.EphemeralMounts...)
 	}
 	spec := buildSpec(specOptions{
+		ProcdPath:                     procdPath,
 		Command:                       command,
 		Args:                          args,
 		Env:                           runtimeEnv,

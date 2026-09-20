@@ -1,0 +1,4 @@
+#!/bin/sh
+# This RootFS contains user state only. The node must mount an assigned procd.
+printf '%s\n' 'sandbox0: node-provided procd mount is missing' >&2
+exit 126

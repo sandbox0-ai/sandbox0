@@ -426,3 +426,8 @@ host may validate only its real width and must never be reported as an eight-way
 run. After reboot, a successor boot may perform plugin-independent cleanup only
 for the same authenticated durable node UID and only after proving old runsc,
 mount, network, writer, and lease-cgroup state absent.
+
+## Platform executable upgrades
+
+See [node-provided procd](procd-runtime.md) for digest-pinned runtime mounts,
+legacy RootFS compatibility, phased rollout, and session recovery readiness.

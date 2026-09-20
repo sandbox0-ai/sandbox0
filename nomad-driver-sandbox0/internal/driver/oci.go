@@ -27,6 +27,7 @@ import (
 )
 
 type specOptions struct {
+	ProcdPath                     string
 	Command                       string
 	Args                          []string
 	Env                           []string
@@ -133,6 +134,9 @@ func buildSpec(options specOptions) specs.Spec {
 		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=67108864"}},
 		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+	}
+	if options.ProcdPath != "" {
+		mounts = append(mounts, specs.Mount{Destination: "/procd", Type: "bind", Source: options.ProcdPath, Options: []string{"bind", "ro", "nosuid", "nodev"}})
 	}
 	if options.ResolvConfPath != "" {
 		mounts = append(mounts, specs.Mount{

@@ -1,10 +1,14 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -12,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -166,24 +171,32 @@ func TestRuntimeReadyMiddlewareFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRuntimeReadyMiddlewareAllowsLifecycleRecoveryControls(t *testing.T) {
+func TestRuntimeReadyMiddlewareGatesLifecycleControlsUntilActivation(t *testing.T) {
+	ready := false
 	server := &Server{
 		runtimeGate: func() (bool, string) {
-			return false, "runtime assignment is recovering"
+			return ready, "runtime assignment is recovering"
 		},
 	}
 	for _, path := range []string{
 		"/api/v1/lifecycle/barrier",
 		"/api/v1/sandbox/pause",
 		"/api/v1/sandbox/resume",
+		"/api/v1/webhook/publish",
 	} {
 		t.Run(path, func(t *testing.T) {
+			ready = false
 			nextCalled := false
 			handler := server.runtimeReadyMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				nextCalled = true
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+			require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+			require.False(t, nextCalled)
+			ready = true
+			recorder = httptest.NewRecorder()
 			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
 
 			if recorder.Code != http.StatusNoContent {
@@ -217,4 +230,43 @@ func TestServerDoesNotExposeInitializeCompatibilityEndpoint(t *testing.T) {
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
+}
+
+func TestListenerAcceptsProbesBeforeActivationWithoutPublishingReadiness(t *testing.T) {
+	var active atomic.Bool
+	server := NewServer(&procdconfig.Config{}, nil, nil, nil, nil, nil, zap.NewNop(), nil,
+		func(kind sandboxprobe.Kind) sandboxprobe.Response {
+			if active.Load() {
+				return sandboxprobe.Passed(kind, "Ready", "ready", nil)
+			}
+			return sandboxprobe.Suspended(kind, "Activating", "recovering sessions", nil)
+		}, func() (bool, string) { return active.Load(), "recovering sessions" })
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, server.Shutdown(ctx))
+		require.ErrorIs(t, <-done, http.ErrServerClosed)
+	})
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Get("http://" + listener.Addr().String() + "/readyz")
+	require.NoError(t, err)
+	response.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+	// Use the same gate as authenticated command-ready requests. TCP acceptance
+	// must not invoke the command handler before activation commits.
+	recorder := httptest.NewRecorder()
+	server.runtimeReadyMiddleware(http.HandlerFunc(server.commandReadyProbeHandler)).ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, procdapi.CommandReadyProbePath, nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	active.Store(true)
+	response, err = client.Get("http://" + listener.Addr().String() + "/readyz")
+	require.NoError(t, err)
+	response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	recorder = httptest.NewRecorder()
+	server.runtimeReadyMiddleware(http.HandlerFunc(server.commandReadyProbeHandler)).ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, procdapi.CommandReadyProbePath, nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
 }

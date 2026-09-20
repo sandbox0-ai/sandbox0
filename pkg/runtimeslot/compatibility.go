@@ -3,6 +3,7 @@ package runtimeslot
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/opencontainers/go-digest"
@@ -72,4 +73,21 @@ func (c RuntimeCompatibility) Digest() (string, error) {
 		return "", fmt.Errorf("encode runtime compatibility: %w", err)
 	}
 	return digest.FromBytes(payload).String(), nil
+}
+
+// SupportsMountedProcd rejects old drivers that would ignore assignment.Procd.
+func (c RuntimeCompatibility) SupportsMountedProcd() bool {
+	parts := strings.Split(c.DriverVersion, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	values := make([]uint64, 3)
+	for i, part := range parts {
+		v, err := strconv.ParseUint(part, 10, 32)
+		if err != nil || strconv.FormatUint(v, 10) != part {
+			return false
+		}
+		values[i] = v
+	}
+	return values[0] > 0 || values[1] >= 3
 }

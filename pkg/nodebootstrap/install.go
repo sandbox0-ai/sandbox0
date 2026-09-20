@@ -52,7 +52,7 @@ func (b *Bootstrapper) validateRuntimeRelease(artifact nodeenrollment.RuntimeArt
 		metadata.Target.Architecture != "amd64" || metadata.Runsc.Distribution != "official-stock" {
 		return "", errors.New("installed runtime release differs from the enrolled immutable artifact")
 	}
-	for _, executable := range []string{"nomad", "node-bootstrap", "ctld", "runsc", "sandbox0-gvisor"} {
+	for _, executable := range []string{"nomad", "node-bootstrap", "ctld", "runsc", "sandbox0-gvisor", "procd"} {
 		info, err := os.Stat(filepath.Join(release, "bin", executable))
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
 			return "", fmt.Errorf("runtime release executable %s is invalid", executable)
@@ -122,6 +122,10 @@ func (b *Bootstrapper) prepareNomadHost(ctx context.Context, release string) err
 		if err := copyRegularFile(asset.source, asset.destination, asset.mode); err != nil {
 			return err
 		}
+	}
+	// ctld owns guest executable distribution, including elastic bootstrap.
+	if err := b.runner.Run(ctx, filepath.Join(release, "bin/ctld"), "--install-procd"); err != nil {
+		return fmt.Errorf("stage bundled procd: %w", err)
 	}
 	return installCNIPlugins(release)
 }

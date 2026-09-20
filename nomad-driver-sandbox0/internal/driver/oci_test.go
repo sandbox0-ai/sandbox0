@@ -247,7 +247,7 @@ func TestWriteBundleUsesDiskBackedTmpWithTemplateCapacity(t *testing.T) {
 }
 
 func TestProcdMountOverridesRootFSWithoutExposingHostDirectory(t *testing.T) {
-	source := "/var/lib/sandbox0/procd/sha256/immutable/procd"
+	source := "/var/lib/sandbox0-procd/sha256/immutable/procd"
 	spec := buildSpec(specOptions{Command: "/procd", ProcdPath: source})
 	count := 0
 	for _, mount := range spec.Mounts {

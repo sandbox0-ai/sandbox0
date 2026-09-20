@@ -67,7 +67,7 @@ var (
 			hclspec.NewAttr("runsc_operation_timeout_seconds", "number", false),
 			hclspec.NewLiteral(`30`),
 		),
-		"procd_artifact_dir": hclspec.NewDefault(hclspec.NewAttr("procd_artifact_dir", "string", false), hclspec.NewLiteral(`"/var/lib/sandbox0/procd"`)),
+		"procd_artifact_dir": hclspec.NewDefault(hclspec.NewAttr("procd_artifact_dir", "string", false), hclspec.NewLiteral(`"/var/lib/sandbox0-procd"`)),
 		"control_dir": hclspec.NewDefault(
 			hclspec.NewAttr("control_dir", "string", false),
 			hclspec.NewLiteral(`"/run/sandbox0/nomad-slots"`),
@@ -211,7 +211,7 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
 		RunscPath:                    "/usr/local/bin/runsc",
-		ProcdArtifactDir:             "/var/lib/sandbox0/procd",
+		ProcdArtifactDir:             "/var/lib/sandbox0-procd",
 		RunscRoot:                    "/run/sandbox0/runsc",
 		RunscOperationTimeoutSeconds: int64(defaultRunscOperationTimeout / time.Second),
 		ControlDir:                   "/run/sandbox0/nomad-slots",

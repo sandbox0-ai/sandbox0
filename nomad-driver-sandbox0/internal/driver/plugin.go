@@ -40,7 +40,7 @@ import (
 
 const (
 	PluginName                   = "sandbox0-gvisor"
-	PluginVersion                = "0.3.0"
+	PluginVersion                = "0.4.0"
 	taskHandleVersion            = 2
 	fingerprintPeriod            = 30 * time.Second
 	defaultRunscOperationTimeout = 30 * time.Second

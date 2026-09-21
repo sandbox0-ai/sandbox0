@@ -74,8 +74,8 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 	for _, p := range executable.Progs {
 		require.NotEqual(t, elf.PT_INTERP, p.Type, "compile with CGO_ENABLED=0")
 	}
-	for _, directFS := range []bool{true, false} {
-		t.Run(fmt.Sprintf("directfs_%t", directFS), func(t *testing.T) {
+	for _, mode := range []struct{ directFS, diskTmp bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
+		t.Run(fmt.Sprintf("directfs_%t_disk_tmp_%t", mode.directFS, mode.diskTmp), func(t *testing.T) {
 			root := t.TempDir()
 			evidence := filepath.Join(root, "evidence")
 			require.NoError(t, os.Mkdir(evidence, 0700))
@@ -114,11 +114,14 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 						{Type: oci.PIDNamespace}, {Type: oci.MountNamespace}, {Type: oci.NetworkNamespace}, {Type: oci.IPCNamespace}, {Type: oci.UTSNamespace},
 					}},
 				}
+				if mode.diskTmp {
+					require.NoError(t, gvisorcli.PrepareEphemeralTmp(bundle, &spec))
+				}
 				payload, err := json.Marshal(spec)
 				require.NoError(t, err)
 				require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), payload, 0600))
 				runtimeRoot := filepath.Join(root, name+"-runsc")
-				runner := gvisorcli.New(gvisorcli.Config{Path: runsc, Root: runtimeRoot, Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: directFS}).(gvisorcli.CheckpointRunsc)
+				runner := gvisorcli.New(gvisorcli.Config{Path: runsc, Root: runtimeRoot, Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: mode.directFS}).(gvisorcli.CheckpointRunsc)
 				t.Cleanup(func() {
 					cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)
 					defer done()

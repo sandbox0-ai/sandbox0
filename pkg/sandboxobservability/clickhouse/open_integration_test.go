@@ -170,4 +170,37 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	if value, ok := got.Attributes["test"].(string); !ok || value != "audit-row-round-trip" {
 		t.Fatalf("ListEvents() attributes = %#v, want test marker", got.Attributes)
 	}
+	if err := sandboxobservability.VerifyEventIntegrity(got, key.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("verify round-trip signature: %v", err)
+	}
+
+	// Exercise a multi-row VALUES insert, including timestamps straddling the
+	// Unix epoch. The stored nanoseconds are part of the signed audit payload.
+	batch := make([]sandboxobservability.Event, 128)
+	for i := range batch {
+		batch[i] = event
+		batch[i].EventID = fmt.Sprintf("33333333-3333-4333-8333-%012d", i)
+		batch[i].TeamID = "team-batch"
+		batch[i].OccurredAt = time.Unix(0, int64(i)-64).In(time.FixedZone("offset", 8*3600))
+		batch[i].IngestedAt = ingestedAt.Add(time.Duration(i) * time.Nanosecond)
+		if err := sandboxobservability.SignEvent(&batch[i], key); err != nil {
+			t.Fatalf("sign batch row %d: %v", i, err)
+		}
+	}
+	if err := repo.InsertEvents(ctx, batch); err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+	listed, err := repo.ListEvents(ctx, sandboxobservability.EventQuery{TeamID: "team-batch", SandboxID: event.SandboxID, Limit: 200})
+	if err != nil {
+		t.Fatalf("read batch: %v", err)
+	}
+	if len(listed.Events) != len(batch) {
+		t.Fatalf("batch rows = %d, want %d", len(listed.Events), len(batch))
+	}
+	for _, stored := range listed.Events {
+		if err := sandboxobservability.VerifyEventIntegrity(stored, key.Public().(ed25519.PublicKey)); err != nil {
+			t.Fatalf("verify batch event %s: %v", stored.EventID, err)
+		}
+	}
+
 }

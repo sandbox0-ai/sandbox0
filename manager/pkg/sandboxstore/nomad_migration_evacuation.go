@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -31,7 +32,8 @@ const nomadMigrationOccupiedNodesSQL = `SELECT DISTINCT source.cluster_id, parti
 const nomadMigrationEvacuationSourceSQL = ` FROM manager.sandboxes s JOIN manager.runtime_slots r
  ON r.sandbox_id=s.sandbox_id AND r.cluster_id=s.cluster_id AND r.allocation_id=s.runtime_id AND r.allocation_namespace=s.runtime_namespace
  JOIN manager.runtime_node_fences f ON f.cluster_id=r.cluster_id AND f.node_id=r.node_id AND f.node_uid=r.node_uid AND f.state='draining'
- WHERE s.desired_state='active' AND s.deleted_at IS NULL AND s.runtime_generation>0 AND s.runtime_generation<9223372036854775807
+ WHERE f.reason NOT LIKE 'audited-runtime-rollout:%'
+ AND s.desired_state='active' AND s.deleted_at IS NULL AND s.runtime_generation>0 AND s.runtime_generation<9223372036854775807
  AND (s.hard_expires_at IS NULL OR s.hard_expires_at>clock_timestamp())
  AND r.state='active' AND NOT r.carrier_retired AND r.heartbeat_expires_at>clock_timestamp()
  AND r.claim_runtime_assignment IS NOT NULL AND r.claim_network_policy IS NOT NULL
@@ -106,9 +108,11 @@ func lockNomadMigrationEvacuation(ctx context.Context, tx pgx.Tx, source *Runtim
 	if !acquired {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
-	var state string
-	err := tx.QueryRow(ctx, `SELECT state FROM manager.runtime_node_fences WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 FOR SHARE`, source.ClusterID, source.NodeID, source.NodeUID).Scan(&state)
-	if err == pgx.ErrNoRows || err == nil && state != "draining" {
+	var state, reason string
+	err := tx.QueryRow(ctx, `SELECT state,reason FROM manager.runtime_node_fences WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 FOR SHARE`, source.ClusterID, source.NodeID, source.NodeUID).Scan(&state, &reason)
+	// Audited runtime upgrades own an explicit filesystem pause inventory.
+	// Starting a competing migration would change its retained generation.
+	if err == pgx.ErrNoRows || err == nil && (state != "draining" || strings.HasPrefix(reason, "audited-runtime-rollout:")) {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
 	if err != nil {

@@ -243,3 +243,22 @@ func TestNomadMigrationEvacuationLostCommitReplyIntegration(t *testing.T) {
 	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM manager.sandbox_runtime_migrations`).Scan(&count))
 	require.Equal(t, 1, count)
 }
+
+func TestNomadMigrationEvacuationDoesNotCompeteWithAuditedPauseRolloutIntegration(t *testing.T) {
+	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "rollout", "")
+	migrationReadyTarget(t, f, "rollout", "b")
+	fenceMigrationSource(t, f, "draining")
+	_, err := f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_fences SET reason='audited-runtime-rollout:immutable-source:operation'`)
+	require.NoError(t, err)
+	work, err := nomadmigration.NewEvacuation(f.store)
+	require.NoError(t, err)
+	result, err := work.RunOnce(f.ctx)
+	require.NoError(t, err)
+	require.Zero(t, result.Candidates)
+	reserved, err := f.store.ReserveNomadMigrationEvacuation(f.ctx, f.sandboxID)
+	require.NoError(t, err)
+	require.False(t, reserved)
+	active, err := f.store.GetActiveLifecycleTxn(f.ctx, f.sandboxID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+}

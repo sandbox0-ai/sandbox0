@@ -2134,3 +2134,12 @@ Upstream references: [gVisor checkpoint/restore](https://gvisor.dev/docs/user_gu
 and [pinned stock restore command](https://github.com/google/gvisor/blob/release-20260817.0/runsc/cmd/restore.go).
 Validate these behaviors against the exact deployed runsc release, not only
 upstream HEAD.
+
+### Explicit runtime-upgrade maintenance
+
+The existing audited runtime rollout retains an exact sandbox generation and
+owns filesystem pause/resume. Automatic evacuation excludes its
+`audited-runtime-rollout:` drain fences in both discovery and the locked
+reservation check. It must not race that maintenance owner by changing the
+retained runtime generation. Ordinary node drain fences continue to trigger
+system-owned execution-state evacuation when both placements are eligible.

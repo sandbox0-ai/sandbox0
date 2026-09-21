@@ -192,7 +192,12 @@ window where an expired provider token could strand a durable cleanup action.
 
 Resize intent is persisted in PostgreSQL, bound to node UID/boot and serialized
 with claim capacity locks. Only allocations outside the retained set are fenced
-during a resize; existing retained carriers continue serving. Nomad updates use
+during a resize; existing retained carriers continue serving. After a successful
+Nomad plan application and stopped-removal proof, newly registered carriers in
+allowed groups can join the exact allocation allowlist individually. A slow
+sibling does not hide already verified ready capacity. The resize remains
+pending until all groups converge; partial admission does not renew its
+provisioning-credit deadline or bypass resource leases and node drain fences. Nomad updates use
 `EnforceIndex` compare-and-swap and monotonic shard revisions. Removed carriers
 must stop before their old ready rows are permanently retired; the normal
 terminal reconciler still owns physical cleanup and resource-release proofs.

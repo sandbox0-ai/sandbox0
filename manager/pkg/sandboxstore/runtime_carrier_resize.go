@@ -18,6 +18,7 @@ type RuntimeCarrierNode struct {
 	Revision                               int64
 	Pending                                bool
 	Groups                                 []string
+	RetainedAllocations                    []string
 	MaxCarriers                            int
 	CompletedAt                            *time.Time
 	Retiring                               bool
@@ -74,7 +75,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
             (SELECT COUNT(*) FROM manager.runtime_slots WHERE cluster_id=c.cluster_id
                 AND node_id=c.node_id AND node_uid=c.node_uid AND node_boot_id=c.node_boot_id
                 AND state='fastpath_ready' AND heartbeat_expires_at>NOW())::integer,
-            COALESCE(r.revision,0),COALESCE(r.pending,false),r.allowed_groups,
+            COALESCE(r.revision,0),COALESCE(r.pending,false),r.allowed_groups,r.retained_allocations,
             COALESCE(r.max_carriers,0),r.completed_at,
             EXISTS(SELECT 1 FROM manager.runtime_node_fences f WHERE f.cluster_id=c.cluster_id
                 AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked'),
@@ -100,7 +101,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
 	for rows.Next() {
 		var n RuntimeCarrierNode
 		if err := rows.Scan(&n.ClusterID, &n.NodeID, &n.NodeUID, &n.NodeBootID, &n.PhysicalCPU, &n.PhysicalMemory, &n.FreeCPU, &n.FreeMemory,
-			&n.Ready, &n.Revision, &n.Pending, &n.Groups, &n.MaxCarriers, &n.CompletedAt, &n.Retiring, &n.CompatibilityCapacity, &n.SurplusSince, &n.StaleIdentity, &n.ReadyByCompatibility); err != nil {
+			&n.Ready, &n.Revision, &n.Pending, &n.Groups, &n.RetainedAllocations, &n.MaxCarriers, &n.CompletedAt, &n.Retiring, &n.CompatibilityCapacity, &n.SurplusSince, &n.StaleIdentity, &n.ReadyByCompatibility); err != nil {
 			return nil, err
 		}
 		result = append(result, n)
@@ -237,6 +238,46 @@ func (s *PGSandboxStore) RuntimeCarrierReadyAllocations(ctx context.Context, n R
 		return nil, ErrRuntimeSlotInvalid
 	}
 	return result, rows.Err()
+}
+
+// AdmitRuntimeCarrierReadyAllocations publishes individually proven carriers
+// without completing a resize. The caller proves Nomad placement and stopped
+// removals; this CAS rechecks exact live ctld identity and preserves every other
+// fence. Claim still acquires its normal physical resource and writer leases.
+func (s *PGSandboxStore) AdmitRuntimeCarrierReadyAllocations(ctx context.Context, n RuntimeCarrierNode, allocations []string) error {
+	if len(allocations) == 0 {
+		return nil
+	}
+	if len(allocations) > 576 || n.ClusterID == "" || n.NodeID == "" || n.NodeUID == "" || n.NodeBootID == "" || n.Revision <= 0 || n.Retiring || n.StaleIdentity {
+		return ErrRuntimeSlotInvalid
+	}
+	seen := map[string]bool{}
+	for _, id := range allocations {
+		if id == "" || len(id) > 256 || seen[id] {
+			return ErrRuntimeSlotInvalid
+		}
+		seen[id] = true
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE manager.runtime_carrier_resizes r
+        SET retained_allocations=ARRAY(SELECT DISTINCT id FROM unnest(r.retained_allocations || $6::text[]) id ORDER BY id)
+        WHERE r.cluster_id=$1 AND r.node_id=$2 AND r.node_uid=$3 AND r.node_boot_id=$4 AND r.revision=$5 AND r.pending
+        AND (SELECT COUNT(DISTINCT id) FROM unnest(r.retained_allocations || $6::text[]) id)<=8192
+        AND EXISTS(SELECT 1 FROM manager.runtime_node_capacities c WHERE c.cluster_id=$1 AND c.node_id=$2
+            AND c.node_uid=$3 AND c.node_boot_id=$4 AND c.heartbeat_expires_at>NOW())
+        AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_fences f WHERE f.cluster_id=$1 AND f.node_id=$2
+            AND f.node_uid=$3 AND f.state IN ('warming','draining','revoked'))
+        AND (SELECT COUNT(*) FROM manager.runtime_slots s WHERE s.cluster_id=$1 AND s.node_id=$2
+            AND s.node_uid=$3 AND s.node_boot_id=$4 AND s.allocation_id=ANY($6::text[])
+            AND NOT s.carrier_retired AND s.heartbeat_expires_at>NOW()
+            AND s.state IN ('fastpath_ready','claiming','starting','active'))=cardinality($6::text[])`,
+		n.ClusterID, n.NodeID, n.NodeUID, n.NodeBootID, n.Revision, allocations)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrRuntimeSlotConflict
+	}
+	return nil
 }
 
 func (s *PGSandboxStore) CompleteRuntimeCarrierResize(ctx context.Context, n RuntimeCarrierNode, removed []string) error {

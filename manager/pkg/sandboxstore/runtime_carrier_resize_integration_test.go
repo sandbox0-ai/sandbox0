@@ -270,3 +270,71 @@ func TestCarrierDemandAggregatesOnlyLiveUnfulfilledOperationsIntegration(t *test
 	require.Positive(t, nodes[0].PhysicalCPU)
 	require.Positive(t, nodes[0].PhysicalMemory)
 }
+
+func TestCarrierPartialAdmissionKeepsResizePendingIntegration(t *testing.T) {
+	s, request, n := carrierResizeFixture(t)
+	revision, err := s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{})
+	require.NoError(t, err)
+	n.Revision = revision
+	_, err = s.AcquireRuntimeSlot(t.Context(), request)
+	require.Error(t, err, "unpublished ready carriers remain fenced")
+	var started time.Time
+	require.NoError(t, s.pool.QueryRow(t.Context(), `SELECT updated_at FROM manager.runtime_carrier_resizes`).Scan(&started))
+	for i := 0; i < 2; i++ {
+		require.NoError(t, s.AdmitRuntimeCarrierReadyAllocations(t.Context(), n, []string{"carrier-allocation-a"}))
+	}
+	nodes, err := s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.True(t, nodes[0].Pending)
+	require.Equal(t, []string{"carrier-allocation-a"}, nodes[0].RetainedAllocations)
+	var after time.Time
+	require.NoError(t, s.pool.QueryRow(t.Context(), `SELECT updated_at FROM manager.runtime_carrier_resizes`).Scan(&after))
+	require.Equal(t, started, after, "partial progress must not renew speculative provisioning credit")
+	slot, err := s.AcquireRuntimeSlot(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "carrier-allocation-a", slot.AllocationID)
+	require.NoError(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil))
+	require.ErrorIs(t, s.AdmitRuntimeCarrierReadyAllocations(t.Context(), n, []string{"carrier-allocation-b"}), ErrRuntimeSlotConflict)
+}
+
+func TestCarrierPartialAdmissionRejectsStaleProofIntegration(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql string
+		change    func(*RuntimeCarrierNode)
+	}{
+		{name: "revision", change: func(n *RuntimeCarrierNode) { n.Revision++ }},
+		{name: "boot", change: func(n *RuntimeCarrierNode) { n.NodeBootID = "stale-boot" }},
+		{name: "expired_slot", sql: `UPDATE manager.runtime_slots SET heartbeat_expires_at=NOW()-INTERVAL '1 minute' WHERE allocation_id='carrier-allocation-b'`},
+		{name: "retired_slot", sql: `UPDATE manager.runtime_slots SET carrier_retired=true WHERE allocation_id='carrier-allocation-b'`},
+		{name: "expired_node", sql: `UPDATE manager.runtime_node_capacities SET heartbeat_expires_at=NOW()-INTERVAL '1 minute'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, n := carrierResizeFixture(t)
+			revision, err := s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{})
+			require.NoError(t, err)
+			n.Revision = revision
+			if tc.sql != "" {
+				_, err = s.pool.Exec(t.Context(), tc.sql)
+				require.NoError(t, err)
+			}
+			if tc.change != nil {
+				tc.change(&n)
+			}
+			require.ErrorIs(t, s.AdmitRuntimeCarrierReadyAllocations(t.Context(), n, []string{"carrier-allocation-a", "carrier-allocation-b"}), ErrRuntimeSlotConflict)
+			var count int
+			require.NoError(t, s.pool.QueryRow(t.Context(), `SELECT cardinality(retained_allocations) FROM manager.runtime_carrier_resizes`).Scan(&count))
+			require.Zero(t, count, "an invalid member must reject the entire publication")
+		})
+	}
+}
+
+func TestCarrierPartialAdmissionPreservesNodeDrainFenceIntegration(t *testing.T) {
+	s, _, n := carrierResizeFixture(t)
+	revision, err := s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{})
+	require.NoError(t, err)
+	n.Revision = revision
+	_, err = s.pool.Exec(t.Context(), `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason) VALUES($1,$2,$3,'draining','test drain')`, n.ClusterID, n.NodeID, n.NodeUID)
+	require.NoError(t, err)
+	require.ErrorIs(t, s.AdmitRuntimeCarrierReadyAllocations(t.Context(), n, []string{"carrier-allocation-a"}), ErrRuntimeSlotConflict)
+}

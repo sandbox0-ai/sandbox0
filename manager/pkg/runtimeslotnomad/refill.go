@@ -12,8 +12,8 @@ import (
 
 // RefillFailedCarriers requests fresh one-shot allocations after startup fails
 // before regional registration. Nomad system jobs do not reschedule themselves.
-// This only stops already-failed carriers; it never invokes client GC, releases
-// a resource/writer lease, or treats the catalog as proof of physical absence.
+// This only evaluates jobs with already-failed carriers. It never invokes client
+// GC, releases a resource/writer lease, or treats the catalog as physical proof.
 func (a *HTTPAPI) RefillFailedCarriers(ctx context.Context, clusterID, after string) (int, string, error) {
 	if err := validateID("cluster_id", clusterID); err != nil {
 		return 0, after, err
@@ -40,7 +40,7 @@ func (a *HTTPAPI) RefillFailedCarriers(ctx context.Context, clusterID, after str
 	}
 	requested := 0
 	for _, candidate := range rows {
-		// Re-read exact identity and terminal state immediately before stop.
+		// Re-read exact identity and terminal state immediately before evaluation.
 		// Another replica or terminal reconciliation may already have acted.
 		current, err := nomadinventory.Get(ctx, client, baseURL, candidate.ID, candidate.NodeID, candidate.Namespace, headers)
 		if err != nil {
@@ -56,10 +56,10 @@ func (a *HTTPAPI) RefillFailedCarriers(ctx context.Context, clusterID, after str
 			ClusterID: clusterID, AllocationID: current.ID,
 			NodeID: current.NodeID, AllocationNamespace: current.Namespace,
 		}
-		// Every replica/retry uses the same scheduling operation. Retrying an
-		// uncertain acknowledgement cannot turn into another resource action.
+		// Retries reconcile the same desired carrier counts. Evaluation does
+		// not advance the finished allocation version or force live restarts.
 		digest := sha256.Sum256([]byte(clusterID + "\x00" + current.NodeID + "\x00" + current.Namespace + "\x00" + current.ID))
-		if err := a.StopAllocation(ctx, target, fmt.Sprintf("carrier-refill-%x", digest)); err != nil {
+		if err := a.EvaluateTerminalAllocation(ctx, target, fmt.Sprintf("carrier-refill-%x", digest)); err != nil {
 			return requested, after, err
 		}
 		requested++

@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,6 +54,11 @@ type nomadTestServerState struct {
 	gcNotEligible   bool
 	gcMissing       bool
 	stopCalls       int
+	evaluateCalls   int
+	clientStatus    string
+	jobID           string
+	evaluateStatus  int
+	emptyEvaluation bool
 	gcCalls         int
 	lastIdempotency string
 }
@@ -70,6 +77,7 @@ func TestHTTPAPICallsServerAndExactClientOverMTLS(t *testing.T) {
 	require.NoError(t, err)
 	expected := testAllocation()
 	expected.ID = testHTTPAllocationID
+	expected.JobID = nomadinventory.DefaultWarmJobID
 	require.Equal(t, expected, allocation)
 	present, err := api.ClientAllocationPresent(t.Context(), target)
 	require.NoError(t, err)
@@ -254,10 +262,33 @@ func newNomadMTLSTestServer(
 				_, _ = writer.Write([]byte("[]"))
 				return
 			}
+			clientStatus := state.clientStatus
+			if clientStatus == "" {
+				clientStatus = "running"
+			}
+			jobID := state.jobID
+			if jobID == "" {
+				jobID = nomadinventory.DefaultWarmJobID
+			}
 			_ = json.NewEncoder(writer).Encode([]Allocation{{
-				ID: testHTTPAllocationID, Namespace: "default", NodeID: "node-1",
-				DesiredStatus: state.desiredStatus, ClientStatus: "running",
+				JobID: jobID,
+				ID:    testHTTPAllocationID, Namespace: "default", NodeID: "node-1",
+				DesiredStatus: state.desiredStatus, ClientStatus: clientStatus,
 			}})
+		case "/v1/job/" + nomadinventory.DefaultWarmJobID + "/evaluate", "/v1/job/" + nomadinventory.DefaultWarmJobID + "-shard-01/evaluate":
+			require.Equal(t, http.MethodPost, request.Method)
+			require.Equal(t, "default", request.URL.Query().Get("namespace"))
+			require.Zero(t, request.ContentLength, "evaluation must not force-reschedule live allocations")
+			state.evaluateCalls++
+			if state.evaluateStatus != 0 {
+				writer.WriteHeader(state.evaluateStatus)
+				return
+			}
+			if state.emptyEvaluation {
+				_, _ = writer.Write([]byte(`{}`))
+				return
+			}
+			_, _ = writer.Write([]byte(`{"EvalID":"evaluation-receipt"}`))
 		case "/v1/allocation/" + testHTTPAllocationID + "/stop":
 			if rejectUnexpectedNomadRequest(t, writer, request.Method, http.MethodPost, "method") ||
 				rejectUnexpectedNomadRequest(t, writer, request.URL.Query().Get("namespace"), "default", "namespace") ||
@@ -416,4 +447,53 @@ func httpTestTarget() runtimeslotreconciler.AllocationTarget {
 	target := testTarget()
 	target.AllocationID = testHTTPAllocationID
 	return target
+}
+
+func TestHTTPAPIEvaluatesOnlyTerminalOwnedCarrierJobs(t *testing.T) {
+	for _, tc := range []struct {
+		name, client, desired, job string
+		missing                    bool
+		wantError                  bool
+		wantCalls                  int
+	}{
+		{name: "live", client: "running", desired: "run", wantError: true},
+		{name: "sharded", client: "failed", desired: "run", job: "sandbox0-warm-slots-shard-01", wantCalls: 1},
+		{name: "completed", client: "complete", desired: "run", wantCalls: 1},
+		{name: "failed", client: "failed", desired: "run", wantCalls: 1},
+		{name: "stopped", client: "running", desired: "stop", wantCalls: 1},
+		{name: "missing", missing: true},
+		{name: "unowned", client: "complete", desired: "run", job: "other-job", wantError: true},
+		{name: "invalid family suffix", client: "failed", desired: "run", job: "sandbox0-warm-slots-other", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &nomadTestServerState{token: "test", serverPresent: !tc.missing, clientStatus: tc.client, desiredStatus: tc.desired, jobID: tc.job}
+			server, resolver, _ := newNomadMTLSTestServer(t, state)
+			defer server.Close()
+			api, err := NewHTTPAPI(resolver)
+			require.NoError(t, err)
+			err = api.EvaluateTerminalAllocation(t.Context(), httpTestTarget(), "replacement")
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.wantCalls, state.evaluateCalls)
+			require.Zero(t, state.stopCalls)
+			require.Zero(t, state.gcCalls)
+		})
+	}
+}
+
+func TestHTTPAPIEvaluationRequiresAcknowledgement(t *testing.T) {
+	for _, code := range []int{0, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			state := &nomadTestServerState{token: "test", serverPresent: true, clientStatus: "failed", desiredStatus: "run", evaluateStatus: code, emptyEvaluation: true}
+			server, resolver, _ := newNomadMTLSTestServer(t, state)
+			defer server.Close()
+			api, err := NewHTTPAPI(resolver)
+			require.NoError(t, err)
+			require.Error(t, api.EvaluateTerminalAllocation(t.Context(), httpTestTarget(), "replacement"))
+			require.Equal(t, 1, state.evaluateCalls)
+		})
+	}
 }

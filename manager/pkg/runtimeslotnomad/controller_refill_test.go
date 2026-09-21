@@ -20,7 +20,7 @@ func TestControllerPurgeRequiresEvaluationAfterObservedTerminalState(t *testing.
 
 	api.allocation.DesiredStatus = "stop"
 	require.NoError(t, controller.Purge(t.Context(), request))
-	require.Equal(t, []string{request.OperationID, request.OperationID}, api.stopCalls,
+	require.Equal(t, []string{request.OperationID}, api.evaluateCalls,
 		"enqueue another exact-allocation evaluation after terminal state is observed")
 	require.Equal(t, 1, api.gcCalls)
 }
@@ -34,7 +34,8 @@ func TestControllerPurgeStillSchedulesAfterClientArtifactsDisappear(t *testing.T
 			require.NoError(t, err)
 			request := runtimeslotreconciler.AllocationPurgeRequest{OperationID: "purge-operation", Target: testTarget()}
 			require.NoError(t, controller.Purge(t.Context(), request))
-			require.Len(t, api.stopCalls, 1)
+			require.Empty(t, api.stopCalls)
+			require.Len(t, api.evaluateCalls, 1)
 			require.Zero(t, api.gcCalls)
 		})
 	}
@@ -43,13 +44,35 @@ func TestControllerPurgeStillSchedulesAfterClientArtifactsDisappear(t *testing.T
 func TestControllerPurgeDoesNotLosePostTerminalEvaluationOnResponseLoss(t *testing.T) {
 	api := &fakeAPI{allocation: testAllocation(), client: false}
 	api.allocation.DesiredStatus = "stop"
-	api.stopErr = runtimeslotreconciler.ErrAllocationStillPresent
+	api.evaluateErr = runtimeslotreconciler.ErrAllocationStillPresent
 	controller, err := New(api)
 	require.NoError(t, err)
 	request := runtimeslotreconciler.AllocationPurgeRequest{OperationID: "purge-operation", Target: testTarget()}
-	require.ErrorIs(t, controller.Purge(t.Context(), request), api.stopErr)
-	require.Len(t, api.stopCalls, 1)
-	api.stopErr = nil
+	require.ErrorIs(t, controller.Purge(t.Context(), request), api.evaluateErr)
+	require.Len(t, api.evaluateCalls, 1)
+	api.evaluateErr = nil
 	require.NoError(t, controller.Purge(t.Context(), request))
-	require.Len(t, api.stopCalls, 2)
+	require.Len(t, api.evaluateCalls, 2)
+}
+
+func TestControllerStopDoesNotMutateCompletedAllocation(t *testing.T) {
+	api := &fakeAPI{allocation: testAllocation(), client: true}
+	api.allocation.ClientStatus = "complete"
+	controller, err := New(api)
+	require.NoError(t, err)
+	require.NoError(t, controller.Stop(t.Context(), runtimeslotreconciler.AllocationPurgeRequest{OperationID: "stop", Target: testTarget()}))
+	require.Empty(t, api.stopCalls)
+	require.Empty(t, api.evaluateCalls)
+	require.Zero(t, api.gcCalls, "terminal catalog state does not authorize physical cleanup")
+}
+
+func TestControllerPurgeDefersClientGCWithoutEvaluationAcknowledgement(t *testing.T) {
+	api := &fakeAPI{allocation: testAllocation(), client: true, evaluateErr: runtimeslotreconciler.ErrAllocationStillPresent}
+	api.allocation.ClientStatus = "complete"
+	controller, err := New(api)
+	require.NoError(t, err)
+	require.ErrorIs(t, controller.Purge(t.Context(), runtimeslotreconciler.AllocationPurgeRequest{OperationID: "purge", Target: testTarget()}), api.evaluateErr)
+	require.Empty(t, api.stopCalls)
+	require.Len(t, api.evaluateCalls, 1)
+	require.Zero(t, api.gcCalls)
 }

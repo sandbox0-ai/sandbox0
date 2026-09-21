@@ -433,7 +433,7 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 		return runtimeSlotJournalRecord{}, fmt.Errorf("migration failure requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
 	}
 	if record.MigrationStaging != nil {
-		if (record.Version != runtimeSlotStagingJournalVersion && !(record.Version == wantFailureVersion && hasFailure) && !hasCaptureFailure) || record.validateMigrationStaging() != nil {
+		if (record.Version != runtimeSlotStagingJournalVersion && (record.Version != wantFailureVersion || !hasFailure) && !hasCaptureFailure) || record.validateMigrationStaging() != nil {
 			return runtimeSlotJournalRecord{}, fmt.Errorf("invalid migration staging custody: %w", errdefs.ErrFailedPrecondition)
 		}
 		// Version 8 wraps the same source/restore/adoption state machines. Run

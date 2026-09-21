@@ -106,7 +106,8 @@ func TestMigrationSourceRegionalReadCannotOverrideLocalCustody(t *testing.T) {
 			receipt, err := d.GetMigrationSourceFinalization(t.Context(), gc.Target.SlotID)
 			require.NoError(t, err)
 			store := installRegionalFinalizationReader(t, d, receipt)
-			if local == "invalidated" {
+			switch local {
+			case "invalidated":
 				require.NoError(t, d.journal.invalidateMigrationExecution(gc.Target.SlotID))
 			}
 			if local == "corrupt" {
@@ -128,11 +129,12 @@ func TestMigrationSourceRegionalReadCannotOverrideLocalCustody(t *testing.T) {
 				require.Nil(t, actual)
 			} else {
 				_, err = d.GetMigrationSourceFinalization(t.Context(), gc.Target.SlotID)
-				if local == "invalidated" {
+				switch local {
+				case "invalidated":
 					require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
-				} else if local == "corrupt" {
+				case "corrupt":
 					require.Error(t, err)
-				} else {
+				default:
 					require.NoError(t, err)
 				}
 			}

@@ -109,8 +109,8 @@ func validateCheckpointArguments(ctx context.Context, containerID, imagePath str
 		return fmt.Errorf("checkpoint container identity is invalid")
 	}
 	for _, c := range containerID {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
-			c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '_' && c != '-' && c != '.' {
 			return fmt.Errorf("checkpoint container identity is invalid")
 		}
 	}

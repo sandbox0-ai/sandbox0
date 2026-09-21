@@ -103,7 +103,7 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 		return false, ErrAllocationStillPresent
 	}
 	if slot.State != sandboxstore.RuntimeSlotStateOrphaned {
-		slot, err = r.store.MarkRuntimeSlotAllocationMissing(ctx, &sandboxstore.MarkRuntimeSlotAllocationMissingRequest{SlotID: slot.ID, AllocationID: slot.AllocationID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID, ObservationDigest: observation.ProofDigest})
+		_, err = r.store.MarkRuntimeSlotAllocationMissing(ctx, &sandboxstore.MarkRuntimeSlotAllocationMissingRequest{SlotID: slot.ID, AllocationID: slot.AllocationID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID, ObservationDigest: observation.ProofDigest})
 		if err != nil {
 			return false, fmt.Errorf("persist migration allocation absence: %w", err)
 		}

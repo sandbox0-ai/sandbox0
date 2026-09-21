@@ -59,7 +59,8 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 	if custody == nil || custody.Adoption != nil || custody.Failure != nil || custody.RequestDigest != imageDigest || custody.Prepared == nil || *custody.Prepared != observation.Request.Prepared {
 		return errdefs.ErrFailedPrecondition
 	}
-	if observation.State == protocol.MigrationRestoreIntent {
+	switch observation.State {
+	case protocol.MigrationRestoreIntent:
 		if custody.Restore != nil && custody.Restore.State != protocol.MigrationRestoreIntent {
 			return errdefs.ErrFailedPrecondition
 		}
@@ -70,7 +71,7 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 		if _, err := runtime.PrepareMigrationImageFiles(ctx, custody.Request.Receipt.Binding, custody.Request.Receipt.Reference, custody.ImageDirectory, true, nil); err != nil {
 			return err
 		}
-	} else if observation.State == protocol.MigrationRestoreExecuting || observation.State == protocol.MigrationRestoreComplete {
+	case protocol.MigrationRestoreExecuting, protocol.MigrationRestoreComplete:
 		matched := false
 		sessions, err := d.runtime.RecoverySessions()
 		if err != nil {

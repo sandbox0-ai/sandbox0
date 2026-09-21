@@ -69,7 +69,7 @@ type MigrationStagingReleased struct {
 }
 
 func (r MigrationStagingReleased) ValidateFor(request MigrationStagingRequest) error {
-	return (MigrationStagingReserved{RequestDigest: r.RequestDigest}).ValidateFor(request)
+	return MigrationStagingReserved(r).ValidateFor(request)
 }
 
 func NewNodeChannelMigrationStagingReserveCommand(request MigrationStagingRequest) (NodeChannelCommand, error) {

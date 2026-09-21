@@ -97,9 +97,10 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 				bundle := filepath.Join(root, name+"-bundle")
 				require.NoError(t, os.Mkdir(bundle, 0700))
 				generation := "1"
-				if name == "target" {
+				switch name {
+				case "target":
 					generation = "2"
-				} else if name == "return" {
+				case "return":
 					generation = "3"
 				}
 				spec := oci.Spec{Version: oci.Version, Root: &oci.Root{Path: rootfs, Readonly: true},

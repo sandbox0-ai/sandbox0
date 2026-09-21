@@ -29,9 +29,27 @@ import (
 )
 
 const (
-	RuntimeSlotJournalVersion   = 1
-	runtimeSlotProofRetention   = 24 * time.Hour
-	runtimeSlotJournalMaxIDSize = 512
+	RuntimeSlotJournalVersion = 1
+	// Migration custody requires readers that understand retained execution
+	// images. An older A/B daemon must reject the envelope, not ignore fields.
+	runtimeSlotMigrationJournalVersion = 2
+	// Restore custody also retains target writes and forbids image replay.
+	runtimeSlotRestoreJournalVersion = 3
+	// Legacy adoption allows normal cleanup while retaining execution history.
+	runtimeSlotLegacyAdoptionJournalVersion = 4
+	// Acknowledged adoption adds regional receipt custody and a prune barrier.
+	runtimeSlotAdoptionJournalVersion = 7
+	// Exclusive staging reservations must survive older A/B daemon rollback.
+	runtimeSlotStagingJournalVersion            = 8
+	runtimeSlotFailureJournalVersion            = 9
+	runtimeSlotFailureCleanupJournalVersion     = 10
+	runtimeSlotFailureFinalizeJournalVersion    = 11
+	runtimeSlotFailureGCJournalVersion          = 12
+	runtimeSlotCaptureFailureJournalVersion     = 13
+	runtimeSlotLegacyFinalizationJournalVersion = 5
+	runtimeSlotFinalizationJournalVersion       = 6
+	runtimeSlotProofRetention                   = 24 * time.Hour
+	runtimeSlotJournalMaxIDSize                 = 512
 )
 
 var runtimeSlotJournalBucket = []byte("runtime-slots-v1")
@@ -81,6 +99,9 @@ func (r RuntimeSlotRegistration) Validate() error {
 }
 
 type runtimeSlotJournalRecord struct {
+	MigrationStaging              *MigrationStagingCustody            `json:"migration_staging,omitempty"`
+	MigrationDestination          *MigrationDestinationCustody        `json:"migration_destination,omitempty"`
+	Migration                     *MigrationCaptureCustody            `json:"migration,omitempty"`
 	Version                       int                                 `json:"version"`
 	Registration                  RuntimeSlotRegistration             `json:"registration"`
 	Cleanup                       *protocol.NodeCleanupControlRequest `json:"cleanup,omitempty"`
@@ -93,8 +114,9 @@ type runtimeSlotJournalRecord struct {
 }
 
 type runtimeSlotJournal struct {
-	db        *bolt.DB
-	retention time.Duration
+	db            *bolt.DB
+	retention     time.Duration
+	migrationRoot string
 }
 
 func newRuntimeSlotJournal(path string, retention time.Duration) (*runtimeSlotJournal, error) {
@@ -146,7 +168,7 @@ func newRuntimeSlotJournal(path string, retention time.Duration) (*runtimeSlotJo
 			return nil, fmt.Errorf("sync runtime slot journal directory: %w", err)
 		}
 	}
-	return &runtimeSlotJournal{db: db, retention: retention}, nil
+	return &runtimeSlotJournal{db: db, retention: retention, migrationRoot: filepath.Join(filepath.Dir(path), "migration-images")}, nil
 }
 
 func (j *runtimeSlotJournal) Close() error {
@@ -213,6 +235,12 @@ func (j *runtimeSlotJournal) Get(slotID string) (runtimeSlotJournalRecord, error
 			return err
 		}
 		record, err = decodeRuntimeSlotJournalRecord(bucket.Get([]byte(slotID)))
+		if err == nil && record.Migration != nil && record.Migration.ImageDirectory != filepath.Join(j.migrationRoot, record.Migration.Capture.RequestDigest) {
+			return fmt.Errorf("migration staging directory escaped node custody: %w", errdefs.ErrFailedPrecondition)
+		}
+		if err == nil && record.MigrationDestination != nil && record.MigrationDestination.ImageDirectory != filepath.Join(j.migrationRoot, "destination-"+record.MigrationDestination.RequestDigest) {
+			return fmt.Errorf("migration destination staging escaped custody: %w", errdefs.ErrFailedPrecondition)
+		}
 		return err
 	})
 	return record, err
@@ -235,8 +263,17 @@ func (j *runtimeSlotJournal) BeginCleanup(request protocol.NodeCleanupControlReq
 		if err != nil {
 			return err
 		}
+		if request.WriterRetireKind == protocol.WriterRetireKindMigration && !current.Migration.readyForCleanup(request) {
+			return errdefs.ErrFailedPrecondition
+		}
+		if current.Migration != nil && current.Migration.ExecutionInvalidated && !current.Migration.captureFailureReadyForCleanup(request) {
+			return errdefs.ErrFailedPrecondition
+		}
 		if err := current.matchesCleanup(request); err != nil {
 			return err
+		}
+		if (current.Migration != nil && !current.Migration.readyForCleanup(request)) || (current.MigrationDestination != nil && !current.MigrationDestination.readyForCleanup(request)) {
+			return fmt.Errorf("migration retains source custody until explicit handoff: %w", errdefs.ErrFailedPrecondition)
 		}
 		if current.Cleanup != nil {
 			if *current.Cleanup != request {
@@ -320,6 +357,17 @@ func (j *runtimeSlotJournal) Prune(now time.Time) (int, error) {
 			if record.Proof == nil || record.CompletedAt == "" {
 				return nil
 			}
+			if record.MigrationDestination.pendingCustody() {
+				return nil
+			}
+			if c := record.Migration; c != nil && c.Failure != nil && (!c.CaptureFailureFinalized() || c.Failure.Finalization.AllocationGC == nil) {
+				return nil
+			}
+			// Retain the receipt until session forgetting AND regional allocation
+			// GC acknowledgement. Nomad may need it long after physical cleanup.
+			if record.Migration != nil && record.Migration.Finalization != nil && (!record.Migration.Finalization.SessionForgotten || record.Migration.Finalization.AllocationGC == nil || record.Migration.ExecutionInvalidated) {
+				return nil
+			}
 			if isRegistrationAbort(record) && !record.RegistrationAbortAcknowledged {
 				return nil
 			}
@@ -364,8 +412,86 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("decode runtime slot journal record: %w", err)
 	}
-	if record.Version != RuntimeSlotJournalVersion || record.Registration.Validate() != nil || record.CreatedAt == "" || record.UpdatedAt == "" {
+	validationVersion := record.Version
+	hasCaptureFailure := record.Migration != nil && record.Migration.Failure != nil
+	if hasCaptureFailure != (record.Version == runtimeSlotCaptureFailureJournalVersion) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("failed capture requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	hasFailure := record.MigrationDestination != nil && record.MigrationDestination.Failure != nil
+	hasFailureCleanup := hasFailure && record.MigrationDestination.Failure.Cleanup != nil
+	wantFailureVersion := runtimeSlotFailureJournalVersion
+	if hasFailureCleanup {
+		wantFailureVersion = runtimeSlotFailureCleanupJournalVersion
+		if record.MigrationDestination.Failure.Cleanup.Finalization != nil {
+			wantFailureVersion = runtimeSlotFailureFinalizeJournalVersion
+			if record.MigrationDestination.Failure.Cleanup.Finalization.AllocationGC != nil {
+				wantFailureVersion = runtimeSlotFailureGCJournalVersion
+			}
+		}
+	}
+	if hasFailure && record.Version != wantFailureVersion {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("migration failure requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if record.MigrationStaging != nil {
+		if (record.Version != runtimeSlotStagingJournalVersion && !(record.Version == wantFailureVersion && hasFailure) && !hasCaptureFailure) || record.validateMigrationStaging() != nil {
+			return runtimeSlotJournalRecord{}, fmt.Errorf("invalid migration staging custody: %w", errdefs.ErrFailedPrecondition)
+		}
+		// Version 8 wraps the same source/restore/adoption state machines. Run
+		// their existing validation using the appropriate inner envelope.
+		validationVersion = runtimeSlotJournalPayloadVersion(record)
+	}
+	if hasCaptureFailure {
+		// The new envelope wraps an existing source (possibly previously
+		// adopted). Validate that history with its original inner version.
+		validationVersion = runtimeSlotMigrationJournalVersion
+		if record.MigrationDestination != nil && record.MigrationDestination.Adopted() {
+			validationVersion = runtimeSlotAdoptionJournalVersion
+		}
+	}
+	hasRestore := record.MigrationDestination != nil && record.MigrationDestination.Restore != nil
+	failureEnvelope := validationVersion == wantFailureVersion && hasFailure
+	migrationEnvelope := validationVersion == runtimeSlotMigrationJournalVersion && (record.Migration != nil || record.MigrationDestination != nil)
+	hasAdoption := record.MigrationDestination != nil && record.MigrationDestination.Adoption != nil
+	hasFinalization := record.Migration != nil && record.Migration.Finalization != nil
+	finalizationEnvelope := (validationVersion == runtimeSlotFinalizationJournalVersion || validationVersion == runtimeSlotLegacyFinalizationJournalVersion || validationVersion == runtimeSlotAdoptionJournalVersion && hasAdoption) && hasFinalization
+	adoptionEnvelope := (validationVersion == runtimeSlotAdoptionJournalVersion || validationVersion == runtimeSlotLegacyAdoptionJournalVersion || finalizationEnvelope) && hasAdoption && hasRestore
+	restoreEnvelope := (validationVersion == runtimeSlotRestoreJournalVersion && hasRestore) || adoptionEnvelope || failureEnvelope
+	if (validationVersion != RuntimeSlotJournalVersion && !migrationEnvelope && !restoreEnvelope && !finalizationEnvelope) || hasFailure && !failureEnvelope ||
+		hasRestore && !restoreEnvelope || hasAdoption && !adoptionEnvelope || hasFinalization && !finalizationEnvelope || record.Registration.Validate() != nil || record.CreatedAt == "" || record.UpdatedAt == "" {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot journal record is invalid: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := record.validateMigrationDestination(); err != nil {
+		return runtimeSlotJournalRecord{}, err
+	}
+	if record.MigrationDestination.FailureFinalized() {
+		if gc := record.MigrationDestination.Failure.Cleanup.Finalization.AllocationGC; gc != nil && record.matchesMigrationFailureGC(*gc) != nil {
+			return runtimeSlotJournalRecord{}, errdefs.ErrFailedPrecondition
+		}
+	}
+	if hasAdoption && record.MigrationDestination.Adoption.RegionalAcknowledgement != nil && validationVersion != runtimeSlotAdoptionJournalVersion {
+		return runtimeSlotJournalRecord{}, errdefs.ErrFailedPrecondition
+	}
+	if record.Migration != nil {
+		if record.Migration.validateCaptureFailure() != nil {
+			return runtimeSlotJournalRecord{}, fmt.Errorf("invalid failed capture custody: %w", errdefs.ErrFailedPrecondition)
+		}
+		if f := record.Migration.Failure; f != nil && f.Finalization != nil &&
+			(record.Proof == nil || *record.Proof != f.Finalization.Request.Proof.Cleanup) {
+			return runtimeSlotJournalRecord{}, errdefs.ErrFailedPrecondition
+		}
+		if f := record.Migration.Finalization; f != nil && f.AllocationGC != nil {
+			if (validationVersion != runtimeSlotFinalizationJournalVersion && validationVersion != runtimeSlotAdoptionJournalVersion) || record.matchesMigrationSourceGC(*f.AllocationGC) != nil {
+				return runtimeSlotJournalRecord{}, fmt.Errorf("invalid migration allocation GC acknowledgement: %w", errdefs.ErrFailedPrecondition)
+			}
+		}
+		if record.Migration.Finalization != nil && record.Migration.Finalization.SessionForgotten && record.Proof == nil {
+			return runtimeSlotJournalRecord{}, fmt.Errorf("migration session forgotten before physical cleanup: %w", errdefs.ErrFailedPrecondition)
+		}
+		if record.Migration.Capture.Validate() != nil || record.Migration.validatePublication() != nil || record.Migration.validateSourceFence() != nil || record.Migration.validateFinalization() != nil || record.matchesMigration(record.Migration.Capture) != nil || (record.Cleanup != nil && !record.Migration.readyForCleanup(*record.Cleanup)) ||
+			!filepath.IsAbs(record.Migration.ImageDirectory) || filepath.Clean(record.Migration.ImageDirectory) != record.Migration.ImageDirectory ||
+			filepath.Base(record.Migration.ImageDirectory) != record.Migration.Capture.RequestDigest {
+			return runtimeSlotJournalRecord{}, fmt.Errorf("invalid migration source custody: %w", errdefs.ErrFailedPrecondition)
+		}
 	}
 	if _, err := time.Parse(time.RFC3339Nano, record.CreatedAt); err != nil {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot journal creation time is invalid: %w", errdefs.ErrFailedPrecondition)
@@ -400,9 +526,45 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 	return record, nil
 }
 
+func runtimeSlotJournalPayloadVersion(record runtimeSlotJournalRecord) int {
+	version := RuntimeSlotJournalVersion
+	if record.Migration != nil || record.MigrationDestination != nil {
+		version = runtimeSlotMigrationJournalVersion
+	}
+	if record.MigrationDestination != nil && record.MigrationDestination.Restore != nil {
+		version = runtimeSlotRestoreJournalVersion
+	}
+	if record.Migration != nil && record.Migration.Finalization != nil {
+		version = runtimeSlotFinalizationJournalVersion
+	}
+	if record.MigrationDestination != nil && record.MigrationDestination.Adoption != nil {
+		version = runtimeSlotAdoptionJournalVersion
+	}
+	if record.MigrationDestination != nil && record.MigrationDestination.Failure != nil {
+		version = runtimeSlotFailureJournalVersion
+		if record.MigrationDestination.Failure.Cleanup != nil {
+			version = runtimeSlotFailureCleanupJournalVersion
+			if record.MigrationDestination.Failure.Cleanup.Finalization != nil {
+				version = runtimeSlotFailureFinalizeJournalVersion
+				if record.MigrationDestination.Failure.Cleanup.Finalization.AllocationGC != nil {
+					version = runtimeSlotFailureGCJournalVersion
+				}
+			}
+		}
+	}
+	if record.Migration != nil && record.Migration.Failure != nil {
+		version = runtimeSlotCaptureFailureJournalVersion
+	}
+	return version
+}
+
 func putRuntimeSlotJournalRecord(bucket *bolt.Bucket, record runtimeSlotJournalRecord) error {
 	if bucket == nil {
 		return fmt.Errorf("runtime slot journal bucket is absent: %w", errdefs.ErrUnavailable)
+	}
+	record.Version = runtimeSlotJournalPayloadVersion(record)
+	if record.MigrationStaging != nil && record.Version != runtimeSlotFailureJournalVersion && record.Version != runtimeSlotFailureCleanupJournalVersion && record.Version != runtimeSlotFailureFinalizeJournalVersion && record.Version != runtimeSlotFailureGCJournalVersion && record.Version != runtimeSlotCaptureFailureJournalVersion {
+		record.Version = runtimeSlotStagingJournalVersion
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

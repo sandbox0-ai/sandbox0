@@ -29,13 +29,28 @@ const (
 type NodeChannelCommandKind string
 
 const (
-	NodeChannelCommandNetworkPrepare NodeChannelCommandKind = "network_prepare"
-	NodeChannelCommandClaim          NodeChannelCommandKind = "claim"
-	NodeChannelCommandCommandReady   NodeChannelCommandKind = "command_ready"
-	NodeChannelCommandPlannedRetire  NodeChannelCommandKind = "planned_retire"
-	NodeChannelCommandRunningFork    NodeChannelCommandKind = "running_fork"
-	NodeChannelCommandPausedRebase   NodeChannelCommandKind = "paused_rebase"
-	NodeChannelCommandCleanup        NodeChannelCommandKind = "cleanup"
+	NodeChannelCommandNetworkPrepare                  NodeChannelCommandKind = "network_prepare"
+	NodeChannelCommandClaim                           NodeChannelCommandKind = "claim"
+	NodeChannelCommandCommandReady                    NodeChannelCommandKind = "command_ready"
+	NodeChannelCommandPlannedRetire                   NodeChannelCommandKind = "planned_retire"
+	NodeChannelCommandRunningFork                     NodeChannelCommandKind = "running_fork"
+	NodeChannelCommandPausedRebase                    NodeChannelCommandKind = "paused_rebase"
+	NodeChannelCommandCleanup                         NodeChannelCommandKind = "cleanup"
+	NodeChannelCommandMigrationCapture                NodeChannelCommandKind = "migration_capture"
+	NodeChannelCommandMigrationCPUPreflight           NodeChannelCommandKind = "migration_cpu_preflight"
+	NodeChannelCommandMigrationRecover                NodeChannelCommandKind = "migration_recover"
+	NodeChannelCommandMigrationStagingReserve         NodeChannelCommandKind = "migration_staging_reserve"
+	NodeChannelCommandMigrationStagingRelease         NodeChannelCommandKind = "migration_staging_release"
+	NodeChannelCommandMigrationPublish                NodeChannelCommandKind = "migration_publish"
+	NodeChannelCommandMigrationFinalize               NodeChannelCommandKind = "migration_finalize"
+	NodeChannelCommandMigrationSourceGC               NodeChannelCommandKind = "migration_source_gc"
+	NodeChannelCommandMigrationFence                  NodeChannelCommandKind = "migration_fence"
+	NodeChannelCommandMigrationFailureStop            NodeChannelCommandKind = "migration_failure_stop"
+	NodeChannelCommandMigrationFailureCleanup         NodeChannelCommandKind = "migration_failure_cleanup"
+	NodeChannelCommandMigrationFailureFinalize        NodeChannelCommandKind = "migration_failure_finalize"
+	NodeChannelCommandMigrationCaptureFailureCleanup  NodeChannelCommandKind = "migration_capture_failure_cleanup"
+	NodeChannelCommandMigrationCaptureFailureFinalize NodeChannelCommandKind = "migration_capture_failure_finalize"
+	NodeChannelCommandMigrationImagePrepare           NodeChannelCommandKind = "migration_image_prepare"
 )
 
 // NodeChannelErrorClass is a bounded retry classification returned by a node.
@@ -145,15 +160,20 @@ func (h NodeChannelHello) Validate() error {
 	if len(capabilities) > 0 && capabilities[0] == NodeChannelCommandNetworkPrepare {
 		capabilities = capabilities[1:]
 	}
-	if len(capabilities) < 3 || len(capabilities) > 6 ||
+	canonical := []NodeChannelCommandKind{
+		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
+		NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationSourceGC,
+		NodeChannelCommandMigrationCPUPreflight, NodeChannelCommandMigrationRecover,
+		NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize,
+		NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize,
+	}
+	if len(capabilities) < 3 || len(capabilities) > 3+len(canonical) ||
 		capabilities[0] != NodeChannelCommandClaim || capabilities[1] != NodeChannelCommandCommandReady ||
 		capabilities[len(capabilities)-1] != NodeChannelCommandCleanup {
 		return fmt.Errorf("node channel capabilities are incomplete")
 	}
 	optional := capabilities[2 : len(capabilities)-1]
-	canonical := []NodeChannelCommandKind{
-		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
-	}
+
 	canonicalIndex := 0
 	for _, capability := range optional {
 		for canonicalIndex < len(canonical) && canonical[canonicalIndex] != capability {
@@ -238,17 +258,30 @@ func (t NodeChannelTarget) validateNodeOnly() error {
 // canonical digest of every target and request byte, so a delayed response
 // cannot satisfy another command.
 type NodeChannelCommand struct {
-	Version        int                               `json:"version"`
-	RequestID      string                            `json:"request_id"`
-	Kind           NodeChannelCommandKind            `json:"kind"`
-	Target         NodeChannelTarget                 `json:"target"`
-	NetworkPrepare *NodeNetworkPrepareControlRequest `json:"network_prepare,omitempty"`
-	Claim          *NodeClaimControlRequest          `json:"claim,omitempty"`
-	CommandReady   *CommandReadyControlRequest       `json:"command_ready,omitempty"`
-	PlannedRetire  *NodePlannedRetireControlRequest  `json:"planned_retire,omitempty"`
-	RunningFork    *NodeRunningForkControlRequest    `json:"running_fork,omitempty"`
-	PausedRebase   *NodePausedRebaseControlRequest   `json:"paused_rebase,omitempty"`
-	Cleanup        *NodeCleanupControlRequest        `json:"cleanup,omitempty"`
+	MigrationStaging                *MigrationStagingRequest                `json:"migration_staging,omitempty"`
+	MigrationCPUPreflight           *MigrationCPUPreflightRequest           `json:"migration_cpu_preflight,omitempty"`
+	MigrationSourceGC               *MigrationSourceGCRequest               `json:"migration_source_gc,omitempty"`
+	MigrationFinalize               *MigrationSourceFinalizeRequest         `json:"migration_finalize,omitempty"`
+	MigrationImagePrepare           *MigrationImagePrepareRequest           `json:"migration_image_prepare,omitempty"`
+	MigrationFailureStop            *MigrationFailureRequest                `json:"migration_failure_stop,omitempty"`
+	MigrationFailureCleanup         *MigrationFailureCleanupRequest         `json:"migration_failure_cleanup,omitempty"`
+	MigrationFailureFinalize        *MigrationFailureFinalizeRequest        `json:"migration_failure_finalize,omitempty"`
+	MigrationCaptureFailureCleanup  *MigrationCaptureFailureRequest         `json:"migration_capture_failure_cleanup,omitempty"`
+	MigrationCaptureFailureFinalize *MigrationCaptureFailureFinalizeRequest `json:"migration_capture_failure_finalize,omitempty"`
+	MigrationFence                  *MigrationSourceFenceRequest            `json:"migration_fence,omitempty"`
+	MigrationPublish                *MigrationPublicationRequest            `json:"migration_publish,omitempty"`
+	MigrationCapture                *MigrationCaptureRequest                `json:"migration_capture,omitempty"`
+	Version                         int                                     `json:"version"`
+	RequestID                       string                                  `json:"request_id"`
+	Kind                            NodeChannelCommandKind                  `json:"kind"`
+	Target                          NodeChannelTarget                       `json:"target"`
+	NetworkPrepare                  *NodeNetworkPrepareControlRequest       `json:"network_prepare,omitempty"`
+	Claim                           *NodeClaimControlRequest                `json:"claim,omitempty"`
+	CommandReady                    *CommandReadyControlRequest             `json:"command_ready,omitempty"`
+	PlannedRetire                   *NodePlannedRetireControlRequest        `json:"planned_retire,omitempty"`
+	RunningFork                     *NodeRunningForkControlRequest          `json:"running_fork,omitempty"`
+	PausedRebase                    *NodePausedRebaseControlRequest         `json:"paused_rebase,omitempty"`
+	Cleanup                         *NodeCleanupControlRequest              `json:"cleanup,omitempty"`
 }
 
 const NodePlannedRetireProofVersion = 1
@@ -573,6 +606,97 @@ func (c NodeChannelCommand) Validate() error {
 		return fmt.Errorf("node channel request_id does not match the command")
 	}
 	switch c.Kind {
+	case NodeChannelCommandMigrationSourceGC:
+		if c.MigrationSourceGC == nil || c.payloadCount() != 1 || c.MigrationSourceGC.Target != c.Target {
+			return fmt.Errorf("migration source GC command changed target")
+		}
+		if err := c.MigrationSourceGC.Validate(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationFinalize:
+		if c.MigrationFinalize == nil || c.payloadCount() != 1 || c.MigrationFinalize.Fence.PublicationRequest.Capture.Request.Target != c.Target {
+			return fmt.Errorf("migration finalization command changed source target")
+		}
+		if err := c.MigrationFinalize.Validate(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationImagePrepare:
+		if c.MigrationImagePrepare == nil || c.payloadCount() != 1 || c.MigrationImagePrepare.Target != c.Target {
+			return fmt.Errorf("migration image preparation changed its destination")
+		}
+		if err := c.MigrationImagePrepare.Validate(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationCaptureFailureCleanup:
+		if c.MigrationCaptureFailureCleanup == nil || c.payloadCount() != 1 || c.MigrationCaptureFailureCleanup.Capture.Request.Target != c.Target {
+			return fmt.Errorf("failed capture command changed source")
+		}
+		if _, err := c.MigrationCaptureFailureCleanup.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationCaptureFailureFinalize:
+		if c.MigrationCaptureFailureFinalize == nil || c.payloadCount() != 1 || c.MigrationCaptureFailureFinalize.Request.Capture.Request.Target != c.Target {
+			return fmt.Errorf("failed capture command changed source")
+		}
+		if _, err := c.MigrationCaptureFailureFinalize.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationFailureFinalize:
+		if c.MigrationFailureFinalize == nil || c.payloadCount() != 1 || c.MigrationFailureFinalize.Request.Failure.Request.Restore.Image.Target != c.Target {
+			return fmt.Errorf("migration failure cleanup changed its destination")
+		}
+		if _, err := c.MigrationFailureFinalize.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationFailureCleanup:
+		if c.MigrationFailureCleanup == nil || c.payloadCount() != 1 || c.MigrationFailureCleanup.Failure.Request.Restore.Image.Target != c.Target {
+			return fmt.Errorf("migration failure cleanup changed its destination")
+		}
+		if _, err := c.MigrationFailureCleanup.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationFailureStop:
+		if c.MigrationFailureStop == nil || c.payloadCount() != 1 || c.MigrationFailureStop.Restore.Image.Target != c.Target {
+			return fmt.Errorf("migration failure stop changed its destination")
+		}
+		if _, err := c.MigrationFailureStop.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationFence:
+		if c.MigrationFence == nil || c.payloadCount() != 1 || c.MigrationFence.PublicationRequest.Capture.Request.Target != c.Target {
+			return fmt.Errorf("migration fence changed the exact source")
+		}
+		if _, err := c.MigrationFence.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationPublish:
+		if c.MigrationPublish == nil || c.payloadCount() != 1 || c.MigrationPublish.Capture.Request.Target != c.Target {
+			return fmt.Errorf("migration publication changed the exact source target")
+		}
+		if _, err := c.MigrationPublish.Digest(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease:
+		if c.MigrationStaging == nil || c.payloadCount() != 1 || c.MigrationStaging.Target != c.Target {
+			return fmt.Errorf("staging command changed request or target")
+		}
+		if err := c.MigrationStaging.Validate(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationCPUPreflight:
+		if c.MigrationCPUPreflight == nil || c.payloadCount() != 1 || c.MigrationCPUPreflight.Target != c.Target {
+			return fmt.Errorf("CPU preflight changed exact target")
+		}
+		if err := c.MigrationCPUPreflight.Validate(); err != nil {
+			return err
+		}
+	case NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationRecover:
+		if c.MigrationCapture == nil || c.payloadCount() != 1 || c.MigrationCapture.Target != c.Target {
+			return fmt.Errorf("migration capture command changed the exact source target")
+		}
+		if err := c.MigrationCapture.Validate(); err != nil {
+			return err
+		}
 	case NodeChannelCommandNetworkPrepare:
 		if c.NetworkPrepare == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("network-prepare command must contain only a network request")
@@ -598,6 +722,9 @@ func (c NodeChannelCommand) Validate() error {
 		}
 		if err := c.Claim.ValidateRegional(); err != nil {
 			return fmt.Errorf("claim request: %w", err)
+		}
+		if c.Claim.MigrationRestore != nil && c.Claim.MigrationRestore.Image.Target != c.Target {
+			return fmt.Errorf("restore claim changed the exact destination")
 		}
 		identity := c.Claim.Stage.Identity
 		if identity.SlotNonce != c.Target.SlotID || identity.AllocationID != c.Target.AllocationID ||
@@ -676,6 +803,19 @@ func (c NodeChannelCommand) Validate() error {
 func (c NodeChannelCommand) payloadCount() int {
 	count := 0
 	for _, present := range []bool{
+		c.MigrationCapture != nil,
+		c.MigrationCPUPreflight != nil,
+		c.MigrationStaging != nil,
+		c.MigrationPublish != nil,
+		c.MigrationFinalize != nil,
+		c.MigrationSourceGC != nil,
+		c.MigrationFence != nil,
+		c.MigrationFailureStop != nil,
+		c.MigrationFailureCleanup != nil,
+		c.MigrationFailureFinalize != nil,
+		c.MigrationCaptureFailureCleanup != nil,
+		c.MigrationCaptureFailureFinalize != nil,
+		c.MigrationImagePrepare != nil,
 		c.NetworkPrepare != nil, c.Claim != nil, c.CommandReady != nil,
 		c.PlannedRetire != nil, c.RunningFork != nil, c.PausedRebase != nil, c.Cleanup != nil,
 	} {
@@ -699,19 +839,33 @@ func (c NodeChannelCommand) digest() (string, error) {
 // NodeChannelResult contains either one exact success payload or one bounded
 // classified error for the matching command.
 type NodeChannelResult struct {
-	Version            int                                        `json:"version"`
-	RequestID          string                                     `json:"request_id"`
-	Kind               NodeChannelCommandKind                     `json:"kind"`
-	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken          `json:"network_policy_token,omitempty"`
-	ControlResponse    *NodeControlResponse                       `json:"control_response,omitempty"`
-	PlannedRetireProof *NodePlannedRetireControlProof             `json:"planned_retire_proof,omitempty"`
-	RunningFork        *rootfshandoff.RunningForkCheckpointResult `json:"running_fork,omitempty"`
-	PausedRebase       *rootfsrebase.WorkerResult                 `json:"paused_rebase,omitempty"`
-	PausedRebaseReject *rootfsrebase.WorkerRejection              `json:"paused_rebase_rejection,omitempty"`
-	PausedRebaseAck    *rootfsrebase.WorkerAcknowledgement        `json:"paused_rebase_ack,omitempty"`
-	CleanupProof       *NodeCleanupControlProof                   `json:"cleanup_proof,omitempty"`
-	Error              string                                     `json:"error,omitempty"`
-	ErrorClass         NodeChannelErrorClass                      `json:"error_class,omitempty"`
+	MigrationStagingReserved        *MigrationStagingReserved                  `json:"migration_staging_reserved,omitempty"`
+	MigrationStagingReleased        *MigrationStagingReleased                  `json:"migration_staging_released,omitempty"`
+	MigrationCPUPreflight           *MigrationCPUPreflight                     `json:"migration_cpu_preflight,omitempty"`
+	MigrationSourceGC               *MigrationSourceGCAcknowledgement          `json:"migration_source_gc,omitempty"`
+	MigrationFinalize               *MigrationSourceFinalizeProof              `json:"migration_finalize,omitempty"`
+	MigrationImagePrepare           *MigrationImagePrepared                    `json:"migration_image_prepare,omitempty"`
+	MigrationFailureStop            *MigrationFailureStopProof                 `json:"migration_failure_stop,omitempty"`
+	MigrationFailureCleanup         *MigrationFailureCleanupProof              `json:"migration_failure_cleanup,omitempty"`
+	MigrationFailureFinalize        *MigrationFailureFinalizeProof             `json:"migration_failure_finalize,omitempty"`
+	MigrationCaptureFailureCleanup  *MigrationCaptureFailureProof              `json:"migration_capture_failure_cleanup,omitempty"`
+	MigrationCaptureFailureFinalize *MigrationCaptureFailureFinalizeProof      `json:"migration_capture_failure_finalize,omitempty"`
+	MigrationFence                  *MigrationSourceFenceProof                 `json:"migration_fence,omitempty"`
+	MigrationPublish                *MigrationPublication                      `json:"migration_publish,omitempty"`
+	MigrationCapture                *MigrationCapture                          `json:"migration_capture,omitempty"`
+	Version                         int                                        `json:"version"`
+	RequestID                       string                                     `json:"request_id"`
+	Kind                            NodeChannelCommandKind                     `json:"kind"`
+	NetworkPolicyToken              *rootfshandoff.NetworkPolicyToken          `json:"network_policy_token,omitempty"`
+	ControlResponse                 *NodeControlResponse                       `json:"control_response,omitempty"`
+	PlannedRetireProof              *NodePlannedRetireControlProof             `json:"planned_retire_proof,omitempty"`
+	RunningFork                     *rootfshandoff.RunningForkCheckpointResult `json:"running_fork,omitempty"`
+	PausedRebase                    *rootfsrebase.WorkerResult                 `json:"paused_rebase,omitempty"`
+	PausedRebaseReject              *rootfsrebase.WorkerRejection              `json:"paused_rebase_rejection,omitempty"`
+	PausedRebaseAck                 *rootfsrebase.WorkerAcknowledgement        `json:"paused_rebase_ack,omitempty"`
+	CleanupProof                    *NodeCleanupControlProof                   `json:"cleanup_proof,omitempty"`
+	Error                           string                                     `json:"error,omitempty"`
+	ErrorClass                      NodeChannelErrorClass                      `json:"error_class,omitempty"`
 }
 
 // ValidateFor rejects a response for any command other than the exact request.
@@ -730,6 +884,86 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 		return nil
 	}
 	switch command.Kind {
+	case NodeChannelCommandMigrationSourceGC:
+		if r.MigrationSourceGC == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration source GC acknowledgement is absent")
+		}
+		return r.MigrationSourceGC.ValidateFor(*command.MigrationSourceGC)
+	case NodeChannelCommandMigrationFinalize:
+		if r.MigrationFinalize == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration finalization result is incomplete")
+		}
+		return r.MigrationFinalize.ValidateFor(*command.MigrationFinalize)
+	case NodeChannelCommandMigrationImagePrepare:
+		if r.MigrationImagePrepare == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("prepared migration image receipt is missing")
+		}
+		return r.MigrationImagePrepare.ValidateFor(*command.MigrationImagePrepare)
+	case NodeChannelCommandMigrationCaptureFailureCleanup:
+		if r.MigrationCaptureFailureCleanup == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("failed capture proof is missing")
+		}
+		return r.MigrationCaptureFailureCleanup.ValidateFor(*command.MigrationCaptureFailureCleanup)
+	case NodeChannelCommandMigrationCaptureFailureFinalize:
+		if r.MigrationCaptureFailureFinalize == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("failed capture proof is missing")
+		}
+		return r.MigrationCaptureFailureFinalize.ValidateFor(*command.MigrationCaptureFailureFinalize)
+	case NodeChannelCommandMigrationFailureFinalize:
+		if r.MigrationFailureFinalize == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration failure cleanup proof is missing")
+		}
+		return r.MigrationFailureFinalize.ValidateFor(*command.MigrationFailureFinalize)
+	case NodeChannelCommandMigrationFailureCleanup:
+		if r.MigrationFailureCleanup == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration failure cleanup proof is missing")
+		}
+		return r.MigrationFailureCleanup.ValidateFor(*command.MigrationFailureCleanup)
+	case NodeChannelCommandMigrationFailureStop:
+		if r.MigrationFailureStop == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration failure stop proof is missing")
+		}
+		return r.MigrationFailureStop.ValidateFor(*command.MigrationFailureStop)
+	case NodeChannelCommandMigrationFence:
+		if r.MigrationFence == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration fence proof is missing")
+		}
+		return r.MigrationFence.ValidateFor(*command.MigrationFence)
+	case NodeChannelCommandMigrationPublish:
+		if r.MigrationPublish == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration publication result is missing")
+		}
+		if err := r.MigrationPublish.ValidateFor(*command.MigrationPublish); err != nil {
+			return err
+		}
+		return nil
+	case NodeChannelCommandMigrationStagingReserve:
+		if r.MigrationStagingReserved == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("staging reservation needs its exact receipt")
+		}
+		return r.MigrationStagingReserved.ValidateFor(*command.MigrationStaging)
+	case NodeChannelCommandMigrationStagingRelease:
+		if r.MigrationStagingReleased == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("staging release needs its exact receipt")
+		}
+		return r.MigrationStagingReleased.ValidateFor(*command.MigrationStaging)
+	case NodeChannelCommandMigrationCPUPreflight:
+		if r.MigrationCPUPreflight == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("CPU preflight result is incomplete")
+		}
+		return r.MigrationCPUPreflight.ValidateFor(*command.MigrationCPUPreflight)
+	case NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationRecover:
+		if r.MigrationCapture == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("migration capture result is incomplete")
+		}
+		if err := r.MigrationCapture.Validate(); err != nil {
+			return err
+		}
+		digest, err := command.MigrationCapture.Digest()
+		if err != nil || r.MigrationCapture.RequestDigest != digest {
+			return fmt.Errorf("migration capture result belongs to another source")
+		}
+		return nil
 	case NodeChannelCommandNetworkPrepare:
 		if r.NetworkPolicyToken == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel network policy result is incomplete")
@@ -750,7 +984,13 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 		if r.ControlResponse == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel control result is incomplete")
 		}
-		return r.ControlResponse.Validate()
+		if command.Kind == NodeChannelCommandClaim {
+			return r.ControlResponse.ValidateClaimResult(*command.Claim)
+		}
+		if a := r.ControlResponse.MigrationAdoption; a != nil && a.Request.Target != command.Target {
+			return fmt.Errorf("adoption receipt changed target node")
+		}
+		return r.ControlResponse.ValidateCommandReadyResult(*command.CommandReady)
 	case NodeChannelCommandPlannedRetire:
 		if r.PlannedRetireProof == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel planned-retire result is incomplete")
@@ -817,6 +1057,20 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 func (r NodeChannelResult) payloadCount() int {
 	count := 0
 	for _, present := range []bool{
+		r.MigrationCapture != nil,
+		r.MigrationCPUPreflight != nil,
+		r.MigrationStagingReserved != nil,
+		r.MigrationStagingReleased != nil,
+		r.MigrationPublish != nil,
+		r.MigrationFinalize != nil,
+		r.MigrationSourceGC != nil,
+		r.MigrationFence != nil,
+		r.MigrationFailureStop != nil,
+		r.MigrationFailureCleanup != nil,
+		r.MigrationFailureFinalize != nil,
+		r.MigrationCaptureFailureCleanup != nil,
+		r.MigrationCaptureFailureFinalize != nil,
+		r.MigrationImagePrepare != nil,
 		r.NetworkPolicyToken != nil, r.ControlResponse != nil, r.PlannedRetireProof != nil, r.RunningFork != nil,
 		r.PausedRebase != nil, r.PausedRebaseReject != nil,
 		r.PausedRebaseAck != nil, r.CleanupProof != nil,

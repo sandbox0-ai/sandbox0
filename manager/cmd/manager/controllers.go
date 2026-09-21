@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -14,6 +15,7 @@ import (
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	"go.uber.org/zap"
 )
 
@@ -66,6 +68,30 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	}
 
 	s.startRootFSMaintenance(ctx)
+	s.startMigrationImageGC(ctx)
+}
+
+func (s *managerControllerSet) startMigrationImageGC(ctx context.Context) {
+	if s.rootFSObjectStore == nil || s.sandboxStore == nil {
+		return
+	}
+	collector, err := runtimecheckpoint.NewCollector(s.rootFSObjectStore)
+	if err != nil {
+		s.logger.Error("Migration image GC unavailable", zap.Error(err))
+		return
+	}
+	worker, err := nomadmigration.NewImageGC(s.sandboxStore, collector)
+	if err != nil {
+		s.logger.Error("Migration image GC unavailable", zap.Error(err))
+		return
+	}
+	go logControllerError(ctx, s.logger, "Migration image GC stopped", func() error {
+		return worker.Run(ctx, func(report nomadmigration.Report) {
+			if report.Error != nil {
+				s.logger.Warn("Migration image GC pass failed", zap.Error(report.Error))
+			}
+		})
+	})
 }
 
 func (s *managerControllerSet) startRootFSMaintenance(ctx context.Context) {

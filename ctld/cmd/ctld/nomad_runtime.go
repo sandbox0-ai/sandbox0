@@ -74,6 +74,9 @@ func configuredNomadRuntimeFactory(
 		RootFSAuthorityTokenFile:              source.AuthorityTokenFile,
 		RuntimeSlotNodeBootIDFile:             source.NodeBootIDFile,
 		RuntimeSlotJournalPath:                source.RuntimeSlotJournalPath,
+		MigrationStagingBytes:                 source.MigrationStagingBytes,
+		MigrationStagingProjectID:             source.MigrationStagingProjectID,
+		MigrationStagingInodes:                source.MigrationStagingInodes,
 		RuntimeResourceCgroupRoot:             source.ResourceCgroupRoot,
 	}
 	runtimeConfig.ApplyDefaults()

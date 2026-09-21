@@ -48,18 +48,20 @@ type managedSession struct {
 
 // Supervisor owns process attempts, session state, and event journals.
 type Supervisor struct {
-	mu                sync.RWMutex
-	store             *FileStore
-	sessions          map[string]*managedSession
-	creationKeys      map[string]string
-	transients        map[string]process.Process
-	sandboxID         string
-	sandboxEnv        map[string]string
-	runtimeGeneration int64
-	active            bool
-	ctx               context.Context
-	cancel            context.CancelFunc
-	logger            *zap.Logger
+	mu                        sync.RWMutex
+	store                     *FileStore
+	sessions                  map[string]*managedSession
+	creationKeys              map[string]string
+	transients                map[string]process.Process
+	sandboxID                 string
+	sandboxEnv                map[string]string
+	runtimeGeneration         int64
+	generationHandover        generationHandover
+	generationHandoverPending bool
+	active                    bool
+	ctx                       context.Context
+	cancel                    context.CancelFunc
+	logger                    *zap.Logger
 }
 
 func NewSupervisor(store *FileStore, logger *zap.Logger) (*Supervisor, error) {
@@ -233,7 +235,14 @@ func (s *Supervisor) Activate(activation Activation) error {
 			s.mu.Unlock()
 			return fmt.Errorf("session supervisor is already bound to sandbox %q", s.sandboxID)
 		}
-		s.runtimeGeneration = activation.RuntimeGeneration
+		if s.generationHandoverPending {
+			s.mu.Unlock()
+			return errors.New("session generation handover is incomplete")
+		}
+		if s.runtimeGeneration != activation.RuntimeGeneration {
+			s.mu.Unlock()
+			return errors.New("active session generation requires an exact migration handover")
+		}
 		s.sandboxEnv = process.CloneEnvVars(activation.SandboxEnv)
 		s.mu.Unlock()
 		return nil
@@ -842,12 +851,13 @@ func (s *Supervisor) startAttempt(managed *managedSession, reason string) error 
 	active := s.active
 	runtimeGeneration := s.runtimeGeneration
 	sandboxEnv := process.CloneEnvVars(s.sandboxEnv)
-	s.mu.RUnlock()
 	if !active {
+		s.mu.RUnlock()
 		return nil
 	}
 
 	managed.mu.Lock()
+	s.mu.RUnlock()
 	if managed.deleting || managed.record.Spec.Lifecycle.DesiredState != DesiredStateRunning {
 		managed.mu.Unlock()
 		return nil

@@ -544,8 +544,8 @@ func lockExactNomadLiveWriter(
 		return nil, fmt.Errorf("%w: source hard TTL has expired", ErrNomadSandboxForkNotReady)
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE sandbox_id = $1 AND state <> $2 FOR UPDATE OF runtime_slots
-	`, source.ID, RuntimeSlotStateTerminal))
+		WHERE sandbox_id = $1 AND state <> $2 AND allocation_id=$3 AND allocation_namespace=$4 FOR UPDATE OF runtime_slots
+	`, source.ID, RuntimeSlotStateTerminal, source.RuntimeID, source.RuntimeNamespace))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: source runtime slot is missing", ErrNomadSandboxForkNotReady)
 	}

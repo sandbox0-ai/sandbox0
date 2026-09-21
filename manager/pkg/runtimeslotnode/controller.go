@@ -43,6 +43,44 @@ func New(transport Transport) (*Controller, error) {
 	return &Controller{transport: transport}, nil
 }
 
+// FinalizeMigrationSource retains the existing authenticated transport and
+// accepts only the complete proof for the regionally authorized command.
+func (c *Controller) FinalizeMigrationSource(ctx context.Context, request protocol.MigrationSourceFinalizeRequest) (*protocol.MigrationSourceFinalizeProof, error) {
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	transport, ok := c.transport.(runtimeslotreconciler.MigrationSourceFinalizer)
+	if !ok {
+		return nil, errors.New("node transport does not support migration finalization")
+	}
+	proof, err := transport.FinalizeMigrationSource(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if proof == nil || proof.ValidateFor(request) != nil {
+		return nil, errors.New("node transport returned invalid migration finalization evidence")
+	}
+	return proof, nil
+}
+
+func (c *Controller) AcknowledgeMigrationSourceGC(ctx context.Context, request protocol.MigrationSourceGCRequest) (*protocol.MigrationSourceGCAcknowledgement, error) {
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	transport, ok := c.transport.(runtimeslotreconciler.MigrationSourceGC)
+	if !ok {
+		return nil, errors.New("node transport does not support migration source GC acknowledgement")
+	}
+	ack, err := transport.AcknowledgeMigrationSourceGC(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if ack == nil || ack.ValidateFor(request) != nil {
+		return nil, errors.New("node transport returned invalid migration source GC acknowledgement")
+	}
+	return ack, nil
+}
+
 // Cleanup dispatches one exact request and accepts only a canonical proof for
 // the same trusted node target and physical slot incarnation.
 func (c *Controller) Cleanup(

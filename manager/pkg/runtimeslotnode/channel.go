@@ -487,6 +487,9 @@ func (h *ChannelHub) CommandReady(
 	if err != nil {
 		return protocol.NodeControlResponse{}, err
 	}
+	if err := h.commitMigrationAdoption(ctx, command, result); err != nil {
+		return protocol.NodeControlResponse{}, err
+	}
 	return *result.ControlResponse, nil
 }
 
@@ -526,6 +529,34 @@ func (h *ChannelHub) RunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
 	return *result.RunningFork, nil
+}
+
+// CaptureMigration dispatches only through the authenticated source-node
+// channel. Manager must commit migration preparation authority before calling.
+func (h *ChannelHub) CaptureMigration(ctx context.Context, request protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
+	command, err := protocol.NewNodeChannelMigrationCaptureCommand(request)
+	if err != nil {
+		return nil, fmt.Errorf("build migration capture command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCapture, nil
+}
+
+// PreflightMigrationCPU is read-only evidence from the exact authenticated
+// node boot. The regional store still owns reservation and freshness checks.
+func (h *ChannelHub) PreflightMigrationCPU(ctx context.Context, request protocol.MigrationCPUPreflightRequest) (*protocol.MigrationCPUPreflight, error) {
+	command, err := protocol.NewNodeChannelMigrationCPUPreflightCommand(request)
+	if err != nil {
+		return nil, fmt.Errorf("build CPU preflight command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCPUPreflight, nil
 }
 
 // PausedRebase dispatches an exact three-device offline merge to one
@@ -692,7 +723,8 @@ func (h *ChannelHub) dispatch(
 }
 
 // connectionForCommand preserves exact-boot routing for every live operation.
-// Cleanup alone may use one authenticated successor boot after the old boot's
+// Cleanup and retention-only migration GC may use one authenticated successor
+// boot after the old boot's
 // stream has disappeared: the persistent node journal still binds the request
 // to the old incarnation, while reboot itself guarantees that its processes
 // and cgroups cannot remain live. More than one successor fails closed.
@@ -715,7 +747,7 @@ func (h *ChannelHub) connectionForCommand(
 			return connection, changed, false, nil
 		}
 	}
-	if kind != protocol.NodeChannelCommandCleanup {
+	if kind != protocol.NodeChannelCommandCleanup && kind != protocol.NodeChannelCommandMigrationSourceGC {
 		return nil, changed, false, nil
 	}
 	var successor *nodeChannelConnection
@@ -1000,4 +1032,168 @@ func nodeChannelRemoteError(message string, class protocol.NodeChannelErrorClass
 		base = errdefs.ErrUnavailable
 	}
 	return fmt.Errorf("node channel %s: %w", strings.TrimSpace(message), base)
+}
+
+// PublishMigration sends only a durably authorized source-publication request.
+// It grants no destination execution or source cleanup authority.
+func (h *ChannelHub) PublishMigration(ctx context.Context, request protocol.MigrationPublicationRequest) (*protocol.MigrationPublication, error) {
+	command, err := protocol.NewNodeChannelMigrationPublishCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationPublish, nil
+}
+
+// FenceMigrationSource requires a regionally committed fence command. The
+// response attests physical execution/writer absence, not total carrier cleanup.
+func (h *ChannelHub) FenceMigrationSource(ctx context.Context, request protocol.MigrationSourceFenceRequest) (*protocol.MigrationSourceFenceProof, error) {
+	command, err := protocol.NewNodeChannelMigrationFenceCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationFence, nil
+}
+
+// PrepareMigrationImage addresses only the reserved destination's authenticated
+// node boot. The regional preparation command must be committed first.
+func (h *ChannelHub) PrepareMigrationImage(ctx context.Context, request protocol.MigrationImagePrepareRequest) (*protocol.MigrationImagePrepared, error) {
+	command, err := protocol.NewNodeChannelMigrationImagePrepareCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationImagePrepare, nil
+}
+
+// FinalizeMigrationSource uses only an authenticated source-node channel.
+func (h *ChannelHub) FinalizeMigrationSource(ctx context.Context, request protocol.MigrationSourceFinalizeRequest) (*protocol.MigrationSourceFinalizeProof, error) {
+	command, err := protocol.NewNodeChannelMigrationFinalizeCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationFinalize, nil
+}
+
+func (h *ChannelHub) AcknowledgeMigrationSourceGC(ctx context.Context, request protocol.MigrationSourceGCRequest) (*protocol.MigrationSourceGCAcknowledgement, error) {
+	command, err := protocol.NewNodeChannelMigrationSourceGCCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationSourceGC, nil
+}
+
+// RecoverMigrationCapture cannot invoke the driver's checkpoint entry point.
+// The optional recovery capability binds the exact source boot and custody.
+func (h *ChannelHub) RecoverMigrationCapture(ctx context.Context, request protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
+	command, err := protocol.NewNodeChannelMigrationRecoverCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCapture, nil
+}
+
+func (h *ChannelHub) ReserveMigrationStaging(ctx context.Context, request protocol.MigrationStagingRequest) (*protocol.MigrationStagingReserved, error) {
+	command, err := protocol.NewNodeChannelMigrationStagingReserveCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationStagingReserved, nil
+}
+
+func (h *ChannelHub) ReleaseMigrationStaging(ctx context.Context, request protocol.MigrationStagingRequest) error {
+	command, err := protocol.NewNodeChannelMigrationStagingReleaseCommand(request)
+	if err != nil {
+		return err
+	}
+	_, err = h.dispatch(ctx, command)
+	return err
+}
+
+// StopFailedMigrationDestination delivers only the region's immutable failure
+// command to the exact authenticated target incarnation.
+func (h *ChannelHub) StopFailedMigrationDestination(ctx context.Context, request protocol.MigrationFailureRequest) (*protocol.MigrationFailureStopProof, error) {
+	command, err := protocol.NewNodeChannelMigrationFailureStopCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationFailureStop, nil
+}
+
+func (h *ChannelHub) CleanupFailedMigrationDestination(ctx context.Context, request protocol.MigrationFailureCleanupRequest) (*protocol.MigrationFailureCleanupProof, error) {
+	command, err := protocol.NewNodeChannelMigrationFailureCleanupCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationFailureCleanup, nil
+}
+
+func (h *ChannelHub) FinalizeFailedMigrationDestination(ctx context.Context, request protocol.MigrationFailureFinalizeRequest) (*protocol.MigrationFailureFinalizeProof, error) {
+	command, err := protocol.NewNodeChannelMigrationFailureFinalizeCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationFailureFinalize, nil
+}
+
+func (h *ChannelHub) CleanupFailedMigrationCapture(ctx context.Context, request protocol.MigrationCaptureFailureRequest) (*protocol.MigrationCaptureFailureProof, error) {
+	command, err := protocol.NewNodeChannelMigrationCaptureFailureCleanupCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCaptureFailureCleanup, nil
+}
+
+func (h *ChannelHub) FinalizeFailedMigrationCapture(ctx context.Context, request protocol.MigrationCaptureFailureFinalizeRequest) (*protocol.MigrationCaptureFailureFinalizeProof, error) {
+	command, err := protocol.NewNodeChannelMigrationCaptureFailureFinalizeCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCaptureFailureFinalize, nil
 }

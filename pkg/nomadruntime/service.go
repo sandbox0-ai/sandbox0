@@ -38,6 +38,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrationstaging"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadinventory"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -167,34 +168,39 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 type nodeRuntime struct {
-	runtime nodeRuntimeBackend
-	runner  Runsc
-	mounter Mounter
-	config  Config
-	logger  logger
+	migrationStaging           migrationStagingGuard
+	migrationContext           context.Context
+	migrationPublications      map[string]*migrationPublicationWorker
+	migrationImagePreparations map[string]*migrationImagePrepareWorker
+	runtime                    nodeRuntimeBackend
+	runner                     Runsc
+	mounter                    Mounter
+	config                     Config
+	logger                     logger
 
-	mu                    sync.Mutex
-	wg                    sync.WaitGroup
-	inflight              map[string]*reconciliationState
-	preempting            map[string]int
-	scanMu                sync.Mutex
-	recoveryRetries       map[string]*recoveryRetry
-	recoverySequence      uint64
-	periodicRecovery      int
-	periodicProofs        int
-	urgentRecovery        int
-	trigger               chan string
-	allocations           nomadAllocationSource
-	runtimeSlotNetwork    runtimeSlotNetworkControl
-	resourceCgroups       runtimeResourceCgroup
-	journal               *runtimeSlotJournal
-	registrationAuthority registrationAbortAuthority
-	registrationAfter     string
-	lastJournalPrune      time.Time
-	metricTargets         map[string]runtimeMetricBinding
-	clusterID             string
-	nodeID                string
-	nodeUID               string
+	mu                     sync.Mutex
+	wg                     sync.WaitGroup
+	inflight               map[string]*reconciliationState
+	preempting             map[string]int
+	scanMu                 sync.Mutex
+	recoveryRetries        map[string]*recoveryRetry
+	recoverySequence       uint64
+	periodicRecovery       int
+	periodicProofs         int
+	urgentRecovery         int
+	trigger                chan string
+	allocations            nomadAllocationSource
+	runtimeSlotNetwork     runtimeSlotNetworkControl
+	resourceCgroups        runtimeResourceCgroup
+	journal                *runtimeSlotJournal
+	registrationAuthority  registrationAbortAuthority
+	registrationAfter      string
+	migrationAdoptionAfter string
+	lastJournalPrune       time.Time
+	metricTargets          map[string]runtimeMetricBinding
+	clusterID              string
+	nodeID                 string
+	nodeUID                string
 }
 
 type reconciliationState struct {
@@ -581,12 +587,21 @@ func run(
 		nodeUID:         strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
 		resourceCgroups: resourceCgroups,
 	}
+	if config.MigrationStagingBytes != 0 {
+		guard, err := migrationstaging.Open(journal.migrationRoot, migrationstaging.Limits{ProjectID: config.MigrationStagingProjectID, Bytes: config.MigrationStagingBytes, Inodes: config.MigrationStagingInodes})
+		if err != nil {
+			logger.Error("migration staging quota unavailable; new migration writes disabled", "error", err)
+		} else {
+			daemon.migrationStaging = guard
+		}
+	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
 	registrationAuthority, err := newRegistrationAbortAuthority(config)
 	if err != nil {
 		return fmt.Errorf("create registration recovery authority: %w", err)
 	}
+	daemon.migrationContext = daemonCtx
 	daemon.registrationAuthority = registrationAuthority
 	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork, resourceCgroups)
 	if err != nil {
@@ -601,6 +616,11 @@ func run(
 	go func() {
 		defer daemon.wg.Done()
 		daemon.reconcileRegistrationLoop(daemonCtx)
+	}()
+	daemon.wg.Add(1)
+	go func() {
+		defer daemon.wg.Done()
+		daemon.reconcileMigrationAdoptionsLoop(daemonCtx)
 	}()
 	var nodeChannelErr <-chan error
 	if nodeChannelAgent != nil {
@@ -941,6 +961,18 @@ func (d *nodeRuntime) CleanupRuntimeSlot(
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("runtime slot cleanup is already in progress: %w", err)
 	}
 	defer d.endReconciliation(request.SlotID)
+	if request.WriterRetireKind == protocol.WriterRetireKindMigration {
+		if journalRecord == nil {
+			return protocol.NodeCleanupControlProof{}, errdefs.ErrFailedPrecondition
+		}
+		// Refresh after acquiring admission: source fencing may have
+		// invalidated execution while this request waited for the slot.
+		current, err := d.journal.BeginCleanup(request)
+		if err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
+		return d.cleanupJournaledRuntimeSlot(ctx, request, current, current.Migration.Finalization.RootFS.Digest)
+	}
 	if request.WriterGrantID == "" {
 		return d.cleanupGrantlessRuntimeSlot(ctx, request, *journalRecord)
 	}
@@ -1348,6 +1380,27 @@ func (d *nodeRuntime) cleanupRuntimeResourceCgroup(
 func (d *nodeRuntime) runtimeSlotStableMountPath(
 	registration RuntimeSlotRegistration,
 ) (string, error) {
+	// Inspect mountinfo before touching the mounted filesystem. After an owner
+	// exits, a detached NBD can leave an EIO-returning XFS/OverlayFS mount; its
+	// underlying carrier directory is still the identity needed for cleanup.
+	attached, err := hostMountAttached(registration.StableMount)
+	if err != nil {
+		return "", err
+	}
+	if attached {
+		resolved, err := stableMountCanonicalPath(registration.StableMount, d.config.RootFSConsumerMountRoot)
+		if err != nil {
+			return "", err
+		}
+		identity, err := stableMountUnderlyingIdentity(resolved)
+		if err != nil {
+			return "", err
+		}
+		if identity != registration.StableMountID {
+			return "", fmt.Errorf("runtime slot stable mount incarnation changed: %w", errdefs.ErrFailedPrecondition)
+		}
+		return resolved, nil
+	}
 	if _, err := os.Lstat(registration.StableMount); errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	} else if err != nil {
@@ -1360,21 +1413,7 @@ func (d *nodeRuntime) runtimeSlotStableMountPath(
 	if resolved != registration.StableMount {
 		return "", fmt.Errorf("runtime slot stable mount is not a canonical resolved path: %w", errdefs.ErrFailedPrecondition)
 	}
-	attached, err := hostMountAttached(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !attached {
-		return "", nil
-	}
-	stableMountID, err := stableMountIdentity(resolved)
-	if err != nil {
-		return "", err
-	}
-	if stableMountID != registration.StableMountID {
-		return "", fmt.Errorf("runtime slot stable mount incarnation changed: %w", errdefs.ErrFailedPrecondition)
-	}
-	return resolved, nil
+	return "", nil
 }
 
 func (d *nodeRuntime) fenceJournalRunsc(ctx context.Context, containerID string) error {
@@ -2093,6 +2132,18 @@ func crashOperationID(stage rootfshandoff.StageRequest) string {
 }
 
 func (d *nodeRuntime) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {
+	if handled, err := d.fenceMigrationDestination(ctx, session); handled || err != nil {
+		return err
+	}
+	capture, err := d.migrationCustodyForSession(session)
+	if err != nil {
+		return err
+	}
+	if capture != nil {
+		// An expired consumer or lost driver must not discard a captured image's
+		// filesystem. Fence execution only; migration owns publication/cleanup.
+		return d.stopMigrationSource(ctx, session, true)
+	}
 	if session.ExternalCrash {
 		_, err := d.runtime.ReclaimExternallyRetired(ctx, session.Stage)
 		return err

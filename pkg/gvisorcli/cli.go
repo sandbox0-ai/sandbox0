@@ -61,12 +61,13 @@ type RunscState struct {
 
 // Command shells out to an unmodified runsc binary.
 type Config struct {
-	Path       string
-	Root       string
-	Platform   string
-	Overlay2   string
-	FileAccess string
-	DirectFS   bool
+	CPULaunchCache *CPULaunchCache
+	Path           string
+	Root           string
+	Platform       string
+	Overlay2       string
+	FileAccess     string
+	DirectFS       bool
 }
 
 type Command struct {
@@ -75,6 +76,9 @@ type Command struct {
 
 // New returns the production stock-runsc adapter.
 func New(config Config) Runsc {
+	if config.CPULaunchCache == nil {
+		config.CPULaunchCache = NewCPULaunchCache()
+	}
 	return &Command{config: config}
 }
 

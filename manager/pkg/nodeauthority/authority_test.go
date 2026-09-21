@@ -99,7 +99,15 @@ func (fakeProber) ProbeCommandReady(context.Context, string, string) (*procdapi.
 	return nil, nil
 }
 
+func (fakeProber) MigrateRuntime(context.Context, string, procdapi.RuntimeMigrationRequest, string) (*procdapi.RuntimeMigrationResponse, error) {
+	return nil, nil
+}
+
 type fakeTokenGenerator struct{}
+
+func (fakeTokenGenerator) GenerateMigrationToken(procdapi.RuntimeMigrationRequest) (string, error) {
+	return "scoped", nil
+}
 
 func (fakeTokenGenerator) GenerateToken(string, string, string) (string, error) {
 	return "token", nil
@@ -126,6 +134,15 @@ func TestNewAssemblesSharedNodeAuthorityAndClaimPlanner(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.IsType(t, &runtimeslotclaim.Planner{}, planner)
+	require.NotNil(t, component.handovers)
+	require.NotNil(t, component.cancellations)
+	require.NotNil(t, component.sourceExecution)
+	require.NotNil(t, component.evacuation)
+	require.NotNil(t, component.preflights)
+	require.NotNil(t, component.sourceRecovery)
+	require.NotNil(t, component.staging)
+	require.NotNil(t, component.stagingRelease)
+	require.NotNil(t, component.destinations)
 	require.NoError(t, component.hub.Close())
 }
 

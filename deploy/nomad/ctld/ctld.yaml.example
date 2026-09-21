@@ -33,6 +33,11 @@ nomad_runtime:
   max_node_dirty_tail_bytes: 42949672960
   dirty_tail_retirement_reserve_bytes: 67108864
   nbd_devices: [${SANDBOX0_ROOTFS_NBD_DEVICES}]
+  # Operator-provisioned XFS project quota; see ../live-migration.md.
+  # All zero disables new migration image writes.
+  migration_staging_bytes: 0
+  migration_staging_project_id: 0
+  migration_staging_inodes: 0
   runtime_slot_journal_path: /var/lib/sandbox0/ctld/nomad/runtime-slots.db
   node_boot_id_file: /proc/sys/kernel/random/boot_id
   authority_url: ${SANDBOX0_MANAGER_AUTHORITY_URL}

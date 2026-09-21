@@ -88,6 +88,11 @@ func TestCPUSetContainsRequiresCanonicalSubset(t *testing.T) {
 		want   bool
 	}{
 		{parent: "0-7", child: "0-7", want: true},
+		{parent: "0,1,2,3", child: "0-3", want: true},
+		{parent: "0-1,2,3-5", child: "1-4", want: true},
+		{parent: "0,1,2,3", child: "0-1,2-3", want: true},
+		{parent: "0,1,3,4", child: "0-4", want: false},
+		{parent: "0,1,2", child: "0-3", want: false},
 		{parent: "0-3,8-11", child: "1-2,9-10", want: true},
 		{parent: "0-3,8-11", child: "2-8", want: false},
 		{parent: "0-3", child: "4", want: false},

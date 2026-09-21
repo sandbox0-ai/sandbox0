@@ -47,6 +47,8 @@ type LinuxRuntime struct {
 	sysBlockRoot string
 	mu           sync.Mutex
 	reserved     map[string]string
+	freezeMu     sync.Mutex
+	freezeFiles  map[string]*os.File
 }
 
 func NewLinuxRuntime(config LinuxRuntimeConfig) (*LinuxRuntime, error) {
@@ -325,27 +327,60 @@ func (r *LinuxRuntime) MountXFS(devicePath, target string) error {
 }
 
 func (r *LinuxRuntime) FreezeXFS(target string) error {
-	return ioctlXFSFreeze(target, fsIOCFreeze, "freeze")
+	// Session operations serialize each mount path. Retain the open directory
+	// across freeze so a later device failure cannot prevent thaw by making a
+	// fresh XFS open return EIO. The map contains only outstanding barriers.
+	r.freezeMu.Lock()
+	file := r.freezeFiles[target]
+	r.freezeMu.Unlock()
+	if file == nil {
+		fd, err := unix.Open(target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return fmt.Errorf("open XFS root to freeze: %w", err)
+		}
+		file = os.NewFile(uintptr(fd), target)
+		r.freezeMu.Lock()
+		if r.freezeFiles == nil {
+			r.freezeFiles = make(map[string]*os.File)
+		}
+		r.freezeFiles[target] = file
+		r.freezeMu.Unlock()
+	}
+	return unix.IoctlSetPointerInt(int(file.Fd()), fsIOCFreeze, 0)
 }
 
 func (r *LinuxRuntime) ThawXFS(target string) error {
-	err := ioctlXFSFreeze(target, fsIOCThaw, "thaw")
+	r.freezeMu.Lock()
+	file := r.freezeFiles[target]
+	r.freezeMu.Unlock()
+	var err error
+	if file != nil {
+		err = unix.IoctlSetPointerInt(int(file.Fd()), fsIOCThaw, 0)
+	} else {
+		err = ioctlXFSFreeze(target, fsIOCThaw, "thaw")
+	}
 	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-		return nil
+		err = nil
+	}
+	if err == nil && file != nil {
+		r.freezeMu.Lock()
+		delete(r.freezeFiles, target)
+		r.freezeMu.Unlock()
+		err = file.Close()
 	}
 	return err
 }
 
 func ioctlXFSFreeze(target string, request uint, operation string) error {
-	if err := requireTrustedDirectory(target); err != nil {
-		return err
-	}
-	file, err := os.Open(target)
+	// XFS getattr returns EIO after device loss, but thaw must still drop the
+	// kernel's freeze reference before unmount. Validate the directory and final
+	// symlink exclusion in open itself instead of depending on a prior stat.
+	fd, err := unix.Open(target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("open XFS root to %s: %w", operation, err)
 	}
-	defer file.Close()
-	if err := unix.IoctlSetPointerInt(int(file.Fd()), request, 0); err != nil {
+	defer unix.Close(fd)
+	if err := unix.IoctlSetPointerInt(fd, request, 0); err != nil {
 		return fmt.Errorf("%s XFS root %s: %w", operation, target, err)
 	}
 	return nil

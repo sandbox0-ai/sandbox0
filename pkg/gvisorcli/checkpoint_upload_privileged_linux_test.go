@@ -106,7 +106,7 @@ func startCheckpointUploadProbe(t *testing.T, ctx context.Context, directory str
 				if peer != nil {
 					uploadErr = peer.stop()
 				}
-				if err := <-done; err != nil && !errors.Is(err, context.Canceled) && !(peer != nil && errors.Is(err, io.ErrClosedPipe)) {
+				if err := <-done; err != nil && !errors.Is(err, context.Canceled) && (peer == nil || !errors.Is(err, io.ErrClosedPipe)) {
 					uploadErr = errors.Join(uploadErr, err)
 				}
 			})

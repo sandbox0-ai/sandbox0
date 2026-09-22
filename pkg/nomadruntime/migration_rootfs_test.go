@@ -73,7 +73,8 @@ func TestMigrationRootFSInventoryOverlapJoinsBeforeReleasingCustody(t *testing.T
 			case <-ctx.Done():
 				t.Fatal("RootFS sealing did not overlap the blocked inventory")
 			}
-			if outcome == "success" || outcome == "inventory failure" {
+			switch outcome {
+			case "success", "inventory failure":
 				select {
 				case err := <-done:
 					t.Fatalf("custody released before inventory joined: %v", err)
@@ -81,7 +82,7 @@ func TestMigrationRootFSInventoryOverlapJoinsBeforeReleasingCustody(t *testing.T
 				}
 				require.False(t, d.beginReconciliation(capture.Request.Target.SlotID, nil))
 				close(r.releasePrime)
-			} else if outcome == "cancellation" {
+			case "cancellation":
 				cancel()
 			}
 			err := <-done

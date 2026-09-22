@@ -160,13 +160,13 @@ func (s *checkpointPeerNetServer) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	cert := r.TLS.PeerCertificates[0]
 	if digest.FromBytes(cert.Raw).String() != s.pin || time.Now().Before(cert.NotBefore) || time.Now().After(cert.NotAfter) {
-		http.Error(w, "untrusted fixture client", 403)
+		http.Error(w, "untrusted fixture client", http.StatusForbidden)
 		return
 	}
 	defer r.Body.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fail := func(err error) { http.Error(w, err.Error(), 409) }
+	fail := func(err error) { http.Error(w, err.Error(), http.StatusConflict) }
 	if r.URL.Path == "/shutdown" {
 		if s.session != nil {
 			fail(errors.New("fixture still owned"))

@@ -22,7 +22,9 @@ sudo systemctl restart docker
 # before pulling large agent images into the runner's Docker image store.
 docker buildx prune --all --force
 docker pull "${image}"
+# Match Sandbox0's executable ephemeral mounts. Docker's own --tmpfs default
+# includes noexec, which prevents executing binaries in nested vfs image layers.
 timeout 600 docker run --name "${name}" --runtime=runsc --cap-add=ALL \
-  --memory=4g --tmpfs /var/lib/docker:rw,nosuid,size=1g \
+  --memory=4g --tmpfs /var/lib/docker:rw,exec,nosuid,size=1g \
   --mount "type=bind,src=$(pwd)/tools/docker-in-sandbox/smoke.sh,dst=/tmp/dind-smoke.sh,readonly" \
   "${image}" bash /tmp/dind-smoke.sh

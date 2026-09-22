@@ -33,7 +33,7 @@ func TestNomadAllocationTerminalUsesClientExecutionTruth(t *testing.T) {
 	}
 }
 
-func newInventoryTestClient(t *testing.T, handler http.HandlerFunc) *NomadClient {
+func newInventoryTestClient(t testing.TB, handler http.HandlerFunc) *NomadClient {
 	t.Helper()
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)

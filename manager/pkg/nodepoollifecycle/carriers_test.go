@@ -25,12 +25,14 @@ func TestCarrierPlansAreCASFencedAndPreserveRuntimeFields(t *testing.T) {
 	current := map[string]any{"ID": "warm", "Type": "system", "NodePool": "sandbox0", "Namespace": "default", "JobModifyIndex": 1,
 		"Meta": jobMeta, "TaskGroups": groups, "UnrelatedJobField": "preserved"}
 	posts := 0
+	jobReads := 0
 	conflict := false
 	client := newInventoryTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs":
 			require.NoError(t, json.NewEncoder(w).Encode([]map[string]any{{"ID": "warm"}}))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/job/warm":
+			jobReads++
 			require.NoError(t, json.NewEncoder(w).Encode(current))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/node/"+testCarrierNode:
 			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ID": testCarrierNode, "NodePool": "sandbox0", "Meta": map[string]string{"sandbox0_dedicated": "true", "sandbox0_standard_carriers": "126"}}))
@@ -65,8 +67,10 @@ func TestCarrierPlansAreCASFencedAndPreserveRuntimeFields(t *testing.T) {
 	}
 	require.NoError(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 10, allowed))
 	require.Equal(t, 1, posts)
+	require.Equal(t, 1, jobReads, "validate and apply one exact job snapshot per attempt")
 	require.NoError(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 10, allowed))
 	require.Equal(t, 1, posts, "lost response retry is a no-op")
+	require.Equal(t, 2, jobReads, "each retry must read a fresh snapshot")
 	require.ErrorContains(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 9, allowed), "stale")
 	require.ErrorContains(t, client.ApplyCarrierPlan(t.Context(), testCarrierNode, 10, append(allowed, "warm-9")), "conflicting intent")
 	require.Equal(t, "preserved", current["UnrelatedJobField"])

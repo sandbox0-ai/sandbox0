@@ -79,31 +79,39 @@ func (n *NomadClient) carrierJobs(ctx context.Context) ([]map[string]json.RawMes
 }
 
 func (n *NomadClient) CarrierCatalog(ctx context.Context, node string) ([]string, error) {
+	catalog, _, err := n.carrierCatalog(ctx, node)
+	return catalog, err
+}
+
+// carrierCatalog returns the validated jobs with their catalog so a resize uses
+// the same snapshot for validation and CAS updates. Refetching the full family
+// here doubles serialization and network work on every pending resize retry.
+func (n *NomadClient) carrierCatalog(ctx context.Context, node string) ([]string, []map[string]json.RawMessage, error) {
 	standard, privileged := 512, 64
 	if node != "" {
 		id, err := uuid.Parse(node)
 		if err != nil || id.String() != node {
-			return nil, fmt.Errorf("invalid carrier node identity")
+			return nil, nil, fmt.Errorf("invalid carrier node identity")
 		}
 		if _, reserved, identityErr := carrierEpochMember(id); identityErr != nil || reserved {
-			return nil, fmt.Errorf("carrier node identity is reserved")
+			return nil, nil, fmt.Errorf("carrier node identity is reserved")
 		}
 		var host struct {
 			ID, NodePool string
 			Meta         map[string]string
 		}
 		if err := n.request(ctx, http.MethodGet, "/v1/node/"+node, nil, &host); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if host.ID != node || host.NodePool != "sandbox0" || host.Meta["sandbox0_dedicated"] != "true" {
-			return nil, fmt.Errorf("carrier node is outside dedicated pool")
+			return nil, nil, fmt.Errorf("carrier node is outside dedicated pool")
 		}
 		standard, privileged = 6, 2
 		for key, destination := range map[string]*int{"sandbox0_standard_carriers": &standard, "sandbox0_privileged_carriers": &privileged} {
 			if value := host.Meta[key]; value != "" {
 				parsed, err := strconv.Atoi(value)
 				if err != nil || parsed < 0 || parsed > 512 {
-					return nil, fmt.Errorf("invalid node carrier ceiling")
+					return nil, nil, fmt.Errorf("invalid node carrier ceiling")
 				}
 				*destination = parsed
 			}
@@ -111,22 +119,22 @@ func (n *NomadClient) CarrierCatalog(ctx context.Context, node string) ([]string
 	}
 	jobs, err := n.carrierJobs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := []string{}
 	seen := map[string]bool{}
 	for _, raw := range jobs {
 		var groups []carrierGroup
 		if err := json.Unmarshal(raw["TaskGroups"], &groups); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, g := range groups {
 			class, index, err := carrierpool.GroupIndex(g.Name)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if seen[g.Name] {
-				return nil, fmt.Errorf("duplicate adaptive carrier group")
+				return nil, nil, fmt.Errorf("duplicate adaptive carrier group")
 			}
 			seen[g.Name] = true
 			extra := index >= 6
@@ -137,20 +145,20 @@ func (n *NomadClient) CarrierCatalog(ctx context.Context, node string) ([]string
 				if len(g.Constraints) != 2 || g.Constraints[0].LTarget != "${meta.sandbox0_"+class+"_carriers}" ||
 					g.Constraints[0].Operand != ">=" || g.Constraints[0].RTarget != strconv.Itoa(index+1) ||
 					g.Constraints[1].LTarget != carrierNodeAttribute || g.Constraints[1].Operand != "set_contains_any" {
-					return nil, fmt.Errorf("adaptive carrier group lost its capacity or membership constraint")
+					return nil, nil, fmt.Errorf("adaptive carrier group lost its capacity or membership constraint")
 				}
 				if _, err := carrierMembers(g.Constraints[1].RTarget); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 			} else if len(g.Constraints) != 0 {
-				return nil, fmt.Errorf("enrollment anchor changed")
+				return nil, nil, fmt.Errorf("enrollment anchor changed")
 			}
 			if !extra || (class == "standard" && index < standard) || (class == "privileged" && index < privileged) {
 				result = append(result, g.Name)
 			}
 		}
 	}
-	return result, nil
+	return result, jobs, nil
 }
 
 func carrierMembers(value string) (map[string]bool, error) {
@@ -263,7 +271,7 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 	if anchorsOnly {
 		catalogNode = ""
 	}
-	catalog, err := n.CarrierCatalog(ctx, catalogNode)
+	catalog, jobs, err := n.carrierCatalog(ctx, catalogNode)
 	if err != nil {
 		return err
 	}
@@ -275,10 +283,6 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 		if !known[g] {
 			return fmt.Errorf("carrier plan exceeds node placement ceiling")
 		}
-	}
-	jobs, err := n.carrierJobs(ctx)
-	if err != nil {
-		return err
 	}
 	allowed := map[string]bool{}
 	for _, g := range groups {

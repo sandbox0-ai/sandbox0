@@ -63,6 +63,13 @@ jobs:
           tags: ${{ env.IMAGE_REPO }}:${{ inputs.version }}-${{ matrix.arch }}
           provenance: false
 
+      - name: Verify Docker in stock gVisor
+        if: inputs.dockerfile == 'manager/procd/Dockerfile.default' || inputs.dockerfile == 'manager/procd/Dockerfile.coding-agent' || inputs.dockerfile == 'manager/procd/Dockerfile.dind'
+        timeout-minutes: 15
+        env:
+          IMAGE: ${{ env.IMAGE_REPO }}:${{ inputs.version }}-${{ matrix.arch }}
+        run: bash tools/docker-in-sandbox/ci-smoke.sh "$IMAGE"
+
   manifest:
     name: Create multi-arch manifest
     runs-on: ubuntu-latest

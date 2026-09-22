@@ -335,6 +335,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			SELECT cluster_id, node_id, node_uid,
 				COUNT(*) FILTER (
 					WHERE state = 'fastpath_ready' AND heartbeat_expires_at > NOW()
+						AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=runtime_slots.slot_id)
 						AND EXISTS (
 							SELECT 1 FROM live_capacity AS current_capacity
 							WHERE current_capacity.cluster_id = runtime_slots.cluster_id
@@ -447,6 +448,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 					AND capacity.node_boot_id = slot.node_boot_id
 				WHERE slot.cluster_id = $1
 					AND slot.state = 'fastpath_ready'
+					AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
 					AND slot.heartbeat_expires_at > NOW()
 			),
 			(
@@ -462,7 +464,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 						(slot.state = 'fastpath_ready' AND slot.heartbeat_expires_at > NOW())
 						OR EXISTS (
 							SELECT 1 FROM manager.runtime_resource_leases AS active_lease
-							WHERE active_lease.lease_id = slot.resource_lease_id
+							WHERE active_lease.slot_id = slot.slot_id
 								AND active_lease.lease_state = 'active'
 						)
 					)
@@ -882,6 +884,7 @@ func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
 						AND instance.node_uid = slot.node_uid
 					WHERE instance.pool_id = $1 AND instance.provider_instance_id = $2
 						AND slot.state = 'fastpath_ready'
+						AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
 						AND slot.heartbeat_expires_at > NOW()
 						AND capacity.heartbeat_expires_at > NOW()
 				) >= $3
@@ -921,6 +924,7 @@ func (s *PGSandboxStore) MarkRuntimeNodeProviderReady(
 					AND slot.node_id = instance.nomad_node_id
 					AND slot.node_uid = instance.node_uid
 					AND slot.state = 'fastpath_ready'
+					AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
 					AND slot.heartbeat_expires_at > NOW()
 					AND capacity.heartbeat_expires_at > NOW()
 			) >= $3

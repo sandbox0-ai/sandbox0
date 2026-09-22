@@ -59,6 +59,17 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		CapacityWait: runtimeslotclaim.CapacityWaitConfig{Timeout: claim.CapacityWaitTimeout.Duration, MaxPending: claim.CapacityWaitMaxPending, MaxPendingPerTeam: claim.CapacityWaitMaxPendingPerTeam},
 		CapacityWake: deps.capacityWake,
 		Prober:       deps.prober, TokenGenerator: deps.tokenGenerator, Observer: deps.observer,
+		MigrationObserver: func(observation runtimeslotclaim.Observation) {
+			if deps.logger == nil {
+				return
+			}
+			fields := []zap.Field{zap.String("operation_id", observation.OperationID),
+				zap.Bool("success", observation.Succeeded), zap.Int64("duration_us", observation.Duration.Microseconds())}
+			for _, phase := range observation.Phases {
+				fields = append(fields, zap.Int64(phase.Phase+"_us", phase.Duration.Microseconds()))
+			}
+			deps.logger.Info("Migration destination planning timing", fields...)
+		},
 		WriterTokenKey: writerTokenKey, ClaimTTL: claim.ClaimTTL.Duration,
 		SLO: claim.SLO.Duration, Now: deps.now,
 		DemandPoolID: demandPoolID(cfg), DemandTTL: cfg.NodePoolAutoscaler.DemandTTL.Duration,

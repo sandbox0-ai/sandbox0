@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -66,7 +67,16 @@ func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *intern
 	}
 	if claims != nil {
 		opts.Audit = claims.Audit
-	} else if authCtx != nil && strings.TrimSpace(authCtx.OperationID) != "" {
+	} else if authCtx != nil {
+		// Direct public ingress owns its operation identity even when audit
+		// delivery is disabled. Manager lifecycle transactions require this
+		// signed identity independently of the optional audit backend.
+		if strings.TrimSpace(authCtx.OperationID) == "" {
+			authCtx.OperationID = uuid.NewString()
+		}
+		if strings.TrimSpace(authCtx.RequestID) == "" {
+			authCtx.RequestID = authCtx.OperationID
+		}
 		principal := authCtx.Principal()
 		opts.Audit = &internalauth.AuditContext{
 			Actor: internalauth.AuditActor{

@@ -44,6 +44,11 @@ func (j *runtimeSlotJournal) registrationAbortCandidates(after string, now time.
 		}
 		for scanned := 0; key != nil && scanned < registrationAbortScanLimit; scanned++ {
 			next = string(key)
+			fingerprint, excluded := j.registrationScanExclusions.contains(value)
+			if excluded {
+				key, value = cursor.Next()
+				continue
+			}
 			record, err := decodeRuntimeSlotJournalRecord(value)
 			if err != nil {
 				return err
@@ -51,6 +56,12 @@ func (j *runtimeSlotJournal) registrationAbortCandidates(after string, now time.
 			created, err := time.Parse(time.RFC3339Nano, record.CreatedAt)
 			if err != nil {
 				return err
+			}
+			// A young, unacknowledged registration can become eligible solely
+			// through time passing, so it must never enter this exclusion cache.
+			if record.RegionalRegistrationObserved || record.RegistrationAbortAcknowledged ||
+				(record.Cleanup != nil && !isRegistrationAbort(record)) {
+				j.registrationScanExclusions.remember(fingerprint)
 			}
 			if !record.RegionalRegistrationObserved && !record.RegistrationAbortAcknowledged &&
 				(record.Cleanup == nil || isRegistrationAbort(record)) && !created.Add(registrationAbortGrace).After(now) {

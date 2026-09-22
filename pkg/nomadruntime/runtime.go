@@ -37,12 +37,19 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	slotprotocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 // rootfsRuntime owns the node-local NBD/XFS/Overlay session inside the
 // node-scoped ctld Nomad runtime. The task driver uses Runtime over Unix RPC.
 type rootfsRuntime struct {
+	migrationUploadMu    sync.Mutex
+	migrationUploads     map[string]migrationCaptureUploadCache
+	migrationInventoryMu sync.Mutex
+	migrationInventories map[string]runtimecheckpoint.LocalImageInventory
+
+	checkpoints       *runtimecheckpoint.Store
 	sessions          *rootfssession.Manager
 	authority         rootFSWriterAuthority
 	info              RuntimeInfo
@@ -304,6 +311,10 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS object store: %w", err)
 	}
+	checkpoints, err := runtimecheckpoint.New(store, runtimecheckpoint.MaxImageBytes)
+	if err != nil {
+		return nil, err
+	}
 	conditional, ok := store.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
 		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", store)
@@ -374,7 +385,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		authority = client
 	}
 	return &rootfsRuntime{
-		sessions: sessions, authority: authority, info: runtimeInfoFromConfig(*config), logger: logger,
+		checkpoints: checkpoints, sessions: sessions, authority: authority, info: runtimeInfoFromConfig(*config), logger: logger,
 		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),
 		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),

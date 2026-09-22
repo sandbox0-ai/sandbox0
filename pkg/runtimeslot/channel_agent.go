@@ -50,6 +50,72 @@ type NodeChannelExecutor interface {
 	Cleanup(context.Context, NodeChannelTarget, NodeCleanupControlRequest) (NodeCleanupControlProof, error)
 }
 
+type NodeChannelMigrationCapturePeerExecutor interface {
+	PrepareMigrationCapturePeer(context.Context, MigrationCapturePeerRequest) (*MigrationCapturePeerPrepared, error)
+}
+
+type NodeChannelMigrationImagePrefetchExecutor interface {
+	PrefetchMigrationImage(context.Context, MigrationImagePrefetchRequest) (*MigrationImagePrefetched, error)
+}
+
+type NodeChannelMigrationImagePrepareExecutor interface {
+	PrepareMigrationImage(context.Context, MigrationImagePrepareRequest) (*MigrationImagePrepared, error)
+}
+
+type NodeChannelMigrationSourceGCExecutor interface {
+	AcknowledgeMigrationSourceGC(context.Context, MigrationSourceGCRequest) (*MigrationSourceGCAcknowledgement, error)
+}
+
+type NodeChannelMigrationFinalizeExecutor interface {
+	FinalizeMigrationSource(context.Context, MigrationSourceFinalizeRequest) (*MigrationSourceFinalizeProof, error)
+}
+
+type NodeChannelMigrationCaptureFailureExecutor interface {
+	CleanupFailedMigrationCapture(context.Context, MigrationCaptureFailureRequest) (*MigrationCaptureFailureProof, error)
+	FinalizeFailedMigrationCapture(context.Context, MigrationCaptureFailureFinalizeRequest) (*MigrationCaptureFailureFinalizeProof, error)
+}
+
+type NodeChannelMigrationFailureExecutor interface {
+	StopFailedMigrationDestination(context.Context, MigrationFailureRequest) (*MigrationFailureStopProof, error)
+}
+
+type NodeChannelMigrationFailureCleanupExecutor interface {
+	CleanupFailedMigrationDestination(context.Context, MigrationFailureCleanupRequest) (*MigrationFailureCleanupProof, error)
+}
+
+type NodeChannelMigrationFailureFinalizeExecutor interface {
+	FinalizeFailedMigrationDestination(context.Context, MigrationFailureFinalizeRequest) (*MigrationFailureFinalizeProof, error)
+}
+
+type NodeChannelMigrationFenceExecutor interface {
+	FenceMigrationSource(context.Context, MigrationSourceFenceRequest) (*MigrationSourceFenceProof, error)
+}
+
+type NodeChannelMigrationPublicationPlanExecutor interface {
+	PlanMigrationPublication(context.Context, MigrationPublicationRequest) (*MigrationPublicationPlan, error)
+}
+
+type NodeChannelMigrationPublishExecutor interface {
+	PublishMigration(context.Context, MigrationPublicationRequest) (*MigrationPublication, error)
+}
+
+type NodeChannelMigrationCaptureExecutor interface {
+	CaptureMigration(context.Context, MigrationCaptureRequest) (*MigrationCapture, error)
+}
+
+type NodeChannelMigrationRecoveryExecutor interface {
+	RecoverMigrationCapture(context.Context, MigrationCaptureRequest) (*MigrationCapture, error)
+}
+
+type NodeChannelMigrationStagingExecutor interface {
+	ReserveMigrationStaging(context.Context, MigrationStagingRequest) (*MigrationStagingReserved, error)
+	ReleaseMigrationStaging(context.Context, MigrationStagingRequest) error
+}
+
+type NodeChannelMigrationCPUPreflightExecutor interface {
+	PreflightMigrationCPU(context.Context, MigrationCPUPreflightRequest) (*MigrationCPUPreflight, error)
+}
+
 // NodeChannelRunningForkExecutor owns the live XFS freeze/checkpoint path. It
 // is optional during rolling upgrades and advertised independently.
 type NodeChannelRunningForkExecutor interface {
@@ -84,21 +150,37 @@ type NodeChannelNetworkExecutor interface {
 // NodeChannelAgentConfig configures one node-initiated mTLS command stream.
 // Certificates, CA, boot ID, and bearer token are reloaded on reconnect.
 type NodeChannelAgentConfig struct {
-	BaseURL               string
-	CAFile                string
-	ClientCertFile        string
-	ClientKeyFile         string
-	TokenFile             string
-	PeerURISAN            string
-	ClusterID             string
-	NodeID                string
-	NodeUID               string
-	NodeBootIDFile        string
-	Executor              NodeChannelExecutor
-	PlannedRetireExecutor NodeChannelPlannedRetireExecutor
-	RunningForkExecutor   NodeChannelRunningForkExecutor
-	PausedRebaseExecutor  NodeChannelPausedRebaseExecutor
-	NetworkExecutor       NodeChannelNetworkExecutor
+	BaseURL                          string
+	CAFile                           string
+	ClientCertFile                   string
+	ClientKeyFile                    string
+	TokenFile                        string
+	PeerURISAN                       string
+	ClusterID                        string
+	NodeID                           string
+	NodeUID                          string
+	NodeBootIDFile                   string
+	Executor                         NodeChannelExecutor
+	PlannedRetireExecutor            NodeChannelPlannedRetireExecutor
+	RunningForkExecutor              NodeChannelRunningForkExecutor
+	PausedRebaseExecutor             NodeChannelPausedRebaseExecutor
+	NetworkExecutor                  NodeChannelNetworkExecutor
+	MigrationImagePrepareExecutor    NodeChannelMigrationImagePrepareExecutor
+	MigrationImagePrefetchExecutor   NodeChannelMigrationImagePrefetchExecutor
+	MigrationCapturePeerExecutor     NodeChannelMigrationCapturePeerExecutor
+	MigrationFailureExecutor         NodeChannelMigrationFailureExecutor
+	MigrationFailureCleanupExecutor  NodeChannelMigrationFailureCleanupExecutor
+	MigrationFailureFinalizeExecutor NodeChannelMigrationFailureFinalizeExecutor
+	MigrationCaptureFailureExecutor  NodeChannelMigrationCaptureFailureExecutor
+	MigrationFenceExecutor           NodeChannelMigrationFenceExecutor
+	MigrationFinalizeExecutor        NodeChannelMigrationFinalizeExecutor
+	MigrationSourceGCExecutor        NodeChannelMigrationSourceGCExecutor
+	MigrationPublishExecutor         NodeChannelMigrationPublishExecutor
+	MigrationPublicationPlanExecutor NodeChannelMigrationPublicationPlanExecutor
+	MigrationCaptureExecutor         NodeChannelMigrationCaptureExecutor
+	MigrationCPUPreflightExecutor    NodeChannelMigrationCPUPreflightExecutor
+	MigrationRecoveryExecutor        NodeChannelMigrationRecoveryExecutor
+	MigrationStagingExecutor         NodeChannelMigrationStagingExecutor
 
 	OperationTimeout    time.Duration
 	RunningForkTimeout  time.Duration
@@ -314,6 +396,54 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	if a.config.PausedRebaseExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandPausedRebase)
 	}
+	if a.config.MigrationCaptureExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationCapture)
+	}
+	if a.config.MigrationPublishExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationPublish)
+	}
+	if a.config.MigrationPublicationPlanExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationPublicationPlan)
+	}
+	if a.config.MigrationFenceExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationFence)
+	}
+	if a.config.MigrationImagePrepareExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationImagePrepare)
+	}
+	if a.config.MigrationImagePrefetchExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationImagePrefetch)
+	}
+	if a.config.MigrationCapturePeerExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationCapturePeer)
+	}
+	if a.config.MigrationFinalizeExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationFinalize)
+	}
+	if a.config.MigrationSourceGCExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationSourceGC)
+	}
+	if a.config.MigrationCPUPreflightExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationCPUPreflight)
+	}
+	if a.config.MigrationRecoveryExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationRecover)
+	}
+	if a.config.MigrationStagingExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease)
+	}
+	if a.config.MigrationFailureExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationFailureStop)
+	}
+	if a.config.MigrationFailureCleanupExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationFailureCleanup)
+	}
+	if a.config.MigrationFailureFinalizeExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationFailureFinalize)
+	}
+	if a.config.MigrationCaptureFailureExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize)
+	}
 	capabilities = append(capabilities, NodeChannelCommandCleanup)
 	hello := NodeChannelHello{
 		Version: NodeChannelVersion, AgentInstanceID: a.agentInstanceID,
@@ -365,11 +495,11 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 		if err := decodeNodeChannelMessage(payload, &command); err != nil {
 			return connectedAt, fmt.Errorf("decode node channel command: %w: %w", err, errdefs.ErrUnavailable)
 		}
-		// A successor boot may attest cleanup of an older incarnation through
+		// A successor boot may attest cleanup or acknowledge retention of an older incarnation through
 		// the persistent node journal. Every operation that can create or mutate
 		// a live runtime remains bound to the exact current boot.
 		bootMatches := command.Target.NodeBootID == hello.NodeBootID ||
-			command.Kind == NodeChannelCommandCleanup
+			command.Kind == NodeChannelCommandCleanup || command.Kind == NodeChannelCommandMigrationSourceGC
 		if err := command.Validate(); err != nil || !hello.Supports(command.Kind) ||
 			command.Target.ClusterID != hello.ClusterID || command.Target.NodeID != hello.NodeID ||
 			command.Target.NodeUID != hello.NodeUID || !bootMatches {
@@ -403,7 +533,9 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	result := NodeChannelResult{Version: NodeChannelVersion, RequestID: command.RequestID, Kind: command.Kind}
 	timeout := a.config.OperationTimeout
 	switch command.Kind {
-	case NodeChannelCommandRunningFork:
+	case NodeChannelCommandMigrationCPUPreflight:
+		timeout = MigrationCPUPreflightTimeout
+	case NodeChannelCommandMigrationRecover, NodeChannelCommandRunningFork, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationCapturePeer, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize:
 		timeout = a.config.RunningForkTimeout
 	case NodeChannelCommandPausedRebase:
 		timeout = a.config.PausedRebaseTimeout
@@ -412,6 +544,170 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	defer cancel()
 	var err error
 	switch command.Kind {
+	case NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease:
+		if a.config.MigrationStagingExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		if command.Kind == NodeChannelCommandMigrationStagingReserve {
+			result.MigrationStagingReserved, err = a.config.MigrationStagingExecutor.ReserveMigrationStaging(operationCtx, *command.MigrationStaging)
+			if err != nil {
+				result.MigrationStagingReserved = nil
+			}
+		} else {
+			err = a.config.MigrationStagingExecutor.ReleaseMigrationStaging(operationCtx, *command.MigrationStaging)
+			if err == nil {
+				digest, digestErr := command.MigrationStaging.Digest()
+				err = digestErr
+				if err == nil {
+					result.MigrationStagingReleased = &MigrationStagingReleased{RequestDigest: digest}
+				}
+			}
+		}
+	case NodeChannelCommandMigrationRecover:
+		if a.config.MigrationRecoveryExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationCapture, err = a.config.MigrationRecoveryExecutor.RecoverMigrationCapture(operationCtx, *command.MigrationCapture)
+		if err != nil {
+			result.MigrationCapture = nil
+		}
+	case NodeChannelCommandMigrationCPUPreflight:
+		if a.config.MigrationCPUPreflightExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationCPUPreflight, err = a.config.MigrationCPUPreflightExecutor.PreflightMigrationCPU(operationCtx, *command.MigrationCPUPreflight)
+		if err != nil {
+			result.MigrationCPUPreflight = nil
+		}
+	case NodeChannelCommandMigrationSourceGC:
+		if a.config.MigrationSourceGCExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationSourceGC, err = a.config.MigrationSourceGCExecutor.AcknowledgeMigrationSourceGC(operationCtx, *command.MigrationSourceGC)
+		if err != nil {
+			result.MigrationSourceGC = nil
+		}
+	case NodeChannelCommandMigrationFinalize:
+		if a.config.MigrationFinalizeExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationFinalize, err = a.config.MigrationFinalizeExecutor.FinalizeMigrationSource(operationCtx, *command.MigrationFinalize)
+		if err != nil {
+			result.MigrationFinalize = nil
+		}
+	case NodeChannelCommandMigrationCapturePeer:
+		if a.config.MigrationCapturePeerExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationCapturePeer, err = a.config.MigrationCapturePeerExecutor.PrepareMigrationCapturePeer(operationCtx, *command.MigrationCapturePeer)
+		if err != nil {
+			result.MigrationCapturePeer = nil
+		}
+	case NodeChannelCommandMigrationImagePrefetch:
+		if a.config.MigrationImagePrefetchExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationImagePrefetch, err = a.config.MigrationImagePrefetchExecutor.PrefetchMigrationImage(operationCtx, *command.MigrationImagePrefetch)
+		if err != nil {
+			result.MigrationImagePrefetch = nil
+		}
+	case NodeChannelCommandMigrationImagePrepare:
+		if a.config.MigrationImagePrepareExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationImagePrepare, err = a.config.MigrationImagePrepareExecutor.PrepareMigrationImage(operationCtx, *command.MigrationImagePrepare)
+		if err != nil {
+			result.MigrationImagePrepare = nil
+		}
+	case NodeChannelCommandMigrationCaptureFailureCleanup:
+		if a.config.MigrationCaptureFailureExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationCaptureFailureCleanup, err = a.config.MigrationCaptureFailureExecutor.CleanupFailedMigrationCapture(operationCtx, *command.MigrationCaptureFailureCleanup)
+		if err != nil {
+			result.MigrationCaptureFailureCleanup = nil
+		}
+	case NodeChannelCommandMigrationCaptureFailureFinalize:
+		if a.config.MigrationCaptureFailureExecutor == nil {
+			err = errdefs.ErrUnavailable
+			break
+		}
+		result.MigrationCaptureFailureFinalize, err = a.config.MigrationCaptureFailureExecutor.FinalizeFailedMigrationCapture(operationCtx, *command.MigrationCaptureFailureFinalize)
+		if err != nil {
+			result.MigrationCaptureFailureFinalize = nil
+		}
+	case NodeChannelCommandMigrationFailureFinalize:
+		if a.config.MigrationFailureFinalizeExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationFailureFinalize, err = a.config.MigrationFailureFinalizeExecutor.FinalizeFailedMigrationDestination(operationCtx, *command.MigrationFailureFinalize)
+		if err != nil {
+			result.MigrationFailureFinalize = nil
+		}
+	case NodeChannelCommandMigrationFailureCleanup:
+		if a.config.MigrationFailureCleanupExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationFailureCleanup, err = a.config.MigrationFailureCleanupExecutor.CleanupFailedMigrationDestination(operationCtx, *command.MigrationFailureCleanup)
+		if err != nil {
+			result.MigrationFailureCleanup = nil
+		}
+	case NodeChannelCommandMigrationFailureStop:
+		if a.config.MigrationFailureExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationFailureStop, err = a.config.MigrationFailureExecutor.StopFailedMigrationDestination(operationCtx, *command.MigrationFailureStop)
+		if err != nil {
+			result.MigrationFailureStop = nil
+		}
+	case NodeChannelCommandMigrationFence:
+		if a.config.MigrationFenceExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationFence, err = a.config.MigrationFenceExecutor.FenceMigrationSource(operationCtx, *command.MigrationFence)
+		if err != nil {
+			result.MigrationFence = nil
+		}
+	case NodeChannelCommandMigrationPublicationPlan:
+		if a.config.MigrationPublicationPlanExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationPublicationPlan, err = a.config.MigrationPublicationPlanExecutor.PlanMigrationPublication(operationCtx, *command.MigrationPublicationPlan)
+		if err != nil {
+			result.MigrationPublicationPlan = nil
+		}
+	case NodeChannelCommandMigrationPublish:
+		if a.config.MigrationPublishExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationPublish, err = a.config.MigrationPublishExecutor.PublishMigration(operationCtx, *command.MigrationPublish)
+		if err != nil {
+			result.MigrationPublish = nil
+		}
+	case NodeChannelCommandMigrationCapture:
+		if a.config.MigrationCaptureExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationCapture, err = a.config.MigrationCaptureExecutor.CaptureMigration(operationCtx, *command.MigrationCapture)
+		if err != nil {
+			result.MigrationCapture = nil
+		}
 	case NodeChannelCommandNetworkPrepare:
 		if a.config.NetworkExecutor == nil {
 			err = fmt.Errorf("node network policy executor is unavailable: %w", errdefs.ErrFailedPrecondition)

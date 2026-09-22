@@ -39,12 +39,15 @@ type HandlerConfig struct {
 type routeAction string
 
 const (
-	actionSlot              routeAction = ""
-	actionReady             routeAction = "ready"
-	actionHeartbeat         routeAction = "heartbeat"
-	actionStarting          routeAction = "starting"
-	actionCommandReady      routeAction = "command-ready"
-	actionRegistrationAbort routeAction = "registration-abort"
+	actionSlot                        routeAction = ""
+	actionReady                       routeAction = "ready"
+	actionHeartbeat                   routeAction = "heartbeat"
+	actionStarting                    routeAction = "starting"
+	actionCommandReady                routeAction = "command-ready"
+	actionRegistrationAbort           routeAction = "registration-abort"
+	actionMigrationSourceFinalization routeAction = "migration-source-finalization"
+	actionMigrationAdoptionReceipt    routeAction = "migration-adoption-receipt"
+	actionMigrationAdoptionCommand    routeAction = "migration-adoption-command"
 )
 
 func NewHandler(config HandlerConfig) (http.Handler, error) {
@@ -85,6 +88,12 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			serveCommandReady(config, identity, slotID, writer, request)
 		case actionRegistrationAbort:
 			serveRegistrationAbort(config, identity, slotID, writer, request)
+		case actionMigrationSourceFinalization:
+			serveMigrationSourceFinalization(config, identity, slotID, writer, request)
+		case actionMigrationAdoptionReceipt:
+			serveMigrationAdoptionReceipt(config, identity, slotID, writer, request)
+		case actionMigrationAdoptionCommand:
+			serveMigrationAdoptionCommand(config, identity, slotID, writer, request)
 		default:
 			writeError(writer, http.StatusBadRequest, protocol.ErrorInvalidArgument, "invalid runtime slot action")
 		}
@@ -187,7 +196,8 @@ func serveStarting(config HandlerConfig, identity nodeauth.Identity, slotID stri
 	networkProof, _ := protocol.DecodeProof("claim_network_digest", body.ClaimNetworkDigest)
 	resourceProof, _ := protocol.DecodeProof("resource_lease_digest", body.ResourceLeaseDigest)
 	slot, err := config.Store.StartRuntimeSlot(request.Context(), &sandboxstore.StartRuntimeSlotRequest{
-		SlotID: slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
+		MigrationRestoreDigest: body.MigrationRestoreDigest,
+		SlotID:                 slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
 		NodeBootID: body.NodeBootID, OperationID: body.OperationID, ClaimID: body.ClaimID,
 		LaunchAttempt: body.LaunchAttempt, RunscContainerID: body.RunscContainerID,
 		RootFSBindingDigest: rootfsProof, ClaimNetworkDigest: networkProof,
@@ -209,7 +219,8 @@ func serveCommandReady(config HandlerConfig, identity nodeauth.Identity, slotID 
 	}
 	proof, _ := protocol.DecodeProof("command_ready_digest", body.CommandReadyDigest)
 	slot, err := config.Store.MarkRuntimeSlotCommandReady(request.Context(), &sandboxstore.MarkRuntimeSlotCommandReadyRequest{
-		SlotID: slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
+		MigrationRestoreDigest: body.MigrationRestoreDigest,
+		SlotID:                 slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
 		NodeBootID: body.NodeBootID, OperationID: body.OperationID, ClaimID: body.ClaimID,
 		ProcdInstanceID: body.ProcdInstanceID, ProcdAddress: body.ProcdAddress,
 		CommandReadyDigest: proof,
@@ -322,7 +333,7 @@ func writeStoreError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound):
 		status, code = http.StatusNotFound, protocol.ErrorNotFound
-	case errors.Is(err, sandboxstore.ErrRuntimeSlotConflict):
+	case errors.Is(err, sandboxstore.ErrRuntimeSlotConflict), errors.Is(err, sandboxstore.ErrNomadSandboxMigrationConflict):
 		status, code = http.StatusConflict, protocol.ErrorConflict
 	case errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
 		status, code = http.StatusPreconditionFailed, protocol.ErrorFailedPrecondition
@@ -354,7 +365,8 @@ func writeObservation(writer http.ResponseWriter, slot *sandboxstore.RuntimeSlot
 		return
 	}
 	observation := protocol.Observation{
-		SlotID: slot.ID, State: protocol.State(slot.State), Revision: slot.Revision,
+		MigrationAdoption: slot.MigrationAdoption,
+		SlotID:            slot.ID, State: protocol.State(slot.State), Revision: slot.Revision,
 		ServerTime: slot.AuthorityObservedAt, HeartbeatExpiresAt: slot.HeartbeatExpiresAt,
 		ClaimOperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID,
 	}
@@ -404,7 +416,7 @@ func parseRoute(path string) (string, routeAction, error) {
 	}
 	action := routeAction(segments[1])
 	switch action {
-	case actionReady, actionHeartbeat, actionStarting, actionCommandReady, actionRegistrationAbort:
+	case actionReady, actionHeartbeat, actionStarting, actionCommandReady, actionRegistrationAbort, actionMigrationSourceFinalization, actionMigrationAdoptionReceipt, actionMigrationAdoptionCommand:
 		return slotID, action, nil
 	default:
 		return "", "", fmt.Errorf("invalid runtime slot action")

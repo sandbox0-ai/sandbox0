@@ -1,0 +1,101 @@
+name: PR Migration Check
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/**'
+      - 'manager/**'
+      - 'ctld/**'
+      - 'nomad-driver-sandbox0/**'
+      - '.github/workflows/pr-migration-check.yml'
+
+concurrency:
+  group: pr-migration-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  migration-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sandbox0
+          POSTGRES_PASSWORD: isolated-ci
+          POSTGRES_DB: migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      INTEGRATION_DATABASE_URL: postgres://sandbox0:isolated-ci@localhost:5432/migration_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Verify PostgreSQL migration authority and recovery
+        run: go test -race -count=1 -timeout=20m ./manager/pkg/sandboxstore
+
+  nomad-driver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            nomad-driver-sandbox0/go.sum
+      - name: Verify the independent Nomad driver module
+        working-directory: nomad-driver-sandbox0
+        # Production node sockets require UID 0 for both the file and peer.
+        # Build as the runner; execute test binaries with that real UID contract.
+        run: go test -exec 'sudo --preserve-env=PATH' -race -count=1 -timeout=20m ./...
+
+  stock-runsc-checkpoint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Install the qualified official runsc bundle
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/gvisor.tar.bz2" \
+            https://github.com/google/gvisor/releases/download/release-20260914.0/gvisor-x86_64.tar.bz2
+          echo "94a1b9716797efcb0b348fc3283ddaa1ee5c7898b61eeccb08ee9ac7dc903c15  $RUNNER_TEMP/gvisor.tar.bz2" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/gvisor"
+          tar -xjf "$RUNNER_TEMP/gvisor.tar.bz2" -C "$RUNNER_TEMP/gvisor"
+          runsc=$(find "$RUNNER_TEMP/gvisor" -type f -name runsc)
+          test -n "$runsc"
+          sudo install -m 0755 "$runsc" /usr/local/bin/runsc
+          sudo cp -a "$(dirname "$runsc")/gvisor-bin" /usr/local/bin/gvisor-bin
+          /usr/local/bin/runsc --version
+      - name: Verify repeated stock-runsc and procd restore, including disk-backed tmp
+        shell: bash
+        run: |
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/checkpoint.test" ./pkg/gvisorcli
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/procd-checkpoint.test" ./manager/procd/pkg/http
+          sudo env SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 "$RUNNER_TEMP/checkpoint.test" -test.run '^TestPrivilegedExecutionCheckpoint$' -test.v -test.timeout=10m
+          sudo env SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 "$RUNNER_TEMP/procd-checkpoint.test" -test.run '^TestPrivilegedProcdSessionCheckpoint$' -test.v -test.timeout=10m
+      - name: Verify kernel-enforced staging quotas
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xfsprogs
+          go test -c -race -o "$RUNNER_TEMP/staging.test" ./pkg/migrationstaging
+          sudo env SANDBOX0_RUN_PRIVILEGED_STAGING_QUOTA=1 "$RUNNER_TEMP/staging.test" -test.v -test.timeout=5m

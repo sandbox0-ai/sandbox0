@@ -48,6 +48,7 @@ func (s *PGSandboxStore) RecordRuntimeCarrierSurplus(ctx context.Context, cluste
 	}
 	_, err := s.pool.Exec(ctx, `WITH ready AS(SELECT node_id,node_uid,node_boot_id,COUNT(*) AS count
 		FROM manager.runtime_slots WHERE cluster_id=$1 AND state='fastpath_ready' AND NOT carrier_retired
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=runtime_slots.slot_id)
 		AND heartbeat_expires_at>NOW() GROUP BY node_id,node_uid,node_boot_id)
 		UPDATE manager.runtime_carrier_resizes r SET surplus_since=CASE WHEN NOT r.pending AND
 		COALESCE((SELECT count FROM ready WHERE node_id=r.node_id AND node_uid=r.node_uid AND node_boot_id=r.node_boot_id),0)>$2
@@ -74,7 +75,8 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
                  WHERE cluster_id=c.cluster_id AND node_uid=c.node_uid AND lease_state='active'))::bigint,
             (SELECT COUNT(*) FROM manager.runtime_slots WHERE cluster_id=c.cluster_id
                 AND node_id=c.node_id AND node_uid=c.node_uid AND node_boot_id=c.node_boot_id
-                AND state='fastpath_ready' AND heartbeat_expires_at>NOW())::integer,
+                AND state='fastpath_ready' AND heartbeat_expires_at>NOW()
+                AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=runtime_slots.slot_id))::integer,
             COALESCE(r.revision,0),COALESCE(r.pending,false),r.allowed_groups,r.retained_allocations,
             COALESCE(r.max_carriers,0),r.completed_at,
             EXISTS(SELECT 1 FROM manager.runtime_node_fences f WHERE f.cluster_id=c.cluster_id
@@ -85,6 +87,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
                 SELECT compatibility_digest,COUNT(*)::integer AS count FROM manager.runtime_slots s
                 WHERE s.cluster_id=c.cluster_id AND s.node_id=c.node_id AND s.node_uid=c.node_uid
                     AND s.node_boot_id=c.node_boot_id AND s.state='fastpath_ready' AND NOT s.carrier_retired
+                    AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=s.slot_id)
                     AND s.heartbeat_expires_at>NOW() GROUP BY compatibility_digest) ready),'{}'::jsonb)
         FROM live c LEFT JOIN manager.runtime_carrier_resizes r USING(cluster_id,node_id)
         WHERE r.pending OR (cardinality(r.allowed_groups)>8 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f

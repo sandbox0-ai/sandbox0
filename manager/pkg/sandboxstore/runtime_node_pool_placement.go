@@ -41,6 +41,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 			SELECT node_id, node_uid, node_boot_id, COUNT(*)::integer AS count
 			FROM manager.runtime_slots
 			WHERE cluster_id = $1 AND state = 'fastpath_ready' AND heartbeat_expires_at > NOW()
+				AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=runtime_slots.slot_id)
 			GROUP BY node_id, node_uid, node_boot_id
 		)
 		SELECT live.cpu_millicores, live.memory_bytes,
@@ -62,6 +63,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 				SELECT compatibility_digest,COUNT(*)::integer AS count FROM manager.runtime_slots slot
 				WHERE slot.cluster_id=live.cluster_id AND slot.node_id=live.node_id AND slot.node_uid=live.node_uid
 					AND slot.node_boot_id=live.node_boot_id AND slot.state='fastpath_ready'
+					AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
 					AND slot.heartbeat_expires_at>NOW() AND NOT slot.carrier_retired GROUP BY compatibility_digest
 			) compatibility_ready),'{}'::jsonb),
 			COALESCE((SELECT resize.compatibility_capacity FROM manager.runtime_carrier_resizes resize

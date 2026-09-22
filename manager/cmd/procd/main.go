@@ -194,6 +194,7 @@ func main() {
 		obsProvider,
 		runtimeController.Probe,
 		runtimeController.CanServe,
+		procdhttp.WithMigrationController(runtimeController),
 	)
 
 	// Bind and serve before loading historical session journals. Accepting a TCP

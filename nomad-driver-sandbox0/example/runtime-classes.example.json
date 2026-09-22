@@ -11,8 +11,8 @@
       "compatibility": {
         "version": 2,
         "architecture": "amd64",
-        "driver_version": "0.3.0",
-        "runsc_version": "runsc release-20260820.0",
+        "driver_version": "0.4.0",
+        "runsc_version": "runsc version release-20260914.0",
         "platform": "systrap",
         "overlay2": "none",
         "file_access": "shared",
@@ -33,8 +33,8 @@
       "compatibility": {
         "version": 2,
         "architecture": "amd64",
-        "driver_version": "0.3.0",
-        "runsc_version": "runsc release-20260820.0",
+        "driver_version": "0.4.0",
+        "runsc_version": "runsc version release-20260914.0",
         "platform": "systrap",
         "overlay2": "none",
         "file_access": "shared",

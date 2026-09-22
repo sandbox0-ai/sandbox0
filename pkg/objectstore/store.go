@@ -466,7 +466,14 @@ func withOSSForbidOverwrite(options *s3.Options) {
 }
 
 func (s *s3Store) Delete(key string) error {
-	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	return s.DeleteContext(context.Background(), key)
+}
+
+func (s *s3Store) DeleteContext(ctx context.Context, key string) error {
+	if err := cleanupContextError(ctx); err != nil {
+		return err
+	}
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(strings.TrimLeft(key, "/")),
 	})
@@ -495,11 +502,18 @@ func (s *s3Store) Head(key string) (Info, error) {
 }
 
 func (s *s3Store) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	return s.ListContext(context.Background(), prefix, startAfter, token, delimiter, limit)
+}
+
+func (s *s3Store) ListContext(ctx context.Context, prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	if err := cleanupContextError(ctx); err != nil {
+		return nil, false, "", err
+	}
 	maxKeys := int32(limit)
 	if limit <= 0 || limit > 1000 {
 		maxKeys = 1000
 	}
-	resp, err := s.client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+	resp, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:            aws.String(s.bucket),
 		Prefix:            aws.String(strings.TrimLeft(prefix, "/")),
 		StartAfter:        aws.String(strings.TrimLeft(startAfter, "/")),
@@ -684,7 +698,14 @@ func (s *gcsStore) PutIfAbsentContext(ctx context.Context, key string, in io.Rea
 }
 
 func (s *gcsStore) Delete(key string) error {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, s.objectURL(gcsObjectName(key)), nil)
+	return s.DeleteContext(context.Background(), key)
+}
+
+func (s *gcsStore) DeleteContext(ctx context.Context, key string) error {
+	if err := cleanupContextError(ctx); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.objectURL(gcsObjectName(key)), nil)
 	if err != nil {
 		return err
 	}
@@ -732,6 +753,13 @@ func (s *gcsStore) Head(key string) (Info, error) {
 }
 
 func (s *gcsStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	return s.ListContext(context.Background(), prefix, startAfter, token, delimiter, limit)
+}
+
+func (s *gcsStore) ListContext(ctx context.Context, prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	if err := cleanupContextError(ctx); err != nil {
+		return nil, false, "", err
+	}
 	pageSize := int(limit)
 	if pageSize <= 0 || pageSize > 1000 {
 		pageSize = 1000
@@ -748,7 +776,7 @@ func (s *gcsStore) List(prefix, startAfter, token, delimiter string, limit int64
 	if token = strings.TrimSpace(token); token != "" {
 		values.Set("pageToken", token)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, s.bucketObjectsURL(values), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.bucketObjectsURL(values), nil)
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -1091,6 +1119,13 @@ func isBucketCreateRace(err error) bool {
 }
 
 func (s *memoryStore) Delete(key string) error {
+	return s.DeleteContext(context.Background(), key)
+}
+
+func (s *memoryStore) DeleteContext(ctx context.Context, key string) error {
+	if err := cleanupContextError(ctx); err != nil {
+		return err
+	}
 	s.state.mu.Lock()
 	defer s.state.mu.Unlock()
 	delete(s.state.objects, strings.TrimLeft(key, "/"))
@@ -1114,6 +1149,13 @@ func (s *memoryStore) Head(key string) (Info, error) {
 }
 
 func (s *memoryStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	return s.ListContext(context.Background(), prefix, startAfter, token, delimiter, limit)
+}
+
+func (s *memoryStore) ListContext(ctx context.Context, prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	if err := cleanupContextError(ctx); err != nil {
+		return nil, false, "", err
+	}
 	s.state.mu.RLock()
 	defer s.state.mu.RUnlock()
 	prefix = strings.TrimLeft(prefix, "/")

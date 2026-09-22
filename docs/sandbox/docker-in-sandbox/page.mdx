@@ -20,6 +20,36 @@ Docker should run inside the sandbox boundary. Do not mount a host Docker socket
 
 ---
 
+## Template Requirements
+
+Installing the Docker CLI alone does not enable Docker in Sandbox. A Docker-enabled
+image must include the daemon, its nested runtime dependencies, and
+`/usr/local/bin/sandbox0-dockerd-entrypoint`. Configure its template with:
+
+```yaml
+spec:
+    mainContainer:
+        image: <immutable-docker-enabled-image>
+        securityClass: privileged
+        resources:
+            memory: 2Gi
+    ephemeralMounts:
+        - mountPath: /var/lib/docker
+          sizeLimit: 1Gi
+```
+
+The privileged class grants capabilities only inside the gVisor guest. The startup
+helper mounts guest cgroup controllers, selects the classic `vfs` image store
+(including the Docker 29 compatibility flag), and disables Docker bridge/NAT.
+It refuses to start if Docker state is not backed by the template's bounded tmpfs.
+The tmpfs competes with processes for the sandbox memory limit; choose its size
+and memory allocation together. Docker PID files and runtime state live under
+`/tmp` and are recreated after resume.
+
+Start the daemon again after pause/resume. The workspace survives; Docker images,
+containers, volumes, and processes do not. Template capability changes apply to
+newly created sandboxes, not to an existing sandbox's immutable security class.
+
 ## Cloud Usage Pattern
 
 For Sandbox0 Cloud, use host networking for service containers:
@@ -32,20 +62,18 @@ Start Docker once per running sandbox:
 
 ```bash
 if ! docker info >/dev/null 2>&1; then
-    rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
-    /usr/bin/dockerd \
-        --host=unix:///var/run/docker.sock \
-        --data-root=/var/lib/docker \
-        --exec-root=/var/run/docker \
-        --storage-driver=vfs \
-        --iptables=false \
-        --ip6tables=false \
-        --bridge=none \
-        --ip-forward=false \
-        --ip-masq=false \
-        >/tmp/sandbox0-dockerd.log 2>&1 &
-
-    until docker info >/dev/null 2>&1; do sleep 1; done
+    nohup /usr/local/bin/sandbox0-dockerd-entrypoint \
+        >/tmp/sandbox0-dockerd.log 2>&1 </dev/null &
+    docker_pid=$!
+    for attempt in $(seq 1 60); do
+        docker info >/dev/null 2>&1 && break
+        kill -0 "$docker_pid" 2>/dev/null || break
+        sleep 1
+    done
+    docker info >/dev/null 2>&1 || {
+        cat /tmp/sandbox0-dockerd.log >&2
+        exit 1
+    }
 fi
 ```
 
@@ -97,7 +125,7 @@ func main() {
         "set -e",
         "if ! docker info >/dev/null 2>&1; then",
         "rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid",
-        "/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &",
+        "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
         "until docker info >/dev/null 2>&1; do sleep 1; done",
         "fi",
         "rm -f /tmp/sandbox0-test-databases.ready",
@@ -170,7 +198,7 @@ try:
 set -e
 if ! docker info >/dev/null 2>&1; then
   rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
-  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  /usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
   until docker info >/dev/null 2>&1; do sleep 1; done
 fi
 rm -f /tmp/sandbox0-test-databases.ready
@@ -229,7 +257,7 @@ finally:
             'set -e',
             'if ! docker info >/dev/null 2>&1; then',
             'rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid',
-            '/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &',
+            '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
             'until docker info >/dev/null 2>&1; do sleep 1; done',
             'fi',
             'rm -f /tmp/sandbox0-test-databases.ready',
@@ -292,7 +320,7 @@ s0 sandbox exec "$SANDBOX_ID" --no-wait --ttl 1800 -- /bin/sh -lc '
 set -e
 if ! docker info >/dev/null 2>&1; then
   rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
-  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  /usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
   until docker info >/dev/null 2>&1; do sleep 1; done
 fi
 rm -f /tmp/sandbox0-test-databases.ready
@@ -363,7 +391,7 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
     "set -e",
     "if ! docker info >/dev/null 2>&1; then",
     "rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid",
-    "/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &",
+    "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
     "until docker info >/dev/null 2>&1; do sleep 1; done",
     "fi",
     "cat > main.go <<'EOF'",
@@ -399,7 +427,7 @@ fmt.Print(result.OutputRaw)`
 set -e
 if ! docker info >/dev/null 2>&1; then
   rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
-  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  /usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
   until docker info >/dev/null 2>&1; do sleep 1; done
 fi
 cat > main.go <<'EOF'
@@ -432,7 +460,7 @@ print(result.output_raw, end="")`
     'set -e',
     'if ! docker info >/dev/null 2>&1; then',
     'rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid',
-    '/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &',
+    '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
     'until docker info >/dev/null 2>&1; do sleep 1; done',
     'fi',
     "cat > main.go <<'EOF'",
@@ -465,7 +493,7 @@ process.stdout.write(result.outputRaw);`
 set -e
 if ! docker info >/dev/null 2>&1; then
   rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
-  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  /usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
   until docker info >/dev/null 2>&1; do sleep 1; done
 fi
 cat > main.go <<'"'"'EOF'"'"'
@@ -502,7 +530,7 @@ For projects that require kind, run that part of the workflow in a VM, a CI runn
 - If you run against an environment where Docker port publishing works, `-p hostPort:containerPort` is also fine. The Cloud examples use `--network=host` because it avoids relying on Docker bridge/NAT.
 - Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
 - Docker state does not survive runtime replacement. Keep source, generated files, or database dumps outside `/var/lib/docker`, then use a named rootfs snapshot or a custom template when they must survive sandbox cleanup.
-- Docker state uses the selected template's ephemeral storage limit. Hosted `default` sandboxes provide `500m` CPU, `2Gi` memory, and `8Gi` ephemeral storage; `coding-agent` provides 1 CPU, `4Gi` memory, and `16Gi` ephemeral storage.
+- Docker state uses the size limit of the `/var/lib/docker` ephemeral mount and counts against sandbox memory. This is separate from the RootFS `ephemeralStorage` capacity. Inspect the selected template configuration for its current limits.
 - Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
 - kind and similar nested Kubernetes tools require cgroup namespace and networking support beyond ordinary Docker builds. Use a VM or CI runner when those kernel features are not available.
 - Long-running containers count against the sandbox resource limits. Stop containers when a test run finishes if the sandbox will stay alive.

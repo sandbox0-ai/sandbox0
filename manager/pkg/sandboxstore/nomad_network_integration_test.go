@@ -46,6 +46,11 @@ func TestNomadSandboxNetworkMutationPublishesOnlyAfterExactAckIntegration(t *tes
 	pending, err := fixture.store.GetNomadSandboxNetworkMutation(fixture.ctx, fixture.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, NomadSandboxNetworkMutationPhasePending, pending.Phase)
+	var retained *string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `SELECT claim_network_policy FROM manager.runtime_slots WHERE slot_id=$1`, fixture.slotID).Scan(&retained))
+	require.Nil(t, retained, "pending policy must not become migration input")
+	_, err = fixture.pool.Exec(fixture.ctx, `UPDATE manager.runtime_slots SET claim_network_policy=$2,claim_network_policy_digest=$3 WHERE slot_id=$1`, fixture.slotID, desiredPolicy, mutation.DesiredPolicyDigest)
+	require.Error(t, err, "deferred guard requires the matching committed acknowledgement")
 
 	token := nomadNetworkMutationToken(slot, mutation)
 	applied, err := fixture.store.CommitNomadSandboxNetworkMutation(
@@ -63,6 +68,9 @@ func TestNomadSandboxNetworkMutationPublishesOnlyAfterExactAckIntegration(t *tes
 	require.NoError(t, err)
 	require.Equal(t, mutation.DesiredPolicyDigest, updatedSlot.ClaimNetworkPolicyDigest)
 	require.Equal(t, slot.Revision+1, updatedSlot.Revision)
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `SELECT claim_network_policy FROM manager.runtime_slots WHERE slot_id=$1`, fixture.slotID).Scan(&retained))
+	require.NotNil(t, retained)
+	require.Equal(t, desiredPolicy, *retained)
 
 	replayed, err := fixture.store.CommitNomadSandboxNetworkMutation(
 		fixture.ctx, fixture.sandboxID, mutation.OperationID, token,

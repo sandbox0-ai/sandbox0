@@ -50,6 +50,14 @@ type NodeChannelExecutor interface {
 	Cleanup(context.Context, NodeChannelTarget, NodeCleanupControlRequest) (NodeCleanupControlProof, error)
 }
 
+type NodeChannelMigrationCapturePeerExecutor interface {
+	PrepareMigrationCapturePeer(context.Context, MigrationCapturePeerRequest) (*MigrationCapturePeerPrepared, error)
+}
+
+type NodeChannelMigrationImagePrefetchExecutor interface {
+	PrefetchMigrationImage(context.Context, MigrationImagePrefetchRequest) (*MigrationImagePrefetched, error)
+}
+
 type NodeChannelMigrationImagePrepareExecutor interface {
 	PrepareMigrationImage(context.Context, MigrationImagePrepareRequest) (*MigrationImagePrepared, error)
 }
@@ -81,6 +89,10 @@ type NodeChannelMigrationFailureFinalizeExecutor interface {
 
 type NodeChannelMigrationFenceExecutor interface {
 	FenceMigrationSource(context.Context, MigrationSourceFenceRequest) (*MigrationSourceFenceProof, error)
+}
+
+type NodeChannelMigrationPublicationPlanExecutor interface {
+	PlanMigrationPublication(context.Context, MigrationPublicationRequest) (*MigrationPublicationPlan, error)
 }
 
 type NodeChannelMigrationPublishExecutor interface {
@@ -154,6 +166,8 @@ type NodeChannelAgentConfig struct {
 	PausedRebaseExecutor             NodeChannelPausedRebaseExecutor
 	NetworkExecutor                  NodeChannelNetworkExecutor
 	MigrationImagePrepareExecutor    NodeChannelMigrationImagePrepareExecutor
+	MigrationImagePrefetchExecutor   NodeChannelMigrationImagePrefetchExecutor
+	MigrationCapturePeerExecutor     NodeChannelMigrationCapturePeerExecutor
 	MigrationFailureExecutor         NodeChannelMigrationFailureExecutor
 	MigrationFailureCleanupExecutor  NodeChannelMigrationFailureCleanupExecutor
 	MigrationFailureFinalizeExecutor NodeChannelMigrationFailureFinalizeExecutor
@@ -162,6 +176,7 @@ type NodeChannelAgentConfig struct {
 	MigrationFinalizeExecutor        NodeChannelMigrationFinalizeExecutor
 	MigrationSourceGCExecutor        NodeChannelMigrationSourceGCExecutor
 	MigrationPublishExecutor         NodeChannelMigrationPublishExecutor
+	MigrationPublicationPlanExecutor NodeChannelMigrationPublicationPlanExecutor
 	MigrationCaptureExecutor         NodeChannelMigrationCaptureExecutor
 	MigrationCPUPreflightExecutor    NodeChannelMigrationCPUPreflightExecutor
 	MigrationRecoveryExecutor        NodeChannelMigrationRecoveryExecutor
@@ -387,11 +402,20 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	if a.config.MigrationPublishExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationPublish)
 	}
+	if a.config.MigrationPublicationPlanExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationPublicationPlan)
+	}
 	if a.config.MigrationFenceExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationFence)
 	}
 	if a.config.MigrationImagePrepareExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationImagePrepare)
+	}
+	if a.config.MigrationImagePrefetchExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationImagePrefetch)
+	}
+	if a.config.MigrationCapturePeerExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandMigrationCapturePeer)
 	}
 	if a.config.MigrationFinalizeExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationFinalize)
@@ -511,7 +535,7 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	switch command.Kind {
 	case NodeChannelCommandMigrationCPUPreflight:
 		timeout = MigrationCPUPreflightTimeout
-	case NodeChannelCommandMigrationRecover, NodeChannelCommandRunningFork, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize:
+	case NodeChannelCommandMigrationRecover, NodeChannelCommandRunningFork, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationCapturePeer, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize:
 		timeout = a.config.RunningForkTimeout
 	case NodeChannelCommandPausedRebase:
 		timeout = a.config.PausedRebaseTimeout
@@ -576,6 +600,24 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		if err != nil {
 			result.MigrationFinalize = nil
 		}
+	case NodeChannelCommandMigrationCapturePeer:
+		if a.config.MigrationCapturePeerExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationCapturePeer, err = a.config.MigrationCapturePeerExecutor.PrepareMigrationCapturePeer(operationCtx, *command.MigrationCapturePeer)
+		if err != nil {
+			result.MigrationCapturePeer = nil
+		}
+	case NodeChannelCommandMigrationImagePrefetch:
+		if a.config.MigrationImagePrefetchExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationImagePrefetch, err = a.config.MigrationImagePrefetchExecutor.PrefetchMigrationImage(operationCtx, *command.MigrationImagePrefetch)
+		if err != nil {
+			result.MigrationImagePrefetch = nil
+		}
 	case NodeChannelCommandMigrationImagePrepare:
 		if a.config.MigrationImagePrepareExecutor == nil {
 			err = errdefs.ErrUnavailable
@@ -638,6 +680,15 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		result.MigrationFence, err = a.config.MigrationFenceExecutor.FenceMigrationSource(operationCtx, *command.MigrationFence)
 		if err != nil {
 			result.MigrationFence = nil
+		}
+	case NodeChannelCommandMigrationPublicationPlan:
+		if a.config.MigrationPublicationPlanExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.MigrationPublicationPlan, err = a.config.MigrationPublicationPlanExecutor.PlanMigrationPublication(operationCtx, *command.MigrationPublicationPlan)
+		if err != nil {
+			result.MigrationPublicationPlan = nil
 		}
 	case NodeChannelCommandMigrationPublish:
 		if a.config.MigrationPublishExecutor == nil {

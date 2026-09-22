@@ -23,6 +23,11 @@ func migrationSourcePolicy(sandbox, team string) string {
 func migrationStoreFixture(t *testing.T, suffix string) (*nomadPauseStoreFixture, runtimecontrol.MigrationAssignment) {
 	t.Helper()
 	f := newNomadPauseStoreFixture(t, "migration-"+suffix)
+	return f, migrationAssignmentFixture(t, f, suffix)
+}
+
+func migrationAssignmentFixture(t *testing.T, f *nomadPauseStoreFixture, suffix string) runtimecontrol.MigrationAssignment {
+	t.Helper()
 	source := runtimecontrol.Assignment{SandboxID: f.sandboxID, TeamID: "team-slot", RuntimeGeneration: 1, SecurityClass: "standard"}
 	revision, err := source.Revision()
 	require.NoError(t, err)
@@ -31,7 +36,7 @@ func migrationStoreFixture(t *testing.T, suffix string) (*nomadPauseStoreFixture
 	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_slots SET claim_network_policy_digest=$2 WHERE slot_id=$1`, f.slotID, protocol.NetworkPolicyDigest(migrationSourcePolicy(f.sandboxID, source.TeamID)))
 	require.NoError(t, err)
 	source.RuntimeGeneration = 2
-	return f, runtimecontrol.MigrationAssignment{OperationID: "migrate-" + suffix, SourceGeneration: 1, SourceRevision: revision, Target: source}
+	return runtimecontrol.MigrationAssignment{OperationID: "migrate-" + suffix, SourceGeneration: 1, SourceRevision: revision, Target: source}
 }
 
 func migrationReadyTarget(t *testing.T, f *nomadPauseStoreFixture, name, node string) *RegisterRuntimeSlotRequest {

@@ -14,7 +14,12 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"golang.org/x/sync/errgroup"
 )
+
+// Bound publication memory and object-store pressure independently of image
+// size. Chunks upload concurrently; the manifest is still published last.
+const publicationConcurrency = 4
 
 // Reference is persisted by the regional transaction only after all image
 // chunks and the manifest have been published. The binding digest scopes all
@@ -36,15 +41,17 @@ func (r Reference) ValidateFor(binding Binding) error {
 }
 
 type Store struct {
-	objects  objectstore.ContextConditionalStore
-	maxBytes int64
+	objects   objectstore.ContextConditionalStore
+	maxBytes  int64
+	manifests manifestCache
 }
 
 // New requires an already-configured regional store, normally constructed by
 // rootfsobjectstore.Create so checkpoint memory receives envelope encryption.
 // maxBytes bounds accepted image bytes. The caller separately enforces disk
 // admission while capturing; this upload check cannot bound producer writes.
-// Transfers keep memory proportional to ChunkBytes and never load the full image.
+// Publication and local verification use at most publicationConcurrency chunk
+// buffers and never load the full image. Download and peer streams use one.
 func New(objects objectstore.Store, maxBytes int64) (*Store, error) {
 	if !objectstore.SupportsContextConditionalCreate(objects) || maxBytes <= 0 || maxBytes > MaxImageBytes {
 		return nil, fmt.Errorf("checkpoint store needs bounded context-aware immutable storage")
@@ -71,9 +78,8 @@ func (s *Store) Publish(ctx context.Context, binding Binding, directory string) 
 		return Reference{}, err
 	}
 	manifest := Manifest{Version: ManifestVersion, Binding: binding}
-	buffer := make([]byte, ChunkBytes)
 	for _, file := range files {
-		captured, err := s.publishFile(ctx, root, file, bindingDigest, buffer)
+		captured, err := s.publishFile(ctx, root, file, bindingDigest)
 		if err != nil {
 			return Reference{}, err
 		}
@@ -113,7 +119,19 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 	if err != nil {
 		return Manifest{}, err
 	}
-	bindingDigest := ref.BindingDigest
+	prefix, err := manifest.chunkPrefix()
+	if err != nil {
+		return Manifest{}, err
+	}
+	return materializeImage(ctx, manifest, directory, admit, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+		return s.readObject(ctx, prefix+strings.TrimPrefix(chunk.Digest, "sha256:"), chunk.Size)
+	})
+}
+
+// Both regional downloads and peer streams use the same admission, private
+// file creation, chunk verification and crash-durable completion boundary.
+func materializeImage(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error,
+	readChunk func(context.Context, Chunk) ([]byte, error)) (Manifest, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return Manifest{}, fmt.Errorf("checkpoint destination must be an absolute canonical path")
 	}
@@ -141,7 +159,7 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 	}
 	defer root.Close()
 	for _, file := range manifest.Files {
-		if err := s.downloadFile(ctx, root, bindingDigest, file); err != nil {
+		if err := materializeFile(ctx, root, file, readChunk); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -168,6 +186,8 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 // VerifyLocal rechecks exact file inventory and every immutable chunk before a
 // recovered destination may reuse an image. Journal existence is not evidence
 // that staging survived a disk failure or that its contents remain unchanged.
+// Reuse the bounded publication scanner so large images do not serialize their
+// independent hash checks on the restore admission path.
 func (s *Store) VerifyLocal(ctx context.Context, expected Binding, ref Reference, directory string) (Manifest, error) {
 	manifest, err := s.loadManifest(ctx, expected, ref)
 	if err != nil {
@@ -185,52 +205,32 @@ func (s *Store) VerifyLocal(ctx context.Context, expected Binding, ref Reference
 	if len(files) != len(manifest.Files) {
 		return Manifest{}, fmt.Errorf("checkpoint file inventory changed")
 	}
-	buffer := make([]byte, ChunkBytes)
 	for i, file := range manifest.Files {
 		if files[i].Path != file.Path || files[i].Size != file.Size {
 			return Manifest{}, fmt.Errorf("checkpoint file identity changed")
 		}
-		input, err := root.Open(file.Path)
-		if err != nil {
+		if _, err := scanImageFile(ctx, root, file, nil); err != nil {
 			return Manifest{}, err
-		}
-		verifyErr := func() error {
-			for _, chunk := range file.Chunks {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				payload := buffer[:int(chunk.Size)]
-				if _, err := io.ReadFull(input, payload); err != nil {
-					return err
-				}
-				if digest.FromBytes(payload).String() != chunk.Digest {
-					return fmt.Errorf("checkpoint local chunk digest mismatch")
-				}
-			}
-			var extra [1]byte
-			if n, err := input.Read(extra[:]); n != 0 || err != io.EOF {
-				return fmt.Errorf("checkpoint local file size changed")
-			}
-			return nil
-		}()
-		closeErr := input.Close()
-		if verifyErr != nil {
-			return Manifest{}, verifyErr
-		}
-		if closeErr != nil {
-			return Manifest{}, closeErr
 		}
 	}
 	return manifest, nil
 }
 
 func (s *Store) loadManifest(ctx context.Context, expected Binding, ref Reference) (Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
+	}
 	bindingDigest, err := expected.Digest()
 	if err != nil {
 		return Manifest{}, err
 	}
 	if ref.BindingDigest != bindingDigest || validateDigest(ref.ManifestDigest) != nil {
 		return Manifest{}, fmt.Errorf("checkpoint reference does not match expected binding")
+	}
+	if payload, ok := s.manifests.get(ref); ok {
+		// Decode a fresh value: callers may mutate their returned chunk slices.
+		// The cache only holds bytes checked against this exact immutable ref.
+		return Decode([]byte(payload), s.maxBytes)
 	}
 	payload, err := s.readObject(ctx, manifestKey(bindingDigest), MaxManifestBytes)
 	if err != nil {
@@ -246,10 +246,15 @@ func (s *Store) loadManifest(ctx context.Context, expected Binding, ref Referenc
 	if manifest.Binding != expected {
 		return Manifest{}, fmt.Errorf("checkpoint manifest belongs to another source")
 	}
+	s.manifests.put(ref, string(payload))
 	return manifest, nil
 }
 
 func (s *Store) imageFiles(ctx context.Context, root *os.Root) ([]File, error) {
+	return s.inspectImageFiles(ctx, root, false)
+}
+
+func (s *Store) inspectImageFiles(ctx context.Context, root *os.Root, allowEmpty bool) ([]File, error) {
 	var files []File
 	var total int64
 	entries := 0
@@ -284,14 +289,23 @@ func (s *Store) imageFiles(ctx context.Context, root *os.Root) ([]File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 || total == 0 {
+	if !allowEmpty && (len(files) == 0 || total == 0) {
 		return nil, fmt.Errorf("checkpoint image is empty")
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }
 
-func (s *Store) publishFile(ctx context.Context, root *os.Root, file File, bindingDigest string, buffer []byte) (File, error) {
+func (s *Store) publishFile(ctx context.Context, root *os.Root, file File, bindingDigest string) (File, error) {
+	return scanImageFile(ctx, root, file, func(ctx context.Context, chunk Chunk, payload []byte) error {
+		return s.putImmutable(ctx, chunkKey(bindingDigest, chunk.Digest), payload)
+	})
+}
+
+// scanImageFile checks a retained local file with bounded parallel reads. A
+// supplied chunk inventory is an expected plan, never permission to trust the
+// current file bytes. The callback runs only after verifying that expectation.
+func scanImageFile(ctx context.Context, root *os.Root, file File, publish func(context.Context, Chunk, []byte) error) (File, error) {
 	input, err := root.Open(file.Path)
 	if err != nil {
 		return File{}, err
@@ -304,23 +318,52 @@ func (s *Store) publishFile(ctx context.Context, root *os.Root, file File, bindi
 	if !before.Mode().IsRegular() || before.Size() != file.Size {
 		return File{}, fmt.Errorf("checkpoint file changed before publication")
 	}
-	for remaining := file.Size; remaining > 0; {
-		if err := ctx.Err(); err != nil {
-			return File{}, err
-		}
-		chunk := buffer[:min(remaining, int64(ChunkBytes))]
-		if _, err := io.ReadFull(input, chunk); err != nil {
-			return File{}, err
-		}
-		d := digest.FromBytes(chunk).String()
-		if err := s.putImmutable(ctx, chunkKey(bindingDigest, d), chunk); err != nil {
-			return File{}, err
-		}
-		file.Chunks = append(file.Chunks, Chunk{Digest: d, Size: int64(len(chunk))})
-		remaining -= int64(len(chunk))
+	count := int((file.Size + ChunkBytes - 1) / ChunkBytes)
+	expected := file.Chunks
+	if expected != nil && len(expected) != count {
+		return File{}, fmt.Errorf("checkpoint file changed planned chunk inventory")
+	}
+	if count > 0 {
+		file.Chunks = make([]Chunk, count)
+	}
+	workers := min(count, publicationConcurrency)
+	group, workerCtx := errgroup.WithContext(ctx)
+	for worker := range workers {
+		group.Go(func() error {
+			buffer := make([]byte, min(file.Size, int64(ChunkBytes)))
+			for index := worker; index < count; index += workers {
+				if err := workerCtx.Err(); err != nil {
+					return err
+				}
+				offset := int64(index) * ChunkBytes
+				chunk := buffer[:min(file.Size-offset, int64(ChunkBytes))]
+				if _, err := input.ReadAt(chunk, offset); err != nil {
+					return err
+				}
+				described := Chunk{Digest: digest.FromBytes(chunk).String(), Size: int64(len(chunk))}
+				if expected != nil && expected[index] != described {
+					return fmt.Errorf("checkpoint file changed planned chunk content")
+				}
+				if publish != nil {
+					if err := publish(workerCtx, described, chunk); err != nil {
+						return err
+					}
+				}
+				// Each worker owns disjoint manifest positions, preserving file
+				// order regardless of network completion order.
+				file.Chunks[index] = described
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return File{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return File{}, err
 	}
 	var extra [1]byte
-	if n, err := input.Read(extra[:]); n != 0 || err != io.EOF {
+	if n, err := input.ReadAt(extra[:], file.Size); n != 0 || err != io.EOF {
 		return File{}, fmt.Errorf("checkpoint file grew during publication")
 	}
 	after, err := input.Stat()
@@ -333,7 +376,7 @@ func (s *Store) publishFile(ctx context.Context, root *os.Root, file File, bindi
 	return file, nil
 }
 
-func (s *Store) downloadFile(ctx context.Context, root *os.Root, bindingDigest string, file File) error {
+func materializeFile(ctx context.Context, root *os.Root, file File, readChunk func(context.Context, Chunk) ([]byte, error)) error {
 	if err := root.MkdirAll(path.Dir(file.Path), 0o700); err != nil {
 		return err
 	}
@@ -343,7 +386,10 @@ func (s *Store) downloadFile(ctx context.Context, root *os.Root, bindingDigest s
 	}
 	defer output.Close()
 	for _, chunk := range file.Chunks {
-		payload, err := s.readObject(ctx, chunkKey(bindingDigest, chunk.Digest), chunk.Size)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		payload, err := readChunk(ctx, chunk)
 		if err != nil {
 			return err
 		}
@@ -376,7 +422,15 @@ func (s *Store) putImmutable(ctx context.Context, key string, payload []byte) er
 }
 
 func (s *Store) readObject(ctx context.Context, key string, limit int64) ([]byte, error) {
-	reader, err := s.objects.GetContext(ctx, key, 0, -1)
+	return readCheckpointObject(ctx, s.objects, key, limit)
+}
+
+type checkpointObjectReader interface {
+	GetContext(context.Context, string, int64, int64) (io.ReadCloser, error)
+}
+
+func readCheckpointObject(ctx context.Context, objects checkpointObjectReader, key string, limit int64) ([]byte, error) {
+	reader, err := objects.GetContext(ctx, key, 0, -1)
 	if err != nil {
 		return nil, err
 	}

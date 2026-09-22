@@ -137,6 +137,11 @@ func (j *runtimeSlotJournal) migrationAdoptionCandidates(after string) ([]runtim
 		}
 		for scanned := 0; key != nil && scanned < 128; scanned++ {
 			next = string(key)
+			fingerprint, excluded := j.adoptionScanExclusions.contains(value)
+			if excluded {
+				key, value = cursor.Next()
+				continue
+			}
 			record, err := decodeRuntimeSlotJournalRecord(value)
 			if err != nil {
 				return err
@@ -146,6 +151,8 @@ func (j *runtimeSlotJournal) migrationAdoptionCandidates(after string) ([]runtim
 				if len(rows) == 16 {
 					break
 				}
+			} else {
+				j.adoptionScanExclusions.remember(fingerprint)
 			}
 			key, value = cursor.Next()
 		}

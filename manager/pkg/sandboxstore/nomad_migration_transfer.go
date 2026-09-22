@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 var _ nomadmigration.Store = (*PGSandboxStore)(nil)
@@ -47,15 +48,15 @@ func (s *PGSandboxStore) listNomadMigrationWork(ctx context.Context, after strin
 // and their receipts. It returns nil if another worker already advanced past
 // transfer; reads do not authorize a new phase or change any lease.
 func (s *PGSandboxStore) GetNomadMigrationTransfer(ctx context.Context, id string) (*nomadmigration.Transfer, error) {
-	var publication, published, image, prepared, fence, binding []byte
+	var publication, published, image, prepared, fence, binding, prefetch, staging []byte
 	var assignmentDigest, publicationDigest, sourceSlot, targetSlot, leaseID, procdID string
-	var imageDigest, fenceDigest *string
+	var imageDigest, fenceDigest, prefetchDigest *string
 	err := s.pool.QueryRow(ctx, `SELECT m.publication_request,m.publication_receipt,m.target_image_request,m.target_image_receipt,m.source_fence_request,
         m.assignment_digest,m.publication_digest,m.source_slot_id,m.target_slot_id,m.target_resource_lease_id,m.source_procd_instance_id,m.source_binding_digest,
-        m.target_image_digest,m.source_fence_digest
+        m.target_image_digest,m.source_fence_digest,m.target_image_prefetch_request,m.target_image_prefetch_digest,m.staging_request
         FROM manager.sandbox_runtime_migrations m JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=m.operation_id
         WHERE m.operation_id=$1 AND `+nomadMigrationTransferPredicate, id).Scan(&publication, &published, &image, &prepared, &fence,
-		&assignmentDigest, &publicationDigest, &sourceSlot, &targetSlot, &leaseID, &procdID, &binding, &imageDigest, &fenceDigest)
+		&assignmentDigest, &publicationDigest, &sourceSlot, &targetSlot, &leaseID, &procdID, &binding, &imageDigest, &fenceDigest, &prefetch, &prefetchDigest, &staging)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -69,7 +70,7 @@ func (s *PGSandboxStore) GetNomadMigrationTransfer(ctx context.Context, id strin
 	for _, item := range []struct {
 		data []byte
 		into any
-	}{{published, &t.Published}, {image, &t.Image}, {prepared, &t.Prepared}, {fence, &t.Fence}} {
+	}{{published, &t.Published}, {image, &t.Image}, {prepared, &t.Prepared}, {fence, &t.Fence}, {prefetch, &t.Prefetch}} {
 		if len(item.data) != 0 && json.Unmarshal(item.data, item.into) != nil {
 			return nil, ErrNomadSandboxMigrationConflict
 		}
@@ -81,6 +82,20 @@ func (s *PGSandboxStore) GetNomadMigrationTransfer(ctx context.Context, id strin
 	p, _ := t.Publication.Digest()
 	capture := t.Publication.Capture.Request
 	if a != assignmentDigest || p != publicationDigest || t.Publication.Assignment.OperationID != id || capture.Target.SlotID != sourceSlot || capture.ProcdInstanceID != procdID || capture.BindingDigest != hex.EncodeToString(binding) {
+		return nil, ErrNomadSandboxMigrationConflict
+	}
+	if t.Prefetch != nil {
+		digest, _ := t.Prefetch.Digest()
+		var reservation protocol.MigrationStagingRequest
+		if prefetchDigest == nil || *prefetchDigest != digest || t.Prefetch.Staging.Target.SlotID != targetSlot ||
+			json.Unmarshal(staging, &reservation) != nil || reservation.Validate() != nil {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+		reservation.Target = reservation.Destination
+		if reservation != t.Prefetch.Staging {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+	} else if prefetchDigest != nil {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
 	if t.Image != nil {

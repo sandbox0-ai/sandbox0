@@ -21,9 +21,20 @@ func checkpointRunner(t *testing.T, behavior string) (*Command, string) {
 		t.Fatal(err)
 	}
 	log := binary + ".calls"
-	return New(Config{Path: binary, Root: filepath.Join(dir, "root"),
-		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true}).(*Command), log
+	runner := New(Config{Path: binary, Root: filepath.Join(dir, "root"),
+		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true}).(*Command)
+	// These adapter tests control OCI observations. Linux-specific tests below
+	// use real child processes to exercise physical exit and source pinning.
+	runner.checkpointSource = func(context.Context, string) (checkpointExitWaiter, error) {
+		return immediateCheckpointExit{}, nil
+	}
+	return runner, log
 }
+
+type immediateCheckpointExit struct{}
+
+func (immediateCheckpointExit) Wait(ctx context.Context) error { return ctx.Err() }
+func (immediateCheckpointExit) Close() error                   { return nil }
 
 func readCheckpointCalls(t *testing.T, log string) string {
 	t.Helper()
@@ -48,7 +59,7 @@ func TestCheckpointStopsSourceAndPreservesImmutableRuntimeFlags(t *testing.T) {
 		t.Fatalf("checkpoint permissions: %v, %v", info, err)
 	}
 	want := strings.Join(append(runner.GlobalArgs(), "checkpoint", "--image-path="+image,
-		"--compression=none", "source"), "\n") + "\n"
+		"--compression=none", "--exclude-committed-zero-pages", "source"), "\n") + "\n"
 	want += strings.Join(append(runner.GlobalArgs(), "state", "source"), "\n") + "\n"
 	if got := readCheckpointCalls(t, log); got != want {
 		t.Fatalf("checkpoint arguments = %q, want %q", got, want)
@@ -193,5 +204,17 @@ func TestRestoreRejectsUnprotectedOrRedirectedImages(t *testing.T) {
 	}
 	if got := readCheckpointCalls(t, log); got != "" {
 		t.Fatalf("unsafe restore reached runsc: %q", got)
+	}
+}
+
+func TestCheckpointWritebackErrorCannotBecomeCaptureSuccess(t *testing.T) {
+	runner, _ := checkpointRunner(t, "case \"$*\" in *' state '*) printf '%s' '{\"id\":\"source\",\"status\":\"stopped\"}';; esac\n")
+	joined := false
+	runner.checkpointWriteback = func(context.Context, string) (func() error, error) {
+		return func() error { joined = true; return errors.New("retained writeback failed") }, nil
+	}
+	err := runner.Checkpoint(t.Context(), "source", filepath.Join(t.TempDir(), "image"))
+	if err == nil || !strings.Contains(err.Error(), "retained writeback failed") || !joined {
+		t.Fatalf("checkpoint lost writeback completion: joined=%t, err=%v", joined, err)
 	}
 }

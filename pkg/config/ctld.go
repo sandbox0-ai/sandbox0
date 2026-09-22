@@ -68,6 +68,7 @@ type CtldNomadRuntimeConfig struct {
 	NBDDevices                      []string `yaml:"nbd_devices" json:"-"`
 	RuntimeSlotJournalPath          string   `yaml:"runtime_slot_journal_path" json:"-"`
 	MigrationStagingBytes           int64    `yaml:"migration_staging_bytes" json:"-"`
+	MigrationPeerAddress            string   `yaml:"migration_peer_address" json:"-"`
 	MigrationStagingProjectID       uint32   `yaml:"migration_staging_project_id" json:"-"`
 	MigrationStagingInodes          uint64   `yaml:"migration_staging_inodes" json:"-"`
 	NodeBootIDFile                  string   `yaml:"node_boot_id_file" json:"-"`

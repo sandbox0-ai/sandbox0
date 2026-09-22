@@ -24,6 +24,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/migrationstaging"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 )
@@ -74,6 +75,7 @@ type Config struct {
 	RuntimeSlotNodeBootIDFile string
 	RuntimeSlotJournalPath    string
 	MigrationStagingBytes     int64
+	MigrationPeerAddress      string
 	MigrationStagingProjectID uint32
 	MigrationStagingInodes    uint64
 }
@@ -175,6 +177,14 @@ func (c Config) Validate() error {
 		paths = append(paths, struct{ name, value string }{
 			"rootfs_object_encryption_key_path", c.RootFSObjectEncryptionKeyPath,
 		})
+	}
+	if c.MigrationPeerAddress != "" {
+		if err := runtimecheckpoint.ValidatePeerAddress(c.MigrationPeerAddress); err != nil {
+			return err
+		}
+		if c.MigrationStagingBytes == 0 {
+			return fmt.Errorf("migration peer requires configured staging quota")
+		}
 	}
 	if c.MigrationStagingBytes != 0 || c.MigrationStagingProjectID != 0 || c.MigrationStagingInodes != 0 {
 		if err := (migrationstaging.Limits{ProjectID: c.MigrationStagingProjectID, Bytes: c.MigrationStagingBytes, Inodes: c.MigrationStagingInodes}).Validate(); err != nil {

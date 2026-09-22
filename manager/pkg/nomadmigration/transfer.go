@@ -19,6 +19,7 @@ const migrationBatchSize = 8
 // Absence of a receipt is pending work, never permission to skip a physical step.
 type Transfer struct {
 	Publication protocol.MigrationPublicationRequest
+	Prefetch    *protocol.MigrationImagePrefetchRequest
 	Published   *protocol.MigrationPublication
 	Image       *protocol.MigrationImagePrepareRequest
 	Prepared    *protocol.MigrationImagePrepared
@@ -32,6 +33,12 @@ func (t Transfer) Validate() error {
 	}
 	if t.Published != nil && t.Published.ValidateFor(t.Publication) != nil {
 		return errors.New("invalid stored migration publication")
+	}
+	if t.Prefetch != nil {
+		digest, err := t.Prefetch.Publication.Digest()
+		if err != nil || digest != publicationDigest || t.Prefetch.Validate() != nil {
+			return errors.New("migration prefetch changed its authorized publication")
+		}
 	}
 	if t.Image != nil {
 		digest, err := t.Image.Publication.Digest()
@@ -83,12 +90,14 @@ type Report struct {
 // evacuation and execution phases to existing PostgreSQL authority. Each store
 // transaction owns its admission and lifecycle decisions; the loop only schedules.
 type Coordinator struct {
-	mu    sync.Mutex
-	store Store
-	node  Node
-	after string
-	list  func(context.Context, string, int) ([]string, error)
-	step  func(context.Context, string) (bool, error)
+	drainWatcher drainWatcher
+	progress     *Progress
+	mu           sync.Mutex
+	store        Store
+	node         Node
+	after        string
+	list         func(context.Context, string, int) ([]string, error)
+	step         func(context.Context, string) (bool, error)
 }
 
 func New(store Store, node Node) (*Coordinator, error) {
@@ -155,7 +164,7 @@ func (c *Coordinator) advance(ctx context.Context, id string) (bool, error) {
 		return false, errors.New("migration transfer changed operation")
 	}
 	if t.Published == nil {
-		receipt, err := c.node.PublishMigration(ctx, t.Publication)
+		receipt, err := c.publishWithPrefetch(ctx, t)
 		if err != nil {
 			return false, err
 		}
@@ -212,7 +221,21 @@ func (c *Coordinator) advance(ctx context.Context, id string) (bool, error) {
 // Run is independent of terminal cleanup so a slow image transfer cannot hold
 // the cleanup loop. Every manager replica can retry the same database commands.
 func (c *Coordinator) Run(ctx context.Context, report func(Report)) error {
+	if c.drainWatcher != nil {
+		if report != nil {
+			callback := report
+			var reportMu sync.Mutex
+			report = func(r Report) { reportMu.Lock(); defer reportMu.Unlock(); callback(r) }
+		}
+		watchCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); c.watchDrains(watchCtx, report) }()
+		defer func() { cancel(); <-done }()
+	}
+	burst := 0
 	for ctx.Err() == nil {
+		// Subscribe before the read so a commit during the pass is not lost.
+		changed := c.progress.watch()
 		pass, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		result, err := c.RunOnce(pass)
 		cancel()
@@ -222,9 +245,31 @@ func (c *Coordinator) Run(ctx context.Context, report func(Report)) error {
 		if report != nil {
 			report(Report{Result: result, Error: err})
 		}
-		timer := time.NewTimer(time.Second)
+		if result.Advanced > 0 {
+			c.progress.notify()
+		}
+		delay := time.Second
+		if err != nil {
+			// Other lanes progressing must not spin retries of a failed RPC.
+			changed = nil
+			burst = 0
+		} else if result.Advanced > 0 {
+			burst++
+			if burst < migrationBatchSize {
+				continue
+			}
+			// Bound continuous work without imposing a second per transition.
+			delay = 10 * time.Millisecond
+			changed = nil
+			burst = 0
+		} else {
+			burst = 0
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
+		case <-changed:
 			timer.Stop()
 		case <-timer.C:
 		}

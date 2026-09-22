@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -58,6 +59,7 @@ type sourceExecutionNode struct {
 	fail                       string
 	badPrepare                 bool
 	uncertain                  bool
+	complete                   bool
 	expire                     bool
 }
 
@@ -115,6 +117,9 @@ func (n *sourceExecutionNode) CaptureMigration(ctx context.Context, r protocol.M
 	digest, err := r.Digest()
 	require.NoError(n.t, err)
 	state := protocol.MigrationCaptureIntent
+	if n.complete {
+		state = protocol.MigrationCaptureComplete
+	}
 	if n.uncertain {
 		state = protocol.MigrationCaptureUncertain
 	}
@@ -167,6 +172,8 @@ func TestNomadMigrationSourceExecutionRecoversLostResponsesIntegration(t *testin
 				r, err := w.RunOnce(f.ctx)
 				if err != nil {
 					failures++
+				} else if n.captureCalls > 0 {
+					require.Equal(t, 1, r.Skipped, "durable capture intent is not a completed transition")
 				} else {
 					require.Equal(t, 1, r.Advanced)
 				}
@@ -196,6 +203,30 @@ func TestNomadMigrationSourceExecutionRecoversLostResponsesIntegration(t *testin
 			record, err := f.store.GetSandbox(f.ctx, f.sandboxID)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), record.RuntimeGeneration)
+		})
+	}
+}
+
+func TestNomadMigrationCaptureObservationDoesNotReportProgressIntegration(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+			f, a := migrationSourceExecutionFixture(t, "pending-capture")
+			retainMigrationEligibilityFixture(t, f, a)
+			n := &sourceExecutionNode{t: t, f: f, complete: complete}
+			w, err := nomadmigration.NewSourceExecution(f.store, n, n, n)
+			require.NoError(t, err)
+			for range 2 {
+				result, err := w.RunOnce(f.ctx)
+				require.NoError(t, err)
+				require.Equal(t, 1, result.Advanced)
+			}
+			for range 3 {
+				result, err := w.RunOnce(f.ctx)
+				require.NoError(t, err)
+				require.Zero(t, result.Advanced)
+				require.Equal(t, 1, result.Skipped)
+			}
+			require.Equal(t, 3, n.captureCalls, "periodic retries still recover lost capture dispatches")
 		})
 	}
 }

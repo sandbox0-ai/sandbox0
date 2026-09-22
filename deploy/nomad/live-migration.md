@@ -8,6 +8,98 @@ select its destination, or download an execution image.
 
 ## Implementation status
 
+### Current performance evidence (2026-09-22 UTC)
+
+Point-to-point execution-image transfer uses pinned mutual TLS and overlaps
+with encrypted regional publication. Regional durability and exact source
+fencing still precede target execution. RootFS already reuses unchanged COW
+blocks; execution memory is a separate checkpoint, not a full disk copy.
+The source seals only changed RootFS blocks and the corresponding mapping into
+an immutable regional generation. The destination attaches that generation,
+reuses local cache entries and reads missing blocks on demand. COW does not
+make anonymous process memory incremental: the destination still needs the
+memory and runtime state required by the stock-runsc execution checkpoint.
+The tentative peer cache avoids sending unchanged checkpoint chunks twice
+within one migration; it is not cross-migration memory dirty-page tracking.
+
+The timer runs from the source drain trigger to the first authenticated
+command response through the regional ingress from the committed destination
+generation. These fixtures use `cluster-gateway` as the single-cluster regional
+entry point; they do not run a separate `regional-gateway` process.
+For a preserved Python process holding 128 MiB of random memory, the
+manifest-cache and resource-comparison cohorts measured:
+
+| Public memory tier / derived CPU | Samples | Target usable, seconds | Median | At or below 3 seconds |
+| --- | --- | --- | --- | --- |
+| 512 MiB / 150 millicores | 6 | 3.428–3.710 | 3.629 | 0 / 6 |
+| 1 GiB / 250 millicores | 4 | 2.815–2.945 | 2.855 | 4 / 4 |
+| 2 GiB / 500 millicores | 6 | 2.234–2.572 | 2.287 | 6 / 6 |
+
+The 512-MiB row is the September 22 manifest-cache cohort described below.
+It and the 1-GiB row include the bounded-prefetch-acknowledgement fix; the
+2-GiB cohort predates that fix. The resource rows were measured in separate
+acceptance cohorts, not a controlled comparison of resource tiers or fixes.
+
+The subsequent integrated growing regional-upload cohort at 150 millicores /
+512 MiB took 3.575–3.924 seconds across six moves (median 3.736 seconds), with
+zero samples at or below three seconds. Early point-to-point receipt is now
+integrated: a subsequent six-move cohort with the same resource limits and
+128-MiB random-memory workload took 3.442–3.621 seconds (median 3.505), also
+with zero samples at or below three seconds. All six moves used early receipt
+and final repair. The observed median is 231 ms lower than the growing-upload
+cohort; these small sequential cohorts are not production percentiles or a
+controlled attribution of every latency difference.
+
+These cohorts used the unchanged 4-GiB-per-CPU policy, 100-ms CPU quota period
+and original `shmem_enabled=never` host setting. All complete-memory, process,
+file and physical-cleanup checks passed. These are serial migrations with warm
+carriers/caches, not production percentiles or a guarantee for arbitrary active
+memory, dirty disks, cold caches or concurrent migrations. Source cleanup is
+measured separately and may finish after the destination becomes usable.
+
+A separate host-setting experiment enabled `shmem_enabled=advise` on both
+temporary nodes without changing CPU/memory quotas or binaries. Six moves took
+3.019–3.464 seconds (median 3.294), with zero at or below three seconds. This
+experiment is separate from the original `never` baseline and does not change
+the production default. Its stock-runsc restore median was 796 ms, versus
+1002 ms in the preceding baseline cohort; the small sequential samples do not
+isolate all sources of variation.
+
+A later verification-overlap revision reduced observed final repair from a
+187-ms to a 109-ms median under the `never` setting. Its full six-move median
+was nevertheless 3.678 seconds; one 7.146-second move included a 3.768-second
+regional-publication interval. The same revision with `advise` took
+3.145–3.433 seconds (median 3.299), again zero of six at or below three seconds.
+All state and cleanup checks passed, and the host setting was restored. These
+results establish a shorter repair stage, not an end-to-end SLO improvement.
+
+A subsequent final-chunk upload overlap candidate moved missing execution
+chunks into the RootFS seal interval. Six `never` moves took 3.550–3.693 seconds
+(median 3.602); six separate `advise` moves took 3.216–4.255 seconds (median
+3.371). Neither cohort had a sample at or below three seconds. Final publication
+medians fell to 94 and 87 ms, but sealing also took longer, so a faster total
+has not been demonstrated. All twelve state/cleanup checks passed and both
+host settings were restored.
+
+The final tested handoff-retry candidate preserved all state across six default
+`never` moves at 150 millicores / 512 MiB with 128 MiB random memory: 3.403–3.640
+seconds, median 3.518. All six reused the prefetched image. The separate `advise`
+experiment had a 3.944-second median and 4–5-second tails; the host setting was
+restored. The release keeps the original CPU quota and `never` setting. The
+observed 3.x-second default cohort is a workload-specific result, not a hard
+latency bound for arbitrary memory, dirty RootFS, cache state or concurrency.
+
+The default 150-millicore/512-MiB tier remains above the requested three-second
+total for this workload. A separate 64-MiB random-memory cohort at that same
+default quota took 2.847–3.028 seconds (median 2.976), with three of four samples
+at or below three seconds. Smaller memory therefore changes the result, but
+still does not establish a stable three-second bound. The resource cohorts
+establish measured conditions, not a change to defaults or proof that
+250 millicores is the minimum.
+Detailed historical samples below retain their original workload, configuration
+and measurement boundaries. Production rollout requires independent validation
+of the deployed immutable bundle, node admission and durable cleanup.
+
 The full Nomad/ctld/block-COW path completed five unattended consecutive moves
 of the **same running sandbox** between two independent Linux hosts on
 2026-09-20 UTC: A → B → A → B → A → B. Generation advanced from 1 through 6.
@@ -124,6 +216,1949 @@ uninterrupted TCP sessions, large-memory performance, concurrent migration
 capacity or recovery of volatile state from a dead source. Migration is
 system-owned; users cannot trigger it or choose its destination.
 
+### End-to-end latency optimization samples (2026-09-21 UTC)
+
+A new isolated two-host fixture uses Nomad 1.11.3, stock runsc
+`release-20260914.0`, real PostgreSQL, disk-backed MinIO with application-layer
+encryption, block-COW RootFS and four ready standard carriers on each host.
+Both hosts are four-vCPU/8-GiB ECS instances in the same zone. These samples use
+one Python REPL workload with a 512-MiB memory lease and the derived default
+150-millicore CPU lease, without an additional large random-memory allocation. The control services and object store share
+host A; this is not production capacity or concurrency acceptance.
+
+The timer starts immediately before committing the source drain fence and ends
+only after the target runtime generation commits and an authenticated regional
+gateway REPL command returns the preserved state. PostgreSQL observation polls
+at 20 ms plus query time; the complete request round trip is included. Source
+cleanup is measured separately. The same PID, in-memory token, increasing
+counter, open-unlinked descriptor and offset, mmap, `/tmp` and persistent file
+contents are checked after every move.
+
+| Change under test | Direction | Target command usable | Final cleanup and verification |
+| --- | --- | --- | --- |
+| P2P, progress wakeups and zero-page exclusion | B → A | 7.697 s | 9.801 s |
+| Revalidated warm CPU evidence; no repeated capture-complete progress | B → A | 3.277 s | 5.023 s |
+| Same process returning; 250-ms capture observation window | A → B | 4.023 s | 5.431 s |
+| One-second observation window, before transient seal-busy retry | B → A | 4.273 s | 6.276 s |
+| Bounded retry includes concurrent source sealing | A → B | 2.455 s | 4.552 s |
+
+The second run recorded 533 migration-port TCP packets with approximately
+14.46 MB of summed TCP payload. Source-execution advance reports fell from 178
+to two. Publication still completes in the encrypted regional store before
+peer transfer; durability and fencing were not relaxed. The 250-ms observation
+window expired before the third run's capture completed, so it still incurred
+the periodic reconciliation delay. The next run encountered concurrent
+driver-owned RootFS sealing and still backed off on temporary node
+unavailability. The bounded wait now includes that transient result. These
+individual samples do not establish a
+three-second SLO, a percentile, or a large-memory bound.
+
+After adding 128 MiB of random memory to that same preserved Python process,
+B → A completed with an identical full-memory SHA-256 and all previous state
+checks. Target generation commit was observed at 5.539 seconds; the regional
+REPL response including a fresh full-memory hash completed at 6.653 seconds.
+Final cleanup plus the repeated hash verification completed at 8.352 seconds.
+The measured command itself took about 1.114 seconds, so this is a conservative
+usability measurement with substantial verification work. Even the earlier
+generation-commit observation exceeded three seconds. This larger-memory sample
+therefore does not satisfy the requested total-latency target.
+A separate repeat of the hash command took 0.957 seconds and consumed about
+0.147 CPU-seconds. Its leaf cgroup (`cpu.max = 15000 100000`) was throttled in
+all nine measured periods, while the two-CPU parent was not throttled. The
+sandbox quota is therefore material to interpreting these timings; four host
+vCPUs do not mean the guest received four CPUs. The restore claim log measured
+1.107 seconds in the restore/start stage, 0.190 seconds in create and 0.068
+seconds in RootFS attachment.
+
+The instrumented repeat retained the same 150-millicore limit and 128-MiB random
+allocation. It took 7.546 seconds through the verifying REPL response, with
+0.610 seconds in stock checkpoint, 0.219 seconds syncing the execution image,
+0.108 seconds sealing RootFS, 0.466 seconds publishing the encrypted image and
+0.751 seconds preparing its 149,105,181 bytes over the peer transport. The
+successful destination journal log explicitly reported `transport=peer`.
+The source's one-second observation window expired about six milliseconds
+before RootFS sealing finished, adding another one-second retry backoff. The
+window was consequently extended to two seconds; this changes bounded waiting,
+not the required durability or execution authority.
+
+The same process returning A → B with the two-second window completed the
+verifying command in 6.028 seconds, with generation commit observed at 5.029
+seconds and final cleanup plus verification at 7.678 seconds. No migration-pass
+errors were recorded. RootFS sealing completed in 0.109 seconds and source
+recovery advanced about 20 milliseconds later, without the previous one-second
+backoff. Checkpoint took 0.418 seconds, image sync 0.232 seconds, regional image
+publication 0.940 seconds, peer preparation 0.464 seconds and restore/start
+1.140 seconds. Direction and stage timings differ between samples, so the
+total difference cannot be attributed solely to the observation window.
+
+RootFS migration already uses the incremental block-COW generation builder:
+unchanged immutable data ranges are reused, while dirty blocks and updated
+mapping metadata are published. The 151,171,392-byte peer image in the return
+sample is the separate execution checkpoint, including the workload's 128 MiB
+of random memory; it is not a full RootFS copy. Disk COW does not provide a
+destination baseline for anonymous process memory. The three-second target
+therefore still requires improvements beyond avoiding full RootFS transfer.
+
+A subsequent B → A move of the same process used a lightweight preserved-state
+REPL command for readiness and performed the full 128-MiB SHA-256 separately
+after cleanup. Generation commit was observed at 5.728 seconds, the readiness
+response at 6.005 seconds, and final cleanup plus full-state verification at
+8.212 seconds. All preserved-state checks passed. This distinction removes
+expensive verification work from the readiness metric; it is not an
+implementation speedup, and the result still exceeds three seconds.
+
+Drain discovery now also listens for PostgreSQL commit notifications. Migration
+090 adds a payload-free notification for entering, changing or removing a drain
+fence; unchanged fences do not notify. Each manager's evacuation worker holds
+one pool connection, scans after subscribing or reconnecting, and retains its
+one-second periodic scan during listener outages. Notifications never carry
+execution authority. Unit/race tests cover immediate wakeup, bounded reconnect,
+fallback scans and cancellation; isolated PostgreSQL tests verify commit,
+rollback and unchanged-fence behavior.
+
+With that change and the same lightweight readiness command, the preserved
+128-MiB random-memory process completed A → B in 5.247 seconds and B → A in
+5.032 seconds. Reservation was observed at 0.054 and 0.052 seconds respectively,
+compared with 0.921 seconds in the preceding B → A sample. Generation commits
+were observed at 5.033 and 4.853 seconds; final cleanup plus full-memory hash
+verification finished at 8.054 and 8.228 seconds. Both full-state checks passed
+with the same 150-millicore/512-MiB lease. These single samples confirm removal
+of discovery polling delay, but do not establish a three-second SLO.
+
+`BenchmarkPeerImageMaterialization` measures a 128-MiB pipe transfer including
+both chunk-hash checks and destination fsync on one host. Three five-iteration
+runs on host A measured 0.956–0.994 seconds per operation. A two-buffer source
+read-ahead experiment passed unit and race tests but measured 1.025–1.076 seconds
+and added 8 MiB of buffer allocation. That experiment was reverted; the
+benchmark remains available. These local disk/pipe results do not characterize
+cross-host network throughput or the end-to-end migration SLO.
+
+### Planned publication and concurrent peer-transfer prototype
+
+`runtimecheckpoint.Store.PlanLocal` now describes a retained completed image
+without uploading objects. `PublishPlanned` and `WritePlannedPeerImage` can
+consume that exact prospective reference concurrently. Publication rereads and
+verifies every planned chunk, publishing the immutable regional manifest last.
+The plan is explicitly not a durable publication receipt or restore authority.
+Tests gate regional uploads while allowing the peer to finish, then exercise
+both successful publication and cancellation. Changed source bytes, inventories
+and bindings are rejected. Existing checkpoint/node-runtime tests, architecture
+checks and checkpoint race tests pass. Planning a warm 128-MiB local image took
+70.95–73.20 ms in three ten-iteration runs with `GOMAXPROCS=2`.
+
+A separate transfer-only prototype compared serial publication then peer
+transfer with planned parallel publication/transfer. It uses 128 MiB of random
+fixture data, the real application-encrypted object store, pinned TLS 1.3 peer
+identities, chunk verification and crash-durable destination materialization.
+Successful HTTP completion also waits for regional publication; receiving all
+peer bytes alone cannot produce success. The timer includes planning, upload,
+transfer, verification and destination fsync. It excludes sandbox checkpoint,
+regional transaction orchestration and guest restore, and the prototype uses
+test-owned authorization rather than the production migration protocol.
+
+With MinIO and the destination sharing host A's 100-GiB ESSD PL0 system disk,
+successive serial and parallel samples both approached 2.05 seconds. A third
+isolated four-vCPU/8-GiB host with its own 100-GiB ESSD PL0 disk then hosted only
+the encrypted object-store backend for the prototype. All three hosts remain
+in the test VPC with automatic release; the live Nomad fixture still uses its
+original backend. With independent storage but back-to-back transfers, both
+modes approached 1.00 second, consistent with a sustained destination-write
+throughput limit.
+
+Spacing otherwise identical transfers by three seconds separated single-run
+latency from that sustained load:
+
+| Transfer-only mode | Three samples | Median |
+| --- | --- | --- |
+| Serial publication then peer | 0.832, 0.852, 0.814 s | 0.832 s |
+| Plan then concurrent publication/peer | 0.513, 0.555, 0.538 s | 0.538 s |
+
+The 0.294-second median difference includes the additional planning scan. It
+supports further protocol integration, not a three-second end-to-end claim.
+The live coordinator still requires committed publication before target
+preparation. Prospective target authorization and interrupted-preparation
+cleanup must be integrated before enabling overlap in actual sandbox migration.
+
+Source ctld now supports reading the planned image while its publication
+worker uploads the same checked chunks. A speculative read explicitly selects
+the planned stream and must match the publication request digest and reserved
+destination certificate. The worker retains its exclusive source slot until
+all admitted readers exit. Closing admission and admitting readers use the same
+mutex, so cleanup cannot race past a late reader. Failed publication cancels
+the readers and expires blocked HTTP write deadlines before releasing custody.
+After successful publication, authorized cleanup can preempt a stalled reader
+without discarding the durable publication receipt. A stream completing early
+is only speculative cache data; it does not prove regional publication.
+
+The peer listener also closes handler admission and joins its active handlers
+before ctld releases the journal and runtime. Closing sockets alone does not
+provide that ownership guarantee. Node-runtime tests cover concurrent transfer
+with a gated regional upload, absent publication authority after early peer
+completion, changed identity/operation rejection, failed-upload interruption,
+successful-upload custody retention, cleanup preemption and joined shutdown.
+The speculative transfer integration is installed in the isolated performance
+fixture and has completed the two-node measurements described below. It adds
+a planning scan when peer publication is enabled; that cost must be included
+in the eventual complete migration measurements.
+
+The authenticated node channel now exposes `migration_publication_plan` as an
+optional capability. It starts or joins the same bounded source upload worker
+and returns a separate prospective-reference response as soon as planning is
+complete. `migration_publish` still waits for the durable publication receipt.
+Repeated observers share the upload; canceling one observer cannot interrupt it.
+A late planned HTTP read can use the exact completed publication after the
+worker exits, with the original destination certificate and request checks.
+Protocol tests reject using a plan as a publication response, mixed response
+payloads, another source binding and unsupported or stale-boot node channels.
+
+Migration 091 adds immutable target-prefetch authorization to PostgreSQL. Its
+request binds the prospective source reference and peer endpoint to the exact
+existing destination staging reservation. Authorization requires a previously
+committed publication request, both staging receipts, current destination
+capacity and no staging release or already-started target preparation. It does
+not create a publication or target-preparation receipt, move the writer, or
+advance runtime generation. The transfer projection reads this authorization
+after manager restart. Isolated PostgreSQL tests cover concurrent exact retries,
+changed plans, expired target admission, immutability and the unchanged durable
+publication gate.
+
+The coordinator now dispatches this optional target cache fill concurrently with
+ordinary source publication. Unsupported peers and failed cache fills retain the
+ordinary image-preparation path. Only the real publication receipt can advance
+the regional transaction. Target journal version 14 owns partial and completed
+cache directories within the existing staging reservation; both ctld instances
+must understand that version before enabling the path. Cache acknowledgements
+are separate from preparation receipts and grant no execution authority.
+
+Ordinary authorized preparation verifies cached files against the published
+regional manifest before promoting the directory. Partial, corrupt or interrupted
+promotion falls back to retrieving the exact published image. Cleanup cancels
+and joins an active fill, fsyncs physical cache absence, and then records the
+cache tombstone before releasing staging. Tests cover restart reuse, quota and
+identity rejection, interrupted promotion, cleanup races, lost fill responses,
+and a target receiving the complete image before gated regional publication.
+Isolated PostgreSQL integration tests also exercise real coordinator overlap,
+unsupported peers, failed peer transfer and failed regional publication, with
+the publication gate unchanged. These tests do not establish an end-to-end
+latency improvement in the live fixture.
+
+The first mixed-version rollout attempt aborted before image transfer. Although
+the driver observed OCI `stopped` after saving, ctld subsequently observed
+`running` and correctly rejected sealing the execution/RootFS pair. The installed
+driver already included the OCI exit polling loop; a missing polling fix was
+ruled out by inspecting the binary. Stock runsc can report a stopped guest while
+its host sentry is still exiting, then fall back to host PID existence if the
+control RPC fails. The adapter now pins the running source with a Linux pidfd
+before checkpoint, rechecks its identity, and waits for that process to exit
+before accepting OCI stopped. This does not kill or resume the source. Tests
+cover early OCI stopped, changed PID and cancellation retaining image custody;
+the complete gvisorcli race suite passes. Two subsequent real migrations with
+this change preserved the same process and all checked state. The failed
+attempt is not a performance result. The relevant upstream behavior is in
+[CheckStopped](https://github.com/google/gvisor/blob/release-20260914.0/runsc/container/container.go#L2274)
+and its fallback
+[IsRunning](https://github.com/google/gvisor/blob/release-20260914.0/runsc/sandbox/sandbox.go#L2063).
+
+The previous REPL had a one-hour lifetime and was no longer present before the
+mixed-version attempt, so that attempt used a replacement context. After its
+failed capture cleanup, a fresh sandbox was claimed for the subsequent pair.
+It retained the same 150-millicore CPU limit, 512-MiB memory limit and 128-MiB
+random-memory workload. Neither comparison silently increases guest resources.
+
+With speculative transfer and physical-exit confirmation installed, B → A took
+5.257 seconds from the drain trigger to a lightweight authenticated preserved
+REPL command; generation commit was observed at 4.957 seconds. RootFS sealing
+took 0.102 seconds, checkpoint 0.468 seconds and image sync 0.197 seconds.
+Regional publication took 0.535 seconds while target prefetch took 1.188 seconds
+for 149,190,423 bytes. Subsequent authorized preparation reported
+`transport=prefetch` and took 0.166 seconds; target claim took 1.641 seconds,
+including 1.207 seconds in restore/start. Final cleanup and a separate complete
+memory-hash check finished at 7.509 seconds, with no migration-pass errors.
+
+The same process returned A → B in 4.946 seconds, with generation commit
+observed at 4.751 seconds and final cleanup plus the full-memory check at
+7.794 seconds. Both directions preserved PID, counter continuity, the full
+128-MiB SHA-256, an unlinked open descriptor and its offset, persistent and
+runtime-only files, and an mmap. These samples confirm end-to-end correctness
+of overlap and cache promotion; they do not meet the three-second total target
+or establish a consistent latency improvement over the earlier serial path.
+Storage and peer transfer share fixture resources, and the longer overlapping
+prefetch must remain in the measured critical path rather than being excluded.
+
+An isolated restore-loading experiment used the same stock runsc, 128 MiB of
+random process memory and a verified 512-MiB cgroup memory limit. At 150
+millicores, four foreground restores took 0.900–0.920 seconds and four
+`--background` restores took 0.897–0.915 seconds. Each incurred nine CPU
+throttling periods; background loading did not materially reduce this stage.
+Complete memory hashes and preserved process state passed in both modes.
+
+A separate, explicitly changed-resource comparison at 1,000 millicores took
+0.098–0.144 seconds for three foreground restores and 0.108–0.145 seconds for
+three background restores. This identifies CPU quota as a substantial restore
+cost in this fixture, but is not an end-to-end migration result or evidence for
+the three-second target at 150 millicores. The actual migration sandbox retains
+its original resource limit, and production restore still uses foreground
+loading. Reproduce the isolated Linux experiment with
+`SANDBOX0_RUN_RESTORE_LOADING_PROBE=1` and
+`SANDBOX0_RESTORE_PROBE_CPU_MILLICORES=150` (or explicitly `1000`), running
+`TestPrivilegedRestoreLoadingLatency` in `pkg/gvisorcli`. It owns separate
+cgroups and runtime roots and requires root and stock runsc.
+
+Local image verification now reuses the bounded publication scanner, checking
+all chunk hashes with at most four workers. Exact file inventory, the regional
+manifest binding and the full restore-intent recheck remain mandatory. This
+raises the maximum chunk-buffer allocation per verification from 8 to 32 MiB;
+it does not increase the guest CPU or memory lease. On the same host with
+`GOMAXPROCS=2`, three five-iteration `BenchmarkVerifyLocal` runs for 128 MiB
+improved from 126.96–127.85 ms to 69.24–70.33 ms. Checkpoint race tests passed,
+including corruption in every parallel worker's chunk and the short final
+chunk, cancellation, changed inventories and planned-image binding checks.
+The affected node-runtime migration tests also passed.
+
+After deploying this verification change only to the temporary fixture, the
+same 150-millicore workload completed another B → A → B pair, advancing runtime
+generation 3 → 4 → 5. Trigger-to-command-ready times were 5.484 and 4.584 seconds;
+generation commit was observed at 5.279 and 4.350 seconds. Image preparation
+took 83.65 and 73.71 ms, versus 165.84 and 149.83 ms in the preceding pair.
+The images contained 151,608,948 and 151,433,309 bytes. Both moves preserved the
+full random-memory hash, PID, increasing counter, open unlinked descriptor and
+offset, persistent file, runtime-only file and mmap; source capacity and both
+staging reservations were released with no migration-pass errors. Cleanup plus
+the separate full-memory check finished at 7.876 and 7.382 seconds. Regional
+publication varied from 1.425 to 0.654 seconds and restore/start from 1.160 to
+1.066 seconds. The stage-level verification gain is established; this pair
+does not establish a consistent total-latency gain or meet the three-second
+target.
+
+An additional end-to-end CPU comparison used a separate sandbox with a real
+1,000-millicore lease, the same 512-MiB memory limit and 128 MiB of random
+process memory. The isolated manager's memory-per-CPU policy was temporarily
+set to `512Mi` only while claiming this sandbox through the normal memory
+override API, then restored byte-for-byte before any timed migration. The
+original sandbox retained its 150-millicore lease and passed another full
+preserved-state check. It was subsequently paused, with its lease released,
+so reverse drains would migrate only the comparison workload. Source and
+destination cgroup reads confirmed `cpu.max = 100000 100000` and
+`memory.max = 536870912` for the new workload. This is a changed-resource
+comparison, not an improvement to the default 150-millicore result.
+
+The same one-core process then completed four alternating migrations:
+
+| Direction | Trigger to command-ready | Cleanup plus full-memory verification |
+| --- | --- | --- |
+| A → B | 2.979 s | 4.764 s |
+| B → A | 3.589 s | 5.131 s |
+| A → B | 3.072 s | 5.395 s |
+| B → A | 3.594 s | 5.071 s |
+
+All four preserved the same PID, random-memory hash, counter continuity,
+unlinked open descriptor and offset, persistent and runtime-only files, and
+mmap. All source leases and staging reservations were released, with no
+migration-pass errors. Checkpoint took 75.6–98.9 ms and restore/start took
+147.1–210.9 ms. Peer prefetch was 522.9–555.3 ms when targeting B and
+1,209.9–1,211.3 ms when targeting A. The final B → A image was 151,400,528
+bytes; host A's physical disk counters increased by 311,025,664 written bytes
+and 1,142 I/O milliseconds between triggering the drain and command readiness.
+These are whole-host counters, so they do not isolate per-service I/O. Their
+approximately doubled byte count is consistent with the target and regional
+MinIO writing the image on the same disk. Independent storage is the next
+experiment needed to test that contention hypothesis. One sub-three-second
+sample does not establish a three-second SLO, even with the larger CPU lease.
+
+The live test region was subsequently moved to the independent storage host.
+The completed synthetic workload was verified and paused, all compute leases
+were released, and the test manager and both nodes' ctld instances were stopped
+before copying. All 78 remaining objects (33,735,954 ciphertext bytes) were
+copied conditionally into a separate test bucket and individually SHA-256
+verified. Source inventory stability and exact destination inventory were also
+checked. Application encryption keys and settings were retained; only the test
+endpoint, bucket and storage credentials changed. The original MinIO service
+was then stopped, retaining its data, so successful new claims and migrations
+could not silently use it. No production configuration was changed.
+
+A fresh, otherwise equivalent one-core/512-MiB workload completed A → B in
+3.023 seconds and B → A in 3.068 seconds, with full preserved-state checks and
+physical cleanup passing in both directions. Regional publication took 599.2
+and 562.2 ms; peer prefetch took 507.0 and 492.2 ms. The former slow direction's
+prefetch therefore improved substantially from approximately 1.21 seconds,
+consistent with removing shared-disk contention. Full migration still exceeded
+three seconds, including preparation, restore, regional commit and the
+authenticated preserved-context command. Cleanup plus full-memory verification
+finished at 5.061 and 5.143 seconds. Neither run reported a migration-pass error.
+
+The observer was then changed from spawning `psql` on every poll to one
+persistent pgx connection. Twenty isolated queries measured a median of 5.886
+ms with a process per query and 0.178 ms with the persistent connection. This
+is a measurement change, not a runtime optimization. The same workload moved
+A → B in 3.002188 seconds and B → A in 2.946016 seconds with the persistent
+observer, preserving the full state and releasing source and staging leases.
+The first result still exceeds three seconds; neither pair establishes a
+stable sub-three-second guarantee. The readiness probe excludes the full
+128-MiB memory hash, which remains required in post-readiness verification.
+
+Destination restore preparation now overlaps image-custody verification with
+attachment of the exact authorized RootFS writer. Request and CPU validation
+still precede both operations; `runsc create` and restore wait for both to
+succeed. A failed operation cancels its peer and joins both calls before the
+driver enters uncertain migration custody. The writer, image and carrier stay
+owned by the regional failure protocol, including a late successful peer
+response. Ordinary non-migration claims retain their existing attach path.
+The complete independent driver module passed its tests; migration-restore
+race tests also passed, including both completion orders and cancellation with
+a delayed successful response in either direction.
+
+With the same one-core workload, independent storage and persistent observer,
+eight alternating moves measured 2.975087, 3.117464, 2.989010, 3.023820,
+3.049723, 3.171024, 3.148818 and 3.126458 seconds (starting A → B). Full memory,
+PID, counter, open-unlinked descriptor, durable file, tmpfs and mmap checks
+passed on every move, as did staging release and physical source cleanup.
+No migration-pass errors were recorded. Target claim durations ranged from
+337.2 to 418.4 ms. Only two of these eight complete migrations met three
+seconds; the stage optimization does not establish the requested latency
+bound, and the one-core results do not replace the separate 150-millicore
+baseline or cold-cache/concurrent acceptance.
+
+A subsequent repeated-migration comparison alternated the serial and parallel
+driver binaries on empty destination nodes. Early immediate-after-restart
+samples included CPU-preflight socket-unavailable retries and reached 5.464
+seconds; those remain rollout-readiness evidence, not clean preparation-cost
+comparisons. After explicitly observing four warm control sockets for five
+consecutive seconds, the final eight comparisons had no migration-pass errors:
+
+| Source generation | Preparation | Trigger to usable (seconds) | Target claim (ms) |
+| --- | --- | ---: | ---: |
+| 21 | Serial | 3.632092 | 447.583 |
+| 22 | Serial | 3.515025 | 406.342 |
+| 23 | Parallel | 3.579752 | 308.116 |
+| 24 | Parallel | 3.771630 | 409.715 |
+| 25 | Serial | 3.618464 | 381.211 |
+| 26 | Serial | 3.689449 | 430.443 |
+| 27 | Parallel | 3.787623 | 385.108 |
+| 28 | Parallel | 3.784553 | 485.509 |
+
+All preserved-state and cleanup checks passed. Median target claim was 418.393
+ms serial and 397.412 ms parallel, but complete-migration medians were 3.625278
+and 3.778091 seconds respectively. These small, sequential samples do not prove
+an end-to-end benefit; latency increased over repeated moves in both modes.
+Image prefetch remained approximately 460–488 ms, regional publication 543–633
+ms, and source image sync approximately 203–216 ms in these final samples.
+Stored migration request sizes were effectively unchanged from generation 10
+through 28, ruling out growing individual authority payloads in this sample.
+Idle two-second samples showed ctld using approximately 20% of one CPU on each
+node. Additional profiling is required before attributing the remaining drift
+to a specific control-plane or node-runtime path.
+
+Profiling the retained-history node showed repeated full journal validation
+inside registration-abort and adoption scans. Code inspection found the same
+full-history validation on synchronous staging-pool admission paths. These
+scans now retain bounded SHA-256 fingerprints of fully validated records that
+cannot contribute work or admission usage without changing their bytes. Each
+of the three scan caches holds at most 256 fingerprints, retains no custody
+payloads, and starts empty after restart. Changed bytes, eviction, candidate
+records and actual execution still use full validation. Young unacknowledged
+registrations are never excluded because time alone can make them eligible.
+Staging exclusions require no image custody, no retained-count admission and
+no exclusive reservation; active reservations remain checked in the same Bolt
+transaction. No journal format, writer fencing or regional durability boundary
+changed.
+
+The complete node-runtime package passed in 12.811 seconds; targeted race tests
+covering registration, scan exclusions, adoption, staging, image preparation
+and prefetch passed in 11.584 seconds. Tests cover grace-period expiry without a
+write, changed corrupt records, restored unacknowledged receipts, bounded
+concurrent eviction, and a cached empty slot becoming an exclusive reservation.
+The existing competing-reservation tests also pass with the new admission scan.
+
+After updating only destination B, the same one-core workload migrated in
+3.560441 seconds. With both ctld nodes updated, five following alternating moves
+measured 2.784806, 2.440921, 2.327040, 2.381981 and 2.276783 seconds. The final
+four have a 2.354511-second median, with full preserved-state checks and physical
+cleanup passing and no migration-pass errors. This uses 1 CPU, 512 MiB of
+memory limit, 128 MiB of random process memory, ready carriers, warm caches and
+independent regional object storage. It is evidence for that bounded serial
+workload, not a cold-cache, high-concurrency or arbitrary-memory guarantee.
+
+The one-core process was then fully verified and normally paused. A fresh
+otherwise equivalent workload used the unchanged default CPU policy: 150
+millicores for a 512-MiB limit. Its six alternating moves measured 3.753032,
+4.127922, 4.231964, 4.240846, 4.011404 and 4.064627 seconds. All state and cleanup
+checks passed; the third move recorded one retried source-execution transaction
+conflict. The default profile therefore still fails the three-second target.
+Median checkpoint time was 608.5 ms and restore execution 1,205.7 ms, compared
+with 93.8 and 175.8 ms in the final four one-core samples. Prefetch remained
+approximately 492 ms and regional publication 568 ms in the default samples;
+process capture and restore under the CPU quota are the principal measured
+remaining difference. These experiments do not change the default CPU policy.
+
+An isolated follow-up kept the 150-millicore quota ratio and 512-MiB memory
+limit while comparing 100-ms, 20-ms and 10-ms CPU bandwidth periods. The
+foreground restore probe used stock runsc, 128 MiB of random memory, its own
+cgroups and runtime directories on the empty destination host. Nine serial
+runs alternated periods in the order 100, 20, 10, 10, 20, 100, 100, 20, 10 ms.
+Every run checked the actual source and destination `cpu.max`, destination
+`memory.max`, process token/PID, open-unlinked file offset, temporary data,
+CPU feature digest and complete restored memory hash.
+
+| CPU period | Checkpoint median | Restore median | Restore range |
+| --- | --- | --- | --- |
+| 100 ms | 502.2 ms | 994.1 ms | 901.3–1,005.8 ms |
+| 20 ms | 534.4 ms | 999.7 ms | 976.9–1,221.4 ms |
+| 10 ms | 534.0 ms | 843.2 ms | 829.9–980.4 ms |
+
+The 10-ms samples suggest a modest restore improvement, but capture did not
+improve consistently and three samples per period do not establish a stable
+tail-latency benefit. These are primitive timings, not trigger-to-command-ready
+migrations; they exclude regional publication, peer transfer and handoff.
+This result does not close the default profile's three-second gap. The probe
+accepts an explicit `SANDBOX0_RESTORE_PROBE_CPU_PERIOD_US` of 100000, 20000 or
+10000 and preserves the quota ratio. Product leases still use the canonical
+100000-us period: changing it also affects exact lease validation and the
+supported minimum CPU allocation, so no production contract was changed.
+
+A second isolated comparison enabled the stock restore `--direct` option,
+which bypasses the host page cache for the pages file. Six alternating runs
+used the unchanged 150-millicore/100-ms quota and the same complete state
+checks. Buffered restore took 822.3, 994.7 and 901.0 ms; direct restore took
+1,122.0, 1,115.8 and 1,133.0 ms. All six passed, but direct I/O was slower in
+this ext4 host-filesystem primitive test. It is not evidence for the separate
+project-quota XFS migration staging mount, and does not justify enabling the
+option in the production adapter. `SANDBOX0_RESTORE_PROBE_DIRECT=1` exposes
+this experiment explicitly; its default remains buffered foreground restore.
+After both comparisons, no probe runtime directories, cgroups or mounts
+remained, and both destination ctld HA readiness probes passed.
+
+External, cgroup-filtered `perf` sampling then localized the remaining restore
+CPU work without enabling runsc profiling or changing its seccomp policy. In
+three isolated restores, 104 of 148 samples included the asynchronous pages
+reader, with kernel stacks in shmem page faults, allocation, clearing and
+`pread` copying. State decoding appeared in 15 samples and Go GC in 12; these
+categories are not exclusive and this small sample is diagnostic, not an exact
+cost breakdown. An initial PID-only capture produced metadata without samples
+and was rejected. The optional `SANDBOX0_RESTORE_PROBE_PROFILE_DIR` probe now
+requires a private output directory and nonempty decoded samples, and joins
+the recorder before cleanup. Profiled timings are excluded from SLO evidence.
+
+The default perf build-ID cache also created a hard link to the watched sentry
+executable on the empty destination. Its hash still matched the source, but
+the inode metadata change correctly invalidated the driver's CPU-launch
+monitor. The first subsequent full migration was rejected during CPU preflight
+and automatically aborted after about 121 seconds, before source preparation or
+capture; the source remained at generation 7. That failed attempt is retained
+and is not a latency sample. Only the empty destination's driver was restarted
+after verifying the matching runsc/sentry hashes, followed by five consecutive
+seconds of four warm control sockets. The profiling probe now passes
+`--no-buildid-cache`; integrity checks were not relaxed to accommodate sampling.
+A subsequent cgroup-filtered capture with that option preserved all watched
+runsc/sidecar device, inode, ctime and hard-link counts, produced real samples,
+and passed the complete restored-state check.
+
+The empty test host used Linux `6.6.102-7.alnx4.x86_64` with shared-memory THP
+disabled (`shmem_enabled=never`), even though runsc enables application huge
+pages by default. Six unprofiled foreground restores alternated `never` and
+`advise`, keeping the 150-millicore/100-ms CPU quota, 512-MiB memory limit,
+128-MiB random workload, anonymous-memory THP settings and `defrag=defer`
+unchanged. The host setting was restored to `never` in a `finally` block.
+
+| Shared-memory THP | Checkpoint median | Restore median | Restore CPU median | Target shmem THP |
+| --- | --- | --- | --- | --- |
+| `never` | 504.4 ms | 909.5 ms | 134.5 ms | 0 |
+| `advise` | 408.2 ms | 526.1 ms | 81.8 ms | 132 MiB |
+
+All six runs preserved the complete process/memory evidence. The three
+`advise` restore samples were 526.1, 522.9 and 710.7 ms, so this is not a
+tail-latency guarantee. The measured cgroup `shmem_thp` confirms that the
+optimization actually changed backing-page allocation. The kernel describes
+the allocation and memory-usage tradeoffs in its
+[transparent hugepage documentation](https://www.kernel.org/doc/html/latest/admin-guide/mm/transhuge.html),
+and the pinned stock runsc
+[flag definition](https://github.com/google/gvisor/blob/release-20260914.0/runsc/config/flags.go)
+requires host shared-memory THP support for application huge pages. These
+primitive results motivate full migration testing, not a production rollout.
+
+Full-path testing then enabled `shmem_enabled=advise` on empty node B, moved
+the existing default-CPU process to B, and enabled it on the now-empty A. The
+first move after repairing the profiling interference completed with state and
+cleanup intact, but its observer selected the earlier aborted transaction at
+the same runtime generation. Its command-ready instant was missed; the later
+observation is explicitly not an SLO sample. The harness now excludes all
+preexisting migration operation IDs before triggering a timed move.
+
+Five following clean moves of that existing process took 3.992011, 3.949547,
+4.186502, 4.184549 and 4.100762 seconds. The recovered workload used only 2 MiB
+of shared-memory THP, so changing the host setting did not give its existing
+128-MiB allocation the same benefit as the primitive's newly created process.
+All retained-state and cleanup checks passed. After the last move, the fixture
+was fully checked and normally paused; its resource lease was released.
+
+A new otherwise equivalent Python workload was created while both hosts used
+`advise`: default 150 millicores, 512-MiB hard limit and 128 MiB of random
+memory. Six alternating A/B migrations took 3.679277, 3.759631, 3.651437,
+3.781331, 3.719128 and 3.776454 seconds, with a 3.739379-second median. All six
+preserved PID, token, counter continuity, open-unlinked FD state, mmap, tmpfs,
+durable files and full memory hash, and completed source/staging cleanup with
+no recorded migration-pass errors. The final target's actual limits remained
+`cpu.max=15000 100000` and `memory.max=536870912`; its `shmem_thp` was 136 MiB.
+These are serial, warm-carrier/cache tests on the same three-host fixture.
+
+| Stage | Earlier default profile median | Newly created THP workload median |
+| --- | --- | --- |
+| Checkpoint | 608.5 ms | 460.9 ms |
+| Image sync | 205.7 ms | 201.5 ms |
+| RootFS cut | 103.3 ms | 100.2 ms |
+| Regional publication | 567.6 ms | 562.2 ms |
+| Peer prefetch | 492.2 ms | 480.3 ms |
+| Target claim | 1,516.5 ms | 1,196.3 ms |
+| Restore execution, included in claim | 1,205.7 ms | 907.8 ms |
+
+Shared-memory THP therefore improves this full migration workload without
+raising its CPU quota, but does not meet the three-second target and is not a
+retroactive guarantee for existing allocations. The host setting is enabled
+only on the temporary test nodes. Production bootstrap and rollout remain
+unchanged; cold/fragmented-memory and density behavior still require validation
+before making a fleet-wide host-policy recommendation.
+
+A further background-loading comparison removed a workload bias from the
+earlier primitive: continuous full-memory hashing could compete with restore.
+With `SANDBOX0_RESTORE_PROBE_LIGHT_WORKLOAD=1`, the test payload instead emits
+lightweight fresh counter/state evidence, then recomputes the complete memory
+hash only after receiving a new random 128-bit verification challenge. The
+parent records first response separately and requires that exact challenge in
+the subsequent matching full-memory proof. A cached pre-checkpoint hash cannot
+satisfy this check. The original continuous-scan workload remains the default.
+
+Six alternating foreground/background restores used shared-memory THP,
+150 millicores, a 100-ms quota period, a 512-MiB memory limit and 128 MiB of
+random memory. Foreground first-response times were 719.1, 638.3 and 638.7 ms;
+background times were 738.6, 729.2 and 620.5 ms. Median restore-command times
+were 618.3 and 708.8 ms respectively. All six passed fresh full-memory and
+process-state validation, with images retained until target teardown. These
+small primitive samples show no stable background-loading advantage for this
+workload and do not support enabling it in the migration adapter. Production
+restore remains foreground, with its existing image-custody boundary.
+
+A source-writeback experiment then targeted the roughly 200-ms serialized
+image sync after capture. It retained the 150-millicore/100-ms quota,
+512-MiB limit and continuous full-memory validation. Three baseline and three
+candidate runs alternated in each comparison. All 18 restores passed the
+complete process/memory checks; these remain isolated primitive timings.
+
+| Filesystem and early writeback | Baseline capture + sync median | Candidate median | Candidate final sync median |
+| --- | --- | --- | --- |
+| Host ext4, `sync_file_range(WRITE)` | 627.0 ms | 498.1 ms | 15.0 ms |
+| Isolated loop XFS with project quotas, `sync_file_range(WRITE)` | 599.1 ms | 551.1 ms | 147.1 ms |
+| Isolated loop XFS with project quotas, 16-MiB `fdatasync` batches | 606.3 ms | 436.6 ms | 6.4 ms |
+
+The first XFS range-writeback candidate took 1,045.4 ms, so the ext4 benefit
+cannot be generalized to XFS or to tail latency. The three XFS batched-data-sync
+samples were 438.6, 404.1 and 436.6 ms, including their final full sync. Both
+isolated XFS mounts and loop devices were detached after runtime/cgroup/mount
+cleanup, and the destination ctld HA probes passed. The probe accepts
+`SANDBOX0_RESTORE_PROBE_WRITEBACK=0`, `1` or `2` for these explicit comparisons
+and disables the production helper to avoid measuring two helpers together.
+
+The production checkpoint adapter now starts one bounded Linux writeback
+worker during stock runsc capture, requesting data sync after each additional
+16 MiB per file. It retains at most 256 regular-file descriptors, rejects
+replacement/truncation, joins the worker, observes a final sync on those same
+descriptors and propagates every writeback error. Retaining the descriptors
+matters because reopening a file only after writeback could miss an earlier
+asynchronous I/O error. The driver's complete file-inventory and directory
+`fsync` remains mandatory before capture completion is journaled; early
+writeback is not a substitute for that durability boundary. Physical sentry
+exit, regional publication, full destination verification and writer fencing
+are unchanged. Tests cover delayed worker exit, retained-descriptor sync
+errors, unsafe inventory, descriptor limits and rejection of capture success
+after a writeback failure. Targeted Linux race tests and the full driver suite
+passed before temporary-node installation. Architecture tests also passed in
+the remote build tree. The local architecture run failed on preexisting,
+untracked legacy `netd` and repository-local `.cache/go-mod` toolchain source;
+those unrelated directories were left untouched, and the local failure is not
+reported as a passing check.
+
+After updating only empty test nodes, six full migrations of the same retained
+THP-backed process took 3.559876, 3.673645, 3.547004, 3.828961, 3.614136 and
+3.561874 seconds, with a 3.588005-second median. The earlier six-move median was
+3.739379 seconds. Every measured move preserved PID, token, counter continuity,
+open-unlinked FD, mmap, tmpfs, durable files and the complete 128-MiB memory
+hash; source/staging cleanup completed and no migration-pass errors were
+recorded. The preliminary move with an old source driver took 4.014937 seconds
+and is retained separately, outside the six candidate samples.
+
+The new combined capture-plus-sync median was 494.0 ms. The adapter's
+`checkpoint_us` now includes joining early writeback and its retained-descriptor
+sync, so the driver's 0.179-ms final `image_sync_us` must not be presented as the
+entire persistence cost. Regional publication, peer prefetch and target restore
+medians were 614.3, 488.2 and 910.7 ms respectively. These are serial, warm-carrier
+three-host tests at the unchanged 150-millicore/512-MiB lease. The improvement
+does not meet the three-second total target or establish concurrent/cold-cache
+performance. Production rollout remains stopped.
+
+A follow-up raw-TCP diagnostic sent 151 MiB of synthetic bytes from A to B,
+A to the independent storage host C, and both destinations simultaneously.
+Three samples per mode had medians of 45.4, 44.4 and 132.5 ms respectively.
+The receiver acknowledged the complete bounded byte count. This excludes TLS,
+hashing, file sync and object-store processing, so it is a network diagnostic,
+not a migration result. It does not support attributing the roughly 614-ms
+publication stage solely to the source link. The temporary private listeners
+were stopped and their ports verified absent before further migrations.
+
+The encrypted object writer issued separate scratch-file writes for each
+16-KiB frame's length and ciphertext and allocated a fresh ciphertext slice
+for every frame. It now buffers up to 64 KiB and reuses one ciphertext buffer,
+without changing encryption algorithms, keys, nonces, authenticated frame
+geometry, object names or immutable publication semantics. The final buffered
+flush must succeed before upload; tests verify that a deferred write error is
+returned and that AES-GCM and ChaCha20 framed objects with partial tails remain
+readable through the existing reader. Existing corruption, range-read and
+conditional-publication coverage also passed in the remote race run of
+`pkg/objectstore`, `pkg/rootfsobjectstore` and `pkg/runtimecheckpoint`.
+
+For an 8-MiB object with 16-KiB frames, three ten-iteration Linux benchmarks
+reduced median encrypted scratch preparation from 9.157 to 5.692 ms and
+allocated bytes from approximately 9.57 MB to 0.215 MB per operation. The
+benchmark uses fixed-cost test key wrapping and a discard upload sink, and
+therefore does not measure regional publication or end-to-end migration.
+The local object-store suite's separate native-OSS virtual-host fixture
+returned an HTTP EOF, including with upper-case proxy variables cleared;
+the complete corresponding remote race suite passed. That local failure is
+retained, not counted as a passing test.
+
+Six following full migrations with buffered encrypted writes took 3.938354,
+3.608897, 3.544732, 3.576641, 5.644309 and 3.623497 seconds. Their
+3.616197-second median does **not** improve the preceding 3.588005-second
+whole-path median, despite reducing median regional publication from 614.3
+to 543.4 ms. All six retained-state, full-memory and source/staging cleanup
+checks passed without migration-pass errors. The preliminary mixed-version
+move took 3.985873 seconds and is recorded separately.
+
+In the 5.644309-second sample, target claim took 3,062.4 ms, including
+2,802.0 ms in the enclosing restore-execution stage. That existing timer also
+includes node observations and journal commits, so it does not prove that the
+stock `runsc restore` command itself consumed the whole interval. The driver
+now separately logs executing-intent persistence, CPU observation before and
+after the command, the restore command, completion persistence and overall
+success. This adds no execution retry and changes none of the authority gates.
+The targeted driver race suite passed before installing the diagnostic build
+on empty temporary nodes. The three-second total target remains unmet.
+
+Six diagnostic moves with the new restore timers took 3.645248, 3.720036,
+3.531109, 3.631447, 3.529552 and 4.774701 seconds; all complete state and
+cleanup checks passed. The median stock restore-command interval was
+839.1 ms, compared with 965.9 ms for the enclosing restore-execution stage.
+Median executing-intent persistence and completed-restore persistence were
+60.2 and 83.8 ms; the two CPU observations were only 2.2 and 3.6 ms.
+These component medians must not be summed as if they described one run.
+
+The new 4.774701-second outlier had a 998.9-ms restore command and a
+1,138.0-ms enclosing restore stage, not a multi-second runsc command. Its node
+claim took 1,320.2 ms. Comparing the source-fence observation with the target
+claim's start identifies approximately one second **before** the node claim,
+in addition to ordinary variation inside restore. The earlier 5.644309-second
+outlier predates these detailed timers and remains unattributed within its
+2,802.0-ms enclosing restore stage. Further diagnosis must preserve both
+possibilities instead of explaining every tail as memory loading. At the end
+of this run, generation 27 was active on A, the migration work queue was empty,
+and actual limits remained 150 millicores/512 MiB with 138 MiB of shmem THP.
+
+A dedicated migration-planning observer now records the existing planner
+phases without feeding migration samples into the ordinary claim SLO observer.
+Six subsequent default-resource moves took 3.763600, 3.817328, 3.681479,
+3.798431, 3.748271 and 3.644055 seconds (median 3.755935 seconds). All preserved
+state, full-memory hashes and source/staging cleanup checks passed without
+migration-pass errors. Planning before the node-claim phase took 23.7–39.7 ms
+(median 35.0 ms). RootFS metadata, slot acquisition, network preparation and
+writer authorization therefore do not explain a fixed one-second delay in
+these samples. The earlier pre-claim outlier did not recur and remains
+unattributed; these diagnostics alone establish no whole-path improvement.
+Comparing planner start with the periodically observed source fence yields
+small negative differences within the observer interval, not execution before
+the required fence. Generation 33 was active on A with an empty migration work
+queue and unchanged 150-millicore/512-MiB limits.
+
+Remote Linux race tests passed for `runtimeslotclaim` and `nodeauthority`, and
+the targeted manager runtime tests and manager build passed. Locally, the
+planner tests passed but the manager build ran out of disk space; that local
+command is recorded as failed, not as completed validation. No production
+rollout was performed.
+
+Additional source-dispatch timing isolated another synchronous history scan.
+Across the six planner-diagnostic moves, capture authorization preceded the
+asynchronous checkpoint worker by approximately 381–432 ms. With source
+admission timers installed, three moves took 3.789301, 3.697169 and 3.935992
+seconds. Their ctld capture-intent recording calls consumed 397.4, 450.0 and
+408.7 ms; lock waiting was negligible and CPU rechecks took only 5.8–7.0 ms.
+The preliminary move with the previous source driver took 3.638642 seconds.
+
+The first source capture's receipt-count scan still decoded every historical
+journal record, unlike the neighboring staging-pool and destination admission
+scans. It now reuses `migrationPoolScanRecord`, including the same bounded
+fingerprints, full validation of changed records and active custody, and the
+same Bolt write transaction. This does not remove an fsync, weaken admission,
+or release any retained source. New tests first cache empty records, then prove
+that newly retained captures still exhaust the original count limit and that
+changed corrupt records reject admission without committing a capture intent.
+The targeted node-runtime race tests passed in 1.170 seconds. The full
+node-runtime package subsequently passed in 12.711 seconds and architecture
+tests passed in 0.025 seconds. The diagnostic driver capture/CPU race tests
+passed in 110.371 seconds before installing it on empty test nodes.
+
+The first mixed-ctld move took 4.026939 seconds. With both nodes updated, six
+alternating default-resource moves took 3.994846, 3.375438, 3.590098, 3.223503,
+3.452657 and 3.207910 seconds, with a 3.414048-second median. No sample is
+removed for being slow. All preserved state, full-memory hashes and physical
+source/staging cleanup checks passed without migration-pass errors. Median
+capture-intent recording dropped to 26.0 ms and complete synchronous dispatch
+to 42.5 ms. This supports the measured reduction in source admission overhead;
+it still does **not** meet the three-second complete-migration target. The
+3.994846-second sample also spent about 0.60 seconds reaching preparation
+following the temporary daemon restarts, while later samples remained faster.
+At completion, generation 44 was active on B, migration work was empty, and
+actual limits remained 150 millicores/512 MiB with 138 MiB of shmem THP.
+Production rollout remains stopped.
+
+Further isolated publication experiments did not establish another material
+whole-path improvement. They used private random files of 128 MiB, 16 MiB and
+64 KiB, the existing encrypted regional MinIO store, and a unique operation per
+sample. Each sample collected its own regional objects and removed its local
+fixture. They are publication primitives, not migrations or a claim about the
+actual guest checkpoint's per-file geometry.
+
+With `GOMAXPROCS=2`, six samples per upload width gave median publication times
+of 519.0 ms at four workers, 498.2 ms at eight and 499.5 ms at sixteen. With
+`GOMAXPROCS=4`, six samples each gave 512.2 ms at four workers and 459.1 ms at
+eight. The running temporary ctld services have no explicit `GOMAXPROCS`
+override. No default concurrency increase was retained; additional chunk-buffer
+memory and these noisy primitive results do not prove an end-to-end gain.
+A Go CPU profile of three default-width publications attributed 48.5% of CPU
+samples to SHA-256 and 4.3% to AES-GCM. The profile also includes fixture
+creation, cleanup and waits; it is diagnostic, not an SLO sample. AWS request
+payload signing contributed to the hashes on this HTTP test-storage endpoint.
+
+A second prototype shared the existing four-chunk budget across multiple files
+instead of processing files serially. Six interleaved samples per version gave
+plan-plus-publication medians of 594.0 ms before and 579.1 ms after, with wide
+overlap between individual samples. Its complete checkpoint race suite passed,
+including shared admission, cancellation joining, unpublished manifests during
+partial uploads, and canonical file/chunk ordering. The small measured benefit
+did not justify retaining the additional scheduling code: the prototype and its
+new tests were removed, the original sources were restored on the build host,
+and no ctld or driver service was updated for these experiments. The retained
+full-migration result remains a 3.414048-second median, above the requested
+three-second total.
+
+A subsequent change overlaps stopped-image inventory hashing with RootFS
+sealing. It starts only after the exact durable capture and physically stopped
+source have been checked, and joins the hash worker before releasing source
+reconciliation custody. Failed sealing cancels and joins the worker. The
+bounded, disposable cache holds hashes for at most two image directories;
+eviction, cancellation or daemon restart falls back to the ordinary scan. The
+exact RootFS/runtime binding is attached only after sealing. Publication and
+peer transfer still reread and verify every chunk, and regional durability,
+destination verification and writer fencing are unchanged. Tests cover overlap,
+cancel/join behavior, optional inventory failure, cache consumption and eviction,
+independent plan ownership and rejection of changed bytes.
+
+The preceding sandbox and REPL approached their two-hour fixture TTL. They were
+verified and normally paused before creating another 150-millicore/512-MiB
+sandbox with 128 MiB of random memory. Its initial setup parser failed to find
+JSON interleaved with the REPL prompt; reattaching to that same context with the
+existing prompt-tolerant parser completed verification without recreating or
+modifying the workload. New baseline and candidate samples are kept separate
+from the preceding fixture. Four baseline moves took 3.107766, 4.050194,
+3.366544 and 3.711814 seconds (median 3.539179). The mixed-version transition
+move took 4.111589 seconds and is retained separately.
+
+With both temporary nodes updated, six alternating moves took 4.119391,
+3.342984, 4.042411, 3.172958, 3.581725 and 3.311214 seconds. Their median was
+3.462354 seconds, with zero samples meeting the three-second total target.
+Median image publication decreased from 605.0 to 527.2 ms, while median RootFS
+sealing increased from 102.0 to 121.1 ms. These phase medians are not additive.
+The small, differently sized cohorts do not establish a stable whole-path
+improvement: direction-specific medians increased, and restore-command times
+in the candidate cohort ranged from 691.0 to 1,568.9 ms. The first candidate
+also spent about 0.65 seconds reaching preparation after a daemon restart; it
+is included. All process, FD, mmap, tmpfs, persistent-file, complete-memory-hash
+and source/staging cleanup checks passed without migration-pass errors.
+
+Targeted Linux race tests passed for checkpoint planning/inventory and node
+inventory/custody behavior. The complete checkpoint and node-runtime package
+tests and architecture tests passed before building ctld with the unchanged
+bundled procd. Only empty temporary nodes were updated, with ctld B then A
+readiness checks. Generation 12 ended on node B; its actual limits remained
+`cpu.max=15000 100000` and 512 MiB, with 136 MiB of shmem THP. The three temporary
+VMs retain automatic deletion at 2026-09-22 02:22 UTC. No production rollout or
+PR update was performed.
+
+Additional node-side restore-observation timers separate image verification,
+session enumeration, runsc state queries and journal reads/commits. They do not
+change execution ordering or receipt validation. Targeted Linux restore race
+tests and architecture checks passed before updating empty temporary nodes.
+Four diagnostic moves took 4.166280, 3.887645, 3.627687 and 3.543710 seconds;
+all state and cleanup checks passed without migration-pass errors. These are
+diagnostic samples, not evidence of another latency improvement.
+
+At restore intent, median image verification took 61.0 ms and the complete
+observation 74.7 ms. Before execution, the observation took 19.8 ms, including
+6.5 ms in runsc state and 8.8 ms in journal commit. After restoration, it took
+62.3 ms, including 44.1 ms in runsc state and 14.2 ms in journal commit. Session
+enumeration took approximately 0.1 ms in both cases, rejecting the hypothesis
+that a node-wide session scan explains this receipt delay. Exact lookup was
+therefore not substituted as a speculative performance change. Separate claim
+logs showed approximately 115–150 ms in RootFS attachment and 128–182 ms in
+runsc create. All durability and physical state checks remain in place.
+
+An isolated HTTP/HTTPS publication comparison used the same storage host,
+reverse-proxy implementation, encrypted random-file fixture and four upload
+workers. HTTPS validated a one-day, IP-SAN test certificate through a
+process-scoped trust file; certificate verification was never disabled. Six
+interleaved samples per protocol produced median publication times of 485.2 ms
+over HTTP and 465.4 ms over HTTPS. The first HTTPS publication took 776.0 ms and
+is retained. Proxy counters observed 120 payload-signed HTTP PUTs and 120
+`UNSIGNED-PAYLOAD` HTTPS PUTs, including the ordinary manifests. Thus the SDK's
+transport-dependent signing avoids a ciphertext hash pass on HTTPS, but this
+small primitive gain does not prove an end-to-end improvement. Application
+encryption, chunk verification and create-only object semantics were unchanged.
+Each sample collected only its own operation's objects. The temporary proxy
+was stopped and its private key removed; production and migration-fixture
+storage configuration were not changed.
+
+Fresh resource-boundary tests retained 512 MiB of sandbox memory and the same
+128-MiB random-memory workload while requesting real 500-millicore and
+1,000-millicore leases. Each cohort used a fresh sandbox/context and six
+alternating A/B migrations of that same process. The previous fixture was
+fully verified and normally paused before each cohort. The isolated manager's
+memory-per-CPU ratio was temporarily changed only to create each comparison
+lease, then its exact original configuration was restored before measurement.
+The public API still exposes memory only; no CPU override or production policy
+change was introduced. These fixed-memory comparisons do not by themselves
+validate the corresponding memory tier under the normal 4-GiB-per-CPU policy.
+
+| CPU lease | Trigger to authenticated preserved-command response, seconds | Median | Samples at or below 3 seconds |
+| --- | --- | --- | --- |
+| 500 millicores | 2.194244, 2.323686, 2.259201, 2.242401, 2.565536, 2.250063 | 2.254632 | 6 / 6 |
+| 1,000 millicores | 2.109569, 2.114734, 2.123841, 2.126140, 2.083836, 2.058408 | 2.112152 | 6 / 6 |
+
+All samples retained PID, token, counter continuity, the open-unlinked FD and
+offset, mmap, tmpfs, durable files and the full memory SHA-256; physical source
+and both staging reservations were released without migration-pass errors.
+The 500-millicore cohort had median capture/restore-command times of
+264.4/200.4 ms; the one-core cohort had 259.2/95.7 ms. Regional publication
+remained approximately 515/521 ms and first-command execution approximately
+76.7/76.0 ms, respectively. These measurements support a resource-dependent
+three-second result for this workload, not a guarantee for 150 millicores,
+larger active memory, dirty disks, cold image/artifact caches, simultaneous
+migrations, storage outages or arbitrary latency percentiles.
+
+Final cgroup observations confirmed `cpu.max` values of `50000 100000` and
+`100000 100000`, 512-MiB memory limits and 136 MiB of shmem THP. The one-core
+fixture ended at generation 7 on A with a fresh complete-state verification,
+an empty migration queue, healthy regional storage and the manager's original
+4-GiB-per-CPU policy restored. The default 150-millicore target remains unmet.
+
+A subsequent cohort used the normal public claim API with a 2-GiB memory
+request and the unchanged 4-GiB-per-CPU policy. It received a real
+500-millicore/2,048-MiB lease without modifying or restarting the manager.
+The same preserved process held 128 MiB of random memory. Six alternating
+moves took 2.125331, 2.213728, 2.230282, 2.246828, 2.178387 and 2.160274
+seconds (median 2.196058); all six met the three-second total target. Full
+state, memory-hash and physical-cleanup checks passed without migration-pass
+errors. The final cgroup had `cpu.max=50000 100000`, a 2-GiB memory limit and
+98 MiB of shmem THP. These measurements validate this normal resource tier
+under the test's warm, serial conditions, but still include the temporary
+host's `shmem_enabled=advise` setting.
+
+Both temporary workers were then returned to their recorded original
+`shmem_enabled=never` setting, changing each only while it held no guest
+RootFS. The mixed-setting transition took 2.276733 seconds and is reported
+separately. Six subsequent alternating migrations of the same native 2-GiB
+fixture took 2.234022, 2.249935, 2.312968, 2.260903, 2.571836 and 2.373535
+seconds (median 2.286935). All six met the trigger-to-target-command target
+without the shmem THP tuning. Each preserved full process/file/memory state
+and completed source lease and both staging releases without migration-pass
+errors. Cleanup plus the post-timing complete-memory probe finished in
+4.081–5.154 seconds; those background cleanup times are not the target-usable
+metric and are not hidden by the three-second result. This remains a serial,
+warm-cache, 128-MiB-active-memory result, not a general latency guarantee.
+A fresh generation-14 probe verified the complete memory hash again, an empty
+migration queue and healthy regional storage. The destination cgroup confirmed
+`cpu.max=50000 100000`, `memory.max=2147483648` and zero `shmem_thp` bytes.
+
+An isolated destination-writeback experiment tested whether overlapping file
+sync with peer reception would shorten materialization. It used the empty
+source host's XFS staging mount, a 128-MiB fixture, the existing peer stream,
+all chunk hashes and final file/directory syncs, with `GOMAXPROCS=2`. One
+bounded worker synced the same output descriptor after each additional
+16, 32 or 64 MiB; it joined before final sync/close and propagated errors.
+Five iterations per mode averaged 970.0 ms for the first baseline, 1,000.0 ms
+at 16 MiB, 1,024.9 ms at 32 MiB, 1,220.3 ms at 64 MiB and 999.3 ms for the
+last baseline. These local transfer primitives do not measure full migration,
+but they provide no evidence to retain this extra worker. The temporary
+prototype was removed, the original build-host source restored byte for byte
+and its isolated staging directory removed. No service binary was updated.
+
+A read-only correlation of the retained source driver and ctld journals also
+checked the interval before publication in two default-resource samples
+(3.207910 and 3.543710 seconds total). Dispatch took 46.9/44.4 ms, checkpoint
+569.5/654.5 ms, and RootFS sealing 96.2/141.3 ms. Subtracting the logged
+publication duration from its completion timestamp places publication's start
+57.9/51.5 ms after RootFS-cut completion. That publication timer includes local
+planning and final receipt persistence, so it must not be confused with the
+first network byte. These two samples do not reveal another fixed, second-long
+source scheduling gap; they do not explain every earlier outlier.
+
+The lower normal public tier was then tested without changing manager policy:
+a fresh 1-GiB sandbox received a 250-millicore/1,024-MiB lease and held the same
+128-MiB random-memory workload. Six alternating moves took 2.554258, 2.775323,
+2.877027, 2.713561, 2.818680 and 2.786959 seconds (median 2.781141). All six
+met the total target and retained the full process/file/memory evidence without
+migration-pass errors. Source leases and both staging reservations were
+released; cleanup plus post-timing verification took 4.853–5.101 seconds.
+The hosts remained at `shmem_enabled=never`. These samples narrow the tested
+resource boundary below 500 millicores, but do not establish a 150-millicore
+result or a tail-latency guarantee. A fresh generation-7 command reverified
+the complete memory hash and an empty migration queue. The cgroup confirmed
+`cpu.max=25000 100000`, `memory.max=1073741824` and zero `shmem_thp` bytes.
+
+A coordinator audit found an avoidable failure tail after successful regional
+publication: `publishWithPrefetch` joined its optional cache observer without
+a separate completion bound. A lost prefetch acknowledgement therefore held
+publication progress until the entire caller deadline expired. A new real
+PostgreSQL regression reproduced the failure under a five-second deadline,
+even though source publication had succeeded.
+
+The coordinator now allows up to 250 ms for the optional acknowledgement after
+`PublishMigration` succeeds, then cancels and joins that observer. The remote
+node retains staging custody independently; ordinary authorized preparation
+still verifies the image or cancels/joins an unfinished fill and downloads the
+exact regional reference. Failed publication cancels immediately and still
+cannot authorize preparation or fencing. This bounds the post-publication
+observer wait, not checkpoint, source transfer, disk sync or all network errors.
+The database regression checks the cancelled observer has exited before return,
+the real publication is committed before ordinary preparation, and no fence is
+authorized early. It passed with race detection alongside success, unsupported
+peer, failed prefetch, failed upload, authority, retry and expiry cases. The
+isolated test databases were removed. Coordinator race tests, node preemption
+race tests and architecture checks also passed before building the temporary
+manager. The five-second reproduction is failure evidence, not an end-to-end
+latency comparison.
+
+The bounded-acknowledgement manager was installed only in the empty temporary
+fixture after its tests passed. A fresh normal-policy 1-GiB/250-millicore
+sandbox with 128 MiB of random memory then completed four alternating moves
+in 2.824309, 2.885032, 2.815430 and 2.944924 seconds (median 2.854671).
+All four retained the complete process/file/memory evidence and released source
+leases and both staging reservations without migration-pass errors. These
+healthy-path checks are below three seconds but do not demonstrate a latency
+improvement over the preceding cohort; the fix addresses lost acknowledgements.
+The temporary manager artifact was
+`sha256:2c06b03a41a7041b643ff287ec12f1d977929c3eca5fe73e5b1391e62b2af264`.
+
+Two following default-policy cohorts retained the 150-millicore/512-MiB lease,
+100-ms quota period and original `shmem_enabled=never` host setting. Each
+used a fresh preserved process and four alternating migrations. With 64 MiB
+of random memory, times were 2.957157, 2.995659, 2.847181 and 3.027947 seconds
+(median 2.976408; three of four at or below three seconds). With 128 MiB,
+times were 3.436222, 6.317229, 3.544834 and 3.726760 seconds (median 3.635797;
+zero of four at or below three seconds). Every complete-memory, process, file,
+source-lease and staging-release check passed without migration-pass errors.
+Both final cgroups confirmed `cpu.max=15000 100000`, a 512-MiB memory limit
+and zero `shmem_thp` bytes; both fixtures were normally paused after final
+verification. These samples cannot justify a stable default-tier guarantee,
+and the slow sample is retained.
+
+In the 6.317229-second move, stock runsc restore took 3,688.2 ms and the
+complete restore-execution interval took 3,805.0 ms. Target planning plus
+claim took 4,186.9 ms. Peer prefetch was 453.0 ms and preparation reused the
+prefetched image in 77.7 ms. This localizes the extra delay to the restore
+command, rather than the newly bounded prefetch acknowledgement. The stage
+logs alone cannot split that command's elapsed time into CPU work, cgroup
+throttling and host scheduling; no narrower cause is claimed from them.
+
+A subsequent four-move diagnostic sampled each temporary node's exact
+150-millicore cgroup `cpu.stat` every 20 ms, without changing binaries or limits.
+It ran for at most four minutes and was explicitly stopped after collection.
+The first attempt on B used a missing temporary directory and failed before
+starting; it was corrected before this diagnostic workload was created.
+The observed total times were 3.449397, 3.663978, 3.506246 and 4.044578 seconds;
+these include the sampler and are kept separate from uninstrumented acceptance.
+All state, memory-hash and cleanup checks passed.
+
+The four restore commands took 978.6, 1,091.3, 993.7 and 1,273.6 ms. Counter
+windows bracketed each command with 1.1–15.3 ms before and 2.9–12.3 ms after.
+They recorded 151.8, 168.1, 158.4 and 197.9 ms of total cgroup CPU, respectively,
+including 112.4, 136.3, 109.3 and 147.0 ms of kernel CPU. Every counted quota
+period was throttled (10/10, 11/11, 10/10 and 13/13). This supports CPU-quota
+limitation during these ordinary restores. The aggregated `throttled_usec`
+values are not additive with wall time and must not be interpreted as an
+exact wall-clock breakdown. The earlier 3,688.2-ms restore was not sampled and
+its extra delay remains unattributed. The diagnostic fixture was verified
+again and normally paused, releasing its lease; both sampling services stopped.
+
+The driver now also records bounded, read-only cgroup CPU counters immediately
+around the restore command. It keeps the same `cpu.stat` file descriptor across
+the command, rejects missing, duplicate, overflowing or decreasing required
+counters, and reports validity separately. Unavailable accounting never changes
+restore authorization, execution or retry behavior. Targeted Linux race tests
+covered restore behavior and counter parsing, retained-descriptor identity and
+path confinement. The initial build used an incorrect command directory after
+the tests passed; building the independent driver module at its root succeeded.
+Both empty temporary nodes received driver artifact
+`sha256:edb8a3e9e3dd61ec8f06541cce50e1328a803a47453cc9d4b3b96a31ac911eea`.
+
+With this accounting and no external sampler, a fresh default 150-millicore /
+512-MiB sandbox containing 128 MiB of random memory completed four moves in
+3.513457, 3.805475, 4.282889 and 3.774819 seconds (median 3.790147; zero of four
+at or below three seconds). All complete-memory, PID, counter, open-file offset,
+mmap, tmpfs, durable-file and cleanup checks passed. The final lease was normally
+paused and released. Original `shmem_enabled=never`, the 100-ms quota period,
+regional durability and stock runsc were retained; accounting was valid in all
+four commands. Restore wall times were 906.0, 1,089.8, 994.3 and 1,096.3 ms;
+cgroup CPU times were 145.1, 160.2, 147.4 and 168.3 ms, including 107.5–132.7 ms
+of kernel CPU. All counted quota periods were throttled (9/9, 11/11, 10/10 and
+11/11). These observations do not establish a speedup or explain the older
+3,688.2-ms restore outlier.
+
+The 4.282889-second move instead included a 706.5-ms target restore-intent
+observation: image verification took 64.9 ms and the journal operation took
+639.8 ms. Its subsequent journal operations took approximately 8 ms each.
+Peer prefetch took 471.7 ms and image preparation reused that cache in 69.3 ms.
+The journal operation reads and writes one slot; it does not scan historical
+records. Its original timer includes acquiring the Bolt write transaction,
+record decoding/encoding and commit, so the 639.8 ms cannot yet be attributed
+to disk sync. Additional diagnostic fields split transaction acquisition,
+record processing and completion of `Update`; completion still includes
+commit/rollback and scheduling, not exclusively filesystem sync. The temporary
+instances' automatic release was extended to 2026-09-22 02:52 UTC for this bounded
+investigation. No production rollout or PR was created.
+
+The journal phase instrumentation passed the targeted Linux restore race tests
+and architecture tests, then was installed on both empty temporary nodes as
+ctld artifact
+`sha256:ea5342da32c3b4bd5166ef7d6dfc3558eecfbf98c766916d9e3c6fee4f4a5aa4`.
+A fresh default-tier 128-MiB-random-memory round trip took 4.849152 and 3.466498
+seconds. Both moves preserved all state and released source/staging custody;
+the final full-memory hash passed before normal pause released the final lease.
+All six restore observations completed their journal operations in 6.4–13.8 ms:
+transaction acquisition took 7–67 microseconds, record work 1.7–6.3 ms, and
+transaction completion 3.5–5.7 ms. The remaining interval includes observation
+validation before acquiring the transaction. The earlier 639.8-ms journal tail
+did not reproduce and remains unattributed; this is diagnostic coverage, not
+a demonstrated journal latency improvement.
+
+In the 4.849152-second move, the regional observer first saw the source barrier
+at 1.547 seconds after triggering drain. The later peer transfer took 460.8 ms
+for 148,797,893 bytes, rootfs cut 128.7 ms, and stock restore 932.7 ms. Restore
+consumed 144.3 ms of cgroup CPU and all nine counted periods were throttled.
+The return restore took 1,090.0 ms and 158.9 ms of cgroup CPU, with 11/11 periods
+throttled. This first sample's extra delay preceded the recorded source barrier;
+it was not another restore-journal spike. No cause narrower than that observation
+boundary is established by these timings.
+
+The manager phase log narrowed the 1.547-second pre-barrier interval: the two
+staging passes completed 748 and 729 ms apart, immediately after CPU preflight.
+Both nodes had just restarted. Startup `Prune` already fully validates every
+retained journal record, but previously discarded that work before the first
+migration-pool scan. It now feeds only eligible, fully validated byte fingerprints
+into the existing bounded exclusion cache. Every current payload is still hashed;
+changed records, active custody, misses and eviction retain full validation.
+No durable authority, expiry, cleanup rule or cache size changed. Reservation
+logs additionally separate intent, kernel quota admission and ready persistence.
+
+Targeted Linux race tests covered startup-validation reuse, changed reservations,
+corruption, staging serialization/recovery and journal pruning; architecture tests
+also passed. Both empty nodes received ctld artifact
+`sha256:63bd8178b2f8df2d6fb889e1284373e4d263843daf41c0bd72e310bfa31ed6c8`.
+Their first subsequent default-tier 128-MiB-random-memory migration reached the
+source barrier at 0.140713 seconds and command-ready at 3.701416 seconds. Local
+source/target staging reservations took 19.5 and 18.4 ms (kernel budget checks
+44 and 32 microseconds), with no intervening migration to prime the cache.
+The return migration took 3.673645 seconds, with 32.5 and 23.8-ms staging
+reservations. Both passed complete state and source/staging-release checks;
+final memory hash, unchanged 150-millicore/512-MiB lease and zero shared THP were
+verified again. These two samples support removal of this startup-related
+critical-path scan, not a general latency distribution or a three-second SLO.
+Restore still took 993.1 and 1,017.6 ms. Earlier slow samples remain part of the
+evidence; the 639.8-ms journal tail is not proven to have the same cause.
+
+The corresponding driver claim logs account for much of the target interval:
+RootFS attachment took 130.5/120.2 ms, stock `runsc create` 159.9/117.2 ms, and
+the complete restore-execution intervals 1,056.4/1,209.7 ms. The first preserved
+REPL command after the first migration committed returned HTTP 200 directly
+and took another 247.9 ms; this command time remains inside the reported total.
+These records do not show a fixed route-cache or coordinator sleep to remove.
+
+A small-buffer verification prototype was evaluated separately on macOS/arm64
+(Apple M1 Pro, Go 1.25.4, GOMAXPROCS=2). The standalone primitive scanned the same
+128-MiB random file in four workers and checked each 8-MiB chunk digest. Across
+three six-iteration runs, median times were 35.846 ms for 8-MiB worker buffers,
+35.976 ms for 64-KiB buffers, 34.338 ms for 256-KiB buffers and 33.678 ms for
+1-MiB buffers. Allocations fell from about 32 MiB to 0.25/1/4 MiB, respectively.
+This is not a Linux checkpoint-store or end-to-end result; the roughly 2-ms best
+primitive improvement does not justify a migration speedup claim. The candidate
+was retained only as a temporary experiment, without changing runtime code.
+
+An attempted 15-minute instance extension failed with
+`InvalidAutoReleaseTime.Malformed`. The original 2026-09-22 02:52 UTC automatic
+release remained effective: a subsequent exact-ID inventory returned zero of
+three requested instances, and the new Linux probe failed before dispatch with
+`InvalidInstance.NotFound`. No result is attributed to that unexecuted probe.
+The preceding real-migration logs and results were already exported locally,
+and the last sandbox had been verified and normally paused with its lease
+released before instance expiry.
+
+A possible next experiment is a separately admitted temporary CPU reservation
+for destination restore, followed by returning to the configured CPU quota before
+publishing readiness. This is a proposal, not implemented behavior or measured
+performance. Whether migration may temporarily exceed the configured sandbox
+CPU cap is an unresolved resource-policy decision. Existing fixed-500-millicore
+samples cannot establish the behavior of a temporary-lease transition.
+
+The pinned stock runtime does not itself prohibit resource-limit differences:
+[`release-20260914.0` restore spec validation](https://github.com/google/gvisor/blob/release-20260914.0/runsc/specutils/restore.go#L444)
+warns about changed Linux resources instead of failing that comparison. This
+source inspection does not validate a live limit transition. Sandbox0 currently
+binds the exact resource snapshot and digest into restore commands and CPU launch
+lineage, so changing `cpu.max` directly would violate its own contract even when
+stock runsc accepts the OCI specs. A reviewable implementation would require
+PostgreSQL admission of additional capacity, exact node/boot/operation binding,
+crash-recoverable application and release of the temporary allocation, and proof
+of restored normal quota before command-ready. Metering must account for the
+actual leased intervals, and source/target overlap must remain admitted. CPU
+feature exposure, memory limits, writer fencing and stock spec validation remain
+unchanged. Tests would need to cover quota-reset failure, lost acknowledgements,
+node/manager restart, exhausted capacity and a second migration after the reset;
+a faster steady-500m benchmark is insufficient evidence for these transitions.
+
+An unconnected protocol candidate now separates an early
+`MigrationRestoreCPUReservation` from a later `MigrationRestoreCPUGrant`.
+Capacity can therefore be reserved before source capture, while the grant binds
+the eventual exact restore request. The base resource lease remains unchanged.
+A reset receipt binds the grant, durable cgroup identity, original CPU period
+and original quota; a receipt from a different restore cannot release it.
+These types do not allocate capacity, alter cgroups, authenticate a node receipt
+or enforce the regional one-time grant transaction. PostgreSQL admission,
+durable application/reset recovery and metering remain unimplemented. No
+runtime path calls the candidate and no temporary CPU policy is enabled.
+The candidate's protocol tests passed locally with Go 1.25.5. On a fresh
+isolated amd64 Linux host, the protocol tests and a real node-fixture restore
+binding test passed with the race detector, followed by the architecture suite.
+They reject changed reservation amounts/boots, retained elevated quotas,
+replacement cgroup identities and reset receipts from another restore. These
+are contract tests, not privileged quota-transition or migration benchmarks.
+
+A follow-up source audit considered overlapping target RootFS attachment and
+container creation with image transfer without changing CPU limits. The current
+transaction graph does not admit that reordering: source fencing requires the
+committed target-image receipt, and destination writer issuance requires the
+exact physical source-fence proof plus the installed captured RootFS head.
+`TestNomadMigrationImagePreparationGatesSourceFenceIntegration` explicitly checks
+that publication alone and download intent cannot detach the source. Removing
+those checks is not a scheduling optimization; an earlier target-preparation
+phase would need its own recoverable authority and failure-state design. This
+was a code audit, not an executed test or evidence of a latency improvement;
+the existing ordering was retained.
+
+A later checkpoint-store change caches successfully read and digest-verified
+regional manifests by their exact binding/reference pair, with limits of 16
+entries and 8 MiB of payload. It does not accept speculative peer plans as
+publication evidence. Returned manifests own their slices, failed reads are
+not cached, eviction/restart falls back to regional reads, and every local file
+and chunk is still revalidated before restore. A read-count test proves that
+repeated local verification avoids a second remote manifest read without
+accepting changed local bytes or a different reference.
+
+On an isolated amd64 Linux source snapshot, the complete `runtimecheckpoint`
+and `nomadruntime` suites passed with the race detector (6.985 and 43.388 seconds),
+followed by architecture checks (0.024 seconds). Local ordinary checkpoint tests
+also passed; local race compilation ran out of disk space, and local architecture
+checks encountered ignored legacy directories/module-cache files, so neither
+local failure was counted as a pass. Restore-intent verification already overlaps
+RootFS attachment, so an avoided manifest read must not be reported as an equal
+reduction in trigger-to-command-ready time.
+
+The subsequent September 22 two-node comparison used two independent
+`ecs.c7.xlarge` workers and a third host for PostgreSQL and encrypted MinIO
+storage. Both variants were built from the same source snapshot; a Go overlay
+disabled only manifest-cache lookup/insertion for the baseline. Both ctld
+binaries bundled the same procd, used stock runsc `release-20260914.0`, and kept
+the 150-millicore/512-MiB lease, 100-ms CPU period and `shmem_enabled=never`.
+The Python image was pinned to
+`sha256:9b8dad7f66b5c7751df6cb7a64a07812e86bed85d0116efe82b3a11209f1440d`.
+Each cohort preserved one Python process with 128 MiB of random memory through
+six consecutive alternating moves, A → B → A → B → A → B → A.
+
+| Manifest reads | Six trigger-to-command-ready samples, seconds | Median | At or below 3 seconds |
+| --- | --- | --- | --- |
+| Baseline, cache disabled | 3.695768, 3.614868, 3.601334, 3.537350, 3.664418, 3.703311 | 3.639643 | 0 / 6 |
+| Bounded manifest cache | 3.587332, 3.625934, 3.632852, 3.428451, 3.659378, 3.709689 | 3.629393 | 0 / 6 |
+
+The approximately 10-ms median difference does not establish an end-to-end
+improvement: these small sequential cohorts were not interleaved, and the first
+cohort also populated shared artifact caches. The cache reduces repeated
+regional reads, but this experiment does not establish a stable latency gain
+or the requested three-second bound. Baseline median RootFS cut, execution-image
+publication and runsc restore were approximately 120, 514 and 1,004 ms;
+publication overlapped peer transfer and these durations must not be summed.
+
+All twelve migrations preserved PID, the advancing counter, memory SHA-256,
+open unlinked FD and its offset, mmap, tmpfs and persistent RootFS contents.
+The timed first command checked state continuity without hashing all 128 MiB;
+the complete hash was verified after migration cleanup. Every move released its
+source lease and both staging reservations. Both final guests were verified,
+normally paused and their final leases released. This remains a serial warm
+carrier test, with no temporary CPU boost or production rollout.
+
+A subsequent stock-runsc source audit examined capture/transfer overlap. In
+`release-20260914.0`, the local pages writer queues offset-based writes. Its
+explicit file pre-extension is enabled only for successful O_DIRECT AIO setup;
+the current non-direct checkpoint uses the serial Go queue instead. Consequently,
+pre-extension is not evidence of a bottleneck in the current configuration.
+Neither a file length nor an mtime is a completed-checkpoint receipt. See the
+pinned [FDWriter implementation](https://github.com/google/gvisor/blob/release-20260914.0/pkg/sentry/state/stateio/fdwriter.go)
+and [asynchronous page saver](https://github.com/google/gvisor/blob/release-20260914.0/pkg/sentry/pgalloc/save_restore.go).
+
+An isolated XFS probe nevertheless compared the existing 16-MiB size-triggered
+writeback with an experimental mtime-triggered variant that also flushed writes
+within an unchanged rounded size. Eight interleaved, foreground-restore runs
+retained 150 millicores, a 100-ms quota period, a 512-MiB limit, 128 MiB of random
+memory and `shmem_enabled=never`. Capture plus final complete-image sync took
+509.915, 485.979, 589.788 and 498.855 ms for the baseline (median 504.385 ms),
+and 590.950, 598.772, 489.684 and 502.783 ms for the experiment (median
+546.867 ms). All eight process/memory restore checks passed. These are isolated
+primitive timings, not migration totals. The slower experimental source changes
+were reverted; its source and evidence were retained outside the repository.
+The probe's runtime/cgroups were cleaned and its XFS mount and loop detached.
+
+Earlier speculative byte transfer alone cannot remove the regional-publication
+wait: current chunk keys include the full image binding, including the captured
+RootFS descriptor, which is available only after execution capture and RootFS
+sealing. The collector uses that same exact binding. Overlapping encrypted
+publication with an unfinished capture therefore requires a separately
+authorized, bounded staging scope with recoverable cleanup, followed by final
+binding and complete chunk validation. No early-publication path or relaxed
+execution/fencing authority was enabled by these experiments.
+
+The next store-layer implementation introduces `BindCapture` and
+`OpenCaptureStaging`. The capture scope reuses the operation, exact source
+writer/boot binding, assignment revision, runtime compatibility and CPU-feature
+digest, while deliberately excluding the not-yet-known final RootFS cut.
+Tentative chunks retain their original encrypted object keys. An immutable
+reservation fixes the plaintext chunk budget; each distinct candidate consumes
+an entire 8-MiB slot, including short chunks and candidates discarded after
+final verification. Recovery lists the bounded existing scope, so restarting
+does not reset that budget. Regional accounting must additionally reserve
+envelope/metadata overhead and exclusive producer ownership.
+
+Final publication rereads and hashes the complete retained image, reuses only
+matching successful uploads, binds exactly one final RootFS descriptor, and
+publishes a version-2 manifest last. Existing version-1 publications and reads
+remain supported. The legacy planned publisher rejects version-2 plans rather
+than placing their chunks under incorrect keys. Peer transfer and local
+verification accept the version-2 manifest with the same complete chunk checks.
+Capture collection retains its final-binding marker through partial deletion
+and also removes a manifest whose successful publication reply was lost.
+
+`CaptureStager` now also produces prospective version-2 peer plans from either
+a retained inventory or a fresh completed-image scan. Its planned publisher
+checks the same reference and every current local chunk, reuses successful
+tentative uploads, and rejects changed files instead of silently repairing an
+already-exposed peer plan. Independent chunks retain four-way upload
+concurrency; equal hashes share one pending immutable write. Peer receipt still
+cannot authorize execution when regional publication fails.
+
+`UploadGrowing` watches the producer-owned private directory without creating
+it. It copies each observed full 8-MiB file range once per worker lifetime,
+using at most four parallel chunk buffers. Concurrent or preallocated bytes
+are tentative candidates only: final publication rehashes the completed image
+and uploads replacements when necessary. Short tails wait for that final scan.
+Cancellation joins uploads before releasing the staging gate; callers must
+cancel and join before planning, publication, cleanup or primary handover.
+The existing distinct-object budget also charges discarded candidates.
+
+An isolated stock-runsc experiment on September 22 compared the legacy planned
+publisher with growing-capture uploads against encrypted regional MinIO on a
+separate host. Eight interleaved runs used the same static Go payload, 128 MiB
+of random memory, 150 millicores, a 100-ms quota period, 512 MiB of memory,
+16-MiB source writeback, an isolated XFS loop filesystem and
+`shmem_enabled=never`. The order was legacy, growing, growing, legacy, legacy,
+growing, growing, legacy. All used the same test binary
+`b7b490dd0fac510393d402396de18267daf5775e2ee34b9b9e71c4c2d44c5ba5`.
+
+| Publication path | Capture + final sync + publication samples, ms | Median, ms | Median publication work remaining after sync, ms |
+| --- | --- | --- | --- |
+| Legacy planned publication | 1089.860, 1105.916, 1088.610, 1093.525 | 1091.693 | 496.375 |
+| Growing capture uploads | 768.403, 809.113, 801.007, 873.354 | 805.060 | 229.792 |
+
+The measured primitive median improved by 286.633 ms (26.3%). Every run
+downloaded the published encrypted image and restored from that downloaded
+copy, preserving PID, progress, open-file offset, tmpfs, CPU flags and the full
+memory SHA-256. Download was measured separately (median 825.298/853.098 ms)
+and excluded from the capture/upload comparison. Each exact test object scope
+was fully collected; test runtimes and cgroups were removed, and the XFS mount
+and loop were detached. Both worker ctld HA probes remained ready.
+
+These are component timings, not trigger-to-command-ready migration results.
+They exclude regional staging admission, the real RootFS cut, P2P transfer,
+manager coordination and restore. Restore ran on the same worker using a
+static fixture filesystem, not a migrated block-COW writer. The measured
+286.633-ms difference cannot simply be subtracted from the full migration
+median: regional publication already overlaps the current peer transfer.
+Earlier destination chunk reception is also needed to remove that remaining
+transfer wait. No new three-second full-migration result is established.
+
+The subsequent integration wires the growing source uploader into ctld capture
+custody and reserves its immutable scope through regional staging admission.
+Migration 092 bounds outstanding regional reservations to 64 GiB, including
+metadata/encryption overhead and failed captures until exact GC completion.
+Exhausted admission falls back to legacy publication. GC requires terminal
+lifecycle and physical custody proofs, including captures that failed before
+publication and lost publication replies. Journal envelope 15 retains the grant
+and rejects downgrade. Capture outcome, cleanup and primary handover cancel and
+join the uploader before releasing reconciliation custody. Earlier destination
+reception is not yet wired into node or regional lifecycle coordination. Source exit, consistent RootFS, successful
+regional publication and destination verification remain execution prerequisites.
+
+Only the temporary test cluster received this integration. Six consecutive
+A-to-B/B-to-A moves retained the same Python process, 128 MiB of random memory,
+150 millicores, 512 MiB memory and a 100-ms quota period. Trigger-to-first-command
+times were 3.789280, 3.671244, 3.903905, 3.683171, 3.923541 and 3.575256 seconds
+(median 3.736226 seconds; zero of six within three seconds). Every move preserved
+PID, counter progress, open-file offset, durable files, tmpfs, mmap and the full
+memory SHA-256. The fixture was verified again and paused after generation 7,
+with its resource lease released. These sequential samples do not establish an
+end-to-end improvement over the earlier cohorts. No production rollout or
+temporary CPU boost was performed.
+
+RootFS already uses incremental block-COW publication in
+`pkg/rootfssession/migration.go`: unchanged data objects are reused, while the
+stopped writer's final dirty blocks and mapping changes form the new generation.
+This is separate from the runsc execution image streamed by P2P. RootFS COW
+does not provide incremental anonymous-memory or tmpfs checkpoints. Destination
+cache misses can still require object reads, so a cold target is not a zero-I/O
+restore even when its RootFS generation shares most blocks.
+
+The integration passed Linux race suites for runtime-slot contracts (1.163 s),
+checkpoint storage (10.346 s), migration coordination (3.172 s) and node runtime
+(45.404 s), plus architecture checks (0.175 s), the separate Nomad driver suite
+(25.059 s) and manager command compilation. Targeted PostgreSQL integration
+tests ran against a separate database and passed in 27.604 s without skips,
+covering concurrent budget admission, unused/failed capture collection,
+post-deletion GC, staging, publication, and existing image-GC recovery.
+
+The next destination-transfer primitive is `CapturePeerCache`. It accepts
+source-scope-bound full 8-MiB ranges before a final manifest exists. Disk bytes,
+file/directory counts and cumulative frame count are bounded; reconnecting does
+not reset admission. Its inventory describes only complete received prefixes.
+The final source rereads its entire retained image, compares the tentative
+inventory with the final plan and sends only changed/missing ranges. The target
+rehashes every reused range, repairs the same files in place, checks exact final
+framing and syncs files/directories before acknowledging receipt. False hints,
+corruption and interrupted frames cannot produce a completed final image.
+Unexpected paths require authorized cache disposal and normal full transfer. Original write descriptors remain open through final fsync to preserve
+writeback-error observation; path/inode substitution and delayed sync errors
+invalidate the cache. Reusable ranges are checked with bounded parallel scans
+at source and destination instead of serial hashing around each reuse flag.
+
+
+`UploadGrowingWithPeer` shares bounded source buffers between regional upload
+and an optional peer consumer, joining both before custody release. The legacy
+uploader remains unchanged when no peer callback is installed. The new stream
+is not exposed by a node endpoint yet: regional source/destination peer grants,
+node journal ownership, restart disposal and integration with normal image
+preparation remain required before enabling it. Capture-cache methods do not
+authorize a destination or replace successful regional publication.
+
+An opt-in 128-MiB random-data probe (`SANDBOX0_CAPTURE_PEER_PROBE=1`,
+`TestCapturePeerGrowing128MiBTransferVolume`) checks that the target receives the
+first chunk while the source file is still only 8 MiB long. It then compares
+full and repair stream volumes and independently hashes the final local image.
+The probe uses local pipes and synthetic image data, with no runsc, regional
+RootFS cut or manager lifecycle; its byte savings are not migration timings.
+On isolated amd64 Linux, the full stream was 134,220,027 bytes. Early receipt
+was 134,218,522 bytes, with 1,745 bytes of inventory metadata. The final repair
+stream was 2,315 bytes when unchanged and 8,390,923 bytes after rewriting one
+8-MiB range. Both final images passed independent full-hash verification. These
+are remaining-transfer savings; all original data still crosses the early
+stream, and rewrites increase total traffic.
+
+The checkpoint and node-runtime race suites passed in 14.822/45.440 seconds,
+with architecture checks in 0.153 seconds. Including the opt-in volume probe,
+the final checkpoint race suite passed in 19.472 seconds. Coverage includes
+canceled consumers retaining custody until joined, incomplete frames, false
+reuse hints, damaged destination data, exact scope/ref binding, bounded repeated
+streams, symlink escape rejection, and canonical inventory decoding.
+
+A subsequent stock-runsc probe restored actual 128-MiB random-memory captures
+from the repaired peer directory and checked PID, progress, open-file offset,
+tmpfs, CPU flags and the full memory hash. It used 150 millicores, 512 MiB memory,
+a 100-ms CPU period and encrypted MinIO on another host. Source capture and
+peer receipt ran on the same worker and isolated loop-backed XFS disk through
+local pipes, so it still excludes real inter-node transport and regional
+RootFS/lifecycle coordination.
+
+Initial interleaved tests found essentially no capture-to-publication/peer-ready
+gain despite reducing the final wire payload to a few MiB. Detailed timings
+showed final target fsync, rather than remaining network bytes, dominating the
+repair phase (418.764 ms in an instrumented early-receipt sample). The receiver
+now submits each full received range for Linux asynchronous writeback, retaining
+its original write descriptor until final fsync. Unsupported filesystems fall
+back to ordinary final synchronization; writeback errors invalidate the cache.
+This hint is not a durability acknowledgement and adds no detached worker.
+
+Eight interleaved tests of binary
+`cf62e62e1350f8f2222befa6d2c7ef97d4026e10a21ce6a1cfbb823da26eb358`
+used full, early, early, full, full, early, early, full order. Both paths used
+regional growing upload; only the early path also received during capture.
+
+| Local-pipe path | Capture + sync + publication + peer verification median, ms | Work remaining after source sync median, ms | Final target sync median, ms |
+| --- | --- | --- | --- |
+| Complete peer transfer after capture | 1248.317 | 702.982 | 356.952 |
+| Early receipt with asynchronous writeback | 1437.619 | 283.204 | 31.251 |
+
+All eight restores and exact-scope object collections passed. Test runtimes,
+cgroups, loop mounts and backing files were cleaned; both worker ctld HA probes
+remained ready. Early receipt reduced the remaining phase by 419.778 ms, but
+increased the combined primitive median by 189.302 ms on the shared disk.
+Source/destination disk contention is a hypothesis to test on separate nodes,
+not evidence of an end-to-end improvement. This prototype has not been wired
+into regional peer grants, node journals or the actual migration path, and no
+three-second result is established. The final checkpoint race suite, including
+the volume probe and writeback-failure tests, passed on Linux in 19.215 seconds.
+
+The follow-up network probe used independent source B and receiver A hosts and
+isolated loop-backed XFS filesystems, with encrypted regional storage on C.
+Its test-only receiver required pinned mutual TLS over the private network;
+it was never registered on ctld. Binary
+`f72374a1181837cc1cae9b3da643445b69bb002beda8dd71267cc61f866788c5`
+passed two initial trials and eight interleaved trials in full, early, early,
+full, full, early, early, full order. The workload and CPU policy were unchanged.
+
+| Separate-node path | Capture + sync + publication + peer verification median, ms | Work remaining after source sync median, ms | Final target sync median, ms |
+| --- | --- | --- | --- |
+| Complete peer transfer after capture | 1144.235 | 577.346 | 156.235 |
+| Early receipt with asynchronous writeback | 946.110 | 368.915 | 156.730 |
+
+The combined component improved by 198.126 ms (about 17%). Early receipt held
+96–128 MiB before final repair; final transfer ranged from 4,543,401 to
+38,064,871 bytes, compared with approximately 139 MB on the full path. These
+are shifted bytes, not avoided total memory traffic. Final synchronization
+remained around 157 ms on the separate receiver, unlike the local-pipe result.
+The comparison supports a component benefit under these conditions, not a
+general causal claim about storage contention.
+
+Each timing ended after A durably received the exact image and verified it
+against the encrypted regional publication. After that timer, the probe copied
+the verified image back to B for stock-runsc restore and full state validation;
+that return copy took 390–411 ms and was explicitly excluded. All eight restores,
+memory hashes and exact-scope regional collections passed. This experiment
+excludes peer admission, manager coordination, the RootFS cut, and restoration
+on A, so it is not a complete cross-node migration acceptance result. The
+test receiver was shut down and its cache released after the cohort.
+
+Node integration now retains each private endpoint and certificate alongside
+the original staging receipt. Retries and primary changes cannot replace that
+historical identity or enable transport for an older reservation. The internal
+`migration_capture_peer` node-channel command binds both receipts, both exact
+placements, the regional capture scope and the existing staging budget. It
+records authority only; source capture intent and final regional publication
+remain separate prerequisites.
+
+Journal envelope 16 retains endpoint/grant state and rejects older envelopes.
+An early destination grant owns its derived cache path and staging admission
+until synchronized physical absence is recorded. Cancellation retains a
+tombstone, so delayed grants cannot recreate released paths. Generic carrier
+cleanup and journal pruning cannot bypass this custody. The source grant owns
+no destination cache path and cannot be introduced after capture begins.
+The ctld source uploader now shares its bounded chunk buffers with an optional
+pinned-TLS stream to the reserved destination. A slow or failed peer cancels
+only that consumer; regional upload continues. The destination retains original
+write descriptors under journal custody until final repair, synchronization or
+cleanup. Prefetch cancels and joins tentative receipt, obtains a bounded reuse
+inventory, and repairs the same files against the final planned or published
+reference. Restarted caches are discarded rather than reopened as trusted data.
+Repair failure removes the old cache before full transfer, preserving the single
+image staging budget. Normal preparation still verifies the committed regional
+manifest before acknowledging a usable destination image.
+
+Actual TLS node tests passed with the race detector in 5.532 s. They exercise
+the source capture uploader, unchanged-chunk reuse (an 8-MiB tentative chunk
+requires less than 32 KiB of final wire data), changed source chunks, corrupt
+target chunks, lost process-local cache state, wrong certificates/grants, and
+receiver cancellation while regional upload continues. A blocked manifest
+publication test proves final repair can finish before publication without
+creating destination execution custody. Complete Linux race regressions passed
+for node runtime (50.384 s), checkpoint storage (14.817 s), runtime-slot contracts
+(1.180 s), migration coordination (3.731 s) and architecture (1.135 s); manager
+and ctld command compilation and the separate driver suite (24.125 s) passed.
+These tests prove protocol behavior, not the three-second migration SLO.
+
+The first integrated six-move probe exposed an admission bug: only the initial
+source accepted its early-peer grant. Later sources retained their previous
+destination-adoption history, which was incorrectly treated as an active image
+preparation. Those five moves safely fell back to full image transfer, so that
+cohort is not evidence for repeated early receipt. The guard now permits a
+historical adopted destination only as the next source, using the existing
+exact adopted-runtime matcher for generation, process, assignment, writer
+binding and resource identity. A changed generation remains rejected. The
+expanded node authority/stream race tests passed in 6.556 s; the complete node
+runtime race suite then passed in 50.066 s.
+
+After that fix, one fresh 150-millicore/512-MiB sandbox holding 128 MiB of random
+memory completed A → B → A → B → A → B → A, advancing generation 1 through 7:
+
+| Move | Trigger to target command-ready |
+| --- | --- |
+| A → B | 3.441619 s |
+| B → A | 3.477313 s |
+| A → B | 3.469087 s |
+| B → A | 3.532972 s |
+| A → B | 3.621430 s |
+| B → A | 3.575501 s |
+
+The median was 3.505143 s; zero of six met the three-second total target. All
+six PostgreSQL grants retained both acknowledgements without fallback, and all
+six destination logs recorded successful early-cache repair. Tentative cache
+inventories contained 96–136 MiB; these are received bytes, not a claim that
+every byte remained reusable in the final checkpoint. Median final repair was
+207.309 ms, prefetch 221.259 ms, published-image preparation 74.452 ms, RootFS
+cut 125.037 ms, and regional publication 176.375 ms. These overlapping stage
+medians must not be added to derive total time. Stock-runsc restore alone still
+took 986–1091 ms (median 1002.228 ms) under the original CPU quota.
+
+Every move preserved PID, counter progress, the full memory SHA-256, the open
+unlinked file and offset, mmap, persistent files and tmpfs. Both staging
+reservations and source leases were released. After final verification the
+fixture was paused; no active guests, migrations, resource leases or outstanding
+capture-upload budget remained, and all six capture scopes were collected.
+The acceptance ctld hash was
+`86d259c0123c7a2a3600bddd3aec14721539576e519d8697b40b9ed2e67fde94`
+and manager hash was
+`cab4b169aa5228b006593eecbe441d3485732ed0326aa59750f27caf57aa462d`.
+The stock runsc, driver, procd, CPU/memory limits, 100-ms quota period and
+`shmem_enabled=never` setting were unchanged. No production rollout occurred.
+
+A subsequent host-setting comparison retained those same binaries, workload,
+150-millicore/512-MiB resources and 100-ms quota period, changing only the two
+temporary nodes from `shmem_enabled=never` to `advise`. Observed guest cgroup
+shared-memory huge pages were 144,703,488 bytes before migration and 142,606,336
+bytes after the sixth move. The six trigger-to-target times were 3.019164,
+3.331543, 3.113738, 3.255509, 3.387829 and 3.463501 seconds (median 3.293526;
+zero of six at or below three seconds). All six early-peer grants retained both
+acknowledgements without fallback, and all six repairs completed. Median final
+repair was 215.404 ms, RootFS cut 119.685 ms, regional image publication
+207.522 ms, checkpoint 558.711 ms and restore 796.441 ms. Stage intervals can
+overlap and are not additive. Full state checks passed on every move; after
+pause, no active guest, migration, resource lease or capture budget remained,
+and all six capture scopes had been collected. This is a host-setting
+experiment, not a new default or a stable three-second bound.
+
+The next checkpoint transport revision removed a duplicate tentative receiver
+hash and moved source chunk hashing outside the frame serialization mutex.
+Final disk verification, buffer ownership and publication authority remain
+unchanged. Linux race suites passed for checkpoint storage (15.583 s) and node
+runtime (50.960 s); the local checkpoint race suite also passed (8.230 s).
+The resulting ctld hash was
+`b7de79da121d4486b6d2e5fae38cb078062e930ea8cc04cf131e232d0bdc04c7`.
+
+With the same `advise` host setting and unchanged manager, driver, runsc,
+resources and workload, six moves took 3.330341, 3.270281, 3.368832, 4.481617,
+3.374631 and 3.333023 seconds (median 3.350927; zero of six at or below three
+seconds). This does not demonstrate an end-to-end latency improvement over
+the preceding cohort. The fourth move's restore command took 1.993638 seconds;
+the overall restore median was 702.708 ms. Median final repair was 282.543 ms,
+RootFS cut 125.276 ms and regional publication 266.367 ms. All six grants and
+repairs succeeded, complete state checks passed, and pause left zero active
+guests, migrations, leases or capture budget, with all six capture scopes
+collected. Both temporary nodes were then verified back at their original
+`shmem_enabled=never` setting. Production was not changed.
+
+An isolated follow-up compared the stock checkpoint `--direct` option (source
+writes, distinct from the earlier restore-read experiment). Six interleaved
+buffered/direct/direct/buffered/buffered/direct runs used independent runsc
+roots and cgroups on a dedicated 2-GiB loop-backed XFS mount, encrypted regional
+growing upload, 150 millicores, 512 MiB, a 100-ms CPU period, 128 MiB of random
+memory and the original `shmem_enabled=never` setting. A private wrapper added
+only the source checkpoint flag; the installed runsc inode was unchanged.
+All six restored the full challenged memory hash, PID, file offset and tmpfs
+state, and collected their unique regional capture prefixes.
+
+| Isolated source I/O | Checkpoint median | Capture plus full sync median | Capture, sync and encrypted publication median |
+| --- | --- | --- | --- |
+| Buffered | 535.730 ms | 542.712 ms | 794.145 ms |
+| Direct | 444.613 ms | 456.493 ms | 691.826 ms |
+
+The direct publication totals were 691.826, 1008.034 and 680.429 ms. The second
+sample's 176.012-ms final sync prevents a stable tail-latency claim. Restore
+medians were effectively unchanged (918.941 versus 917.951 ms). These
+component timings exclude actual cross-node placement, P2P receipt and writer
+handover; they motivate a full-path comparison, not enabling a production
+default. Probe runtimes, cgroups, mount and loop device were removed, and both
+ctld HA probes passed afterward.
+
+The subsequent full-path source-I/O comparison used the early-peer ctld
+`b7de79da121d4486b6d2e5fae38cb078062e930ea8cc04cf131e232d0bdc04c7`,
+unchanged manager/runsc, 150 millicores, 512 MiB, 128 MiB random memory, a 100-ms
+CPU period and `shmem_enabled=never`. Both driver variants came from the same
+build tree, with only the direct variant's test build overlay adding
+`--direct` to the checkpoint command. The adapter race suite passed (2.668 s).
+The full driver race suite exceeded its initial three-minute package budget
+while building repeated 300-MiB RootFS fixtures; the timed-out package passed
+with a larger budget in 387.073 s, and the remaining packages had passed.
+No race report occurred in the timed-out attempt.
+
+| Source checkpoint I/O | Six trigger-to-target times, seconds | Median | At or below 3 seconds |
+| --- | --- | --- | --- |
+| Direct, experimental overlay | 3.488125, 4.506994, 3.442739, 3.482087, 3.730311, 3.736231 | 3.609218 s | 0 / 6 |
+| Buffered, control build | 3.605657, 3.713474, 3.588602, 3.518664, 3.450084, 4.638609 | 3.597129 s | 0 / 6 |
+
+Checkpoint medians were 557.488 ms direct and 650.588 ms buffered, but the
+complete migration did not improve. Final repair medians were 197.296 and
+186.580 ms; restore medians were 1045.515 and 1041.287 ms. The cohorts are small
+sequential comparisons and do not establish tail percentiles or attribute all
+differences to the flag. All twelve moves preserved complete state, used both
+early-peer acknowledgements without fallback and released source/staging
+custody. Both fixtures were paused with zero active guests, migrations, leases
+or capture budgets, and all twelve capture scopes were collected.
+The direct driver hash was
+`1837781737a325780815bdfb6ec334f7b8f17a7e72c7f4979a1a71e6e941dd20`;
+the buffered control hash was
+`6f06ea22037254c8f11b421ea7d7c04b5db77f780e244e64b42c1b94ad575776`.
+Both hosts were then verified running the original driver
+`9ff8e85a845e64609fae79ffb1b52e7967eb3046814813b14b97cbc686920321`.
+The production source I/O default remains buffered.
+
+Final peer repair now releases reuse frames before rechecking retained source
+bytes, allowing the destination's complete local hash check to overlap source
+validation. The node flushes buffered HTTP frames explicitly; otherwise tiny
+reuse markers would remain buffered until the source scan finished. Reuse
+protocol version 3 requires an explicit completion trailer after every source
+check and also requires successful transport EOF. A missing trailer fails even
+when all cached files are valid and the local reader ends cleanly. Late HTTP
+errors, failed flushes, corrupt sources and incomplete streams retain custody
+and cannot produce a successful receipt. Peers with incompatible repair wire
+versions discard the optional cache and use the unchanged full-image protocol.
+There is no checkpoint-manifest or RootFS-format change.
+
+A first local experiment without a trailer failed the existing changed-source
+regression: complete reuse frames could be misread as success on a clean local
+EOF. The required trailer fixes that failure. Added tests exercise complete
+cached-file verification followed by a late HTTP abort, flush failure, absent
+completion, version rejection and an actual TLS-node fallback from a legacy
+repair header. Final local checkpoint race tests passed in 7.055 s. Linux
+checkpoint and node-runtime race suites passed in 16.347 s and 52.172 s. The
+acceptance ctld hash was
+`ad594257686b35a9def5cafaf188523b8f783047483a5a29e04272cdb989a752`;
+the original driver, manager, procd and stock runsc remained in use.
+
+Two fresh 150-millicore/512-MiB cohorts with 128 MiB random memory and a 100-ms
+CPU period measured:
+
+| Shared-memory THP | Six trigger-to-target times, seconds | Median | At or below 3 seconds |
+| --- | --- | --- | --- |
+| `never` | 3.699343, 3.663328, 3.598762, 3.692723, 7.146285, 3.634200 | 3.678026 s | 0 / 6 |
+| `advise` | 3.145259, 3.167384, 3.433022, 3.408285, 3.246178, 3.351617 | 3.298898 s | 0 / 6 |
+
+With `never`, final repair's median was 108.562 ms versus 186.580 ms in the
+preceding buffered-control cohort. Publication, checkpoint and restore medians
+were 160.220, 694.026 and 1092.811 ms. The fifth move's publication interval was
+3767.576 ms; no target execution was authorized before it completed. A retained
+object-store service log inspection found no entries in that interval, and the
+store host had 80 GiB free. This does not identify the cause of that outlier.
+With `advise`, repair, publication, checkpoint and restore medians were 172.356,
+286.136, 507.924 and 796.427 ms. The final guest used 142,606,336 bytes of
+shared-memory huge pages. Different overlapping-stage medians are not additive.
+
+All twelve moves preserved the complete process/memory/file evidence, used both
+early-peer acknowledgements without fallback and completed peer repair. Both
+fixtures were fully verified and paused; active guest, migration, lease and
+capture-budget counts were zero and all twelve capture scopes had been
+collected. Both temporary hosts were verified back at `shmem_enabled=never`.
+The shorter repair stage does not establish lower total migration latency or
+a stable three-second bound. Production rollout remains stopped.
+
+Final tentative chunk upload can now overlap RootFS sealing. After the growing
+uploader has joined and the completed execution image is under stopped-source
+custody, inventory inspection also stages missing chunks, including short file
+tails, under the existing capture reservation. This worker has a 500-ms optional
+deadline and must join before reconciliation custody is released. Failure keeps
+existing budget charges and falls back to ordinary final publication. It does
+not bind a RootFS cut or publish a restorable manifest early. Final publication
+still rereads every planned chunk and publishes the manifest last, after the
+exact durable RootFS cut has been obtained.
+
+Tests cover short-tail upload without binding or manifest publication, changed
+bytes after inspection, cancellation with retained budget charges, rejection
+after publication binding, and actual overlap with RootFS sealing while a
+canceled backend write is still exiting. The last test checks that cancellation
+alone cannot release node custody. Local checkpoint race tests passed; Linux
+checkpoint and node-runtime race suites passed in 16.853 s and 53.023 s. The
+candidate ctld hash is
+`9d0f099c6202731b9e3f1b4b442875101e00b7fd6368df11b9b48a80c099db1a`.
+Publication timing now separates upload-scope opening, planning, object
+publication, stopped-source recheck and journal commit, so regional-write tails
+can be distinguished from those other stages.
+
+The first six-move cohort with this candidate kept 150 millicores, 512 MiB,
+128 MiB random memory, a 100-ms CPU period and `shmem_enabled=never`. Total
+trigger-to-target times were 3.597392, 3.625329, 3.553882, 3.607454, 3.693179
+and 3.549788 seconds: median 3.602423 seconds and zero of six at or below three
+seconds. All six optional sealing uploads succeeded, with a median of
+179.139 ms. The six initial RootFS cuts had a 175.480-ms median; one operation
+also logged an 8.067-ms idempotent cut retry, which is not another migration
+sample. Final publication had a 93.867-ms median, comprising upload opening
+4.596 ms, planning 3.170 ms, objects 69.428 ms, source recheck 5.430 ms and
+journal 9.582 ms. These component medians are not additive. Checkpoint,
+restore and final peer repair medians were 585.457, 1089.311 and 145.815 ms.
+
+Every move preserved the complete process, memory and file evidence and used
+both early-peer acknowledgements without fallback. The fixture was fully
+verified and paused; active guest, migration, lease and capture-budget counts
+were zero and all six capture scopes were collected. Moving writes into the
+seal interval shortens the later publication stage, but also lengthens the
+seal interval. This cohort alone does not establish lower total latency.
+
+A separate six-move `advise` cohort with the same candidate and unchanged
+quotas measured 3.215906, 3.294467, 3.532142, 3.309415, 3.432484 and 4.254830
+seconds: median 3.370949 seconds, zero of six at or below three seconds. All
+six optional uploads succeeded. Sealing-upload, final-publication, checkpoint,
+restore and peer-repair medians were 208.783, 86.659, 527.405, 788.037 and
+181.539 ms. The sixth move included a 909.738-ms destination image-preparation
+stage; its restore command took 779.099 ms. Its preparation transport was
+`peer`, while only five of six moves logged successful final repair/prefetch.
+Thus that move retransferred the image rather than promoting the early cache.
+The logs alone do not prove why its optional prefetch failed. The implementation
+can cancel an unfinished fill after the manager's 250-ms observer grace, making
+that boundary a relevant recovery-path test rather than a confirmed cause.
+
+All six moves preserved the full state evidence and used both peer grant
+acknowledgements without disabling the early grant. That grant evidence does
+not imply successful final cache reuse: five moves reused it, one retransferred. The final guest used 142,606,336 bytes of
+shared-memory huge pages. It was verified and paused; active guest, migration,
+lease and capture-budget counts were zero, all six capture scopes were
+collected, and both hosts were restored to `never`. No stable three-second
+bound or end-to-end improvement is established by these candidate cohorts.
+
+Destination preparation now gives an exact, same-process prefetch worker up to
+150 ms to finish before canceling and joining it. This is additional to the
+manager's existing 250-ms observer grace, not a change to publication or restore
+authority. A completed or absent worker adds no wait; an unrelated worker is
+not observed. The final image still must pass published-manifest verification.
+Tests cover productive completion without retransmission, exact worker matching,
+observer cancellation and the existing stuck-fill cancellation/cleanup paths.
+The Linux node-runtime race suite passed in 52.022 s for ctld
+`969c606987e6cac72d532f58e3a104b95e179513fbdc3b61ac2083838e14d262`.
+
+A fresh `never` cohort at the unchanged 150-millicore/512-MiB quota and 128-MiB
+random-memory workload took 3.573934, 3.580143, 3.778573, 3.714979, 3.748320
+and 3.703642 seconds: median 3.709310 seconds, zero of six at or below three
+seconds. All six moves used final repair and `prefetch` preparation. Repair,
+preparation, publication, checkpoint and restore medians were 113.884, 74.209,
+90.921, 676.428 and 1083.781 ms. Complete state verification passed throughout.
+These observations do not establish a reduction in total latency or prove that
+the additional grace was exercised during this particular cohort.
+
+The final-repair client also retries a pre-stream HTTP 503 up to three times,
+with 5/10/15-ms backoffs, before using its existing fallback. The source can
+briefly reject exclusive admission after retiring the shared publication reader
+and before releasing publication custody. No cache mutation has begun at this
+point. Permission failures, other HTTP statuses, transport errors and partial
+or corrupt streams are not retried. The request context continues to bound
+network operations; the 30-ms sum describes backoff only, not total RPC time.
+Error bodies are closed without an extra potentially blocking drain.
+
+An actual TLS node test holds source reconciliation across the first repair
+request, then releases it. Repair succeeds with less than 32 KiB sent for an
+already-retained full chunk, followed by normal published-image verification.
+A persistent-busy test verifies that bounded repair failure discards the
+optional cache and recovers through the regional publication path. Existing
+late-stream, version-mismatch, corruption and authorization coverage remains
+in the full node-runtime race suite, which passed in 53.167 s. The combined
+acceptance ctld hash is
+`0a0c921b0e295d419be8660d0070b4a2c0cb59aab6bb019e8e1fb906690c450e`.
+
+The combined candidate's default `never` cohort took 3.532339, 3.502819,
+3.493374, 3.402783, 3.538887 and 3.639924 seconds (median 3.517579). All six
+moves used final repair and prefetched-image preparation. Repair, preparation,
+publication, checkpoint and restore medians were 113.782, 74.071, 92.173,
+666.736 and 987.131 ms. The separate `advise` cohort took 3.563687, 4.324232,
+3.342873, 3.448943, 5.293101 and 4.411446 seconds (median 3.943959); all six
+also reused the prefetched image. Its restore median was 796.943 ms, which
+does not explain or eliminate the other tail intervals. These small cohorts
+do not attribute their total differences solely to the recovery-path changes.
+
+All eighteen moves across the grace-only and combined-candidate cohorts passed
+complete state verification, used both early grant acknowledgements and were
+verified/paused afterward. Each cohort ended with zero active guests, migrations,
+leases and capture-budget bytes, and all capture scopes collected. Both hosts
+were restored to `shmem_enabled=never`. Production CPU and hugepage defaults
+remain unchanged; the tests do not establish a hard three-second SLO.
+
+Regional migration 093 now records the exact peer grant in the same transaction
+as the final staging acknowledgement. The existing staging worker first asks
+the destination to retain that grant, then the source. Source preparation is
+excluded from discovery and denied by both locked authorization and SQL guards
+until both acknowledgements exist or an explicit fallback is committed. The
+pending-staging index includes peer decisions after pool admission completes.
+Receipts and fallback decisions cannot be reversed by retries or late replies.
+Each optional node call has a 500-ms observer limit; a failed call records
+fallback without claiming that the node accepted no work or releasing its
+staging custody. Invalid acknowledgements remain errors. Legacy receipts
+without endpoints, incompatible endpoint pairs, and operations without regional
+capture-upload admission keep the existing path without extra peer calls.
+Migration 093 has been applied to the isolated acceptance cluster after tests
+in a separate database. The acceptance manager and both ctld A/B pairs now run
+the streaming implementation; production remains unchanged. The acceptance
+rollout verified no active guests, migrations or resource leases, updated each
+standby before its primary, and confirmed four warm carriers per node.
+The PostgreSQL authority/worker and existing staging race tests passed in
+32.593 s without skips; the final indexed-schema peer tests passed in 11.896 s.
+Coverage includes destination-before-source dispatch, concurrent acknowledgement
+replay, failures with nonnil node results, late replies after fallback, expired
+CPU eligibility, cancellation retaining staging release authority, immutable
+SQL evidence, and source preparation remaining gated. Existing source-dispatch,
+capture-upload and staging integration regressions also passed without skips
+in 25.839 s. Coordinator race tests passed in 3.724 s, manager compilation passed,
+and the final architecture checks passed in 0.025 s. The regional integration
+tests use node doubles, with authenticated-channel behavior tested separately;
+they do not establish a new migration SLO.
+
+Linux race suites passed after this authority work: node runtime 45.083 s,
+runtime-slot contracts 1.193 s, authenticated node channels 66.251 s, and
+checkpoint storage 13.809 s; architecture checks passed in 0.022 s. Tests cover
+immutable endpoints across restart/configuration changes, exact grant retries,
+key/placement substitutions, mixed command payloads, unsupported peers, errors
+discarding acknowledgement payloads, cancellation overtaking grants, forbidden
+late grants after capture, and retaining cache custody until physical cleanup.
+The fallback test additionally leaves partial peer data, removes the current
+TLS identity, and verifies ordinary preparation removes that cache before
+downloading and validating the committed regional image. The updated complete
+node race suite passed in 45.191 s. Manager command compilation and the separate
+Nomad driver suite also passed (driver package 24.202 s).
+
+
+On the isolated amd64 Linux source tree, the complete checkpoint-store and node
+runtime suites passed with the race detector (7.510 and 43.561 seconds), followed
+by architecture checks (0.186 seconds) and the separate Nomad driver suite
+(24.618 seconds). Follow-up checkpoint race tests passed in 7.308 seconds and
+include version-2 peer round-trip,
+lost chunk/publication replies, unchanged-chunk reuse, budget recovery, exact
+source/cut rejection, regional encryption and partial garbage collection.
+The manager migration coordinator tests passed with the race detector, and
+`TestNomadMigrationImageGCRequiresPhysicalCustodyAndRetriesIntegration` executed
+against a separate PostgreSQL test database and passed (1.006 seconds); it was
+not skipped. The database test preserves the existing successful-publication
+GC gate. The subsequent migration-092 tests additionally cover regional authorization
+for collecting a capture that failed before final publication.
+
+The growing-upload and version-2 planning changes passed the complete Linux
+checkpoint-store and node-runtime race suites (11.858/45.762 seconds), the
+architecture checks (0.176 seconds), and the separate Nomad driver suite
+(25.739 seconds). Final test refinements and the opt-in real-runsc upload probe
+passed checkpoint-store/gVisor race tests again (10.298/2.755 seconds). Cases
+include preallocated pages overwritten after early upload, exact chunk reuse,
+changed local plans, bounded parallel publication, canceled uploads releasing
+custody, budget exhaustion and peer completion without regional publication.
+
 The execution-image foundation is implemented in `pkg/gvisorcli` and
 `pkg/runtimecheckpoint`. It includes stock runsc checkpoint/restore adapters,
 bounded immutable image transfer using the regional object-store interface,
@@ -206,6 +2241,12 @@ destination. The driver retains its once-only checkpoint intent and uncertain
 outcome fence. Lost dispatch replies retry the same command; an uncertain
 capture never causes a second checkpoint or a fresh start. The independent
 source-recovery worker seals completed captures and authorizes publication.
+Capture receipts are observations rather than new regional commits, including
+repeated completed receipts. The recovery worker briefly polls missing or exact
+pending journal observations, including temporary node unavailability during a
+concurrent RootFS seal, for up to two seconds at 50-ms intervals. Other errors
+keep the ordinary retry backoff. The wait never dispatches a capture or
+authorizes execution, and larger checkpoints retain periodic recovery.
 CPU expiry excludes new preparation/capture authorization, while a previously
 authorized capture retains its historical command. Cancellation excludes
 further preparation and serializes against first capture authorization.
@@ -917,14 +2958,132 @@ prepare the reserved target image and commit its receipt, then authorize and
 physically fence the source and commit that proof. New commands must be stored
 before dispatch. Missing or invalid node evidence never permits the next step.
 
-Each operation has a two-minute attempt budget, each pass a five-minute budget,
-and passes wait one second before rescanning. A cursor traverses unresolved work
+Each operation has a two-minute attempt budget and each pass a five-minute budget.
+Committed progress immediately advances the next pass and broadcasts a wakeup
+to the other migration lanes in the same manager. These notifications contain
+no authority; every lane still rereads PostgreSQL. Idle lanes reconcile every
+second to recover missed notifications and commits from other replicas. Failed
+passes retain a one-second retry delay even while other lanes make progress.
+Continuous successful work yields for ten milliseconds after eight passes.
+A cursor traverses unresolved work
 without letting the first failed batch starve later operations; cancellation
 preserves the unvisited suffix. This loop is separate from terminal cleanup, so
 an image transfer cannot occupy that worker. Every manager replica can run it;
 the existing database CAS and node journals serialize effects, and each replica
 uses its own authenticated node channels. A replica without the relevant node
 stream fails that attempt and retries on a later pass.
+
+Optional peer transport is configured with `nomad_runtime.migration_peer_address`
+on ctld, using a concrete private IP and fixed TCP port, for example
+`10.0.1.10:19443`. It requires the existing migration staging quota. The primary
+ctld owns the listener; standby instances must not bind it. Both nodes need the
+configuration and private connectivity. An empty address leaves regional image
+download in use.
+
+Each daemon generates a private TLS identity. The destination's public
+certificate digest is durably retained with staging reservation and returned
+over the existing authenticated manager channel. The region binds that digest
+into the source publication command. The source's public endpoint certificate
+is included in its immutable publication receipt. The target validates that
+exact trust anchor, and the source serves bytes only to the exact destination
+certificate authorized for that operation. Neither exchange contains a bearer
+token or private key. Redirects, DNS endpoints, public addresses and ambient
+HTTP proxies are not used. The listener bounds concurrent connections and
+request headers. The source independently limits each stream to two minutes;
+cancellation or regional cleanup expires its socket write deadline so a
+non-reading destination cannot retain source custody indefinitely. The target
+also uses the authenticated migration operation's context for its request.
+
+The peer stream carries the existing canonical manifest followed by its file
+chunks. The target verifies the regional manifest digest and binding, checks
+staging capacity before creating files, validates each chunk and fsyncs the
+completed image before journaling preparation. Source custody remains locked
+during streaming so cleanup cannot remove the files. A partial or corrupt peer
+image is discarded before falling back to the exact regional reference; bytes
+from the two sources are never combined. A daemon restart changes its key;
+existing staging receipts retain their original key and safely fall back.
+
+The stream contains the runsc execution image only. It does not contain the
+block-COW RootFS or unchanged RootFS blocks: the publication binding carries
+the exact RootFS generation and descriptor, and the destination reattaches that
+regional generation through the existing writer/claim path. The bytes that can
+still dominate this transfer are guest memory and other runsc execution state.
+
+Regional publication uploads up to four chunks concurrently with at most four
+8 MiB chunk buffers, then publishes the manifest only after all chunks succeed.
+The manifest format and immutable retry checks are unchanged.
+
+This transport currently starts after regional publication completes. It
+eliminates the regional image download but does not remove the durable upload
+from the critical path. Source fencing, RootFS durability, restore authorization
+and command-ready publication are unchanged. Unit and transport checks are not
+an end-to-end latency SLO; measure trigger-to-first-successful-user-command on
+two real nodes for each memory size, cache state and dirty-filesystem workload.
+
+A September 21, 2026 transport probe used two temporary `ecs.c7.xlarge`
+instances in the same `us-east-1a` private network, each with a 100 GiB ESSD
+PL0 system disk. Random image data traveled through `WritePeerImage` and
+`ReceivePeerImage` over pinned TLS 1.3 with an authorized client certificate.
+The timer began before the HTTP request and ended after digest verification,
+file and directory fsync, and stream termination. Transfers were serial:
+
+| Image bytes | Samples | Observed transfer and fsync seconds |
+| --- | --- | --- |
+| 128 MiB | 5 | 0.390, 0.834, 1.018, 1.024, 1.018 |
+| 256 MiB | 2 | 1.386, 2.042 |
+| 512 MiB | 1 | 3.884 |
+
+This probe used a memory object store to construct the reference before the
+timer and a small authenticated HTTP handler around the checkpoint transport.
+It did not run the ctld listener, migration coordinator, runsc checkpoint or
+restore, RootFS handoff, regional object upload, or command-ready publication.
+Source files were already cached after publication; target directories were
+new, but neither node's caches were explicitly dropped. The samples cannot
+establish a percentile SLO or isolate network throughput from disk throughput.
+In particular, 512 MiB exceeded three seconds in this transfer stage alone.
+The two test instances and their temporary network resources were released
+after the probe. End-to-end trigger-to-command-ready under three seconds remains
+unverified.
+
+The checkpoint adapter also passes stock runsc's
+`--exclude-committed-zero-pages` alongside `--compression=none`. This preserves
+zero-filled memory implicitly in the existing runsc format. It matters after
+runtime usage sampling marks pages known-committed: the default runsc save path
+does not rescan those pages for zeros. Scanning costs CPU and does not reduce
+random or otherwise nonzero memory, so it is not a general memory-size limit.
+
+A subsequent two-host probe on September 22, 2026 (Asia/Shanghai) used the same
+instance type and disk class and the pinned stock `release-20260914.0`
+distribution. A guest allocated and populated 128 MiB, then either zeroed it or
+retained random contents. After a `runsc events --stats` observation, the
+following single samples compared the existing arguments with zero-page
+exclusion. Each real execution image was transferred using the pinned TLS peer
+stream and restored on the other host:
+
+| Workload | Zero-page exclusion | Image MiB | Checkpoint seconds | Transfer + fsync seconds | Restore seconds |
+| --- | --- | --- | --- | --- | --- |
+| 128 MiB zero | Off | 130.77 | 0.095 | 0.344 | 0.057 |
+| 128 MiB zero | On | 2.56 | 0.093 | 0.020 | 0.033 |
+| 128 MiB random | Off | 130.81 | 0.099 | 0.345 | 0.059 |
+| 128 MiB random | On | 130.43 | 0.101 | 0.384 | 0.058 |
+
+Before usage sampling, both zero-page cases were already about 2.6 MiB. All
+eight cross-host cases retained the process token, PID, open-unlinked-file
+offset, tmpfs sentinel, CPU flags and full workload memory digest after restore.
+The source was deleted before transfer, and the destination made further
+progress and checkpointed again. Tests can reproduce the workload with
+`SANDBOX0_CHECKPOINT_MEMORY_MIB=128`,
+`SANDBOX0_CHECKPOINT_MEMORY_PATTERN=zero` or `random`, and
+`SANDBOX0_CHECKPOINT_OBSERVE_USAGE=1` in the explicitly enabled cross-host probe.
+
+These are separate stage timers, not a trigger-to-ready measurement. The
+reference was published into a memory store outside the transfer timer; the
+probe used a small TLS handler rather than the ctld listener. RootFS was a
+prepared read-only test bundle, and neither regional object upload, Nomad
+placement, manager handoff, target creation nor authenticated command-ready
+publication was timed. Source caches were warm and caches were not dropped on
+either host. One sample per case does not establish a percentile or a
+three-second full-migration SLO.
 
 A lost node response or database acknowledgement retries the same immutable
 command. Each new pass rereads PostgreSQL, so a committed receipt survives manager
@@ -1472,7 +3631,8 @@ used unchanged because it deliberately lets the source continue execution.
 
 Execution images include memory and may contain credentials. Use the same
 configured application-encrypted regional store as RootFS. Objects are scoped
-by the binding digest, split into fixed bounded chunks, and created
+by the final binding digest in version 1, or the exact capture scope in the
+version-2 staging foundation described above, split into fixed bounded chunks, and created
 conditionally. A manifest is published only after all chunks. Collision reads
 verify bytes; downloads verify the committed manifest digest, exact binding,
 file geometry and every chunk. Host image directories are private and must
@@ -1595,6 +3755,20 @@ against a hostile host, mmap writes or remote filesystem changes. See the
 [inotify limitations](https://man7.org/linux/man-pages/man7/inotify.7.html).
 Replacement closes the old monitor and conservatively invalidates outstanding
 witnesses. Shutdown closes the cache; it never accumulates a watch per carrier.
+
+Migration preflight and capture/restore boundary checks now reuse this same
+qualified warm evidence. Every check still freshly scans native capabilities
+on every eligible CPU and revalidates the boot and all executable monitors.
+A changed, closed or incomplete retained snapshot rejects migration; it is not
+replaced by a fresh profile during the operation. Adapters with no prepared
+snapshot retain the full stock-runsc observation and bundle-hashing path.
+The original source launch binding and stock restore validation remain required.
+
+On the isolated four-vCPU hosts, three component samples measured one bundle
+hash at 0.254–0.260 seconds and CPU coverage at 0.035–0.038 seconds. A full
+preflight hashes twice. Begin/complete warm revalidation took 0.0008–0.0012
+seconds. These measurements explain an optimization opportunity; they do not
+establish the complete migration latency.
 
 Only successful start followed by successful verification can persist a launch
 record with the active claim. The witness is one-use and expires after two

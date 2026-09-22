@@ -3,7 +3,6 @@ package nomadruntime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -129,7 +128,21 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	if !ok {
 		return nil, errdefs.ErrUnavailable
 	}
-	if !d.beginReconciliation(request.Target.SlotID, nil) {
+	prior, err := d.journal.Get(request.Target.SlotID)
+	if err != nil {
+		return nil, err
+	}
+	if (prior.hasMigrationPrefetch() || prior.hasMigrationCapturePeerCache()) && prior.matchesMigrationStagingImage(request) == nil {
+		if err := d.awaitMigrationPrefetch(ctx, request, prior); err != nil {
+			return nil, err
+		}
+		// A lost prefetch reply must not strand normal preparation behind a
+		// disposable fill. Its own publication authority permits taking over
+		// the exact reserved destination after canceling and joining that fill.
+		if err := d.beginExternalReconciliation(ctx, request.Target.SlotID); err != nil {
+			return nil, err
+		}
+	} else if !d.beginReconciliation(request.Target.SlotID, nil) {
 		return nil, errdefs.ErrUnavailable
 	}
 	defer d.endReconciliation(request.Target.SlotID)
@@ -147,35 +160,70 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	// Retrying an incomplete download may discard only this exact private
 	// directory, and only before a target filesystem or container exists.
 	if custody.Prepared == nil {
-		if _, err := d.runner.State(ctx, record.Registration.RunscContainerID); !errdefs.IsNotFound(err) {
-			return nil, fmt.Errorf("migration image download requires an unused destination: %w", errdefs.ErrFailedPrecondition)
-		}
-		sessions, err := d.runtime.RecoverySessions()
-		if err != nil {
+		if err := d.requireUnusedMigrationDestination(ctx, record.Registration, request.Target); err != nil {
 			return nil, err
 		}
-		for _, session := range sessions {
-			if session.Stage.Identity.SlotNonce == request.Target.SlotID || session.Stage.Identity.AllocationID == request.Target.AllocationID {
-				return nil, fmt.Errorf("migration download cannot replace image custody after RootFS attachment: %w", errdefs.ErrFailedPrecondition)
+		// Tentative bytes are disposable. Until final repair has transferred
+		// them into verified prefetch custody, ordinary preparation removes
+		// this exact cache and continues through its published-image fallback.
+		if record.hasMigrationCapturePeerCache() {
+			if err := d.discardMigrationCapturePeer(ctx, request.Target.SlotID, record.MigrationStaging.CapturePeer); err != nil {
+				return nil, err
 			}
 		}
 	}
-	if err := os.MkdirAll(d.journal.migrationRoot, 0o700); err != nil {
+	if err := ensureMigrationStagingDirectory(d.journal.migrationRoot); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(d.journal.migrationRoot)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("migration staging root is not private: %w", errdefs.ErrFailedPrecondition)
-	}
+	var cached *runtimecheckpoint.Manifest
 	if custody.Prepared == nil {
 		if err := os.RemoveAll(custody.ImageDirectory); err != nil {
 			return nil, err
 		}
+	}
+	transferStarted := time.Now()
+	if custody.Prepared == nil {
+		cached, err = d.consumeMigrationPrefetch(ctx, request, custody.ImageDirectory)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if custody.Prepared == nil && cached == nil {
 		if err := d.checkMigrationStaging(true); err != nil {
 			return nil, err
 		}
 	}
-	manifest, err := runtime.PrepareMigrationImageFiles(ctx, request.Receipt.Binding, request.Receipt.Reference, custody.ImageDirectory, custody.Prepared != nil, d.checkMigrationStagingBudget)
+	transport := "regional"
+	if custody.Prepared != nil {
+		transport = "local-verification"
+	}
+	var manifest runtimecheckpoint.Manifest
+	if cached != nil {
+		manifest = *cached
+		transport = "prefetch"
+	}
+	peer := cached == nil && custody.Prepared == nil && d.migrationPeer != nil && request.Receipt.Peer != (runtimecheckpoint.PeerEndpoint{}) &&
+		runtimecheckpoint.PeerCertificateDigest(d.migrationPeer.identity) == request.Publication.DestinationPeerCertificateSHA256
+	if peer {
+		transport = "peer"
+		manifest, err = d.receiveMigrationPeer(ctx, request, custody.ImageDirectory)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// A partial peer image is never mixed with a regional download.
+			// The same exclusive, unused destination checks above still apply.
+			if err := os.RemoveAll(custody.ImageDirectory); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if cached == nil && (!peer || err != nil) {
+		if peer {
+			transport = "regional-fallback"
+		}
+		manifest, err = runtime.PrepareMigrationImageFiles(ctx, request.Receipt.Binding, request.Receipt.Reference, custody.ImageDirectory, custody.Prepared != nil, d.checkMigrationStagingBudget)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +240,8 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	if err := d.journal.recordMigrationDestination(request, &result); err != nil {
 		return nil, err
 	}
+	d.logMigrationTiming(request.Publication.Assignment.OperationID, "image-preparation", transferStarted,
+		"transport", transport, "image_bytes", result.TotalBytes)
 	return &result, nil
 }
 
@@ -217,6 +267,9 @@ func (j *runtimeSlotJournal) recordMigrationDestination(request protocol.Migrati
 		if current.Cleanup != nil || current.Proof != nil || current.Migration != nil || current.matchesMigrationDestination(request) != nil {
 			return errdefs.ErrFailedPrecondition
 		}
+		if result != nil && current.hasMigrationCapturePeerCache() {
+			return errdefs.ErrFailedPrecondition
+		}
 		if prior := current.MigrationDestination; prior != nil {
 			if prior.Adoption != nil {
 				return errdefs.ErrFailedPrecondition
@@ -234,13 +287,13 @@ func (j *runtimeSlotJournal) recordMigrationDestination(request protocol.Migrati
 			if result != nil {
 				return errdefs.ErrFailedPrecondition
 			}
-			if err := checkMigrationStagingWrite(bucket, current, nil, &request); err != nil {
+			if err := j.checkMigrationStagingWrite(bucket, current, nil, &request); err != nil {
 				return err
 			}
 			retained := 0
 			if err := bucket.ForEach(func(_, payload []byte) error {
-				record, err := decodeRuntimeSlotJournalRecord(payload)
-				if err != nil {
+				record, excluded, err := j.migrationPoolScanRecord(payload)
+				if err != nil || excluded {
 					return err
 				}
 				if record.retainsMigrationCountAdmission() {

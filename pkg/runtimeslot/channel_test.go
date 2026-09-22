@@ -398,8 +398,8 @@ func TestNodeChannelHelloAcceptsAllMigrationCapabilities(t *testing.T) {
 	hello.Capabilities = []NodeChannelCommandKind{
 		NodeChannelCommandNetworkPrepare, NodeChannelCommandClaim, NodeChannelCommandCommandReady,
 		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
-		NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationFence,
-		NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationSourceGC, NodeChannelCommandCleanup,
+		NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence,
+		NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationSourceGC, NodeChannelCommandCleanup,
 	}
 	if err := hello.Validate(); err != nil {
 		t.Fatal(err)

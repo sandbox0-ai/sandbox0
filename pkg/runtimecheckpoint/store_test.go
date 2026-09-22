@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -181,13 +182,12 @@ func TestCheckpointRejectsCrossOperationAndCrossTenantRestore(t *testing.T) {
 
 type interruptedStore struct {
 	objectstore.ContextConditionalStore
-	writes int
+	writes atomic.Int32
 	failAt int
 }
 
 func (s *interruptedStore) PutIfAbsentContext(ctx context.Context, key string, reader io.Reader) (bool, error) {
-	s.writes++
-	if s.writes == s.failAt {
+	if int(s.writes.Add(1)) == s.failAt {
 		return false, errors.New("injected publication interruption")
 	}
 	return s.ContextConditionalStore.PutIfAbsentContext(ctx, key, reader)
@@ -298,4 +298,33 @@ func TestCheckpointVerifyLocalRejectsChangedInventoryAndChunks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckpointVerifyLocalChecksEveryParallelChunk(t *testing.T) {
+	data := bytes.Repeat([]byte{0x35}, publicationConcurrency*ChunkBytes+17)
+	store, err := New(objectstore.NewMemoryStore(""), int64(len(data)))
+	require.NoError(t, err)
+	directory := privateImage(t, map[string][]byte{"pages.img": data})
+	ref, err := store.Publish(t.Context(), testBinding(), directory)
+	require.NoError(t, err)
+	file, err := os.OpenFile(filepath.Join(directory, "pages.img"), os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer file.Close()
+	// Cover every worker and a second chunk owned by the first worker, including
+	// the short final chunk. No worker may report overall success prematurely.
+	for index := 0; index <= publicationConcurrency; index++ {
+		offset := int64(index * ChunkBytes)
+		_, err := file.WriteAt([]byte{0x36}, offset)
+		require.NoError(t, err)
+		_, err = store.VerifyLocal(t.Context(), testBinding(), ref, directory)
+		require.Error(t, err, "corruption in chunk %d", index)
+		_, err = file.WriteAt([]byte{0x35}, offset)
+		require.NoError(t, err)
+	}
+	_, err = store.VerifyLocal(t.Context(), testBinding(), ref, directory)
+	require.NoError(t, err)
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = store.VerifyLocal(canceled, testBinding(), ref, directory)
+	require.ErrorIs(t, err, context.Canceled)
 }

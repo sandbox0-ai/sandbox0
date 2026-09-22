@@ -140,6 +140,10 @@ func NewSourceExecution(store SourceExecutionStore, procd Procd, tokens Handover
 		if receipt.State != protocol.MigrationCaptureIntent && receipt.State != protocol.MigrationCaptureComplete {
 			return false, errors.New("source capture outcome requires reconciliation")
 		}
-		return true, nil
+		// Both pending and complete receipts are observations, not new regional
+		// commits. Recovery independently seals the cut and authorizes its
+		// publication. Reporting every completed observation as progress spins
+		// RPCs while recovery is waiting for a busy node or retry backoff.
+		return false, nil
 	}}, nil
 }

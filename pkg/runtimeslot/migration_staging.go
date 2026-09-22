@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 )
 
 // MigrationStagingRequest reserves exclusive use of one node's migration
@@ -19,6 +20,7 @@ type MigrationStagingRequest struct {
 	DestinationResourceLeaseDigest string                  `json:"destination_resource_lease_digest"`
 	Bytes                          int64                   `json:"bytes"`
 	Inodes                         uint64                  `json:"inodes"`
+	CaptureUpload                  MigrationCaptureUpload  `json:"capture_upload,omitzero"`
 }
 
 func (r MigrationStagingRequest) IsSource() bool { return r.Target == r.Source.Target }
@@ -43,6 +45,11 @@ func (r MigrationStagingRequest) Validate() error {
 	if r.Bytes < 1<<20 || r.Bytes > 1<<50 || r.Bytes%4096 != 0 || r.Inodes < 2 || r.Inodes > 16384 {
 		return fmt.Errorf("staging reservation requires aligned 1 MiB–1 PiB capacity and 2–16384 inodes")
 	}
+	if r.CaptureUpload != (MigrationCaptureUpload{}) {
+		if err := r.CaptureUpload.ValidateFor(r.Source, r.Bytes); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -61,7 +68,9 @@ func (r MigrationStagingRequest) Digest() (string, error) {
 // MigrationStagingReserved acknowledges durable exclusive admission. It is not
 // a physical block allocation or an authorization to execute either placement.
 type MigrationStagingReserved struct {
-	RequestDigest string `json:"request_digest"`
+	RequestDigest         string                         `json:"request_digest"`
+	PeerCertificateSHA256 string                         `json:"peer_certificate_sha256,omitempty"`
+	Peer                  runtimecheckpoint.PeerEndpoint `json:"peer,omitzero"`
 }
 
 type MigrationStagingReleased struct {
@@ -69,7 +78,7 @@ type MigrationStagingReleased struct {
 }
 
 func (r MigrationStagingReleased) ValidateFor(request MigrationStagingRequest) error {
-	return MigrationStagingReserved(r).ValidateFor(request)
+	return (MigrationStagingReserved{RequestDigest: r.RequestDigest}).ValidateFor(request)
 }
 
 func NewNodeChannelMigrationStagingReserveCommand(request MigrationStagingRequest) (NodeChannelCommand, error) {
@@ -89,6 +98,17 @@ func (r MigrationStagingReserved) ValidateFor(request MigrationStagingRequest) e
 	}
 	if r.RequestDigest != want {
 		return fmt.Errorf("staging receipt changed reservation")
+	}
+	if r.PeerCertificateSHA256 != "" {
+		if err := runtimecheckpoint.ValidatePeerCertificateDigest(r.PeerCertificateSHA256); err != nil {
+			return err
+		}
+	}
+	if r.Peer != (runtimecheckpoint.PeerEndpoint{}) {
+		pin, err := r.Peer.CertificateDigest()
+		if err != nil || pin != r.PeerCertificateSHA256 {
+			return fmt.Errorf("staging endpoint changed reserved certificate")
+		}
 	}
 	return nil
 }

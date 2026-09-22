@@ -2,6 +2,7 @@ package gvisorcli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,37 @@ type CheckpointRunsc interface {
 	Restore(context.Context, string, string) error
 }
 
+type checkpointExitWaiter interface {
+	Wait(context.Context) error
+	Close() error
+}
+
+// Pin the live sentry before saving. OCI stopped can describe guest exit while
+// the host sentry still exists; a later failed RPC can report running again.
+// A pidfd provides irreversible exit evidence without following a reused PID.
+func (r *Command) pinCheckpointSource(ctx context.Context, id string) (checkpointExitWaiter, error) {
+	if r.checkpointSource != nil {
+		return r.checkpointSource(ctx, id)
+	}
+	before, err := r.State(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if before.ID != id || before.Status != "running" || before.PID <= 0 {
+		return nil, fmt.Errorf("checkpoint requires the exact running source process")
+	}
+	waiter, err := pinCheckpointProcess(before.PID)
+	if err != nil {
+		return nil, err
+	}
+	after, err := r.State(ctx, id)
+	if err != nil || after.ID != id || after.Status != "running" || after.PID != before.PID {
+		_ = waiter.Close()
+		return nil, fmt.Errorf("checkpoint source changed while pinning its process: %v", err)
+	}
+	return waiter, nil
+}
+
 var _ CheckpointRunsc = (*Command)(nil)
 
 // Checkpoint saves execution state and stops the source guest. imagePath must
@@ -28,15 +60,32 @@ var _ CheckpointRunsc = (*Command)(nil)
 //
 // There is intentionally no leave-running option. Once the source has been
 // checkpointed, only the regional transaction can authorize further execution.
-func (r *Command) Checkpoint(ctx context.Context, containerID, imagePath string) error {
+func (r *Command) Checkpoint(ctx context.Context, containerID, imagePath string) (resultErr error) {
 	if err := validateCheckpointArguments(ctx, containerID, imagePath); err != nil {
 		return err
 	}
 	if err := os.Mkdir(imagePath, 0o700); err != nil {
 		return fmt.Errorf("reserve runsc checkpoint directory: %w", err)
 	}
+	exit, err := r.pinCheckpointSource(ctx, containerID)
+	if err != nil {
+		return fmt.Errorf("pin checkpoint source exit: %w", err)
+	}
+	defer exit.Close()
+	writeback := r.checkpointWriteback
+	if writeback == nil {
+		writeback = startCheckpointWriteback
+	}
+	joinWriteback, err := writeback(ctx, imagePath)
+	if err != nil {
+		return fmt.Errorf("start checkpoint writeback: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, joinWriteback()) }()
+	// Usage sampling can mark zero-filled guest pages known-committed. Ask
+	// stock runsc to exclude those pages too, preserving their zero contents
+	// implicitly instead of publishing and transferring them as image bytes.
 	if err := r.run(ctx, "checkpoint", "--image-path="+imagePath,
-		"--compression=none", containerID); err != nil {
+		"--compression=none", "--exclude-committed-zero-pages", containerID); err != nil {
 		return err
 	}
 	// Stock runsc may return the successful non-resuming save RPC before its
@@ -45,6 +94,9 @@ func (r *Command) Checkpoint(ctx context.Context, containerID, imagePath string)
 	// exact stopped observation is success; never kill or resume to repair it.
 	exitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if err := exit.Wait(exitCtx); err != nil {
+		return fmt.Errorf("wait for physical checkpoint source exit: %w", err)
+	}
 	for {
 		state, err := r.State(exitCtx, containerID)
 		if err != nil {

@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func retainMigrationStagingFixture(t *testing.T, f *nomadPauseStoreFixture, a runtimecontrol.MigrationAssignment) {
+func retainMigrationStagingFixture(t *testing.T, f *nomadPauseStoreFixture, a runtimecontrol.MigrationAssignment, destinationPeer ...string) {
 	t.Helper()
 	for range 2 {
 		r, err := f.store.AuthorizeNomadSandboxMigrationStaging(f.ctx, a)
@@ -22,7 +22,11 @@ func retainMigrationStagingFixture(t *testing.T, f *nomadPauseStoreFixture, a ru
 		require.NotNil(t, r)
 		digest, err := r.Digest()
 		require.NoError(t, err)
-		require.NoError(t, f.store.CommitNomadSandboxMigrationStaging(f.ctx, a, *r, protocol.MigrationStagingReserved{RequestDigest: digest}))
+		receipt := protocol.MigrationStagingReserved{RequestDigest: digest}
+		if !r.IsSource() && len(destinationPeer) > 0 {
+			receipt.PeerCertificateSHA256 = destinationPeer[0]
+		}
+		require.NoError(t, f.store.CommitNomadSandboxMigrationStaging(f.ctx, a, *r, receipt))
 	}
 }
 

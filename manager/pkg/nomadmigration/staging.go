@@ -38,8 +38,11 @@ func NewStaging(store StagingStore, node StagingNode) (*Coordinator, error) {
 			return false, errors.New("staging work changed assignment")
 		}
 		request, err := store.AuthorizeNomadSandboxMigrationStaging(ctx, *a)
-		if err != nil || request == nil {
+		if err != nil {
 			return false, err
+		}
+		if request == nil {
+			return prepareCapturePeer(ctx, store, node, *a)
 		}
 		if request.Validate() != nil || request.Source.OperationID != id || request.Source.SandboxID != a.Target.SandboxID ||
 			request.Source.SourceGeneration != a.SourceGeneration || request.Source.AssignmentRevision != a.SourceRevision {

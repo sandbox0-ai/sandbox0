@@ -19,11 +19,18 @@ type migrationImageDownloadTestRuntime struct {
 	store           *runtimecheckpoint.Store
 	fail            bool
 	calls           int
+	downloadCalls   int
+	verifyCalls     int
 	started, resume chan struct{}
 }
 
 func (r *migrationImageDownloadTestRuntime) PrepareMigrationImageFiles(ctx context.Context, binding runtimecheckpoint.Binding, ref runtimecheckpoint.Reference, directory string, verify bool, admit func(int64, uint64) error) (runtimecheckpoint.Manifest, error) {
 	r.calls++
+	if verify {
+		r.verifyCalls++
+	} else {
+		r.downloadCalls++
+	}
 	if r.started != nil {
 		close(r.started)
 		select {
@@ -47,9 +54,12 @@ func (r *migrationImageDownloadTestRuntime) PrepareMigrationImageFiles(ctx conte
 	return r.store.DownloadWithAdmission(ctx, binding, ref, directory, admit)
 }
 
-func migrationImageDestinationFixture(t *testing.T) (*nodeRuntime, protocol.MigrationImagePrepareRequest, *migrationImageDownloadTestRuntime) {
+func migrationImageDestinationFixture(t *testing.T, beforePublish ...func(*nodeRuntime, *protocol.MigrationPublicationRequest, *migrationImageTestRuntime)) (*nodeRuntime, protocol.MigrationImagePrepareRequest, *migrationImageDownloadTestRuntime) {
 	t.Helper()
 	source, publication, images := migrationImageNodeFixture(t)
+	for _, prepare := range beforePublish {
+		prepare(source, &publication, images)
+	}
 	receipt, err := source.PublishMigration(t.Context(), publication)
 	require.NoError(t, err)
 	registration := testRuntimeSlotJournalRegistration(t, "target-slot")

@@ -83,20 +83,35 @@ func (j *runtimeSlotJournal) invalidateMigrationExecution(slotID string) error {
 	})
 }
 
-func (d *nodeRuntime) RecordMigrationCapture(_ context.Context, capture protocol.MigrationCapture) error {
+func (d *nodeRuntime) RecordMigrationCapture(ctx context.Context, capture protocol.MigrationCapture) error {
 	if d == nil || d.journal == nil {
 		return errdefs.ErrUnavailable
 	}
 	if capture.RootFS != nil {
 		return fmt.Errorf("only ctld may record the filesystem cut: %w", errdefs.ErrPermissionDenied)
 	}
+	if err := capture.Validate(); err != nil {
+		return err
+	}
 	if capture.Request.Target.ClusterID != d.clusterID || capture.Request.Target.NodeID != d.nodeID || capture.Request.Target.NodeUID != d.nodeUID {
 		return fmt.Errorf("migration custody belongs to another node: %w", errdefs.ErrPermissionDenied)
 	}
-	if !d.beginReconciliation(capture.Request.Target.SlotID, nil) {
+	if d.hasMigrationCaptureUpload(capture) {
+		if capture.State == protocol.MigrationCaptureIntent {
+			return nil // An exact lost intent reply joins the existing worker.
+		}
+		if err := d.beginExternalReconciliation(ctx, capture.Request.Target.SlotID); err != nil {
+			return err
+		}
+	} else if !d.beginReconciliation(capture.Request.Target.SlotID, nil) {
 		return fmt.Errorf("source recovery is already in progress: %w", errdefs.ErrUnavailable)
 	}
-	defer d.endReconciliation(capture.Request.Target.SlotID)
+	owned := true
+	defer func() {
+		if owned {
+			d.endReconciliation(capture.Request.Target.SlotID)
+		}
+	}()
 	record, err := d.journal.Get(capture.Request.Target.SlotID)
 	if err != nil {
 		return err
@@ -108,7 +123,17 @@ func (d *nodeRuntime) RecordMigrationCapture(_ context.Context, capture protocol
 			return err
 		}
 	}
-	return d.journal.RecordMigrationCapture(capture)
+	if err := d.journal.RecordMigrationCapture(capture); err != nil {
+		return err
+	}
+	if capture.State == protocol.MigrationCaptureIntent {
+		record, err := d.journal.Get(capture.Request.Target.SlotID)
+		if err != nil {
+			return err
+		}
+		owned = !d.startMigrationCaptureUpload(record)
+	}
+	return nil
 }
 
 func (j *runtimeSlotJournal) RecordMigrationCapture(capture protocol.MigrationCapture) error {
@@ -163,13 +188,13 @@ func (j *runtimeSlotJournal) RecordMigrationCapture(capture protocol.MigrationCa
 		} else if capture.State != protocol.MigrationCaptureIntent {
 			return fmt.Errorf("migration outcome has no durable intent: %w", errdefs.ErrFailedPrecondition)
 		} else {
-			if err := checkMigrationStagingWrite(bucket, current, &capture.Request, nil); err != nil {
+			if err := j.checkMigrationStagingWrite(bucket, current, &capture.Request, nil); err != nil {
 				return err
 			}
 			retained := 0
 			if err := bucket.ForEach(func(_, payload []byte) error {
-				record, err := decodeRuntimeSlotJournalRecord(payload)
-				if err != nil {
+				record, excluded, err := j.migrationPoolScanRecord(payload)
+				if err != nil || excluded {
 					return err
 				}
 				if record.retainsMigrationCountAdmission() {

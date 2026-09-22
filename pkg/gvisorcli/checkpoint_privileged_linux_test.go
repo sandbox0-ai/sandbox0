@@ -4,6 +4,8 @@ package gvisorcli
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"debug/elf"
 	"encoding/json"
 	"errors"
@@ -28,12 +30,14 @@ import (
 const checkpointPayloadEnv = "SANDBOX0_CHECKPOINT_TEST_PAYLOAD"
 
 type checkpointPayloadEvidence struct {
-	Token          int64  `json:"token"`
-	PID            int    `json:"pid"`
-	Counter        int64  `json:"counter"`
-	Offset         int64  `json:"offset"`
-	Temp           string `json:"temp"`
-	CPUFlagsDigest string `json:"cpu_flags_digest"`
+	Token              int64  `json:"token"`
+	PID                int    `json:"pid"`
+	Counter            int64  `json:"counter"`
+	Offset             int64  `json:"offset"`
+	Temp               string `json:"temp"`
+	CPUFlagsDigest     string `json:"cpu_flags_digest"`
+	MemorySHA256       string `json:"memory_sha256"`
+	MemoryVerification string `json:"memory_verification,omitempty"`
 }
 
 // TestPrivilegedExecutionCheckpoint is a runtime primitive check, not the
@@ -104,7 +108,7 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 			spec := specs.Spec{
 				Version: specs.Version, Root: &specs.Root{Path: rootfs, Readonly: true},
 				Process: &specs.Process{Cwd: "/", Args: []string{"/payload", "-test.run=^TestCheckpointPayload$"},
-					Env: []string{checkpointPayloadEnv + "=1", "GOMAXPROCS=2"}},
+					Env: checkpointProbeEnvironment(t)},
 				Mounts: []specs.Mount{
 					{Destination: "/proc", Type: "proc", Source: "proc"},
 					{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}},
@@ -151,6 +155,7 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 			require.Equal(t, cut.Offset, after.Offset, "open unlinked file offset must survive")
 			require.Equal(t, cut.Temp, after.Temp, "tmpfs contents must survive")
 			require.Equal(t, cut.CPUFlagsDigest, after.CPUFlagsDigest, "guest CPU flags must preserve source exposure")
+			require.Equal(t, cut.MemorySHA256, after.MemorySHA256, "all committed workload pages must survive")
 			// A second checkpoint must save the already-restored guest state,
 			// without rerunning its entrypoint or replacing inherited CPU flags.
 			secondImage := filepath.Join(root, "checkpoint-second")
@@ -174,6 +179,7 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 			require.Equal(t, cut.Offset, last.Offset)
 			require.Equal(t, cut.Temp, last.Temp)
 			require.Equal(t, cut.CPUFlagsDigest, last.CPUFlagsDigest)
+			require.Equal(t, cut.MemorySHA256, last.MemorySHA256)
 		})
 	}
 }
@@ -202,6 +208,19 @@ func TestCheckpointPayload(t *testing.T) {
 	if os.Getenv(checkpointPayloadEnv) != "1" {
 		t.Skip("guest-only checkpoint payload")
 	}
+	// Populate before zeroing to ensure the zero workload has committed pages,
+	// rather than only untouched virtual address space. Keep checking the whole
+	// allocation after restore; an entrypoint restart is rejected by the token.
+	memoryMiB, err := strconv.Atoi(os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_MIB"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, memoryMiB, 0)
+	require.LessOrEqual(t, memoryMiB, 512)
+	memory := make([]byte, memoryMiB<<20)
+	_, err = rand.Read(memory)
+	require.NoError(t, err)
+	if os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_PATTERN") == "zero" {
+		clear(memory)
+	}
 	token := time.Now().UnixNano()
 	sentinel := strconv.FormatInt(token, 10)
 	require.NoError(t, os.WriteFile("/tmp/sentinel", []byte(sentinel), 0o600))
@@ -213,7 +232,27 @@ func TestCheckpointPayload(t *testing.T) {
 	_, err = file.Seek(7, io.SeekStart)
 	require.NoError(t, err)
 	require.NoError(t, os.Remove("/tmp/unlinked"))
+	onRequest := os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_VERIFY_ON_REQUEST") == "1"
+	memoryDigest, verification := "", ""
 	for counter := int64(1); ; counter++ {
+		// The optional idle workload separates first response from a fresh,
+		// explicitly challenged full-memory scan after background restore.
+		challenge := ""
+		if onRequest {
+			if data, err := os.ReadFile("/evidence/verify-memory"); err == nil {
+				require.Len(t, data, 32)
+				challenge = string(data)
+				require.NoError(t, os.Remove("/evidence/verify-memory"))
+			} else {
+				require.True(t, os.IsNotExist(err))
+			}
+		}
+		if memoryDigest == "" || !onRequest || challenge != "" {
+			memoryDigest = fmt.Sprintf("%x", sha256.Sum256(memory))
+			if challenge != "" {
+				verification = challenge
+			}
+		}
 		data, err := os.ReadFile("/tmp/sentinel")
 		require.NoError(t, err)
 		require.Equal(t, sentinel, string(data))
@@ -235,11 +274,40 @@ func TestCheckpointPayload(t *testing.T) {
 		require.NotEmpty(t, flags, "read CPU flags afresh after every restore")
 		payload, err := json.Marshal(checkpointPayloadEvidence{
 			Token: token, PID: os.Getpid(), Counter: counter, Offset: offset, Temp: string(data),
-			CPUFlagsDigest: digest.FromString(flags).String(),
+			CPUFlagsDigest:     digest.FromString(flags).String(),
+			MemorySHA256:       memoryDigest,
+			MemoryVerification: verification,
 		})
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile("/evidence/state.new", payload, 0o600))
 		require.NoError(t, os.Rename("/evidence/state.new", "/evidence/state.json"))
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// checkpointProbeEnvironment forwards only explicit, bounded workload inputs.
+// It does not change the production checkpoint format or runsc arguments.
+func checkpointProbeEnvironment(t *testing.T) []string {
+	t.Helper()
+	mib := os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_MIB")
+	if mib == "" {
+		mib = "0"
+	}
+	n, err := strconv.Atoi(mib)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, n, 0)
+	require.LessOrEqual(t, n, 512)
+	pattern := os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_PATTERN")
+	if pattern == "" {
+		pattern = "random"
+	}
+	require.Contains(t, []string{"zero", "random"}, pattern)
+	onRequest := os.Getenv("SANDBOX0_CHECKPOINT_MEMORY_VERIFY_ON_REQUEST")
+	if onRequest == "" {
+		onRequest = "0"
+	}
+	require.Contains(t, []string{"0", "1"}, onRequest)
+	return []string{checkpointPayloadEnv + "=1", "GOMAXPROCS=2",
+		"SANDBOX0_CHECKPOINT_MEMORY_MIB=" + mib, "SANDBOX0_CHECKPOINT_MEMORY_PATTERN=" + pattern,
+		"SANDBOX0_CHECKPOINT_MEMORY_VERIFY_ON_REQUEST=" + onRequest}
 }

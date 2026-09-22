@@ -168,6 +168,10 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 type nodeRuntime struct {
+	migrationCapturePeerCaches map[string]*migrationCapturePeerCache
+	migrationCaptureUploads    map[string]string
+	migrationPrefetches        map[string]*migrationPrefetchWorker
+	migrationPeer              *migrationPeer
 	migrationStaging           migrationStagingGuard
 	migrationContext           context.Context
 	migrationPublications      map[string]*migrationPublicationWorker
@@ -603,6 +607,14 @@ func run(
 	}
 	daemon.migrationContext = daemonCtx
 	daemon.registrationAuthority = registrationAuthority
+	if config.MigrationPeerAddress != "" {
+		peer, err := daemon.startMigrationPeer(daemonCtx, config.MigrationPeerAddress)
+		if err != nil {
+			return fmt.Errorf("start migration peer: %w", err)
+		}
+		daemon.migrationPeer = peer
+		defer peer.close()
+	}
 	nodeChannelAgent, err := newNodeRuntimeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork, resourceCgroups)
 	if err != nil {
 		return err
@@ -636,6 +648,9 @@ func run(
 	}
 	err = serveNodeRuntime(daemonCtx, config.SocketPath, runtime, daemon.writerLeaseLost, daemon.health, daemon)
 	cancelDaemon()
+	if daemon.migrationPeer != nil {
+		daemon.migrationPeer.close()
+	}
 	if nodeChannelErr != nil {
 		agentErr := <-nodeChannelErr
 		if err == nil && ctx.Err() == nil && !errors.Is(agentErr, context.Canceled) {
@@ -643,6 +658,7 @@ func run(
 		}
 	}
 	daemon.wg.Wait()
+	err = errors.Join(err, daemon.closeMigrationCapturePeerCaches())
 	return err
 }
 

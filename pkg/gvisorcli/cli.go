@@ -71,7 +71,9 @@ type Config struct {
 }
 
 type Command struct {
-	config Config
+	config              Config
+	checkpointSource    func(context.Context, string) (checkpointExitWaiter, error)
+	checkpointWriteback func(context.Context, string) (func() error, error)
 }
 
 // New returns the production stock-runsc adapter.

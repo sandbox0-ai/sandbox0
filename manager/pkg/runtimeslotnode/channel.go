@@ -1197,3 +1197,43 @@ func (h *ChannelHub) FinalizeFailedMigrationCapture(ctx context.Context, request
 	}
 	return result.MigrationCaptureFailureFinalize, nil
 }
+
+// PlanMigrationPublication dispatches an already authorized source-publication
+// request. Its prospective reference grants only speculative image transfer.
+func (h *ChannelHub) PlanMigrationPublication(ctx context.Context, request protocol.MigrationPublicationRequest) (*protocol.MigrationPublicationPlan, error) {
+	command, err := protocol.NewNodeChannelMigrationPublicationPlanCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationPublicationPlan, nil
+}
+
+// PrefetchMigrationImage sends only a committed staging-cache authorization.
+// Its acknowledgement never replaces the normal image-preparation receipt.
+func (h *ChannelHub) PrefetchMigrationImage(ctx context.Context, request protocol.MigrationImagePrefetchRequest) (*protocol.MigrationImagePrefetched, error) {
+	command, err := protocol.NewNodeChannelMigrationImagePrefetchCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationImagePrefetch, nil
+}
+
+func (h *ChannelHub) PrepareMigrationCapturePeer(ctx context.Context, request protocol.MigrationCapturePeerRequest) (*protocol.MigrationCapturePeerPrepared, error) {
+	command, err := protocol.NewNodeChannelMigrationCapturePeerCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCapturePeer, nil
+}

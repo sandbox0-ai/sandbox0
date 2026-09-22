@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,6 +60,18 @@ func TestCPULaunchWarmCacheAndOneShotWitness(t *testing.T) {
 	require.NoError(t, runner.PrepareCPULaunch(t.Context()))
 	before := cache.snapshot
 	require.NoError(t, os.WriteFile(deny, []byte("deny"), 0600))
+	launch := &protocol.MigrationCPULaunch{Observation: before.observation, ExecutableDigest: before.executableDigest}
+	current, err := observeMigrationCPU(t.Context(), runner, launch, before.observation.CPUSet)
+	require.NoError(t, err, "migration must revalidate native state without launching stock probes")
+	require.Equal(t, before.observation, current)
+	current.Profile.Features[0] = "changed"
+	require.Equal(t, "aes", before.observation.Profile.Features[0])
+	changedLaunch := *launch
+	changedLaunch.ExecutableDigest = "sha256:" + strings.Repeat("f", 64)
+	_, err = observeMigrationCPU(t.Context(), runner, &changedLaunch, before.observation.CPUSet)
+	require.ErrorContains(t, err, "artifact differs")
+	_, err = observeMigrationCPU(t.Context(), runner, launch, "1048575")
+	require.Error(t, err, "warm evidence cannot cover an unobserved target CPU")
 	// A different carrier shares the same bounded cache and cannot shell out
 	// during reuse, begin or completion, even when several claims overlap.
 	other := New(Config{Path: path, CPULaunchCache: cache}).(*Command)
@@ -116,6 +129,8 @@ func TestCPULaunchWarmCacheAndOneShotWitness(t *testing.T) {
 			cache.mu.Unlock()
 			_, err := runner.BeginCPULaunch(t.Context(), changed.observation.CPUSet)
 			require.Error(t, err)
+			_, err = observeMigrationCPU(t.Context(), runner, launch, before.observation.CPUSet)
+			require.Error(t, err, "migration must fail closed when warm evidence changes")
 			// Completing an old witness verifies its own immutable history,
 			// rather than adopting evidence from a later cache replacement.
 			old := &cpuLaunchVerifier{expires: time.Now().Add(time.Minute), command: runner, snapshot: before}
@@ -154,6 +169,8 @@ func TestCPULaunchWarmCacheAndOneShotWitness(t *testing.T) {
 	_, err = runner.BeginCPULaunch(t.Context(), before.observation.CPUSet)
 	require.Error(t, err)
 	require.Error(t, runner.PrepareCPULaunch(t.Context()))
+	_, err = observeMigrationCPU(t.Context(), runner, launch, before.observation.CPUSet)
+	require.Error(t, err, "closed monitors cannot certify migration")
 }
 
 func TestCPUExecutableDigestAndInPlaceReplacement(t *testing.T) {

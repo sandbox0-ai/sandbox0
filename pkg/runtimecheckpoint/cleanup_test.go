@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -17,6 +18,10 @@ type cleanupFaultStore struct {
 	list      func(context.Context, string) ([]objectstore.Info, bool, string, error)
 	failAfter int
 	deletes   int
+}
+
+func (s *cleanupFaultStore) GetContext(ctx context.Context, key string, off, limit int64) (io.ReadCloser, error) {
+	return s.ContextCleanupStore.(checkpointObjectReader).GetContext(ctx, key, off, limit)
 }
 
 func (s *cleanupFaultStore) ListContext(ctx context.Context, prefix, after, token, delimiter string, limit int64) ([]objectstore.Info, bool, string, error) {

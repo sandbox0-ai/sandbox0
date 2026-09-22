@@ -17,5 +17,7 @@ func NewEvacuation(store EvacuationStore) (*Coordinator, error) {
 	if store == nil {
 		return nil, errors.New("migration evacuation store is required")
 	}
-	return &Coordinator{list: store.ListNomadMigrationEvacuations, step: store.ReserveNomadMigrationEvacuation}, nil
+	c := &Coordinator{list: store.ListNomadMigrationEvacuations, step: store.ReserveNomadMigrationEvacuation, progress: &Progress{}}
+	c.drainWatcher, _ = store.(drainWatcher)
+	return c, nil
 }

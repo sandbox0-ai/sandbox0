@@ -44,6 +44,20 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationPublication(ctx context.C
 	}
 	request := protocol.MigrationPublicationRequest{Capture: capture, Assignment: assignment,
 		CompatibilityDigest: reservation.SourceSlot.CompatibilityDigest, CPUFeaturesDigest: cpuFeaturesDigest, CPULaunch: launch}
+	staging, err := loadNomadMigrationStaging(ctx, tx, assignment.OperationID)
+	if err != nil {
+		return nil, err
+	}
+	if staging != nil && staging.destination != nil {
+		if staging.validateCurrent(reservation) != nil || staging.sourceRelease || staging.destinationRelease {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+		request.DestinationPeerCertificateSHA256 = staging.destination.PeerCertificateSHA256
+		if grant := staging.request.CaptureUpload; grant.Version != 0 &&
+			(grant.TeamID != assignment.Target.TeamID || grant.CompatibilityDigest != request.CompatibilityDigest || grant.CPUFeaturesDigest != cpuFeaturesDigest) {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+	}
 	want, err := request.Digest()
 	if err != nil {
 		return nil, err

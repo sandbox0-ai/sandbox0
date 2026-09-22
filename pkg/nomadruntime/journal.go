@@ -15,6 +15,7 @@
 package nomadruntime
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	bolt "go.etcd.io/bbolt"
 )
@@ -46,6 +48,9 @@ const (
 	runtimeSlotFailureFinalizeJournalVersion    = 11
 	runtimeSlotFailureGCJournalVersion          = 12
 	runtimeSlotCaptureFailureJournalVersion     = 13
+	runtimeSlotPrefetchJournalVersion           = 14
+	runtimeSlotCaptureUploadJournalVersion      = 15
+	runtimeSlotCapturePeerJournalVersion        = 16
 	runtimeSlotLegacyFinalizationJournalVersion = 5
 	runtimeSlotFinalizationJournalVersion       = 6
 	runtimeSlotProofRetention                   = 24 * time.Hour
@@ -114,9 +119,12 @@ type runtimeSlotJournalRecord struct {
 }
 
 type runtimeSlotJournal struct {
-	db            *bolt.DB
-	retention     time.Duration
-	migrationRoot string
+	registrationScanExclusions journalScanExclusions
+	stagingScanExclusions      journalScanExclusions
+	adoptionScanExclusions     journalScanExclusions
+	db                         *bolt.DB
+	retention                  time.Duration
+	migrationRoot              string
 }
 
 func newRuntimeSlotJournal(path string, retention time.Duration) (*runtimeSlotJournal, error) {
@@ -238,6 +246,15 @@ func (j *runtimeSlotJournal) Get(slotID string) (runtimeSlotJournalRecord, error
 		if err == nil && record.Migration != nil && record.Migration.ImageDirectory != filepath.Join(j.migrationRoot, record.Migration.Capture.RequestDigest) {
 			return fmt.Errorf("migration staging directory escaped node custody: %w", errdefs.ErrFailedPrecondition)
 		}
+		if err == nil && record.MigrationStaging != nil && record.MigrationStaging.Prefetch != nil && record.MigrationStaging.Prefetch.ImageDirectory != filepath.Join(j.migrationRoot, "prefetch-"+record.MigrationStaging.Prefetch.RequestDigest) {
+			return fmt.Errorf("migration prefetch escaped staging custody: %w", errdefs.ErrFailedPrecondition)
+		}
+		if err == nil && record.MigrationStaging != nil && record.MigrationStaging.CapturePeer != nil {
+			c := record.MigrationStaging.CapturePeer
+			if !c.Request.Staging.IsSource() && c.ImageDirectory != filepath.Join(j.migrationRoot, "capture-peer-"+c.RequestDigest) {
+				return fmt.Errorf("early peer escaped staging custody: %w", errdefs.ErrFailedPrecondition)
+			}
+		}
 		if err == nil && record.MigrationDestination != nil && record.MigrationDestination.ImageDirectory != filepath.Join(j.migrationRoot, "destination-"+record.MigrationDestination.RequestDigest) {
 			return fmt.Errorf("migration destination staging escaped custody: %w", errdefs.ErrFailedPrecondition)
 		}
@@ -271,6 +288,9 @@ func (j *runtimeSlotJournal) BeginCleanup(request protocol.NodeCleanupControlReq
 		}
 		if err := current.matchesCleanup(request); err != nil {
 			return err
+		}
+		if current.hasMigrationPrefetch() || current.hasMigrationCapturePeerCache() {
+			return errdefs.ErrFailedPrecondition
 		}
 		if (current.Migration != nil && !current.Migration.readyForCleanup(request)) || (current.MigrationDestination != nil && !current.MigrationDestination.readyForCleanup(request)) {
 			return fmt.Errorf("migration retains source custody until explicit handoff: %w", errdefs.ErrFailedPrecondition)
@@ -354,10 +374,11 @@ func (j *runtimeSlotJournal) Prune(now time.Time) (int, error) {
 			if err != nil {
 				return fmt.Errorf("decode runtime slot journal %q: %w", key, err)
 			}
+			j.rememberMigrationPoolExclusion(sha256.Sum256(payload), record)
 			if record.Proof == nil || record.CompletedAt == "" {
 				return nil
 			}
-			if record.MigrationDestination.pendingCustody() {
+			if record.hasMigrationPrefetch() || record.hasMigrationCapturePeerCache() || record.MigrationDestination.pendingCustody() {
 				return nil
 			}
 			if c := record.Migration; c != nil && c.Failure != nil && (!c.CaptureFailureFinalized() || c.Failure.Finalization.AllocationGC == nil) {
@@ -411,6 +432,39 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 	var record runtimeSlotJournalRecord
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("decode runtime slot journal record: %w", err)
+	}
+	originalVersion := record.Version
+	hasCapturePeer := record.MigrationStaging != nil && (record.MigrationStaging.Peer != (runtimecheckpoint.PeerEndpoint{}) || record.MigrationStaging.CapturePeer != nil)
+	if hasCapturePeer != (record.Version == runtimeSlotCapturePeerJournalVersion) || record.validateMigrationCapturePeer() != nil {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("capture peer requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCapturePeer {
+		record.Version = runtimeSlotJournalBaseEnvelopeVersion(record)
+		if record.MigrationStaging.Prefetch != nil {
+			record.Version = runtimeSlotPrefetchJournalVersion
+		}
+		if record.MigrationStaging.Request.CaptureUpload != (protocol.MigrationCaptureUpload{}) {
+			record.Version = runtimeSlotCaptureUploadJournalVersion
+		}
+	}
+	hasCaptureUpload := record.MigrationStaging != nil && record.MigrationStaging.Request.CaptureUpload != (protocol.MigrationCaptureUpload{})
+	if hasCaptureUpload != (record.Version == runtimeSlotCaptureUploadJournalVersion) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("capture upload requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCaptureUpload {
+		record.Version = runtimeSlotJournalBaseEnvelopeVersion(record)
+		if record.MigrationStaging.Prefetch != nil {
+			record.Version = runtimeSlotPrefetchJournalVersion
+		}
+	}
+	hasPrefetch := record.MigrationStaging != nil && record.MigrationStaging.Prefetch != nil
+	if hasPrefetch != (record.Version == runtimeSlotPrefetchJournalVersion) || record.validateMigrationPrefetch() != nil {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("prefetch custody requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasPrefetch {
+		// Version 14 wraps existing staging and execution state machines.
+		// Preserve all their validation rather than accepting a new shortcut.
+		record.Version = runtimeSlotJournalBaseEnvelopeVersion(record)
 	}
 	validationVersion := record.Version
 	hasCaptureFailure := record.Migration != nil && record.Migration.Failure != nil
@@ -523,6 +577,7 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 		(record.RegionalRegistrationObserved && isRegistrationAbort(record)) {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("runtime slot registration acknowledgement is invalid: %w", errdefs.ErrFailedPrecondition)
 	}
+	record.Version = originalVersion
 	return record, nil
 }
 
@@ -558,13 +613,27 @@ func runtimeSlotJournalPayloadVersion(record runtimeSlotJournalRecord) int {
 	return version
 }
 
+func runtimeSlotJournalBaseEnvelopeVersion(record runtimeSlotJournalRecord) int {
+	record.Version = runtimeSlotJournalPayloadVersion(record)
+	if record.MigrationStaging != nil && record.Version != runtimeSlotFailureJournalVersion && record.Version != runtimeSlotFailureCleanupJournalVersion && record.Version != runtimeSlotFailureFinalizeJournalVersion && record.Version != runtimeSlotFailureGCJournalVersion && record.Version != runtimeSlotCaptureFailureJournalVersion {
+		record.Version = runtimeSlotStagingJournalVersion
+	}
+	return record.Version
+}
+
 func putRuntimeSlotJournalRecord(bucket *bolt.Bucket, record runtimeSlotJournalRecord) error {
 	if bucket == nil {
 		return fmt.Errorf("runtime slot journal bucket is absent: %w", errdefs.ErrUnavailable)
 	}
-	record.Version = runtimeSlotJournalPayloadVersion(record)
-	if record.MigrationStaging != nil && record.Version != runtimeSlotFailureJournalVersion && record.Version != runtimeSlotFailureCleanupJournalVersion && record.Version != runtimeSlotFailureFinalizeJournalVersion && record.Version != runtimeSlotFailureGCJournalVersion && record.Version != runtimeSlotCaptureFailureJournalVersion {
-		record.Version = runtimeSlotStagingJournalVersion
+	record.Version = runtimeSlotJournalBaseEnvelopeVersion(record)
+	if record.MigrationStaging != nil && record.MigrationStaging.Prefetch != nil {
+		record.Version = runtimeSlotPrefetchJournalVersion
+	}
+	if record.MigrationStaging != nil && record.MigrationStaging.Request.CaptureUpload != (protocol.MigrationCaptureUpload{}) {
+		record.Version = runtimeSlotCaptureUploadJournalVersion
+	}
+	if record.MigrationStaging != nil && (record.MigrationStaging.Peer != (runtimecheckpoint.PeerEndpoint{}) || record.MigrationStaging.CapturePeer != nil) {
+		record.Version = runtimeSlotCapturePeerJournalVersion
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

@@ -8,13 +8,30 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
 type migrationStagingChannelExecutor struct {
 	reserves, releases atomic.Int32
+	peers              atomic.Int32
 	fail               atomic.Bool
+}
+
+func (e *migrationStagingChannelExecutor) PrepareMigrationCapturePeer(_ context.Context, r protocol.MigrationCapturePeerRequest) (*protocol.MigrationCapturePeerPrepared, error) {
+	e.peers.Add(1)
+	want, err := r.Digest()
+	receipt := &protocol.MigrationCapturePeerPrepared{RequestDigest: want}
+	if e.fail.Load() {
+		return receipt, errdefs.ErrFailedPrecondition
+	}
+	return receipt, err
+}
+
+func (e *migrationStagingChannelExecutor) PrefetchMigrationImage(context.Context, protocol.MigrationImagePrefetchRequest) (*protocol.MigrationImagePrefetched, error) {
+	return nil, errdefs.ErrUnavailable
 }
 
 func (e *migrationStagingChannelExecutor) ReserveMigrationStaging(_ context.Context, r protocol.MigrationStagingRequest) (*protocol.MigrationStagingReserved, error) {
@@ -49,6 +66,10 @@ func TestMigrationStagingUsesDistinctAuthenticatedCommands(t *testing.T) {
 				ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond}
 			if supported {
 				config.MigrationStagingExecutor = executor
+				config.MigrationCapturePeerExecutor = executor
+				// Real ctld advertises both features. Their canonical hello order
+				// must remain valid when early-peer support is added.
+				config.MigrationImagePrefetchExecutor = executor
 			}
 			agent, err := protocol.NewNodeChannelAgent(config)
 			require.NoError(t, err)
@@ -66,15 +87,23 @@ func TestMigrationStagingUsesDistinctAuthenticatedCommands(t *testing.T) {
 					NodeID: "node-2", NodeUID: "node-uid-2", NodeBootID: "boot-2", ControlEndpoint: "unix:///private/target.sock"},
 				DestinationResourceLeaseDigest: strings.Repeat("d", 64), Bytes: 8 << 20, Inodes: 64}
 			receipt, err := hub.ReserveMigrationStaging(ctx, request)
+			peerRequest := channelCapturePeerRequest(t, request)
+			peerReceipt, peerErr := hub.PrepareMigrationCapturePeer(ctx, peerRequest)
 			if !supported {
 				require.Error(t, err)
 				require.Nil(t, receipt)
 				require.Error(t, hub.ReleaseMigrationStaging(ctx, request))
 				require.Zero(t, executor.reserves.Load())
 				require.Zero(t, executor.releases.Load())
+				require.Error(t, peerErr)
+				require.Nil(t, peerReceipt)
+				require.Zero(t, executor.peers.Load())
 				return
 			}
 			require.NoError(t, err)
+			require.NoError(t, peerErr)
+			require.NoError(t, peerReceipt.ValidateFor(peerRequest))
+			require.EqualValues(t, 1, executor.peers.Load())
 			require.NoError(t, receipt.ValidateFor(request))
 			require.NoError(t, hub.ReleaseMigrationStaging(ctx, request))
 			require.EqualValues(t, 1, executor.reserves.Load())
@@ -96,10 +125,37 @@ func TestMigrationStagingUsesDistinctAuthenticatedCommands(t *testing.T) {
 			require.EqualValues(t, 1, executor.reserves.Load())
 			require.EqualValues(t, 1, executor.releases.Load())
 			executor.fail.Store(true)
+			peerReceipt, peerErr = hub.PrepareMigrationCapturePeer(ctx, peerRequest)
+			require.Error(t, peerErr)
+			require.Nil(t, peerReceipt, "an error cannot carry an accepted grant receipt")
 			receipt, err = hub.ReserveMigrationStaging(ctx, request)
 			require.Error(t, err)
 			require.Nil(t, receipt)
 			require.Error(t, hub.ReleaseMigrationStaging(ctx, request))
 		})
 	}
+}
+
+func channelCapturePeerRequest(t *testing.T, staging protocol.MigrationStagingRequest) protocol.MigrationCapturePeerRequest {
+	t.Helper()
+	var err error
+	staging.CaptureUpload, err = protocol.NewMigrationCaptureUpload(staging.Source, "team", digest.FromString("compat").String(), digest.FromString("cpu").String(), staging.Bytes)
+	require.NoError(t, err)
+	r := protocol.MigrationCapturePeerRequest{Staging: staging}
+	for i, receipt := range []*protocol.MigrationStagingReserved{&r.Source, &r.Destination} {
+		request := staging
+		address := "10.1.1.1:18992"
+		if i == 1 {
+			request.Target, address = staging.Destination, "10.1.1.2:18992"
+		}
+		receipt.RequestDigest, err = request.Digest()
+		require.NoError(t, err)
+		cert, err := runtimecheckpoint.NewPeerIdentity()
+		require.NoError(t, err)
+		receipt.PeerCertificateSHA256 = runtimecheckpoint.PeerCertificateDigest(cert)
+		receipt.Peer, err = runtimecheckpoint.NewPeerEndpoint(address, cert)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Validate())
+	return r
 }

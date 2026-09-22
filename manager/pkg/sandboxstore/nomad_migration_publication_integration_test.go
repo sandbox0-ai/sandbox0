@@ -12,13 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func migrationPublicationStoreFixture(t *testing.T, suffix string) (*nomadPauseStoreFixture, *NomadSandboxMigrationReservation, protocol.MigrationPublicationRequest) {
+func migrationPublicationStoreFixture(t *testing.T, suffix string, destinationPeer ...string) (*nomadPauseStoreFixture, *NomadSandboxMigrationReservation, protocol.MigrationPublicationRequest) {
 	t.Helper()
 	f, assignment := migrationStoreFixture(t, suffix)
 	migrationReadyTarget(t, f, suffix, "b")
 	reservation, err := f.store.ReserveNomadSandboxMigration(f.ctx, assignment)
 	require.NoError(t, err)
-	cpuLaunch := retainMigrationEligibilityFixture(t, f, assignment)
+	cpuLaunch := retainMigrationCPUFixture(t, f, assignment)
+	retainMigrationStagingFixture(t, f, assignment, destinationPeer...)
 	cpuProfile, err := cpuLaunch.Observation.Profile.Digest()
 	require.NoError(t, err)
 	prepare, err := f.store.AuthorizeNomadSandboxMigrationPreparation(f.ctx, assignment, migrationSourcePolicy(f.sandboxID, assignment.Target.TeamID))
@@ -37,9 +38,33 @@ func migrationPublicationStoreFixture(t *testing.T, suffix string) (*nomadPauseS
 	require.NoError(t, err)
 	request := protocol.MigrationPublicationRequest{Capture: protocol.MigrationCapture{Request: *captureRequest, RequestDigest: d, State: protocol.MigrationCaptureComplete, RootFS: &cut},
 		Assignment: assignment, CompatibilityDigest: reservation.SourceSlot.CompatibilityDigest, CPUFeaturesDigest: cpuProfile, CPULaunch: cpuLaunch}
+	if len(destinationPeer) > 0 {
+		request.DestinationPeerCertificateSHA256 = destinationPeer[0]
+	}
 	_, err = request.Digest()
 	require.NoError(t, err)
 	return f, reservation, request
+}
+
+func TestNomadMigrationPublicationBindsReservedPeerIdentityIntegration(t *testing.T) {
+	identity, err := runtimecheckpoint.NewPeerIdentity()
+	require.NoError(t, err)
+	fingerprint := runtimecheckpoint.PeerCertificateDigest(identity)
+	f, _, request := migrationPublicationStoreFixture(t, "publish-peer", fingerprint)
+	authorized, err := f.store.AuthorizeNomadSandboxMigrationPublication(f.ctx, request.Assignment, request.Capture, request.CPUFeaturesDigest)
+	require.NoError(t, err)
+	require.Equal(t, request, *authorized)
+	require.Equal(t, fingerprint, authorized.DestinationPeerCertificateSHA256)
+	receipt := migrationPublicationReceipt(t, *authorized)
+	receipt.Peer, err = runtimecheckpoint.NewPeerEndpoint("10.0.1.2:19443", identity)
+	require.NoError(t, err)
+	require.NoError(t, f.store.CommitNomadSandboxMigrationPublication(f.ctx, *authorized, receipt))
+	changed := *authorized
+	changed.DestinationPeerCertificateSHA256 = digest.FromString("unreserved-destination").String()
+	require.ErrorIs(t, f.store.CommitNomadSandboxMigrationPublication(f.ctx, changed, migrationPublicationReceipt(t, changed)), ErrNomadSandboxMigrationConflict)
+	retry, err := f.store.AuthorizeNomadSandboxMigrationPublication(f.ctx, request.Assignment, request.Capture, request.CPUFeaturesDigest)
+	require.NoError(t, err)
+	require.Equal(t, *authorized, *retry)
 }
 
 func migrationPublicationReceipt(t *testing.T, request protocol.MigrationPublicationRequest) protocol.MigrationPublication {

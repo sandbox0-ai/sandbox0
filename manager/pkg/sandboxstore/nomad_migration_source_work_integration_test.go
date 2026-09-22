@@ -6,11 +6,28 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNomadMigrationSourceRecoveryAdvancesPeerPublicationIntegration(t *testing.T) {
+	peer := digest.FromString("reserved-destination-certificate").String()
+	f, _, request := migrationPublicationStoreFixture(t, "source-recovery-peer", peer)
+	node := &sourceRecoveryTestNode{t: t, request: request}
+	worker, err := nomadmigration.NewSourceRecovery(f.store, node)
+	require.NoError(t, err)
+	result, err := worker.RunOnce(f.ctx)
+	require.NoError(t, err, "committed peer publication must wake the transfer lane without an error backoff")
+	require.Equal(t, 1, result.Advanced)
+	transfer, err := f.store.GetNomadMigrationTransfer(f.ctx, request.Assignment.OperationID)
+	require.NoError(t, err)
+	require.NotNil(t, transfer)
+	require.Equal(t, request, transfer.Publication)
+	require.Equal(t, peer, transfer.Publication.DestinationPeerCertificateSHA256)
+}
 
 type sourceRecoveryTestNode struct {
 	mu      sync.Mutex

@@ -12,44 +12,92 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
-func (h *taskHandle) prepareMigrationRestore(request protocol.MigrationRestoreRequest) (string, error) {
+// prepareMigrationRestore verifies image custody and attaches the authorized
+// RootFS concurrently. Both must finish before any container is created. On
+// failure, cancellation is followed by joining both operations so no attach or
+// intent write can race the caller's transition to uncertain migration custody.
+func (h *taskHandle) prepareMigrationRestore(request protocol.MigrationRestoreRequest, stage rootfshandoff.StageRequest) (string, string, time.Duration, error) {
 	if err := request.Validate(); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	custodian, ok := h.rootfs.(nomadruntime.MigrationRestoreCustodian)
 	if !ok {
-		return "", errdefs.ErrUnavailable
+		return "", "", 0, errdefs.ErrUnavailable
 	}
 	if _, ok := h.runner.(gvisorcli.CheckpointRunsc); !ok {
-		return "", errdefs.ErrUnavailable
+		return "", "", 0, errdefs.ErrUnavailable
 	}
 	target := request.Image.Target
 	if target.SlotID != h.taskConfig.ID || target.AllocationID != h.taskConfig.AllocID || target.NodeID != h.taskConfig.NodeID {
-		return "", errdefs.ErrFailedPrecondition
+		return "", "", 0, errdefs.ErrFailedPrecondition
 	}
 	digest, _ := request.Digest()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := h.checkMigrationRestoreCPU(ctx, request); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
-	if err := custodian.RecordMigrationRestore(ctx, protocol.MigrationRestoreObservation{Request: request, RequestDigest: digest, State: protocol.MigrationRestoreIntent}); err != nil {
-		return "", err
+	var imageDirectory string
+	imageDone := make(chan error, 1)
+	go func() {
+		imageErr := custodian.RecordMigrationRestore(ctx, protocol.MigrationRestoreObservation{Request: request, RequestDigest: digest, State: protocol.MigrationRestoreIntent})
+		if imageErr == nil {
+			var custody *nomadruntime.MigrationDestinationCustody
+			custody, imageErr = custodian.GetMigrationDestination(ctx, target.SlotID)
+			if imageErr == nil {
+				if custody == nil || custody.Restore == nil || custody.Restore.RequestDigest != digest || custody.Restore.State != protocol.MigrationRestoreIntent {
+					imageErr = errdefs.ErrFailedPrecondition
+				} else {
+					imageDirectory = custody.ImageDirectory
+				}
+			}
+		}
+		if imageErr != nil {
+			cancel()
+		}
+		imageDone <- imageErr
+	}()
+	attachCtx, attachCancel := context.WithTimeout(ctx, 3*time.Minute)
+	started := time.Now()
+	mount, attachErr := h.rootfs.Ensure(attachCtx, stage, h.handleWriterLeaseLoss)
+	attachElapsed := time.Since(started)
+	attachCancel()
+	if attachErr != nil {
+		cancel()
+		attachErr = fmt.Errorf("attach migration RootFS session: %w", attachErr)
 	}
-	custody, err := custodian.GetMigrationDestination(ctx, target.SlotID)
-	if err != nil {
-		return "", err
+	imageErr := <-imageDone
+	if err := errors.Join(imageErr, attachErr, ctx.Err()); err != nil {
+		return "", "", attachElapsed, err
 	}
-	if custody == nil || custody.Restore == nil || custody.Restore.RequestDigest != digest || custody.Restore.State != protocol.MigrationRestoreIntent {
-		return "", errdefs.ErrFailedPrecondition
-	}
-	return custody.ImageDirectory, nil
+	return imageDirectory, mount.Source, attachElapsed, nil
 }
 
 func (h *taskHandle) restoreMigrationExecution(ctx context.Context, request protocol.MigrationRestoreRequest, directory string) (*protocol.MigrationCPULaunch, error) {
+	started := time.Now()
+	var intentElapsed, beforeElapsed, restoreElapsed, afterElapsed, commitElapsed time.Duration
+	completed := false
+	var accounting migrationCPUCounters
+	accountingValid := false
+	defer func() {
+		if h.logger != nil {
+			// The enclosing claim timer includes node RPCs and journal commits.
+			// Keep those separate from stock runsc loading when diagnosing tails.
+			h.logger.Info("Migration restore execution timing", "operation_id", request.Image.Publication.Assignment.OperationID,
+				"restore_success", completed, "restore_total_us", time.Since(started).Microseconds(),
+				"restore_intent_us", intentElapsed.Microseconds(), "restore_cpu_before_us", beforeElapsed.Microseconds(),
+				"restore_command_us", restoreElapsed.Microseconds(), "restore_cpu_after_us", afterElapsed.Microseconds(),
+				"restore_commit_us", commitElapsed.Microseconds(),
+				"restore_cpu_accounting_valid", accountingValid,
+				"restore_cgroup_cpu_usage_us", accounting.usage, "restore_cgroup_cpu_user_us", accounting.user,
+				"restore_cgroup_cpu_system_us", accounting.system, "restore_cgroup_periods", accounting.periods,
+				"restore_cgroup_throttled_periods", accounting.throttledPeriods, "restore_cgroup_throttled_us", accounting.throttled)
+		}
+	}()
 	custodian, ok := h.rootfs.(nomadruntime.MigrationRestoreCustodian)
 	if !ok {
 		return nil, errdefs.ErrUnavailable
@@ -60,19 +108,35 @@ func (h *taskHandle) restoreMigrationExecution(ctx context.Context, request prot
 	}
 	digest, _ := request.Digest()
 	observation := protocol.MigrationRestoreObservation{Request: request, RequestDigest: digest, State: protocol.MigrationRestoreExecuting}
-	if err := custodian.RecordMigrationRestore(ctx, observation); err != nil {
+	stepStarted := time.Now()
+	err := custodian.RecordMigrationRestore(ctx, observation)
+	intentElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
+	stepStarted = time.Now()
 	before, err := h.observeMigrationRestoreCPU(ctx, request)
+	beforeElapsed = time.Since(stepStarted)
 	if err != nil {
 		return nil, err
 	}
 	// This is the only execution call for a migration destination. Never use
 	// Start after any restore error, including an ambiguous transport result.
-	if err := runner.Restore(ctx, h.containerID, directory); err != nil {
+	// Read only the already validated target lease's cgroup. Accounting failures
+	// must not change restore behavior, and aggregated throttle time is not a
+	// wall-clock component that can be added to the command duration.
+	sample := openMigrationCPUAccounting(h.resourceCgroupRoot, request.Image.Resources.CgroupName)
+	defer sample.close()
+	stepStarted = time.Now()
+	err = runner.Restore(ctx, h.containerID, directory)
+	restoreElapsed = time.Since(stepStarted)
+	accounting, accountingValid = sample.finish()
+	if err != nil {
 		return nil, fmt.Errorf("runsc restore: %w", err)
 	}
+	stepStarted = time.Now()
 	after, err := h.observeMigrationRestoreCPU(ctx, request)
+	afterElapsed = time.Since(stepStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -81,9 +145,13 @@ func (h *taskHandle) restoreMigrationExecution(ctx context.Context, request prot
 		return nil, err
 	}
 	observation.State = protocol.MigrationRestoreComplete
-	if err := custodian.RecordMigrationRestore(ctx, observation); err != nil {
+	stepStarted = time.Now()
+	err = custodian.RecordMigrationRestore(ctx, observation)
+	commitElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
+	completed = true
 	return launch, nil
 }
 

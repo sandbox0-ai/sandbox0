@@ -15,6 +15,8 @@ var _ nomadmigration.SourceExecutionStore = (*PGSandboxStore)(nil)
 const nomadMigrationSourceExecutionPredicate = `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
  AND m.assignment_request IS NOT NULL AND m.preparation_cancel_request IS NULL AND m.publication_request IS NULL
  AND m.staging_source_receipt IS NOT NULL AND m.staging_destination_receipt IS NOT NULL
+ AND (m.capture_peer_request IS NULL OR m.capture_peer_disabled OR
+    (m.capture_peer_source_receipt IS NOT NULL AND m.capture_peer_destination_receipt IS NOT NULL))
  AND NOT m.staging_source_release_requested AND NOT m.staging_destination_release_requested AND (
   (l.phase='publishing' AND m.capture_request IS NOT NULL AND m.preparation_address IS NOT NULL) OR
   (l.phase IN ('preparing','barriered') AND m.capture_request IS NULL

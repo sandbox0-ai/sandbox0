@@ -50,7 +50,12 @@ func migrationStagingRequest(r *NomadSandboxMigrationReservation, bytes int64, i
 }
 
 func (p *nomadMigrationStaging) validateCurrent(r *NomadSandboxMigrationReservation) error {
-	if p.request != migrationStagingRequest(r, p.request.Bytes, p.request.Inodes) {
+	expected := migrationStagingRequest(r, p.request.Bytes, p.request.Inodes)
+	// The initial transaction derives this immutable grant from the retained
+	// assignment and CPU preflight. Later retries cannot widen or replace it.
+	expected.CaptureUpload = p.request.CaptureUpload
+	if p.request != expected || p.request.Validate() != nil ||
+		(p.request.CaptureUpload.Version != 0 && p.request.CaptureUpload.CompatibilityDigest != r.SourceSlot.CompatibilityDigest) {
 		return ErrNomadSandboxMigrationConflict
 	}
 	return nil
@@ -136,6 +141,10 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationStaging(ctx context.Conte
 		// to filesystem blocks; XFS still bounds actual producer writes.
 		bytes := (r.SourceSlot.ResourceLease.MemoryBytes + 64<<20 + 4095) / 4096 * 4096
 		request := migrationStagingRequest(r, bytes, runtimecheckpoint.MaxFiles*8)
+		request.CaptureUpload, err = reserveNomadMigrationCaptureUpload(ctx, tx, r, a, bytes)
+		if err != nil {
+			return nil, err
+		}
 		if err := request.Validate(); err != nil {
 			return nil, err
 		}
@@ -226,6 +235,14 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationStaging(ctx context.Context,
 	if _, err := tx.Exec(ctx, query, a.OperationID, payload); err != nil {
 		return err
 	}
+	if request.IsSource() {
+		p.source = &receipt
+	} else {
+		p.destination = &receipt
+	}
+	if err := initializeNomadMigrationCapturePeer(ctx, tx, a.OperationID, p); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -235,6 +252,13 @@ func requireNomadMigrationStaging(ctx context.Context, tx pgx.Tx, r *NomadSandbo
 		return err
 	}
 	if p == nil || p.source == nil || p.destination == nil || p.sourceRelease || p.destinationRelease || p.validateCurrent(r) != nil {
+		return ErrNomadSandboxMigrationConflict
+	}
+	peer, err := loadNomadMigrationCapturePeer(ctx, tx, r.Lifecycle.ID, p)
+	if err != nil {
+		return err
+	}
+	if peer.next() != nil {
 		return ErrNomadSandboxMigrationConflict
 	}
 	return nil

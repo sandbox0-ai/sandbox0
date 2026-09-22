@@ -75,6 +75,7 @@ func configuredNomadRuntimeFactory(
 		RuntimeSlotNodeBootIDFile:             source.NodeBootIDFile,
 		RuntimeSlotJournalPath:                source.RuntimeSlotJournalPath,
 		MigrationStagingBytes:                 source.MigrationStagingBytes,
+		MigrationPeerAddress:                  source.MigrationPeerAddress,
 		MigrationStagingProjectID:             source.MigrationStagingProjectID,
 		MigrationStagingInodes:                source.MigrationStagingInodes,
 		RuntimeResourceCgroupRoot:             source.ResourceCgroupRoot,

@@ -160,9 +160,12 @@ type Config struct {
 	Prober         CommandProber
 	TokenGenerator TokenGenerator
 	Observer       Observer
-	DemandRecorder CapacityDemandRecorder
-	DemandPoolID   string
-	DemandTTL      time.Duration
+	// MigrationObserver receives restore-planning phases separately from the
+	// ordinary claim SLO, which requires a fresh authenticated command probe.
+	MigrationObserver func(Observation)
+	DemandRecorder    CapacityDemandRecorder
+	DemandPoolID      string
+	DemandTTL         time.Duration
 	// WriterTokenKey must remain stable for the lifetime of every retryable
 	// operation, including during rolling upgrades.
 	WriterTokenKey []byte
@@ -206,21 +209,22 @@ type Result struct {
 
 // Planner executes one region-authoritative Nomad warm-slot claim.
 type Planner struct {
-	capacityQueue  *capacityQueue
-	capacityWake   func()
-	store          Store
-	network        NetworkPreparer
-	node           NodeExecutor
-	prober         CommandProber
-	tokenGenerator TokenGenerator
-	observer       Observer
-	demandRecorder CapacityDemandRecorder
-	demandPoolID   string
-	demandTTL      time.Duration
-	writerTokenKey []byte
-	claimTTL       time.Duration
-	slo            time.Duration
-	now            func() time.Time
+	capacityQueue     *capacityQueue
+	capacityWake      func()
+	store             Store
+	network           NetworkPreparer
+	node              NodeExecutor
+	prober            CommandProber
+	tokenGenerator    TokenGenerator
+	observer          Observer
+	migrationObserver func(Observation)
+	demandRecorder    CapacityDemandRecorder
+	demandPoolID      string
+	demandTTL         time.Duration
+	writerTokenKey    []byte
+	claimTTL          time.Duration
+	slo               time.Duration
+	now               func() time.Time
 }
 
 // New validates immutable claim policy and constructs a Planner.
@@ -281,7 +285,8 @@ func New(config Config) (*Planner, error) {
 		store: config.Store, network: config.Network, node: config.Node,
 		prober: config.Prober, tokenGenerator: config.TokenGenerator,
 		observer: config.Observer, writerTokenKey: append([]byte(nil), config.WriterTokenKey...),
-		demandRecorder: config.DemandRecorder, demandPoolID: demandPoolID,
+		migrationObserver: config.MigrationObserver,
+		demandRecorder:    config.DemandRecorder, demandPoolID: demandPoolID,
 		demandTTL: demandTTL,
 		claimTTL:  claimTTL, slo: slo, now: now,
 	}, nil
@@ -334,13 +339,18 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 			result.WithinSLO = withinSLO
 			result.Phases = append([]PhaseObservation(nil), phases...)
 		}
-		if p.observer != nil && migration == nil {
-			p.observer.ObserveRuntimeSlotClaim(Observation{
+		if (p.observer != nil && migration == nil) || (p.migrationObserver != nil && migration != nil) {
+			observation := Observation{
 				OperationID: request.OperationID, SandboxID: request.SandboxID, SlotID: observedSlotID,
 				StartedAt: startedAt, CompletedAt: completedAt, Duration: duration,
 				Succeeded: resultErr == nil, WithinSLO: withinSLO,
 				Phases: append([]PhaseObservation(nil), phases...),
-			})
+			}
+			if migration != nil {
+				p.migrationObserver(observation)
+			} else {
+				p.observer.ObserveRuntimeSlotClaim(observation)
+			}
 		}
 	}()
 

@@ -19,6 +19,7 @@ import (
 type migrationChannelExecutor struct {
 	mu    sync.Mutex
 	calls int
+	peer  runtimecheckpoint.PeerEndpoint
 }
 
 func (e *migrationChannelExecutor) AcknowledgeMigrationSourceGC(_ context.Context, r protocol.MigrationSourceGCRequest) (*protocol.MigrationSourceGCAcknowledgement, error) {
@@ -47,6 +48,10 @@ func TestMigrationCaptureUsesAuthenticatedNodeCapability(t *testing.T) {
 			server, files := newNodeChannelTLSServer(t, hub)
 			defer server.Close()
 			executor := &migrationChannelExecutor{}
+			peerIdentity, err := runtimecheckpoint.NewPeerIdentity()
+			require.NoError(t, err)
+			executor.peer, err = runtimecheckpoint.NewPeerEndpoint("127.0.0.1:19443", peerIdentity)
+			require.NoError(t, err)
 			config := protocol.NodeChannelAgentConfig{BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
 				ClientKeyFile: files.clientKey, TokenFile: files.token, PeerURISAN: testNodeChannelServerURI,
 				NodeUID: "node-uid-1", NodeBootIDFile: files.boot, ClusterID: "cluster-1", NodeID: "node-1",
@@ -55,8 +60,10 @@ func TestMigrationCaptureUsesAuthenticatedNodeCapability(t *testing.T) {
 			if supported {
 				config.MigrationCaptureExecutor = executor
 				config.MigrationPublishExecutor = executor
+				config.MigrationPublicationPlanExecutor = executor
 				config.MigrationFenceExecutor = executor
 				config.MigrationImagePrepareExecutor = executor
+				config.MigrationImagePrefetchExecutor = executor
 				config.MigrationFinalizeExecutor = executor
 				config.MigrationSourceGCExecutor = executor
 			}
@@ -93,6 +100,24 @@ func TestMigrationCaptureUsesAuthenticatedNodeCapability(t *testing.T) {
 				require.Error(t, err)
 			}
 			publication := migrationChannelPublication(t, request)
+			publication.DestinationPeerCertificateSHA256 = digest.FromString("reserved-destination").String()
+			plan, err := hub.PlanMigrationPublication(ctx, publication)
+			if supported {
+				require.NoError(t, err)
+				require.NoError(t, plan.ValidateFor(publication))
+				command, err := protocol.NewNodeChannelMigrationPublicationPlanCommand(publication)
+				require.NoError(t, err)
+				response := protocol.NodeChannelResult{Version: protocol.NodeChannelVersion, Kind: command.Kind, RequestID: command.RequestID, MigrationPublicationPlan: plan}
+				require.NoError(t, response.ValidateFor(command))
+				receipt := migrationChannelReceipt(t, publication)
+				response.MigrationPublish = &receipt
+				require.Error(t, response.ValidateFor(command), "a plan cannot be combined with a publication receipt")
+				response.MigrationPublish = nil
+				plan.RequestDigest = strings.Repeat("f", 64)
+				require.Error(t, response.ValidateFor(command))
+			} else {
+				require.Error(t, err)
+			}
 			published, err := hub.PublishMigration(ctx, publication)
 			if supported {
 				require.NoError(t, err)
@@ -113,11 +138,34 @@ func TestMigrationCaptureUsesAuthenticatedNodeCapability(t *testing.T) {
 			sourceCapture.Target.NodeID, sourceCapture.Target.NodeUID = "source-node", "source-uid"
 			sourceCapture.Target.SlotID, sourceCapture.Target.AllocationID = "source-slot", "source-allocation"
 			sourcePublication := migrationChannelPublication(t, sourceCapture)
+			sourcePublication.DestinationPeerCertificateSHA256 = digest.FromString("reserved-destination").String()
 			resources, err := protocol.NewRuntimeResourceLease(request.OperationID, "target-claim", request.Target.SlotID, request.Target.ClusterID,
 				request.Target.NodeID, request.Target.NodeUID, request.Target.NodeBootID,
 				protocol.RuntimeResourceRequest{Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1000, MemoryBytes: 128 << 20, PIDsLimit: 1024}, "0", "0")
 			require.NoError(t, err)
 			prepare := protocol.MigrationImagePrepareRequest{Target: request.Target, Resources: resources, Publication: sourcePublication, Receipt: migrationChannelReceipt(t, sourcePublication)}
+			resourceDigest, err := resources.Digest()
+			require.NoError(t, err)
+			prefetch := protocol.MigrationImagePrefetchRequest{Publication: sourcePublication,
+				Staging: protocol.MigrationStagingRequest{Target: request.Target, Destination: request.Target, Source: sourcePublication.Capture.Request,
+					DestinationResourceLeaseDigest: strings.TrimPrefix(resourceDigest, "sha256:"), Bytes: runtimecheckpoint.ChunkBytes, Inodes: 64},
+				Plan: protocol.MigrationPublicationPlan{RequestDigest: prepare.Receipt.RequestDigest, Binding: prepare.Receipt.Binding,
+					Reference: prepare.Receipt.Reference, Peer: executor.peer}}
+			prefetched, err := hub.PrefetchMigrationImage(ctx, prefetch)
+			if supported {
+				require.NoError(t, err)
+				require.NoError(t, prefetched.ValidateFor(prefetch))
+				command, err := protocol.NewNodeChannelMigrationImagePrepareCommand(prepare)
+				require.NoError(t, err)
+				response := protocol.NodeChannelResult{Version: protocol.NodeChannelVersion, Kind: command.Kind, RequestID: command.RequestID, MigrationImagePrefetch: prefetched}
+				require.Error(t, response.ValidateFor(command), "a cache acknowledgement cannot replace normal image preparation")
+			} else {
+				require.Error(t, err)
+			}
+			stalePrefetch := prefetch
+			stalePrefetch.Staging.Target.NodeBootID, stalePrefetch.Staging.Destination.NodeBootID = "old-boot", "old-boot"
+			_, err = hub.PrefetchMigrationImage(ctx, stalePrefetch)
+			require.Error(t, err)
 			prepared, err := hub.PrepareMigrationImage(ctx, prepare)
 			if supported {
 				require.NoError(t, err)
@@ -156,16 +204,80 @@ func TestMigrationCaptureUsesAuthenticatedNodeCapability(t *testing.T) {
 			require.Error(t, err)
 			_, err = hub.PublishMigration(ctx, migrationChannelPublication(t, wrongBoot))
 			require.Error(t, err)
+			wrongPlan := migrationChannelPublication(t, wrongBoot)
+			wrongPlan.DestinationPeerCertificateSHA256 = publication.DestinationPeerCertificateSHA256
+			_, err = hub.PlanMigrationPublication(ctx, wrongPlan)
+			require.Error(t, err)
 			executor.mu.Lock()
 			calls := executor.calls
 			executor.mu.Unlock()
 			want := 0
 			if supported {
-				want = 5
+				want = 7
 			}
 			require.Equal(t, want, calls)
 		})
 	}
+}
+
+func (e *migrationChannelExecutor) PrefetchMigrationImage(_ context.Context, request protocol.MigrationImagePrefetchRequest) (*protocol.MigrationImagePrefetched, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	digest, err := request.Digest()
+	return &protocol.MigrationImagePrefetched{RequestDigest: digest, ManifestDigest: request.Plan.Reference.ManifestDigest, TotalBytes: 8192}, err
+}
+
+func (e *migrationChannelExecutor) PlanMigrationPublication(ctx context.Context, request protocol.MigrationPublicationRequest) (*protocol.MigrationPublicationPlan, error) {
+	p, err := e.PublishMigration(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.MigrationPublicationPlan{RequestDigest: p.RequestDigest, Binding: p.Binding, Reference: p.Reference, Peer: e.peer}, nil
+}
+
+func TestMigrationPublicationPlanIsBoundAndCannotReplacePublication(t *testing.T) {
+	capture := protocol.MigrationCaptureRequest{Target: protocol.NodeChannelTarget{SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1", ControlEndpoint: "unix:///var/run/sandbox0/source.sock"},
+		OperationID: "migration-1", LifecycleEpoch: 2, SandboxID: "sandbox-1", SourceGeneration: 1, ProcdInstanceID: "procd-1",
+		AssignmentRevision: strings.Repeat("ab", 32), BindingDigest: strings.Repeat("cd", 32), ResourceLeaseDigest: strings.Repeat("ef", 32)}
+	request := migrationChannelPublication(t, capture)
+	request.DestinationPeerCertificateSHA256 = digest.FromString("destination").String()
+	identity, err := runtimecheckpoint.NewPeerIdentity()
+	require.NoError(t, err)
+	endpoint, err := runtimecheckpoint.NewPeerEndpoint("127.0.0.1:19443", identity)
+	require.NoError(t, err)
+	executor := &migrationChannelExecutor{peer: endpoint}
+	plan, err := executor.PlanMigrationPublication(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, plan.ValidateFor(request))
+	for _, test := range []struct {
+		name   string
+		change func(*protocol.MigrationPublicationPlan)
+	}{
+		{"source binding", func(p *protocol.MigrationPublicationPlan) { p.Binding.SandboxID = "another-sandbox" }},
+		{"reference binding", func(p *protocol.MigrationPublicationPlan) {
+			p.Reference.BindingDigest = digest.FromString("another-cut").String()
+		}},
+		{"missing manifest", func(p *protocol.MigrationPublicationPlan) { p.Reference.ManifestDigest = "" }},
+		{"missing peer", func(p *protocol.MigrationPublicationPlan) { p.Peer = runtimecheckpoint.PeerEndpoint{} }},
+		{"public peer", func(p *protocol.MigrationPublicationPlan) { p.Peer.Address = "https://8.8.8.8:443" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := *plan
+			test.change(&changed)
+			require.Error(t, changed.ValidateFor(request))
+		})
+	}
+	changedRequest := request
+	changedRequest.DestinationPeerCertificateSHA256 = ""
+	require.Error(t, plan.ValidateFor(changedRequest))
+	_, err = protocol.NewNodeChannelMigrationPublicationPlanCommand(changedRequest)
+	require.Error(t, err)
+	publish, err := protocol.NewNodeChannelMigrationPublishCommand(request)
+	require.NoError(t, err)
+	response := protocol.NodeChannelResult{Version: protocol.NodeChannelVersion, Kind: publish.Kind, RequestID: publish.RequestID, MigrationPublicationPlan: plan}
+	require.Error(t, response.ValidateFor(publish), "a plan alone cannot acknowledge durable publication")
 }
 
 func (e *migrationChannelExecutor) PublishMigration(_ context.Context, request protocol.MigrationPublicationRequest) (*protocol.MigrationPublication, error) {

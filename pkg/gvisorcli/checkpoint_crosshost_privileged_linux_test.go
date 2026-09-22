@@ -117,8 +117,16 @@ func TestPrivilegedCrossHostCheckpoint(t *testing.T) {
 		require.Equal(t, before.Offset, after.Offset)
 		require.Equal(t, before.Temp, after.Temp)
 		require.Equal(t, before.CPUFlagsDigest, after.CPUFlagsDigest)
+		require.Equal(t, before.MemorySHA256, after.MemorySHA256)
 	}
 	if phase != "return" {
+		if os.Getenv("SANDBOX0_CHECKPOINT_OBSERVE_USAGE") == "1" {
+			// Production samples runtime memory usage. That sampling can mark
+			// pages known-committed, changing the default zero-page scan scope.
+			stats, err := runner.Stats(ctx, phase)
+			require.NoError(t, err)
+			t.Logf("pre-checkpoint memory usage: %d", stats.Data.Memory.Usage.Usage)
+		}
 		started := time.Now()
 		require.NoError(t, runner.Checkpoint(ctx, phase, filepath.Join(root, "image-"+strconv.Itoa(len(record.Cuts)+1))))
 		cut.CheckpointNanos = time.Since(started).Nanoseconds()
@@ -171,7 +179,7 @@ func prepareCrossHostBundle(t *testing.T, root string) {
 	require.NoError(t, err)
 	require.NoError(t, dst.Close())
 	spec := specs.Spec{Version: specs.Version, Root: &specs.Root{Path: filepath.Join(root, "rootfs"), Readonly: true},
-		Process: &specs.Process{Cwd: "/", Args: []string{"/payload", "-test.run=^TestCheckpointPayload$"}, Env: []string{checkpointPayloadEnv + "=1", "GOMAXPROCS=2"}},
+		Process: &specs.Process{Cwd: "/", Args: []string{"/payload", "-test.run=^TestCheckpointPayload$"}, Env: checkpointProbeEnvironment(t)},
 		Mounts: []specs.Mount{
 			{Destination: "/proc", Type: "proc", Source: "proc"},
 			{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}},

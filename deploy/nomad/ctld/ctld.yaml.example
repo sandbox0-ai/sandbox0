@@ -38,6 +38,9 @@ nomad_runtime:
   migration_staging_bytes: 0
   migration_staging_project_id: 0
   migration_staging_inodes: 0
+  # Optional node-to-node checkpoint transport. Requires staging quota above.
+  # Bind the concrete private worker IP, for example "10.0.1.10:19443".
+  migration_peer_address: ""
   runtime_slot_journal_path: /var/lib/sandbox0/ctld/nomad/runtime-slots.db
   node_boot_id_file: /proc/sys/kernel/random/boot_id
   authority_url: ${SANDBOX0_MANAGER_AUTHORITY_URL}

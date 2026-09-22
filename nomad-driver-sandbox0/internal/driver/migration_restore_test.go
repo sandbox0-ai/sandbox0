@@ -12,6 +12,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -382,4 +383,160 @@ func TestMigrationHandoverCommandReadinessBindsOriginalProcdAndRestore(t *testin
 	custodian.mu.Unlock()
 	require.ErrorIs(t, handle.CommandReady(CommandReadyRequest{Proof: proof}), errdefs.ErrFailedPrecondition)
 	require.Len(t, fixture.authority.commandSnapshot(), 1, "uncertain custody cannot reuse an earlier ready observation")
+}
+
+// restorePreparationGate exposes the two independent node operations without
+// changing the custody fixture's serialization of durable observations.
+type restorePreparationGate struct {
+	*restoreCustodian
+	intent func(context.Context) error
+	attach func(context.Context) error
+}
+
+func (c *restorePreparationGate) RecordMigrationRestore(ctx context.Context, observation protocol.MigrationRestoreObservation) error {
+	if observation.State == protocol.MigrationRestoreIntent && c.intent != nil {
+		if err := c.intent(ctx); err != nil {
+			return err
+		}
+	}
+	return c.restoreCustodian.RecordMigrationRestore(ctx, observation)
+}
+
+func (c *restorePreparationGate) Ensure(ctx context.Context, stage rootfshandoff.StageRequest, loss func(error)) (rootfssession.Mount, error) {
+	if c.attach != nil {
+		if err := c.attach(ctx); err != nil {
+			return rootfssession.Mount{}, err
+		}
+	}
+	return c.RootFSRuntime.Ensure(ctx, stage, loss)
+}
+
+func TestMigrationRestoreOverlapsImageVerificationAndRootFSAttach(t *testing.T) {
+	for _, first := range []string{"image", "rootfs"} {
+		t.Run(first+" finishes first", func(t *testing.T) {
+			h, claim, runner, custodian, _ := migrationRestoreHandleFixture(t)
+			imageEntered, attachEntered := make(chan struct{}), make(chan struct{})
+			imageRelease, attachRelease := make(chan struct{}), make(chan struct{})
+			var imageOnce, attachOnce sync.Once
+			releaseImage := func() { imageOnce.Do(func() { close(imageRelease) }) }
+			releaseAttach := func() { attachOnce.Do(func() { close(attachRelease) }) }
+			t.Cleanup(releaseImage)
+			t.Cleanup(releaseAttach)
+			h.rootfs = &restorePreparationGate{restoreCustodian: custodian,
+				intent: func(ctx context.Context) error {
+					close(imageEntered)
+					select {
+					case <-imageRelease:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				},
+				attach: func(ctx context.Context) error {
+					close(attachEntered)
+					select {
+					case <-attachRelease:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				},
+			}
+			done := make(chan error, 1)
+			go func() { done <- h.Claim(claim) }()
+			for _, entered := range []chan struct{}{imageEntered, attachEntered} {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("preparation did not overlap")
+				}
+			}
+			if first == "image" {
+				releaseImage()
+			} else {
+				releaseAttach()
+			}
+			require.NotContains(t, runner.callsSnapshot(), "create", "both preparation operations must finish before execution")
+			select {
+			case err := <-done:
+				t.Fatalf("claim completed before preparation: %v", err)
+			default:
+			}
+			releaseImage()
+			releaseAttach()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("claim did not finish")
+			}
+			require.Equal(t, 1, countMigrationCall(runner.callsSnapshot(), "restore"))
+			require.NotContains(t, runner.callsSnapshot(), "start")
+		})
+	}
+}
+
+func TestMigrationRestorePreparationFailureCancelsAndJoinsPeer(t *testing.T) {
+	for _, failing := range []string{"image", "rootfs"} {
+		t.Run(failing, func(t *testing.T) {
+			h, claim, runner, custodian, fixture := migrationRestoreHandleFixture(t)
+			peerEntered, peerCancelled, peerRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(peerRelease) }) }
+			t.Cleanup(release)
+			failure := errors.New("injected preparation failure")
+			fail := func(ctx context.Context) error {
+				select {
+				case <-peerEntered:
+					return failure
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			peer := func(ctx context.Context) error {
+				close(peerEntered)
+				<-ctx.Done()
+				close(peerCancelled)
+				<-peerRelease
+				// A successful late node reply still cannot authorize execution.
+				return nil
+			}
+			gate := &restorePreparationGate{restoreCustodian: custodian, intent: fail, attach: peer}
+			if failing == "rootfs" {
+				gate.intent, gate.attach = peer, fail
+			}
+			h.rootfs = gate
+			done := make(chan error, 1)
+			go func() { done <- h.Claim(claim) }()
+			select {
+			case <-peerCancelled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("peer was not cancelled")
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("claim did not join cancelled peer: %v", err)
+			default:
+			}
+			release()
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, failure)
+			case <-time.After(5 * time.Second):
+				t.Fatal("claim did not finish")
+			}
+			require.NotContains(t, runner.callsSnapshot(), "create")
+			require.NotContains(t, runner.callsSnapshot(), "restore")
+			require.NotContains(t, runner.callsSnapshot(), "start")
+			custody, err := custodian.GetMigrationDestination(t.Context(), fixture.task.ID)
+			require.NoError(t, err)
+			require.Equal(t, protocol.MigrationRestoreUncertain, custody.Restore.State)
+			h.mu.Lock()
+			require.Equal(t, phaseMigrating, h.phase)
+			require.True(t, h.rootMounted, "retain possibly consumed writer for regional cleanup")
+			require.NotNil(t, h.claim)
+			h.mu.Unlock()
+			require.Error(t, h.Claim(claim), "failed migration carrier cannot be reused")
+		})
+	}
 }

@@ -35,13 +35,28 @@ func (d *nodeRuntime) GetMigrationDestination(_ context.Context, slotID string) 
 // retained image; restoring requires the exact created container and attached
 // writer; restored requires that same container to be running. No path here
 // creates or resumes execution on behalf of the driver.
-func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation protocol.MigrationRestoreObservation) error {
+func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation protocol.MigrationRestoreObservation) (resultErr error) {
 	if err := observation.Validate(); err != nil {
 		return err
 	}
 	if d == nil || d.journal == nil || d.runtime == nil || d.runner == nil {
 		return errdefs.ErrUnavailable
 	}
+	started := time.Now()
+	var readElapsed, verifyElapsed, sessionsElapsed, stateElapsed, commitElapsed time.Duration
+	var journalTiming migrationRestoreJournalTiming
+	defer func() {
+		// Keep physical observations separate from journal work; a delayed
+		// receipt does not by itself identify the restore command as the cause.
+		d.logMigrationTiming(observation.Request.Image.Publication.Assignment.OperationID, "restore-observation", started,
+			"restore_state", observation.State, "success", resultErr == nil,
+			"journal_read_us", readElapsed.Microseconds(), "image_verify_us", verifyElapsed.Microseconds(),
+			"sessions_read_us", sessionsElapsed.Microseconds(), "runsc_state_us", stateElapsed.Microseconds(),
+			"journal_commit_us", commitElapsed.Microseconds(),
+			"journal_begin_us", journalTiming.begin.Microseconds(),
+			"journal_record_us", journalTiming.record.Microseconds(),
+			"journal_finish_us", journalTiming.finish.Microseconds())
+	}()
 	target := observation.Request.Image.Target
 	if target.ClusterID != d.clusterID || target.NodeID != d.nodeID || target.NodeUID != d.nodeUID {
 		return errdefs.ErrPermissionDenied
@@ -50,7 +65,9 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 		return errdefs.ErrUnavailable
 	}
 	defer d.endReconciliation(target.SlotID)
+	stepStarted := time.Now()
 	record, err := d.journal.Get(target.SlotID)
+	readElapsed = time.Since(stepStarted)
 	if err != nil {
 		return err
 	}
@@ -68,12 +85,17 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 		if !ok {
 			return errdefs.ErrUnavailable
 		}
-		if _, err := runtime.PrepareMigrationImageFiles(ctx, custody.Request.Receipt.Binding, custody.Request.Receipt.Reference, custody.ImageDirectory, true, nil); err != nil {
-			return err
+		stepStarted = time.Now()
+		_, verifyErr := runtime.PrepareMigrationImageFiles(ctx, custody.Request.Receipt.Binding, custody.Request.Receipt.Reference, custody.ImageDirectory, true, nil)
+		verifyElapsed = time.Since(stepStarted)
+		if verifyErr != nil {
+			return verifyErr
 		}
 	case protocol.MigrationRestoreExecuting, protocol.MigrationRestoreComplete:
 		matched := false
+		stepStarted = time.Now()
 		sessions, err := d.runtime.RecoverySessions()
+		sessionsElapsed = time.Since(stepStarted)
 		if err != nil {
 			return err
 		}
@@ -87,7 +109,9 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 		if !matched {
 			return errdefs.ErrFailedPrecondition
 		}
+		stepStarted = time.Now()
 		state, err := d.runner.State(ctx, record.Registration.RunscContainerID)
+		stateElapsed = time.Since(stepStarted)
 		if err != nil {
 			return err
 		}
@@ -99,14 +123,38 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 			return errdefs.ErrFailedPrecondition
 		}
 	}
-	return d.journal.recordMigrationRestore(observation)
+	stepStarted = time.Now()
+	err = d.journal.recordMigrationRestoreObserved(observation, &journalTiming)
+	commitElapsed = time.Since(stepStarted)
+	return err
+}
+
+// migrationRestoreJournalTiming separates acquiring a Bolt write transaction,
+// processing its record, and completing Update. Finish includes commit/rollback
+// and scheduling; it must not be presented as pure disk sync time.
+type migrationRestoreJournalTiming struct {
+	begin, record, finish time.Duration
 }
 
 func (j *runtimeSlotJournal) recordMigrationRestore(observation protocol.MigrationRestoreObservation) error {
+	return j.recordMigrationRestoreObserved(observation, nil)
+}
+
+func (j *runtimeSlotJournal) recordMigrationRestoreObserved(observation protocol.MigrationRestoreObservation, timing *migrationRestoreJournalTiming) error {
 	if err := observation.Validate(); err != nil {
 		return err
 	}
-	return j.db.Update(func(tx *bolt.Tx) error {
+	started := time.Now()
+	var recordFinished time.Time
+	err := j.db.Update(func(tx *bolt.Tx) error {
+		if timing != nil {
+			entered := time.Now()
+			timing.begin = entered.Sub(started)
+			defer func() {
+				recordFinished = time.Now()
+				timing.record = recordFinished.Sub(entered)
+			}()
+		}
 		bucket, err := runtimeSlotJournalBucketFrom(tx)
 		if err != nil {
 			return err
@@ -143,6 +191,10 @@ func (j *runtimeSlotJournal) recordMigrationRestore(observation protocol.Migrati
 		current.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return putRuntimeSlotJournalRecord(bucket, current)
 	})
+	if timing != nil && !recordFinished.IsZero() {
+		timing.finish = time.Since(recordFinished)
+	}
+	return err
 }
 
 // fenceMigrationDestination retains both the image and any post-restore dirty

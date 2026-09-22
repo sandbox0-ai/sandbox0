@@ -15,11 +15,14 @@ import (
 )
 
 const (
-	ManifestVersion  = 1
-	ChunkBytes       = 8 << 20
-	MaxFiles         = 256
-	MaxManifestBytes = 4 << 20
-	MaxImageBytes    = int64(256) << 30
+	ManifestVersion = 1
+	// StagedManifestVersion reuses chunks uploaded in an exact capture scope
+	// before the final RootFS descriptor is available.
+	StagedManifestVersion = 2
+	ChunkBytes            = 8 << 20
+	MaxFiles              = 256
+	MaxManifestBytes      = 4 << 20
+	MaxImageBytes         = int64(256) << 30
 )
 
 // Binding ties execution state to the same filesystem cut and immutable source
@@ -40,9 +43,20 @@ type Binding struct {
 }
 
 func (b Binding) Validate() error {
+	if err := b.validateSource(); err != nil {
+		return err
+	}
+	if b.RootFSGenerationID == "" || len(b.RootFSGenerationID) > 512 ||
+		strings.TrimSpace(b.RootFSGenerationID) != b.RootFSGenerationID || strings.ContainsAny(b.RootFSGenerationID, "\x00\r\n") {
+		return fmt.Errorf("rootfs_generation_id must be a canonical bounded identity")
+	}
+	return validateDigest(b.RootFSDescriptorDigest)
+}
+
+func (b Binding) validateSource() error {
 	for name, value := range map[string]string{
 		"operation_id": b.OperationID, "sandbox_id": b.SandboxID,
-		"team_id": b.TeamID, "rootfs_generation_id": b.RootFSGenerationID,
+		"team_id": b.TeamID,
 	} {
 		if value == "" || len(value) > 512 || strings.TrimSpace(value) != value ||
 			strings.ContainsAny(value, "\x00\r\n") {
@@ -53,7 +67,6 @@ func (b Binding) Validate() error {
 		"source_binding_digest":        b.SourceBindingDigest,
 		"runtime_compatibility_digest": b.RuntimeCompatibilityDigest,
 		"assignment_revision":          b.AssignmentRevision, "cpu_features_digest": b.CPUFeaturesDigest,
-		"rootfs_descriptor_digest": b.RootFSDescriptorDigest,
 	} {
 		if err := validateDigest(value); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
@@ -94,18 +107,24 @@ type Manifest struct {
 }
 
 func (m Manifest) Validate(maxBytes int64) error {
-	if maxBytes <= 0 || maxBytes > MaxImageBytes || m.Version != ManifestVersion ||
+	if maxBytes <= 0 || maxBytes > MaxImageBytes || (m.Version != ManifestVersion && m.Version != StagedManifestVersion) ||
 		len(m.Files) == 0 || len(m.Files) > MaxFiles {
 		return fmt.Errorf("invalid checkpoint version, file count or image limit")
 	}
 	if err := m.Binding.Validate(); err != nil {
 		return err
 	}
+	return validateImageFiles(m.Files, maxBytes)
+}
+
+// Shared file validation keeps tentative inventories within the same path,
+// chunk, inode and byte limits without inventing a final runtime binding.
+func validateImageFiles(files []File, maxBytes int64) error {
 	var total int64
-	seen := make(map[string]bool, len(m.Files))
+	seen := make(map[string]bool, len(files))
 	directories := map[string]bool{".": true}
 	previous := ""
-	for _, file := range m.Files {
+	for _, file := range files {
 		if !validPath(file.Path) || file.Path <= previous || file.Size < 0 || file.Size > maxBytes-total {
 			return fmt.Errorf("invalid checkpoint file path, order or size")
 		}

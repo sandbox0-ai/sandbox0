@@ -18,15 +18,21 @@ import (
 // Publication alone
 // never authorizes target execution or releases source custody.
 type MigrationPublicationRequest struct {
-	Capture             MigrationCapture                   `json:"capture"`
-	Assignment          runtimecontrol.MigrationAssignment `json:"assignment"`
-	CompatibilityDigest string                             `json:"compatibility_digest"`
-	CPUFeaturesDigest   string                             `json:"cpu_features_digest"`
-	CPULaunch           *MigrationCPULaunch                `json:"cpu_launch,omitempty"`
+	DestinationPeerCertificateSHA256 string                             `json:"destination_peer_certificate_sha256,omitempty"`
+	Capture                          MigrationCapture                   `json:"capture"`
+	Assignment                       runtimecontrol.MigrationAssignment `json:"assignment"`
+	CompatibilityDigest              string                             `json:"compatibility_digest"`
+	CPUFeaturesDigest                string                             `json:"cpu_features_digest"`
+	CPULaunch                        *MigrationCPULaunch                `json:"cpu_launch,omitempty"`
 }
 
 func (r MigrationPublicationRequest) Binding() (runtimecheckpoint.Binding, error) {
 	var zero runtimecheckpoint.Binding
+	if r.DestinationPeerCertificateSHA256 != "" {
+		if err := runtimecheckpoint.ValidatePeerCertificateDigest(r.DestinationPeerCertificateSHA256); err != nil {
+			return zero, err
+		}
+	}
 	if err := r.Capture.Validate(); err != nil {
 		return zero, err
 	}
@@ -76,12 +82,21 @@ func (r MigrationPublicationRequest) Digest() (string, error) {
 // includes the full filesystem descriptor, preventing independent memory and
 // disk snapshots from being combined under the same operation identity.
 type MigrationPublication struct {
-	RequestDigest string                      `json:"request_digest"`
-	Binding       runtimecheckpoint.Binding   `json:"binding"`
-	Reference     runtimecheckpoint.Reference `json:"reference"`
+	Peer          runtimecheckpoint.PeerEndpoint `json:"peer,omitzero"`
+	RequestDigest string                         `json:"request_digest"`
+	Binding       runtimecheckpoint.Binding      `json:"binding"`
+	Reference     runtimecheckpoint.Reference    `json:"reference"`
 }
 
 func (p MigrationPublication) ValidateFor(request MigrationPublicationRequest) error {
+	if p.Peer != (runtimecheckpoint.PeerEndpoint{}) {
+		if request.DestinationPeerCertificateSHA256 == "" {
+			return fmt.Errorf("peer image requires the authorized destination certificate")
+		}
+		if err := p.Peer.Validate(); err != nil {
+			return err
+		}
+	}
 	want, err := request.Digest()
 	if err != nil {
 		return err

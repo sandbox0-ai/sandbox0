@@ -92,6 +92,18 @@ func (s *managerControllerSet) startMigrationImageGC(ctx context.Context) {
 			}
 		})
 	})
+	captureWorker, err := nomadmigration.NewCaptureUploadGC(s.sandboxStore, collector)
+	if err != nil {
+		s.logger.Error("Capture upload GC unavailable", zap.Error(err))
+		return
+	}
+	go logControllerError(ctx, s.logger, "Capture upload GC stopped", func() error {
+		return captureWorker.Run(ctx, func(report nomadmigration.Report) {
+			if report.Error != nil {
+				s.logger.Warn("Capture upload GC pass failed", zap.Error(report.Error))
+			}
+		})
+	})
 }
 
 func (s *managerControllerSet) startRootFSMaintenance(ctx context.Context) {

@@ -2,6 +2,7 @@ package nomadruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 func migrationJournalRequest(t *testing.T, registration RuntimeSlotRegistration) protocol.MigrationCapture {
@@ -130,5 +132,62 @@ func TestMigrationJournalBoundsUnresolvedCapturesAcrossRetries(t *testing.T) {
 		capture.State = protocol.MigrationCaptureUncertain
 		require.NoError(t, journal.RecordMigrationCapture(capture))
 		require.NoError(t, journal.RecordMigrationCapture(capture))
+	}
+}
+
+// First capture must invalidate cached empty records before counting retained
+// custody; exclusions may accelerate history scans but never grant capacity.
+func TestMigrationCaptureAdmissionRechecksExcludedRecords(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("corrupt=%t", corrupt), func(t *testing.T) {
+			j, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "slots.db"), time.Hour)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, j.Close()) })
+			registrations := make([]RuntimeSlotRegistration, maxMigrationImageCustodies+1)
+			for i := range registrations {
+				registrations[i] = testRuntimeSlotJournalRegistration(t, fmt.Sprintf("source-%d", i))
+				require.NoError(t, j.Register(registrations[i]))
+			}
+			require.NoError(t, j.db.View(func(tx *bolt.Tx) error {
+				bucket, err := runtimeSlotJournalBucketFrom(tx)
+				if err != nil {
+					return err
+				}
+				return j.checkMigrationStagingPool(bucket, "")
+			}))
+			require.Len(t, j.stagingScanExclusions.keys, len(registrations))
+			if corrupt {
+				require.NoError(t, j.db.Update(func(tx *bolt.Tx) error {
+					bucket, err := runtimeSlotJournalBucketFrom(tx)
+					if err != nil {
+						return err
+					}
+					key := []byte(registrations[0].SlotID)
+					var record runtimeSlotJournalRecord
+					if err := json.Unmarshal(bucket.Get(key), &record); err != nil {
+						return err
+					}
+					record.Version = 999
+					payload, err := json.Marshal(record)
+					if err != nil {
+						return err
+					}
+					return bucket.Put(key, payload)
+				}))
+				require.Error(t, j.RecordMigrationCapture(migrationJournalRequest(t, registrations[1])))
+				record, err := j.Get(registrations[1].SlotID)
+				require.NoError(t, err)
+				require.Nil(t, record.Migration, "failed admission cannot commit capture intent")
+				return
+			}
+			for i, registration := range registrations {
+				err := j.RecordMigrationCapture(migrationJournalRequest(t, registration))
+				if i == maxMigrationImageCustodies {
+					require.ErrorIs(t, err, errdefs.ErrResourceExhausted)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+		})
 	}
 }

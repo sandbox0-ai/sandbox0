@@ -169,6 +169,10 @@ func migrationPlannerFixture(t *testing.T) (*plannerFixture, *migrationPlannerSt
 
 func TestPlannerMigrationReusesExactWriterAndNeverProbesBeforeHandover(t *testing.T) {
 	f, s, n := migrationPlannerFixture(t)
+	var migrationObservations []Observation
+	f.planner.migrationObserver = func(observation Observation) {
+		migrationObservations = append(migrationObservations, observation)
+	}
 	s.issueLost = true
 	_, err := f.planner.RestoreMigration(t.Context(), s.image, f.request.NetworkPolicy)
 	require.ErrorContains(t, err, "writer issue response lost")
@@ -187,6 +191,14 @@ func TestPlannerMigrationReusesExactWriterAndNeverProbesBeforeHandover(t *testin
 	require.Empty(t, f.prober.addresses)
 	require.Empty(t, n.commands)
 	require.Empty(t, f.observer.observations, "migration must not inflate ordinary claim latency samples")
+	require.Len(t, migrationObservations, 3)
+	for index, observation := range migrationObservations {
+		require.False(t, observation.WithinSLO, "restore is not an ordinary command-ready claim")
+		require.Equal(t, index == 2, observation.Succeeded)
+		require.Equal(t, s.image.Publication.Assignment.OperationID, observation.OperationID)
+		require.NotEmpty(t, observation.Phases)
+	}
+	require.Equal(t, PhaseNodeClaim, migrationObservations[2].Phases[len(migrationObservations[2].Phases)-1].Phase)
 	require.Equal(t, 3, s.acquireCalls)
 	require.Equal(t, 2, s.authorizeCalls)
 }

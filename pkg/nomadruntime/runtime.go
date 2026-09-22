@@ -44,6 +44,11 @@ import (
 // rootfsRuntime owns the node-local NBD/XFS/Overlay session inside the
 // node-scoped ctld Nomad runtime. The task driver uses Runtime over Unix RPC.
 type rootfsRuntime struct {
+	migrationUploadMu    sync.Mutex
+	migrationUploads     map[string]migrationCaptureUploadCache
+	migrationInventoryMu sync.Mutex
+	migrationInventories map[string]runtimecheckpoint.LocalImageInventory
+
 	checkpoints       *runtimecheckpoint.Store
 	sessions          *rootfssession.Manager
 	authority         rootFSWriterAuthority

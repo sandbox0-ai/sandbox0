@@ -29,6 +29,20 @@ func cloneMigrationCapture(value *protocol.MigrationCapture) *protocol.Migration
 // Both journals precede runsc checkpoint. A retry observes the same operation;
 // an interrupted invocation never runs checkpoint again or calls Start.
 func (h *taskHandle) CaptureMigration(ctx context.Context, request protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
+	started := time.Now()
+	var lockElapsed, adoptionElapsed, cpuElapsed, persistElapsed, recordElapsed, custodyElapsed time.Duration
+	dispatched := false
+	defer func() {
+		if h.logger != nil {
+			// Include admission and durable intent, which precede the asynchronous
+			// checkpoint timer. A retry observation is not a fresh dispatch.
+			h.logger.Info("Migration capture dispatch timing", "operation_id", request.OperationID,
+				"capture_dispatched", dispatched, "dispatch_total_us", time.Since(started).Microseconds(),
+				"dispatch_lock_us", lockElapsed.Microseconds(), "dispatch_adoption_us", adoptionElapsed.Microseconds(),
+				"dispatch_cpu_us", cpuElapsed.Microseconds(), "dispatch_persist_us", persistElapsed.Microseconds(),
+				"dispatch_record_us", recordElapsed.Microseconds(), "dispatch_custody_us", custodyElapsed.Microseconds())
+		}
+	}()
 	if ctx == nil {
 		return nil, errdefs.ErrInvalidArgument
 	}
@@ -47,9 +61,14 @@ func (h *taskHandle) CaptureMigration(ctx context.Context, request protocol.Migr
 	if !ok {
 		return nil, fmt.Errorf("stock runsc checkpoint is unavailable: %w", errdefs.ErrUnavailable)
 	}
+	stepStarted := time.Now()
 	h.closeMu.Lock()
+	lockElapsed = time.Since(stepStarted)
 	defer h.closeMu.Unlock()
-	if err := h.refreshMigrationAdoption(); err != nil {
+	stepStarted = time.Now()
+	err = h.refreshMigrationAdoption()
+	adoptionElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
@@ -90,7 +109,10 @@ func (h *taskHandle) CaptureMigration(ctx context.Context, request protocol.Migr
 		return nil, errdefs.ErrFailedPrecondition
 	}
 	h.mu.Unlock()
-	if err := h.checkMigrationCaptureCPU(ctx, request, false); err != nil {
+	stepStarted = time.Now()
+	err = h.checkMigrationCaptureCPU(ctx, request, false)
+	cpuElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
@@ -102,13 +124,21 @@ func (h *taskHandle) CaptureMigration(ctx context.Context, request protocol.Migr
 	h.phase = phaseMigrating
 	intent := *h.migration
 	h.mu.Unlock()
-	if err := h.persist(); err != nil {
+	stepStarted = time.Now()
+	err = h.persist()
+	persistElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
-	if err := custodian.RecordMigrationCapture(ctx, intent); err != nil {
+	stepStarted = time.Now()
+	err = custodian.RecordMigrationCapture(ctx, intent)
+	recordElapsed = time.Since(stepStarted)
+	if err != nil {
 		return nil, err
 	}
+	stepStarted = time.Now()
 	custody, err := custodian.GetMigrationCapture(ctx, request.Target.SlotID)
+	custodyElapsed = time.Since(stepStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +167,7 @@ func (h *taskHandle) CaptureMigration(ctx context.Context, request protocol.Migr
 			h.logger.Error("migration source checkpoint requires reconciliation", "error", err)
 		}
 	}()
+	dispatched = true
 	return &intent, nil
 }
 
@@ -144,12 +175,23 @@ func (h *taskHandle) completeMigrationCapture(ctx context.Context, imageDirector
 	h.mu.Lock()
 	request := h.migration.Request
 	h.mu.Unlock()
+	stepStarted := time.Now()
 	err := h.checkMigrationCaptureCPU(ctx, request, true)
+	cpuDuration := time.Since(stepStarted)
+	var checkpointDuration, syncDuration time.Duration
 	if err == nil {
+		stepStarted = time.Now()
 		err = runner.Checkpoint(ctx, h.containerID, imageDirectory)
+		checkpointDuration = time.Since(stepStarted)
 	}
 	if err == nil {
+		stepStarted = time.Now()
 		err = syncMigrationImage(imageDirectory)
+		syncDuration = time.Since(stepStarted)
+	}
+	if h.logger != nil {
+		h.logger.Info("Migration execution capture timing", "operation_id", request.OperationID, "execution_capture_success", err == nil,
+			"cpu_check_us", cpuDuration.Microseconds(), "checkpoint_us", checkpointDuration.Microseconds(), "image_sync_us", syncDuration.Microseconds())
 	}
 	h.mu.Lock()
 	if h.migration.State == protocol.MigrationCaptureIntent {

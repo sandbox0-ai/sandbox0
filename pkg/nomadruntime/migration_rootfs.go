@@ -66,6 +66,31 @@ func (d *nodeRuntime) SealMigrationRootFS(ctx context.Context, request protocol.
 	cutRequest := rootfshandoff.MigrationRootFSCutRequest{OperationID: request.OperationID,
 		CaptureRequestDigest: custody.Capture.RequestDigest, SourceBindingDigest: request.BindingDigest,
 		GenerationID: "migration-" + custody.Capture.RequestDigest}
+	// Inspect only the already durable, stopped memory image. Inspection may
+	// stage missing chunks under existing upload admission while RootFS sealing
+	// proceeds. Both share reconciliation; no worker survives custody release.
+	// Priming failure is a cache miss, never evidence for a completed image.
+	sealed := false
+	if primer, ok := d.runtime.(interface {
+		PrimeMigrationImageInventory(context.Context, string) error
+	}); ok && d.migrationPeer != nil && custody.Capture.RootFS == nil {
+		primeCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if attempted, _ := d.primeMigrationCaptureUpload(primeCtx, request, custody.ImageDirectory); !attempted {
+				_ = primer.PrimeMigrationImageInventory(primeCtx, custody.ImageDirectory)
+			}
+		}()
+		defer func() {
+			if !sealed {
+				cancel()
+			}
+			<-done
+			cancel()
+		}()
+	}
+	cutStarted := time.Now()
 	cut, err := runtime.CaptureMigrationRootFS(ctx, matched.Stage, cutRequest)
 	if err != nil {
 		if errors.Is(err, rootfssession.ErrMigrationCutOwnerLost) {
@@ -86,6 +111,8 @@ func (d *nodeRuntime) SealMigrationRootFS(ctx context.Context, request protocol.
 	if err := d.journal.RecordMigrationCapture(capture); err != nil {
 		return zero, err
 	}
+	sealed = true
+	d.logMigrationTiming(request.OperationID, "rootfs-cut", cutStarted)
 	return cut, nil
 }
 

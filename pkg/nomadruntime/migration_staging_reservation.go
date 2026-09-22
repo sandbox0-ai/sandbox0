@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	bolt "go.etcd.io/bbolt"
 )
@@ -15,21 +16,40 @@ import (
 // excludes competing image writers even when quota verification is interrupted.
 // Neither connection loss nor elapsed time releases this reservation.
 type MigrationStagingCustody struct {
-	Request       protocol.MigrationStagingRequest `json:"request"`
-	RequestDigest string                           `json:"request_digest"`
-	Ready         bool                             `json:"ready"`
-	Released      bool                             `json:"released"`
+	CapturePeer           *MigrationCapturePeerCustody     `json:"capture_peer,omitempty"`
+	Peer                  runtimecheckpoint.PeerEndpoint   `json:"peer,omitzero"`
+	Prefetch              *MigrationPrefetchCustody        `json:"prefetch,omitempty"`
+	PeerCertificateSHA256 string                           `json:"peer_certificate_sha256,omitempty"`
+	Request               protocol.MigrationStagingRequest `json:"request"`
+	RequestDigest         string                           `json:"request_digest"`
+	Ready                 bool                             `json:"ready"`
+	Released              bool                             `json:"released"`
 }
 
-func (d *nodeRuntime) ReserveMigrationStaging(ctx context.Context, request protocol.MigrationStagingRequest) (*protocol.MigrationStagingReserved, error) {
+func (d *nodeRuntime) ReserveMigrationStaging(ctx context.Context, request protocol.MigrationStagingRequest) (result *protocol.MigrationStagingReserved, resultErr error) {
 	if err := d.validateMigrationStagingRequest(ctx, request); err != nil {
 		return nil, err
 	}
+	started := time.Now()
+	var intentElapsed, budgetElapsed, readyElapsed time.Duration
+	defer func() {
+		d.logMigrationTiming(request.Source.OperationID, "staging-reservation", started,
+			"success", resultErr == nil, "intent_us", intentElapsed.Microseconds(),
+			"budget_us", budgetElapsed.Microseconds(), "ready_us", readyElapsed.Microseconds())
+	}()
 	if !d.beginReconciliation(request.Target.SlotID, nil) {
 		return nil, errdefs.ErrUnavailable
 	}
 	defer d.endReconciliation(request.Target.SlotID)
-	custody, err := d.journal.reserveMigrationStaging(request, false)
+	certificate := ""
+	var endpoint runtimecheckpoint.PeerEndpoint
+	if d.migrationPeer != nil {
+		certificate = runtimecheckpoint.PeerCertificateDigest(d.migrationPeer.identity)
+		endpoint = d.migrationPeer.endpoint
+	}
+	stepStarted := time.Now()
+	custody, err := d.journal.reserveMigrationStagingWithEndpoint(request, false, certificate, endpoint)
+	intentElapsed = time.Since(stepStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -40,18 +60,23 @@ func (d *nodeRuntime) ReserveMigrationStaging(ctx context.Context, request proto
 			return nil, err
 		}
 	} else {
-		if err := d.checkMigrationStagingBudget(request.Bytes, request.Inodes); err != nil {
+		stepStarted = time.Now()
+		err = d.checkMigrationStagingBudget(request.Bytes, request.Inodes)
+		budgetElapsed = time.Since(stepStarted)
+		if err != nil {
 			return nil, err
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		stepStarted = time.Now()
 		custody, err = d.journal.reserveMigrationStaging(request, true)
+		readyElapsed = time.Since(stepStarted)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &protocol.MigrationStagingReserved{RequestDigest: custody.RequestDigest}, nil
+	return &protocol.MigrationStagingReserved{RequestDigest: custody.RequestDigest, PeerCertificateSHA256: custody.PeerCertificateSHA256, Peer: custody.Peer}, nil
 }
 
 // ReleaseMigrationStaging requires an exact regional cancellation/finalization
@@ -61,10 +86,32 @@ func (d *nodeRuntime) ReleaseMigrationStaging(ctx context.Context, request proto
 	if err := d.validateMigrationStagingRequest(ctx, request); err != nil {
 		return err
 	}
-	if !d.beginReconciliation(request.Target.SlotID, nil) {
+	record, err := d.journal.Get(request.Target.SlotID)
+	if err != nil {
+		return err
+	}
+	if (record.hasMigrationPrefetch() || record.hasMigrationCapturePeerCache()) && record.MigrationStaging.Request == request {
+		if err := d.beginExternalReconciliation(ctx, request.Target.SlotID); err != nil {
+			return err
+		}
+	} else if !d.beginReconciliation(request.Target.SlotID, nil) {
 		return errdefs.ErrUnavailable
 	}
 	defer d.endReconciliation(request.Target.SlotID)
+	record, err = d.journal.Get(request.Target.SlotID)
+	if err != nil {
+		return err
+	}
+	if record.hasMigrationCapturePeerCache() && record.MigrationStaging.Request == request {
+		if err := d.discardMigrationCapturePeer(ctx, request.Target.SlotID, record.MigrationStaging.CapturePeer); err != nil {
+			return err
+		}
+	}
+	if record.hasMigrationPrefetch() && record.MigrationStaging.Request == request {
+		if err := d.discardMigrationPrefetch(ctx, request.Target.SlotID, record.MigrationStaging.Prefetch); err != nil {
+			return err
+		}
+	}
 	return d.journal.releaseMigrationStaging(request)
 }
 
@@ -82,8 +129,26 @@ func (d *nodeRuntime) validateMigrationStagingRequest(ctx context.Context, reque
 }
 
 func (j *runtimeSlotJournal) reserveMigrationStaging(request protocol.MigrationStagingRequest, ready bool) (*MigrationStagingCustody, error) {
+	return j.reserveMigrationStagingWithPeer(request, ready, "")
+}
+
+// Persist the first peer key (including disabled) with the reservation intent.
+// Retries after restart must not change the receipt already held by the region.
+func (j *runtimeSlotJournal) reserveMigrationStagingWithPeer(request protocol.MigrationStagingRequest, ready bool, certificate string) (*MigrationStagingCustody, error) {
+	return j.reserveMigrationStagingWithEndpoint(request, ready, certificate, runtimecheckpoint.PeerEndpoint{})
+}
+
+func (j *runtimeSlotJournal) reserveMigrationStagingWithEndpoint(request protocol.MigrationStagingRequest, ready bool, certificate string, endpoint runtimecheckpoint.PeerEndpoint) (*MigrationStagingCustody, error) {
+	if certificate != "" {
+		if err := runtimecheckpoint.ValidatePeerCertificateDigest(certificate); err != nil {
+			return nil, err
+		}
+	}
 	want, err := request.Digest()
 	if err != nil {
+		return nil, err
+	}
+	if err := (protocol.MigrationStagingReserved{RequestDigest: want, PeerCertificateSHA256: certificate, Peer: endpoint}).ValidateFor(request); err != nil {
 		return nil, err
 	}
 	var result *MigrationStagingCustody
@@ -117,11 +182,11 @@ func (j *runtimeSlotJournal) reserveMigrationStaging(request protocol.MigrationS
 			if ready || record.Migration != nil || record.hasMigrationImageCustody() || record.MigrationDestination != nil && !request.IsSource() {
 				return errdefs.ErrFailedPrecondition
 			}
-			record.MigrationStaging = &MigrationStagingCustody{Request: request, RequestDigest: want}
+			record.MigrationStaging = &MigrationStagingCustody{Request: request, RequestDigest: want, PeerCertificateSHA256: certificate, Peer: endpoint}
 		}
 		// Bolt serializes this scan with first source/destination image intent.
 		// Older image commands without reservations cannot race past it.
-		if err := checkMigrationStagingPool(bucket, request.Target.SlotID); err != nil {
+		if err := j.checkMigrationStagingPool(bucket, request.Target.SlotID); err != nil {
 			return err
 		}
 		record.MigrationStaging.Ready = ready
@@ -201,20 +266,20 @@ func canReplaceMigrationStaging(prior MigrationStagingCustody, next protocol.Mig
 // Historical adoption receipts still consume count admission, but no longer
 // own image space after their exact image-absence proof has been persisted.
 func (r runtimeSlotJournalRecord) hasMigrationImageCustody() bool {
-	return r.Migration != nil && !r.Migration.CaptureFailureFinalized() && (r.Migration.Finalization == nil || !r.Migration.Finalization.ImageAbsent) ||
+	return r.hasMigrationCapturePeerCache() || r.hasMigrationPrefetch() || r.Migration != nil && !r.Migration.CaptureFailureFinalized() && (r.Migration.Finalization == nil || !r.Migration.Finalization.ImageAbsent) ||
 		r.MigrationDestination != nil && !r.MigrationDestination.Adopted() && !r.MigrationDestination.FailureFinalized()
 }
 
 func (r runtimeSlotJournalRecord) retainsMigrationCountAdmission() bool {
-	return r.Migration != nil && !r.Migration.CaptureFailureFinalized() && (r.Migration.Finalization == nil || !r.Migration.Finalization.ImageAbsent) ||
+	return r.hasMigrationCapturePeerCache() || r.hasMigrationPrefetch() || r.Migration != nil && !r.Migration.CaptureFailureFinalized() && (r.Migration.Finalization == nil || !r.Migration.Finalization.ImageAbsent) ||
 		r.MigrationDestination.pendingCustody()
 }
 
-func checkMigrationStagingPool(bucket *bolt.Bucket, ownSlot string) error {
+func (j *runtimeSlotJournal) checkMigrationStagingPool(bucket *bolt.Bucket, ownSlot string) error {
 	retained := 0
 	err := bucket.ForEach(func(key, payload []byte) error {
-		record, err := decodeRuntimeSlotJournalRecord(payload)
-		if err != nil {
+		record, excluded, err := j.migrationPoolScanRecord(payload)
+		if err != nil || excluded {
 			return err
 		}
 		if record.retainsMigrationCountAdmission() {
@@ -251,6 +316,14 @@ func (r runtimeSlotJournalRecord) validateMigrationStaging() error {
 	if c == nil {
 		return nil
 	}
+	if err := (protocol.MigrationStagingReserved{RequestDigest: c.RequestDigest, PeerCertificateSHA256: c.PeerCertificateSHA256, Peer: c.Peer}).ValidateFor(c.Request); err != nil {
+		return err
+	}
+	if c.PeerCertificateSHA256 != "" {
+		if err := runtimecheckpoint.ValidatePeerCertificateDigest(c.PeerCertificateSHA256); err != nil {
+			return err
+		}
+	}
 	want, err := c.Request.Digest()
 	if err != nil || want != c.RequestDigest || r.matchesMigrationStaging(c.Request) != nil || c.Released && r.hasMigrationImageCustody() {
 		return errdefs.ErrFailedPrecondition
@@ -284,7 +357,7 @@ func (r runtimeSlotJournalRecord) matchesMigrationStagingImage(request protocol.
 // checkMigrationStagingWrite is called in the transaction that first records
 // image custody. Exact outcome retries do not need new admission. Legacy first
 // writes are excluded by any durable reservation, including an unfinished one.
-func checkMigrationStagingWrite(bucket *bolt.Bucket, record runtimeSlotJournalRecord, source *protocol.MigrationCaptureRequest, image *protocol.MigrationImagePrepareRequest) error {
+func (j *runtimeSlotJournal) checkMigrationStagingWrite(bucket *bolt.Bucket, record runtimeSlotJournalRecord, source *protocol.MigrationCaptureRequest, image *protocol.MigrationImagePrepareRequest) error {
 	if c := record.MigrationStaging; c != nil {
 		if !c.Ready || c.Released {
 			return errdefs.ErrFailedPrecondition
@@ -297,11 +370,11 @@ func checkMigrationStagingWrite(bucket *bolt.Bucket, record runtimeSlotJournalRe
 				return err
 			}
 		}
-		return checkMigrationStagingPool(bucket, record.Registration.SlotID)
+		return j.checkMigrationStagingPool(bucket, record.Registration.SlotID)
 	}
 	return bucket.ForEach(func(_, payload []byte) error {
-		other, err := decodeRuntimeSlotJournalRecord(payload)
-		if err != nil {
+		other, excluded, err := j.migrationPoolScanRecord(payload)
+		if err != nil || excluded {
 			return err
 		}
 		if other.MigrationStaging != nil && !other.MigrationStaging.Released && other.Proof == nil {

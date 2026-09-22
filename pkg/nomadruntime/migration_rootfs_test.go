@@ -3,6 +3,7 @@ package nomadruntime
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -17,6 +18,88 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
+
+type primingMigrationCutRuntime struct {
+	*migrationCutTestRuntime
+	primeStarted chan struct{}
+	cutStarted   chan struct{}
+	releasePrime chan struct{}
+	primeExited  chan struct{}
+	primeErr     error
+}
+
+func (r *primingMigrationCutRuntime) PrimeMigrationImageInventory(ctx context.Context, _ string) error {
+	close(r.primeStarted)
+	defer close(r.primeExited)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.releasePrime:
+		return r.primeErr
+	}
+}
+
+func (r *primingMigrationCutRuntime) CaptureMigrationRootFS(ctx context.Context, stage rootfshandoff.StageRequest, request rootfshandoff.MigrationRootFSCutRequest) (rootfshandoff.MigrationRootFSCut, error) {
+	select {
+	case <-r.primeStarted:
+	case <-ctx.Done():
+		return rootfshandoff.MigrationRootFSCut{}, ctx.Err()
+	}
+	close(r.cutStarted)
+	return r.migrationCutTestRuntime.CaptureMigrationRootFS(ctx, stage, request)
+}
+
+func TestMigrationRootFSInventoryOverlapJoinsBeforeReleasingCustody(t *testing.T) {
+	for _, outcome := range []string{"success", "inventory failure", "cut failure", "cancellation"} {
+		t.Run(outcome, func(t *testing.T) {
+			d, capture, runtime, _ := migrationRootFSNodeFixture(t)
+			capture.State = protocol.MigrationCaptureComplete
+			require.NoError(t, d.RecordMigrationCapture(t.Context(), capture))
+			r := &primingMigrationCutRuntime{migrationCutTestRuntime: runtime, primeStarted: make(chan struct{}),
+				cutStarted: make(chan struct{}), releasePrime: make(chan struct{}), primeExited: make(chan struct{})}
+			d.runtime, d.migrationPeer = r, &migrationPeer{}
+			if outcome == "cut failure" {
+				r.sealErr = errors.New("seal unavailable")
+			}
+			if outcome == "inventory failure" {
+				r.primeErr = errors.New("optional inventory unavailable")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := d.SealMigrationRootFS(ctx, capture.Request); done <- err }()
+			select {
+			case <-r.cutStarted:
+			case <-ctx.Done():
+				t.Fatal("RootFS sealing did not overlap the blocked inventory")
+			}
+			if outcome == "success" || outcome == "inventory failure" {
+				select {
+				case err := <-done:
+					t.Fatalf("custody released before inventory joined: %v", err)
+				default:
+				}
+				require.False(t, d.beginReconciliation(capture.Request.Target.SlotID, nil))
+				close(r.releasePrime)
+			} else if outcome == "cancellation" {
+				cancel()
+			}
+			err := <-done
+			if outcome == "cut failure" {
+				require.ErrorContains(t, err, "seal unavailable")
+			} else if outcome != "cancellation" {
+				require.NoError(t, err, "optional hash failure must fall back to normal planning")
+			}
+			select {
+			case <-r.primeExited:
+			default:
+				t.Fatal("inventory worker outlived source custody")
+			}
+			require.True(t, d.beginReconciliation(capture.Request.Target.SlotID, nil))
+			d.endReconciliation(capture.Request.Target.SlotID)
+		})
+	}
+}
 
 type migrationCutTestRuntime struct {
 	*fakeRootFSRuntime

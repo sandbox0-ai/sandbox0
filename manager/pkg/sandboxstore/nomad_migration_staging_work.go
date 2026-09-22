@@ -14,7 +14,9 @@ var _ nomadmigration.StagingStore = (*PGSandboxStore)(nil)
 const nomadMigrationStagingWorkPredicate = `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable AND l.phase='preparing'
     AND m.assignment_request IS NOT NULL AND m.preparation_request IS NULL AND m.cpu_preflight_destination IS NOT NULL
     AND NOT m.staging_source_release_requested AND NOT m.staging_destination_release_requested
-    AND (m.staging_source_receipt IS NULL OR m.staging_destination_receipt IS NULL)
+    AND (m.staging_source_receipt IS NULL OR m.staging_destination_receipt IS NULL OR
+        (m.capture_peer_request IS NOT NULL AND NOT m.capture_peer_disabled
+            AND (m.capture_peer_source_receipt IS NULL OR m.capture_peer_destination_receipt IS NULL)))
     AND l.created_at <= clock_timestamp() AND l.created_at + INTERVAL '2 minutes' > clock_timestamp()
     AND m.cpu_preflight_requested_at <= clock_timestamp() AND m.cpu_preflight_requested_at + INTERVAL '2 minutes' > clock_timestamp()`
 

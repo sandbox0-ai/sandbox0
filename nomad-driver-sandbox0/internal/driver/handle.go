@@ -673,12 +673,11 @@ func (h *taskHandle) executeClaim(
 
 	imageDirectory := ""
 	if request.MigrationRestore != nil {
-		imageDirectory, err = h.prepareMigrationRestore(*request.MigrationRestore)
+		imageDirectory, rootfsSource, timings.rootFSEnsure, err = h.prepareMigrationRestore(*request.MigrationRestore, *request.Stage)
 		if err != nil {
 			return h.poisonClaimLaunch(err, false)
 		}
-	}
-	if durableStage != nil {
+	} else if durableStage != nil {
 		attachCtx, attachCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		stepStarted = time.Now()
 		mount, ensureErr := h.rootfs.Ensure(attachCtx, *request.Stage, h.handleWriterLeaseLoss)

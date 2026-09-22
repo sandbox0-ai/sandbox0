@@ -3,6 +3,9 @@ package nomadmigration
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/containerd/errdefs"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -50,7 +53,7 @@ func NewSourceRecovery(store SourceRecoveryStore, node SourceRecoveryNode) (*Coo
 		if source.Validate() != nil || source.Assignment.OperationID != id {
 			return false, errors.New("invalid migration source recovery work")
 		}
-		captured, err := node.RecoverMigrationCapture(ctx, source.Capture)
+		captured, err := observeSourceCapture(ctx, node, source.Capture)
 		if err != nil {
 			return false, err
 		}
@@ -85,7 +88,10 @@ func NewSourceRecovery(store SourceRecoveryStore, node SourceRecoveryNode) (*Coo
 		if command == nil || command.CPULaunch == nil || command.Capture.Request != source.Capture {
 			return false, errors.New("publication changed source recovery authority")
 		}
-		expected := protocol.MigrationPublicationRequest{Assignment: source.Assignment, Capture: *captured, CPUFeaturesDigest: cpu, CPULaunch: &source.Launch, CompatibilityDigest: command.CompatibilityDigest}
+		// Compatibility and the reserved destination certificate are selected
+		// by the locked store transaction, not by the captured source.
+		expected := protocol.MigrationPublicationRequest{Assignment: source.Assignment, Capture: *captured, CPUFeaturesDigest: cpu, CPULaunch: &source.Launch,
+			CompatibilityDigest: command.CompatibilityDigest, DestinationPeerCertificateSHA256: command.DestinationPeerCertificateSHA256}
 		want, err := expected.Digest()
 		got, actualErr := command.Digest()
 		if err != nil || actualErr != nil || got != want {
@@ -93,4 +99,32 @@ func NewSourceRecovery(store SourceRecoveryStore, node SourceRecoveryNode) (*Coo
 		}
 		return true, nil
 	}}, nil
+}
+
+// Capture dispatch and source recovery are independent lanes. The first
+// observation can arrive before the driver's intent is journaled. Briefly
+// await that exact capture rather than imposing an error backoff on a healthy
+// source. A concurrent driver-owned RootFS seal may also report unavailable;
+// it has the same bounded retry window. No attempt starts execution or changes
+// capture authority. The bounded window limits work when a node is absent or
+// a larger checkpoint is still busy.
+func observeSourceCapture(ctx context.Context, node SourceRecoveryNode, request protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		capture, err := node.RecoverMigrationCapture(ctx, request)
+		pending := errdefs.IsNotFound(err) || errdefs.IsUnavailable(err) || (err == nil && capture != nil && capture.Validate() == nil && capture.Request == request && capture.State == protocol.MigrationCaptureIntent)
+		if !pending || !time.Now().Before(deadline) {
+			return capture, err
+		}
+		timer := time.NewTimer(min(50*time.Millisecond, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

@@ -11,9 +11,64 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMigrationStagingPeerIdentitySurvivesRestartAndConfigChanges(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("initially_enabled_%t", enabled), func(t *testing.T) {
+			daemon, request := migrationStagingReservationFixture(t)
+			if enabled {
+				cert, err := runtimecheckpoint.NewPeerIdentity()
+				require.NoError(t, err)
+				endpoint, err := runtimecheckpoint.NewPeerEndpoint("127.0.0.1:19001", cert)
+				require.NoError(t, err)
+				daemon.migrationPeer = &migrationPeer{identity: cert, endpoint: endpoint}
+			}
+			first, err := daemon.ReserveMigrationStaging(t.Context(), request)
+			require.NoError(t, err)
+			require.Equal(t, enabled, first.PeerCertificateSHA256 != "")
+			require.Equal(t, enabled, first.Peer.Address != "")
+			record, err := daemon.journal.Get(request.Target.SlotID)
+			require.NoError(t, err)
+			if enabled {
+				require.Equal(t, runtimeSlotCapturePeerJournalVersion, record.Version)
+				for _, version := range []int{runtimeSlotStagingJournalVersion, runtimeSlotCaptureUploadJournalVersion} {
+					changed := record
+					changed.Version = version
+					payload, err := json.Marshal(changed)
+					require.NoError(t, err)
+					_, err = decodeRuntimeSlotJournalRecord(payload)
+					require.ErrorContains(t, err, "non-downgradable")
+				}
+			}
+			path := daemon.journal.db.Path()
+			require.NoError(t, daemon.journal.Close())
+			daemon.journal, err = newRuntimeSlotJournal(path, time.Hour)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, daemon.journal.Close()) })
+			cert, err := runtimecheckpoint.NewPeerIdentity()
+			require.NoError(t, err)
+			endpoint, err := runtimecheckpoint.NewPeerEndpoint("127.0.0.1:19002", cert)
+			require.NoError(t, err)
+			daemon.migrationPeer = &migrationPeer{identity: cert, endpoint: endpoint}
+			again, err := daemon.ReserveMigrationStaging(t.Context(), request)
+			require.NoError(t, err)
+			require.Equal(t, first, again, "a replacement daemon cannot replace a committed peer pin or enable an old reservation")
+			daemon.migrationPeer = nil
+			again, err = daemon.ReserveMigrationStaging(t.Context(), request)
+			require.NoError(t, err)
+			require.Equal(t, first, again)
+			require.NoError(t, daemon.ReleaseMigrationStaging(t.Context(), request))
+			record, err = daemon.journal.Get(request.Target.SlotID)
+			require.NoError(t, err)
+			require.True(t, record.MigrationStaging.Released)
+			require.Equal(t, first.Peer, record.MigrationStaging.Peer)
+		})
+	}
+}
 
 func migrationStagingSourceRequest(t *testing.T, registration RuntimeSlotRegistration) protocol.MigrationStagingRequest {
 	t.Helper()

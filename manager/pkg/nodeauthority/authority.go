@@ -81,23 +81,25 @@ type Config struct {
 // ClaimPlannerConfig provides the non-listener dependencies needed by the
 // request path. Node and network delivery are always the component's own hub.
 type ClaimPlannerConfig struct {
-	CapacityWait   runtimeslotclaim.CapacityWaitConfig
-	CapacityWake   func()
-	Prober         runtimeslotclaim.CommandProber
-	TokenGenerator runtimeslotclaim.TokenGenerator
-	Observer       runtimeslotclaim.Observer
-	DemandPoolID   string
-	DemandTTL      time.Duration
-	WriterTokenKey []byte
-	ClaimTTL       time.Duration
-	SLO            time.Duration
-	Now            func() time.Time
+	CapacityWait      runtimeslotclaim.CapacityWaitConfig
+	CapacityWake      func()
+	Prober            runtimeslotclaim.CommandProber
+	TokenGenerator    runtimeslotclaim.TokenGenerator
+	Observer          runtimeslotclaim.Observer
+	MigrationObserver func(runtimeslotclaim.Observation)
+	DemandPoolID      string
+	DemandTTL         time.Duration
+	WriterTokenKey    []byte
+	ClaimTTL          time.Duration
+	SLO               time.Duration
+	Now               func() time.Time
 }
 
 // Component owns one listener-local node channel registry. Every replica may
 // run the terminal loop so the instance holding a node stream can make
 // progress; PostgreSQL fences and deterministic operations serialize effects.
 type Component struct {
+	migrationProgress    nomadmigration.Progress
 	store                Store
 	hub                  *runtimeslotnode.ChannelHub
 	server               *rootfswriterauthority.Server
@@ -284,11 +286,16 @@ func New(config Config) (*Component, error) {
 		_ = hub.Close()
 		return nil, fmt.Errorf("create node authority server: %w", err)
 	}
-	return &Component{
+	component := &Component{
 		store: config.Store, hub: hub, server: server,
 		terminal: terminal, allocation: allocation, pressure: pressure, transfers: transfers, preflights: preflights, sourceRecovery: sourceRecovery,
 		staging: staging, stagingRelease: stagingRelease, evacuation: evacuation, failures: failures, failureStops: failureStops, failureCleanups: failureCleanups, failureFinalizations: failureFinalizations, captureFailures: captureFailures,
-	}, nil
+	}
+	for _, lane := range []*nomadmigration.Coordinator{sourceRecovery, staging, stagingRelease, preflights, transfers,
+		evacuation, failures, failureStops, failureCleanups, failureFinalizations, captureFailures} {
+		lane.SetProgress(&component.migrationProgress)
+	}
+	return component, nil
 }
 
 func newNodeAuthorityMux(writer, slots, channel, health http.Handler) *http.ServeMux {
@@ -477,7 +484,8 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 		Store: c.store, Network: c.hub, Node: c.hub,
 		Prober: config.Prober, TokenGenerator: config.TokenGenerator,
 		Observer: config.Observer, WriterTokenKey: config.WriterTokenKey,
-		DemandRecorder: c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
+		MigrationObserver: config.MigrationObserver,
+		DemandRecorder:    c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
 		ClaimTTL: config.ClaimTTL, SLO: config.SLO, Now: config.Now,
 	})
 	if err != nil {
@@ -509,6 +517,9 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 	}
 	c.migrationMu.Lock()
 	c.sourceExecution = sourceExecution
+	for _, lane := range []*nomadmigration.Coordinator{sourceExecution, handover, cancellation, destination} {
+		lane.SetProgress(&c.migrationProgress)
+	}
 	c.handovers = handover
 	c.cancellations = cancellation
 	c.destinations = destination

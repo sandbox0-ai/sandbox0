@@ -177,6 +177,12 @@ func newNodeRuntimeChannelAgent(
 	if _, ok := cleaner.(MigrationSourceFinalizer); ok {
 		agentConfig.MigrationFinalizeExecutor = executor
 	}
+	if _, ok := cleaner.(MigrationCapturePeerPreparer); ok {
+		agentConfig.MigrationCapturePeerExecutor = executor
+	}
+	if _, ok := cleaner.(MigrationImagePrefetcher); ok {
+		agentConfig.MigrationImagePrefetchExecutor = executor
+	}
 	if _, ok := cleaner.(MigrationImagePreparer); ok {
 		agentConfig.MigrationImagePrepareExecutor = executor
 	}
@@ -194,6 +200,9 @@ func newNodeRuntimeChannelAgent(
 	}
 	if _, ok := cleaner.(MigrationSourceFencer); ok {
 		agentConfig.MigrationFenceExecutor = executor
+	}
+	if _, ok := cleaner.(MigrationPublicationPlanner); ok {
+		agentConfig.MigrationPublicationPlanExecutor = executor
 	}
 	if _, ok := cleaner.(MigrationImagePublisher); ok {
 		agentConfig.MigrationPublishExecutor = executor
@@ -584,4 +593,48 @@ func (e *nodeRuntimeChannelExecutor) FinalizeFailedMigrationCapture(ctx context.
 		return nil, errdefs.ErrUnavailable
 	}
 	return cleaner.FinalizeFailedMigrationCapture(ctx, request)
+}
+
+// PlanMigrationPublication has the same exact source authority as publication,
+// but its response cannot be used as a durable image receipt.
+func (e *nodeRuntimeChannelExecutor) PlanMigrationPublication(ctx context.Context, request protocol.MigrationPublicationRequest) (*protocol.MigrationPublicationPlan, error) {
+	if e == nil {
+		return nil, errdefs.ErrUnavailable
+	}
+	if err := e.validateTarget(request.Capture.Request.Target); err != nil {
+		return nil, err
+	}
+	planner, ok := e.cleaner.(MigrationPublicationPlanner)
+	if !ok {
+		return nil, errdefs.ErrUnavailable
+	}
+	return planner.PlanMigrationPublication(ctx, request)
+}
+
+func (e *nodeRuntimeChannelExecutor) PrefetchMigrationImage(ctx context.Context, request protocol.MigrationImagePrefetchRequest) (*protocol.MigrationImagePrefetched, error) {
+	if e == nil {
+		return nil, errdefs.ErrUnavailable
+	}
+	if err := e.validateTarget(request.Staging.Target); err != nil {
+		return nil, err
+	}
+	prefetcher, ok := e.cleaner.(MigrationImagePrefetcher)
+	if !ok {
+		return nil, errdefs.ErrUnavailable
+	}
+	return prefetcher.PrefetchMigrationImage(ctx, request)
+}
+
+func (e *nodeRuntimeChannelExecutor) PrepareMigrationCapturePeer(ctx context.Context, request protocol.MigrationCapturePeerRequest) (*protocol.MigrationCapturePeerPrepared, error) {
+	if e == nil {
+		return nil, errdefs.ErrUnavailable
+	}
+	if err := e.validateTarget(request.Staging.Target); err != nil {
+		return nil, err
+	}
+	prefetcher, ok := e.cleaner.(MigrationCapturePeerPreparer)
+	if !ok {
+		return nil, errdefs.ErrUnavailable
+	}
+	return prefetcher.PrepareMigrationCapturePeer(ctx, request)
 }

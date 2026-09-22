@@ -212,8 +212,18 @@ func TestMigrationHTTPHandoverAndLegacyControlFencing(t *testing.T) {
 		r.Header.Set(internalauth.DefaultTokenHeader, prepareToken)
 		w := httptest.NewRecorder()
 		f.s.router.ServeHTTP(w, r)
+		// The activation/readiness gate runs before the lifecycle migration
+		// guard and rejects a prepared source before it reaches the handler.
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("legacy control %s bypassed readiness fencing: %d", path, w.Code)
+		}
+		guarded := f.s.migrationLifecycleMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("legacy lifecycle handler ran while migration owned the process")
+		}))
+		w = httptest.NewRecorder()
+		guarded.ServeHTTP(w, r)
 		if w.Code != http.StatusConflict {
-			t.Fatalf("legacy control %s bypassed migration: %d", path, w.Code)
+			t.Fatalf("legacy control %s bypassed migration fencing: %d", path, w.Code)
 		}
 	}
 	if _, err := client.ProbeCommandReady(context.Background(), host.URL, prepareToken); err == nil {

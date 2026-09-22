@@ -3200,3 +3200,25 @@ func cloneNomadPausedRebaseCandidate(
 	copy.WorkerProofDigest = append([]byte(nil), candidate.WorkerProofDigest...)
 	return &copy
 }
+
+func TestPauseAPIWaitsForCommittedPausePhysicalCleanup(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", AlreadyPaused: true,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+	}
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+	response, err := fixture.service.PauseSandboxAndWait(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.False(t, response.Paused, "a committed head is not proof that resume can acquire a new runtime")
+	require.Equal(t, managerapi.SandboxStatusStarting, response.Status)
+	require.Equal(t, []string{"sandbox-1"}, enqueuer.sandboxIDs)
+	require.Len(t, fixture.store.quiesceCalls, 1)
+
+	fixture.store.pauseCandidate.SlotID = ""
+	response, err = fixture.service.PauseSandboxAndWait(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.True(t, response.Paused)
+	require.Equal(t, managerapi.SandboxStatusPaused, response.Status)
+}

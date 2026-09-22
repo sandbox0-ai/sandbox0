@@ -39,6 +39,7 @@ type Runsc interface {
 	Start(ctx context.Context, containerID string) error
 	Wait(ctx context.Context, containerID string) (WaitResult, error)
 	Kill(ctx context.Context, containerID, signal string) error
+	SignalInit(ctx context.Context, containerID, signal string) error
 	Delete(ctx context.Context, containerID string, force bool) error
 	State(ctx context.Context, containerID string) (RunscState, error)
 	Stats(ctx context.Context, containerID string) (RunscStats, error)
@@ -109,6 +110,15 @@ func (r *Command) Kill(ctx context.Context, containerID, signal string) error {
 		signal = "TERM"
 	}
 	return r.run(ctx, "kill", "--all", containerID, signal)
+}
+
+// SignalInit lets the guest supervisor quiesce durable process state before
+// its children are terminated. Kill remains the whole-container fence.
+func (r *Command) SignalInit(ctx context.Context, containerID, signal string) error {
+	if signal == "" {
+		signal = "TERM"
+	}
+	return r.run(ctx, "kill", containerID, signal)
 }
 
 func (r *Command) Delete(ctx context.Context, containerID string, force bool) error {

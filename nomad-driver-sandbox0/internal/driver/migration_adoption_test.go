@@ -55,7 +55,8 @@ func TestMigrationAdoptionCommandReadyReturnsDurableReceiptAndAllowsStop(t *test
 	require.Equal(t, 1, countMigrationCall(runner.callsSnapshot(), "restore"))
 	require.NoError(t, h.Signal("USR1"))
 	require.NoError(t, h.Stop(0, "TERM"))
-	require.Contains(t, runner.callsSnapshot(), "kill:TERM")
+	require.Contains(t, runner.callsSnapshot(), "kill:USR1")
+	require.Contains(t, runner.callsSnapshot(), "signal-init:TERM")
 }
 
 func TestMigrationAdoptionLostResponseRetryDoesNotRestoreAgain(t *testing.T) {

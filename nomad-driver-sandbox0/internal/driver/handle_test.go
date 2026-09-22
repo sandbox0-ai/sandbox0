@@ -114,6 +114,15 @@ func (r *fakeRunsc) Kill(_ context.Context, _, signal string) error {
 	return nil
 }
 
+func (r *fakeRunsc) SignalInit(_ context.Context, _, signal string) error {
+	r.record("signal-init:" + signal)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.releaseOnce.Do(func() { close(r.waitReleased) })
+	r.state = "stopped"
+	return nil
+}
+
 func (r *fakeRunsc) Delete(_ context.Context, _ string, force bool) error {
 	if force {
 		r.record("delete:force")
@@ -427,4 +436,31 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func TestStopSignalsSupervisorBeforeChildrenAndKeepsForceCleanup(t *testing.T) {
+	for _, signal := range []string{"", "TERM", "SIGTERM", "INT", "SIGINT", "KILL"} {
+		t.Run("signal_"+signal, func(t *testing.T) {
+			runner := newFakeRunsc()
+			h := newTaskHandle(taskHandleOptions{runner: runner, containerID: "guest", bundleDir: t.TempDir()})
+			h.phase = phaseActive
+			if err := h.Stop(0, signal); err != nil {
+				t.Fatal(err)
+			}
+			expected := "signal-init:" + signal
+			if signal == "" {
+				expected = "signal-init:TERM"
+			}
+			if signal == "KILL" {
+				expected = "kill:KILL"
+			}
+			calls := runner.callsSnapshot()
+			if !contains(calls, expected) || !contains(calls, "delete:force") {
+				t.Fatalf("stop calls = %v", calls)
+			}
+			if signal != "KILL" && (contains(calls, "kill:TERM") || contains(calls, "kill:SIGTERM") || contains(calls, "kill:INT") || contains(calls, "kill:SIGINT")) {
+				t.Fatalf("graceful shutdown signaled session children: %v", calls)
+			}
+		})
+	}
 }

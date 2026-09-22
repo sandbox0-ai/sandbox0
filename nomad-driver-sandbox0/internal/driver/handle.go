@@ -43,12 +43,13 @@ import (
 type slotPhase string
 
 const (
-	phaseWarm     slotPhase = "warm"
-	phaseClaiming slotPhase = "claiming"
-	phaseActive   slotPhase = "active"
-	phaseStopping slotPhase = "stopping"
-	phaseExited   slotPhase = "exited"
-	phasePoisoned slotPhase = "poisoned"
+	phaseWarm      slotPhase = "warm"
+	phaseClaiming  slotPhase = "claiming"
+	phaseActive    slotPhase = "active"
+	phaseMigrating slotPhase = "migrating"
+	phaseStopping  slotPhase = "stopping"
+	phaseExited    slotPhase = "exited"
+	phasePoisoned  slotPhase = "poisoned"
 )
 
 // ClaimRequest is the shared one-shot region-to-driver claim contract.
@@ -58,24 +59,29 @@ type ClaimRequest = protocol.NodeClaimControlRequest
 type CommandReadyRequest = protocol.CommandReadyControlRequest
 
 type claimMetadata struct {
-	OperationID         string                      `json:"operation_id,omitempty"`
-	ClaimID             string                      `json:"claim_id,omitempty"`
-	LaunchAttempt       string                      `json:"launch_attempt,omitempty"`
-	RootFSBindingDigest string                      `json:"rootfs_binding_digest,omitempty"`
-	ClaimNetworkDigest  string                      `json:"claim_network_digest,omitempty"`
-	ProcdInstanceID     string                      `json:"procd_instance_id,omitempty"`
-	CommandReadyDigest  string                      `json:"command_ready_digest,omitempty"`
-	RuntimeRevision     string                      `json:"runtime_revision,omitempty"`
-	ResourceLeaseID     string                      `json:"resource_lease_id,omitempty"`
-	ResourceLeaseDigest string                      `json:"resource_lease_digest,omitempty"`
-	RootfsPath          string                      `json:"rootfs_path"`
-	WriterEpoch         string                      `json:"writer_epoch"`
-	Stage               *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	MigrationCPULaunch  *protocol.MigrationCPULaunch       `json:"migration_cpu_launch,omitempty"`
+	MigrationAdoption   *protocol.MigrationAdoptionReceipt `json:"migration_adoption,omitempty"`
+	MigrationRestore    *protocol.MigrationRestoreRequest  `json:"migration_restore,omitempty"`
+	SandboxID           string                             `json:"sandbox_id,omitempty"`
+	OperationID         string                             `json:"operation_id,omitempty"`
+	ClaimID             string                             `json:"claim_id,omitempty"`
+	LaunchAttempt       string                             `json:"launch_attempt,omitempty"`
+	RootFSBindingDigest string                             `json:"rootfs_binding_digest,omitempty"`
+	ClaimNetworkDigest  string                             `json:"claim_network_digest,omitempty"`
+	ProcdInstanceID     string                             `json:"procd_instance_id,omitempty"`
+	CommandReadyDigest  string                             `json:"command_ready_digest,omitempty"`
+	RuntimeRevision     string                             `json:"runtime_revision,omitempty"`
+	ResourceLeaseID     string                             `json:"resource_lease_id,omitempty"`
+	ResourceLeaseDigest string                             `json:"resource_lease_digest,omitempty"`
+	RootfsPath          string                             `json:"rootfs_path"`
+	WriterEpoch         string                             `json:"writer_epoch"`
+	Stage               *rootfshandoff.StageRequest        `json:"stage,omitempty"`
 }
 
 // PersistedState carries enough identity to recover a runsc task without reusing its claim token.
 type PersistedState struct {
-	TaskConfig *drivers.TaskConfig `json:"task_config"`
+	Migration  *protocol.MigrationCapture `json:"migration,omitempty"`
+	TaskConfig *drivers.TaskConfig        `json:"task_config"`
 	// Nomad's TaskConfig omits its private raw driver config during persistence.
 	// Save the normalized immutable inputs explicitly, never reconstruct defaults.
 	DriverConfig *TaskConfig    `json:"driver_config"`
@@ -131,15 +137,21 @@ type taskHandle struct {
 	networkChain                  string
 	logger                        hclog.Logger
 
-	phase        slotPhase
-	startedAt    time.Time
-	completedAt  time.Time
-	exitResult   *drivers.ExitResult
-	rootMounted  bool
-	claim        *claimMetadata
-	claimAttempt *claimAttempt
-	stage        *rootfshandoff.StageRequest
-	closed       bool
+	phase                    slotPhase
+	startedAt                time.Time
+	completedAt              time.Time
+	exitResult               *drivers.ExitResult
+	rootMounted              bool
+	claim                    *claimMetadata
+	claimAttempt             *claimAttempt
+	stage                    *rootfshandoff.StageRequest
+	migration                *protocol.MigrationCapture
+	migrationFinalized       bool
+	migrationCancel          context.CancelFunc
+	migrationInFlight        bool
+	migrationAdmissionFenced bool
+	migrationFenceOnce       sync.Once
+	closed                   bool
 
 	done chan struct{}
 
@@ -163,6 +175,7 @@ type claimAttempt struct {
 // claimTimings splits the synchronous node claim without adding identifiers to
 // metric cardinality or changing the one-shot claim protocol.
 type claimTimings struct {
+	cpuLaunchVerify    time.Duration
 	bundleWrite        time.Duration
 	claimStatePersist  time.Duration
 	rootFSEnsure       time.Duration
@@ -177,6 +190,7 @@ type claimTimings struct {
 func (t claimTimings) observation(elapsed time.Duration) protocol.NodeClaimTiming {
 	return protocol.NodeClaimTiming{
 		ClaimDurationMicros:      elapsed.Microseconds(),
+		CPULaunchVerifyMicros:    t.cpuLaunchVerify.Microseconds(),
 		BundleWriteMicros:        t.bundleWrite.Microseconds(),
 		ClaimStatePersistMicros:  t.claimStatePersist.Microseconds(),
 		RootFSEnsureMicros:       t.rootFSEnsure.Microseconds(),
@@ -193,6 +207,7 @@ func (h *taskHandle) logClaimTimings(success bool, elapsed time.Duration, timing
 	args := []any{
 		"success", success,
 		"claim_duration_us", elapsed.Microseconds(),
+		"cpu_launch_verify_us", timings.cpuLaunchVerify.Microseconds(),
 		"bundle_write_us", timings.bundleWrite.Microseconds(),
 		"claim_state_persist_us", timings.claimStatePersist.Microseconds(),
 		"rootfs_ensure_us", timings.rootFSEnsure.Microseconds(),
@@ -218,6 +233,7 @@ func (h *taskHandle) persistedLocked() PersistedState {
 	driverConfig := h.driverConfig
 	driverConfig.Args = append([]string(nil), driverConfig.Args...)
 	return PersistedState{
+		Migration:    cloneMigrationCapture(h.migration),
 		TaskConfig:   h.taskConfig,
 		DriverConfig: &driverConfig,
 		ContainerID:  h.containerID,
@@ -265,7 +281,12 @@ func writePersistedState(state PersistedState, path string) error {
 	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("replace driver state: %w", err)
 	}
-	return nil
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func readPersistedState(path string) (PersistedState, error) {
@@ -498,6 +519,11 @@ func (h *taskHandle) executeClaim(
 	if err != nil {
 		return fmt.Errorf("encode claim retry identity: %w", err)
 	}
+	var owned ClaimRequest
+	if err := json.Unmarshal(requestPayload, &owned); err != nil {
+		return err
+	}
+	request = owned
 	requestDigest := sha256.Sum256(requestPayload)
 
 	h.mu.Lock()
@@ -622,7 +648,8 @@ func (h *taskHandle) executeClaim(
 	h.rootMounted = true
 	h.phase = phaseClaiming
 	if durableStage != nil {
-		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage}
+		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage, MigrationRestore: request.MigrationRestore}
+		h.claim.SandboxID = request.Runtime.SandboxID
 		if startingRequest != nil {
 			h.claim.OperationID = startingRequest.OperationID
 			h.claim.ClaimID = startingRequest.ClaimID
@@ -644,7 +671,13 @@ func (h *taskHandle) executeClaim(
 		return fmt.Errorf("persist claiming state: %w", err)
 	}
 
-	if durableStage != nil {
+	imageDirectory := ""
+	if request.MigrationRestore != nil {
+		imageDirectory, rootfsSource, timings.rootFSEnsure, err = h.prepareMigrationRestore(*request.MigrationRestore, *request.Stage)
+		if err != nil {
+			return h.poisonClaimLaunch(err, false)
+		}
+	} else if durableStage != nil {
 		attachCtx, attachCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		stepStarted = time.Now()
 		mount, ensureErr := h.rootfs.Ensure(attachCtx, *request.Stage, h.handleWriterLeaseLoss)
@@ -710,6 +743,11 @@ func (h *taskHandle) executeClaim(
 		}
 	}
 
+	stepStarted = time.Now()
+	cpuCtx, cpuCancel := context.WithTimeout(context.Background(), migrationCPULaunchVerifyTimeout)
+	cpuWitness := h.beginMigrationCPULaunch(cpuCtx, request)
+	cpuCancel()
+	timings.cpuLaunchVerify = time.Since(stepStarted)
 	ctx, cancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
 	defer cancel()
 	stepStarted = time.Now()
@@ -719,27 +757,61 @@ func (h *taskHandle) executeClaim(
 		return h.poisonClaimLaunch(fmt.Errorf("runsc create: %w", err), true)
 	}
 	cancel()
-	startCtx, startCancel := context.WithTimeout(context.Background(), h.runscOperationTimeout)
+	startTimeout := h.runscOperationTimeout
+	if request.MigrationRestore != nil {
+		startTimeout = 5 * time.Minute
+	}
+	startCtx, startCancel := context.WithTimeout(context.Background(), startTimeout)
+	if request.MigrationRestore != nil {
+		h.mu.Lock()
+		h.migrationCancel = startCancel
+		fenced := h.migrationAdmissionFenced
+		h.mu.Unlock()
+		if fenced {
+			startCancel()
+		}
+		defer func() { h.mu.Lock(); h.migrationCancel = nil; h.mu.Unlock() }()
+	}
 	defer startCancel()
 	stepStarted = time.Now()
-	err = h.runner.Start(startCtx, h.containerID)
+	var cpuLaunch *protocol.MigrationCPULaunch
+	if request.MigrationRestore != nil {
+		cpuLaunch, err = h.restoreMigrationExecution(startCtx, *request.MigrationRestore, imageDirectory)
+	} else {
+		err = h.runner.Start(startCtx, h.containerID)
+	}
 	timings.runscStart = time.Since(stepStarted)
 	if err != nil {
-		return h.poisonClaimLaunch(fmt.Errorf("runsc start: %w", err), true)
+		return h.poisonClaimLaunch(fmt.Errorf("launch workload: %w", err), true)
 	}
+	stepStarted = time.Now()
+	cpuCtx, cpuCancel = context.WithTimeout(context.Background(), migrationCPULaunchVerifyTimeout)
+	if request.MigrationRestore == nil {
+		cpuLaunch = h.completeMigrationCPULaunch(cpuCtx, request, cpuWitness)
+	}
+	cpuCancel()
+	timings.cpuLaunchVerify += time.Since(stepStarted)
 
 	h.mu.Lock()
+	if request.MigrationRestore != nil && h.migrationAdmissionFenced {
+		h.mu.Unlock()
+		return h.poisonClaimLaunch(errors.New("migration restore lost execution authority"), false)
+	}
 	h.phase = phaseActive
 	if h.claim == nil {
-		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage}
+		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage, MigrationRestore: request.MigrationRestore}
 	}
 	h.claim.RootfsPath = resolvedRootfs
+	h.claim.MigrationCPULaunch = cpuLaunch
 	h.stage = durableStage
 	h.mu.Unlock()
 	stepStarted = time.Now()
 	err = h.persist()
 	timings.activeStatePersist = time.Since(stepStarted)
 	if err != nil {
+		if request.MigrationRestore != nil {
+			return h.failMigrationRestore(fmt.Errorf("persist restored state: %w", err))
+		}
 		_ = h.runner.Kill(context.Background(), h.containerID, "KILL")
 		_ = h.mounter.Unmount(h.rootMount)
 		_ = h.runner.Delete(context.Background(), h.containerID, true)
@@ -766,6 +838,20 @@ func (h *taskHandle) activeRegionalClaimRetryMatchesLocked(request ClaimRequest)
 	if h.claim == nil || h.claim.Stage == nil || request.Stage == nil {
 		return false, nil
 	}
+	if (h.claim.MigrationRestore == nil) != (request.MigrationRestore == nil) {
+		return false, nil
+	}
+	if request.MigrationRestore != nil {
+		want, err := h.claim.MigrationRestore.Digest()
+		if err != nil {
+			return false, err
+		}
+		actual, err := request.MigrationRestore.Digest()
+		if err != nil || actual != want {
+			return false, err
+		}
+	}
+
 	if err := request.ValidateRegional(); err != nil {
 		return false, fmt.Errorf("validate active regional claim retry: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
@@ -805,24 +891,33 @@ func (h *taskHandle) handleWriterLeaseLoss(cause error) {
 	}
 	h.leaseFenceOnce.Do(func() {
 		leaseErr := fmt.Errorf("RootFS writer lease lost: %w", cause)
-		h.mu.Lock()
-		if h.closed || h.phase == phaseExited || h.phase == phasePoisoned {
-			h.mu.Unlock()
+		if h.fenceMigrationExecution(leaseErr) {
 			return
 		}
-		h.phase = phasePoisoned
-		h.exitResult = &drivers.ExitResult{Err: leaseErr}
-		if h.completedAt.IsZero() {
-			h.completedAt = time.Now()
-		}
-		closeDoneLocked(h.done)
-		h.mu.Unlock()
-		if err := h.persist(); err != nil {
-			h.logger.Error("persist writer lease loss", "error", err)
-		}
-		h.logger.Error("fencing expired RootFS writer", "error", leaseErr)
-		go h.retryWriterLeaseFence()
+		h.poisonLostWriter(leaseErr)
 	})
+}
+
+// poisonLostWriter also handles lease loss racing with durable migration adoption.
+// That handoff may occur after leaseFenceOnce has selected migration fencing.
+func (h *taskHandle) poisonLostWriter(leaseErr error) {
+	h.mu.Lock()
+	if h.closed || h.phase == phaseExited || h.phase == phasePoisoned {
+		h.mu.Unlock()
+		return
+	}
+	h.phase = phasePoisoned
+	h.exitResult = &drivers.ExitResult{Err: leaseErr}
+	if h.completedAt.IsZero() {
+		h.completedAt = time.Now()
+	}
+	closeDoneLocked(h.done)
+	h.mu.Unlock()
+	if err := h.persist(); err != nil {
+		h.logger.Error("persist writer lease loss", "error", err)
+	}
+	h.logger.Error("fencing expired RootFS writer", "error", leaseErr)
+	go h.retryWriterLeaseFence()
 }
 
 func (h *taskHandle) retryWriterLeaseFence() {
@@ -868,6 +963,12 @@ func (h *taskHandle) failClaimBeforeLaunch(cause error, writerConsumed bool) err
 // poisonClaimLaunch prevents reuse after the writer was consumed or regional
 // starting may have committed, and leaves failed detach state recoverable.
 func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error {
+	h.mu.Lock()
+	restoring := h.hasMigrationRestoreLocked()
+	h.mu.Unlock()
+	if restoring {
+		return h.failMigrationRestore(cause)
+	}
 	h.stopConsumerRenewal()
 	unmountErr := h.mounter.Unmount(h.rootMount)
 	var deleteErr error
@@ -916,8 +1017,12 @@ func (h *taskHandle) waitForExit(ctx context.Context) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
+	observedAt := time.Now()
+	if !h.awaitMigrationAdoptionForExit(ctx) {
+		return
+	}
 	h.mu.Lock()
-	if h.closed || h.phase == phaseExited || h.phase == phasePoisoned {
+	if h.closed || h.phase == phaseExited || h.phase == phasePoisoned || h.migration != nil || h.hasMigrationRestoreLocked() {
 		h.mu.Unlock()
 		return
 	}
@@ -929,7 +1034,7 @@ func (h *taskHandle) waitForExit(ctx context.Context) {
 		h.exitResult = &drivers.ExitResult{ExitCode: result.ExitStatus}
 	}
 	if h.completedAt.IsZero() {
-		h.completedAt = time.Now()
+		h.completedAt = observedAt
 	}
 	closeDoneLocked(h.done)
 	h.mu.Unlock()
@@ -970,10 +1075,25 @@ func (h *taskHandle) WaitChannel(ctx context.Context) <-chan *drivers.ExitResult
 
 // Stop terminates a warm or active one-shot container.
 func (h *taskHandle) Stop(timeout time.Duration, signal string) error {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if err := h.refreshMigrationAdoption(); err != nil {
+		return err
+	}
 	if timeout < 0 {
 		timeout = 0
 	}
 	h.mu.Lock()
+	if h.migration != nil || h.hasMigrationRestoreLocked() {
+		h.mu.Unlock()
+		if complete, err := h.observeMigrationFinalization(); err != nil || complete {
+			if complete && err == nil {
+				h.stopControl()
+			}
+			return err
+		}
+		return fmt.Errorf("migration custody requires regional handoff: %w", errdefs.ErrFailedPrecondition)
+	}
 	phase := h.phase
 	h.mu.Unlock()
 	if phase == phaseExited || phase == phasePoisoned || phase == phaseStopping {
@@ -1018,9 +1138,18 @@ func (h *taskHandle) Stop(timeout time.Duration, signal string) error {
 
 // Signal forwards a signal to an active container only.
 func (h *taskHandle) Signal(signal string) error {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if err := h.refreshMigrationAdoption(); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	phase := h.phase
+	custody := h.migration != nil || h.hasMigrationRestoreLocked()
 	h.mu.Unlock()
+	if custody {
+		return fmt.Errorf("migration custody requires regional handoff: %w", errdefs.ErrFailedPrecondition)
+	}
 	if phase != phaseActive {
 		return fmt.Errorf("cannot signal slot in %s phase", phase)
 	}
@@ -1034,14 +1163,29 @@ func (h *taskHandle) Signal(signal string) error {
 func (h *taskHandle) Close(force bool) error {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
+	if err := h.refreshMigrationAdoption(); err != nil {
+		return err
+	}
 
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
 		return nil
 	}
+	if h.migration != nil || h.hasMigrationRestoreLocked() {
+		h.mu.Unlock()
+		complete, err := h.observeMigrationFinalization()
+		if err != nil {
+			return err
+		}
+		if !complete {
+			return fmt.Errorf("migration images remain in ctld custody: %w", errdefs.ErrFailedPrecondition)
+		}
+		h.mu.Lock()
+	}
 	h.closed = true
 	rootMounted := h.rootMounted
+	migrationFinalized := h.migrationFinalized
 	h.mu.Unlock()
 
 	h.stopControl()
@@ -1049,13 +1193,16 @@ func (h *taskHandle) Close(force bool) error {
 	h.stopConsumerRenewal()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if force {
-		_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
-	}
-	firstErr := h.runner.Delete(cleanupCtx, h.containerID, true)
-	if rootMounted {
-		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
-			firstErr = err
+	var firstErr error
+	if !migrationFinalized {
+		if force {
+			_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
+		}
+		firstErr = h.runner.Delete(cleanupCtx, h.containerID, true)
+		if rootMounted {
+			if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	// The regional reconciler is the sole terminal writer owner. The plugin
@@ -1137,7 +1284,7 @@ func (h *taskHandle) IsRunning() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch h.phase {
-	case phaseWarm, phaseClaiming, phaseActive, phaseStopping:
+	case phaseWarm, phaseClaiming, phaseActive, phaseStopping, phaseMigrating:
 		return true
 	default:
 		return false
@@ -1169,7 +1316,7 @@ func (h *taskHandle) TaskStatus() *drivers.TaskStatus {
 
 func (h *taskHandle) IsRunningLocked() bool {
 	switch h.phase {
-	case phaseWarm, phaseClaiming, phaseActive, phaseStopping:
+	case phaseWarm, phaseClaiming, phaseActive, phaseStopping, phaseMigrating:
 		return true
 	default:
 		return false
@@ -1207,11 +1354,28 @@ func (h *taskHandle) Recover(state PersistedState) error {
 	h.startedAt = state.StartedAt
 	h.rootMounted = state.RootMounted
 	h.claim = state.Claim
+	h.stage = nil
+	h.migration = cloneMigrationCapture(state.Migration)
 	if state.Claim != nil {
 		h.stage = state.Claim.Stage
 	}
 	h.phase = phaseWarm
 	h.mu.Unlock()
+	// A fully cleaned source must not reactivate its old registration or an
+	// earlier adopted destination, including when Nomad retained a warm handle.
+	complete, finalizeErr := h.observeMigrationFinalization()
+	if errdefs.IsNotFound(finalizeErr) && state.Migration == nil && !state.RootMounted {
+		finalizeErr = nil
+	}
+	if complete || finalizeErr != nil {
+		return finalizeErr
+	}
+	if handled, err := h.recoverMigrationRestore(state); handled || err != nil {
+		return err
+	}
+	if handled, err := h.recoverMigrationCapture(state); handled || err != nil {
+		return err
+	}
 	if state.RootMounted && h.stage != nil {
 		return h.recoverCrashedRootFS()
 	}

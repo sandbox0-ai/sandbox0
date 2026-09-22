@@ -297,7 +297,14 @@ func (d *auditDelivery) runCanonicalBatches(ctx context.Context) {
 		}
 
 	drained:
-		if len(batch) < auditReplayBatchSize && d.foregroundCalls.Load() > 1 {
+		// Always give the first queued request the short coalescing window. The
+		// caller that observes foregroundCalls is often the first request to
+		// enqueue, so checking the counter here races with concurrent requests
+		// that have not reached the queue yet and turns the intended batcher into
+		// a stream of singleton INSERTs. A bounded wait preserves low latency for
+		// a solitary request while allowing burst traffic to share one canonical
+		// backend write.
+		if len(batch) < auditReplayBatchSize {
 			timer := time.NewTimer(auditCanonicalBatchWindow)
 			collecting := true
 			for collecting && len(batch) < auditReplayBatchSize {

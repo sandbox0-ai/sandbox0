@@ -15,6 +15,7 @@
 package ctlddeploy
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,7 +174,14 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	}
 	ctld := write("ctld", "#!/bin/sh\n", 0o755)
 	driver := write("driver", "#!/bin/sh\n", 0o755)
-	runsc := write("runsc", "#!/bin/sh\n", 0o755)
+	runsc := write("runsc", "#!/bin/sh\necho 'runsc version release-20260914.0'\n", 0o755)
+	companions := []string{"checkpointgofer", "gvisor-sentry-prewarmer", "gvisor_sentry", "runsc-fd-parking", "runsc-metric-server"}
+	if err := os.MkdirAll(filepath.Join(inputs, "gvisor-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range companions {
+		write("gvisor-bin/"+name, "#!/bin/sh\n# "+name+"\n", 0o755)
+	}
 	config := write("ctld.yaml", "nomad_runtime:\n  enabled: true\n", 0o600)
 	network := write("network.yaml", "node_name: node-1\n", 0o600)
 	nomadConfig := write("nomad.hcl", "plugin \"sandbox0-gvisor\" {}\n", 0o600)
@@ -197,6 +205,36 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("staged install: %v\n%s", err, output)
+	}
+	for _, name := range companions {
+		source, err := os.ReadFile(filepath.Join(inputs, "gvisor-bin", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		installed, err := os.ReadFile(filepath.Join(root, "usr/local/bin/gvisor-bin", name))
+		if err != nil || string(installed) != string(source) {
+			t.Fatalf("companion %s differs: %v", name, err)
+		}
+	}
+	// Partial and missing new-format bundles must fail before touching the host.
+	if err := os.Remove(filepath.Join(inputs, "gvisor-bin", companions[0])); err != nil {
+		t.Fatal(err)
+	}
+	for _, partial := range []bool{true, false} {
+		if !partial {
+			if err := os.RemoveAll(filepath.Join(inputs, "gvisor-bin")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fresh := filepath.Join(directory, fmt.Sprintf("rejected-%v", partial))
+		args := append([]string(nil), command.Args[1:]...)
+		args[len(args)-1] = fresh
+		if output, err := exec.Command("sh", args...).CombinedOutput(); err == nil {
+			t.Fatalf("accepted incomplete runsc bundle: %s", output)
+		}
+		if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+			t.Fatalf("rejected install mutated staging root: %v", err)
+		}
 	}
 	moduleConfig, err := os.ReadFile(filepath.Join(root, "etc/modprobe.d/sandbox0-nbd.conf"))
 	if err != nil || string(moduleConfig) != "options nbd nbds_max=512 max_part=0\n" {

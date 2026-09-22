@@ -12,6 +12,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
@@ -40,6 +41,20 @@ type Store interface {
 	runtimeslotclaim.Store
 	runtimeslotnode.CapacityStore
 	runtimeslotterminal.Store
+	nomadmigration.Store
+	nomadmigration.DestinationStore
+	nomadmigration.HandoverStore
+	nomadmigration.CPUPreflightStore
+	nomadmigration.SourceRecoveryStore
+	nomadmigration.StagingStore
+	nomadmigration.PreparationCancellationStore
+	nomadmigration.SourceExecutionStore
+	nomadmigration.EvacuationStore
+	nomadmigration.FailureStore
+	nomadmigration.FailureStopStore
+	nomadmigration.FailureCleanupStore
+	nomadmigration.FailureFinalizationStore
+	nomadmigration.CaptureFailureStore
 	GetRootFSCompositeBacklogUsage(context.Context) (sandboxstore.RootFSCompositeBacklogUsage, error)
 	RecordRuntimeNodePoolDemand(context.Context, *sandboxstore.RuntimeNodePoolDemandRequest) error
 	GetRuntimeNodeCertificateIdentity(context.Context, string) (*sandboxstore.RuntimeNodeCertificateIdentity, error)
@@ -66,29 +81,47 @@ type Config struct {
 // ClaimPlannerConfig provides the non-listener dependencies needed by the
 // request path. Node and network delivery are always the component's own hub.
 type ClaimPlannerConfig struct {
-	CapacityWait   runtimeslotclaim.CapacityWaitConfig
-	CapacityWake   func()
-	Prober         runtimeslotclaim.CommandProber
-	TokenGenerator runtimeslotclaim.TokenGenerator
-	Observer       runtimeslotclaim.Observer
-	DemandPoolID   string
-	DemandTTL      time.Duration
-	WriterTokenKey []byte
-	ClaimTTL       time.Duration
-	SLO            time.Duration
-	Now            func() time.Time
+	CapacityWait      runtimeslotclaim.CapacityWaitConfig
+	CapacityWake      func()
+	Prober            runtimeslotclaim.CommandProber
+	TokenGenerator    runtimeslotclaim.TokenGenerator
+	Observer          runtimeslotclaim.Observer
+	MigrationObserver func(runtimeslotclaim.Observation)
+	DemandPoolID      string
+	DemandTTL         time.Duration
+	WriterTokenKey    []byte
+	ClaimTTL          time.Duration
+	SLO               time.Duration
+	Now               func() time.Time
 }
 
 // Component owns one listener-local node channel registry. Every replica may
 // run the terminal loop so the instance holding a node stream can make
 // progress; PostgreSQL fences and deterministic operations serialize effects.
 type Component struct {
-	store      Store
-	hub        *runtimeslotnode.ChannelHub
-	server     *rootfswriterauthority.Server
-	terminal   *runtimeslotreconciler.Worker
-	allocation *runtimeslotnomad.Controller
-	pressure   *writerPressureCoordinator
+	migrationProgress    nomadmigration.Progress
+	store                Store
+	hub                  *runtimeslotnode.ChannelHub
+	server               *rootfswriterauthority.Server
+	terminal             *runtimeslotreconciler.Worker
+	allocation           *runtimeslotnomad.Controller
+	pressure             *writerPressureCoordinator
+	sourceRecovery       *nomadmigration.Coordinator
+	staging              *nomadmigration.Coordinator
+	stagingRelease       *nomadmigration.Coordinator
+	preflights           *nomadmigration.Coordinator
+	transfers            *nomadmigration.Coordinator
+	migrationMu          sync.RWMutex
+	destinations         *nomadmigration.Coordinator
+	handovers            *nomadmigration.Coordinator
+	cancellations        *nomadmigration.Coordinator
+	sourceExecution      *nomadmigration.Coordinator
+	evacuation           *nomadmigration.Coordinator
+	failures             *nomadmigration.Coordinator
+	failureStops         *nomadmigration.Coordinator
+	failureCleanups      *nomadmigration.Coordinator
+	failureFinalizations *nomadmigration.Coordinator
+	captureFailures      *nomadmigration.Coordinator
 }
 
 var _ runtimeslotclaim.NetworkPreparer = (*Component)(nil)
@@ -181,6 +214,64 @@ func New(config Config) (*Component, error) {
 		return nil, err
 	}
 
+	failures, err := nomadmigration.NewFailure(config.Store)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	failureStops, err := nomadmigration.NewFailureStop(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	failureCleanups, err := nomadmigration.NewFailureCleanup(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	failureFinalizations, err := nomadmigration.NewFailureFinalization(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	captureFailures, err := nomadmigration.NewCaptureFailure(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	evacuation, err := nomadmigration.NewEvacuation(config.Store)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	transfers, err := nomadmigration.New(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+
+	preflights, err := nomadmigration.NewCPUPreflight(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+
+	sourceRecovery, err := nomadmigration.NewSourceRecovery(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	staging, err := nomadmigration.NewStaging(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+	stagingRelease, err := nomadmigration.NewStagingRelease(config.Store, hub)
+	if err != nil {
+		_ = hub.Close()
+		return nil, err
+	}
+
 	mux := newNodeAuthorityMux(lifecycleHandler, runtimeSlotHandler, hub, backlogHealthHandler(config.Store))
 	authorized, err := nodeauth.NewVerifiedCertificateMiddleware(verifier, mux)
 	if err != nil {
@@ -195,10 +286,16 @@ func New(config Config) (*Component, error) {
 		_ = hub.Close()
 		return nil, fmt.Errorf("create node authority server: %w", err)
 	}
-	return &Component{
+	component := &Component{
 		store: config.Store, hub: hub, server: server,
-		terminal: terminal, allocation: allocation, pressure: pressure,
-	}, nil
+		terminal: terminal, allocation: allocation, pressure: pressure, transfers: transfers, preflights: preflights, sourceRecovery: sourceRecovery,
+		staging: staging, stagingRelease: stagingRelease, evacuation: evacuation, failures: failures, failureStops: failureStops, failureCleanups: failureCleanups, failureFinalizations: failureFinalizations, captureFailures: captureFailures,
+	}
+	for _, lane := range []*nomadmigration.Coordinator{sourceRecovery, staging, stagingRelease, preflights, transfers,
+		evacuation, failures, failureStops, failureCleanups, failureFinalizations, captureFailures} {
+		lane.SetProgress(&component.migrationProgress)
+	}
+	return component, nil
 }
 
 func newNodeAuthorityMux(writer, slots, channel, health http.Handler) *http.ServeMux {
@@ -376,19 +473,58 @@ func (c *Component) RunTerminal(
 }
 
 // NewClaimPlanner binds the request path to the exact same authenticated hub
-// used for node registration, network preparation, and terminal cleanup.
+// used for node registration, network preparation, and terminal cleanup. It
+// also installs destination restoration and handover before the manager starts.
 func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclaim.Planner, error) {
 	if c == nil || c.store == nil || c.hub == nil {
 		return nil, fmt.Errorf("node authority is not initialized")
 	}
-	return runtimeslotclaim.New(runtimeslotclaim.Config{
+	planner, err := runtimeslotclaim.New(runtimeslotclaim.Config{
 		CapacityWait: config.CapacityWait, CapacityWake: config.CapacityWake,
 		Store: c.store, Network: c.hub, Node: c.hub,
 		Prober: config.Prober, TokenGenerator: config.TokenGenerator,
 		Observer: config.Observer, WriterTokenKey: config.WriterTokenKey,
-		DemandRecorder: c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
+		MigrationObserver: config.MigrationObserver,
+		DemandRecorder:    c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
 		ClaimTTL: config.ClaimTTL, SLO: config.SLO, Now: config.Now,
 	})
+	if err != nil {
+		return nil, err
+	}
+	destination, err := nomadmigration.NewDestination(c.store, planner)
+	if err != nil {
+		return nil, err
+	}
+	procd, ok := config.Prober.(nomadmigration.Procd)
+	if !ok {
+		return nil, fmt.Errorf("migration requires the procd handover client")
+	}
+	tokens, ok := config.TokenGenerator.(nomadmigration.HandoverTokens)
+	if !ok {
+		return nil, fmt.Errorf("migration requires scoped procd tokens")
+	}
+	handover, err := nomadmigration.NewHandover(c.store, procd, tokens, migrationReadyNode{c.hub})
+	if err != nil {
+		return nil, err
+	}
+	cancellation, err := nomadmigration.NewPreparationCancellation(c.store, procd, tokens)
+	if err != nil {
+		return nil, err
+	}
+	sourceExecution, err := nomadmigration.NewSourceExecution(c.store, procd, tokens, c.hub)
+	if err != nil {
+		return nil, err
+	}
+	c.migrationMu.Lock()
+	c.sourceExecution = sourceExecution
+	for _, lane := range []*nomadmigration.Coordinator{sourceExecution, handover, cancellation, destination} {
+		lane.SetProgress(&c.migrationProgress)
+	}
+	c.handovers = handover
+	c.cancellations = cancellation
+	c.destinations = destination
+	c.migrationMu.Unlock()
+	return planner, nil
 }
 
 func backlogHealthHandler(store Store) http.HandlerFunc {
@@ -404,4 +540,229 @@ func backlogHealthHandler(store Store) http.HandlerFunc {
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	}
+}
+
+// RunMigrationCPUPreflights recovers eligibility checks for reserved operations.
+// Probes use only this listener's authenticated channels and never gate procd.
+func (c *Component) RunMigrationCPUPreflights(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.preflights == nil {
+		return fmt.Errorf("migration CPU preflight worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.preflights.Run(ctx, report)
+}
+
+// RunMigrationFailures closes expired or terminating destination authority.
+// It neither fabricates node cleanup nor releases either capacity reservation.
+func (c *Component) RunMigrationFailures(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.failures == nil {
+		return fmt.Errorf("migration failure worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.failures.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationFailureStops(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.failureStops == nil {
+		return fmt.Errorf("migration failure stop worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.failureStops.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationFailureCleanups(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.failureCleanups == nil {
+		return fmt.Errorf("migration failure cleanup worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.failureCleanups.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationCaptureFailures(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.captureFailures == nil {
+		return fmt.Errorf("migration capture failure worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.captureFailures.Run(ctx, report)
+}
+
+// RunMigrationSourceRecovery completes existing captured-source custody without
+// access to the first-capture dispatch capability.
+func (c *Component) RunMigrationSourceRecovery(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.sourceRecovery == nil {
+		return fmt.Errorf("migration source recovery worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.sourceRecovery.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationEvacuation(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.evacuation == nil {
+		return fmt.Errorf("migration evacuation worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.evacuation.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationStaging(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.staging == nil {
+		return fmt.Errorf("migration staging worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.staging.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationStagingRelease(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.stagingRelease == nil {
+		return fmt.Errorf("migration staging release worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.stagingRelease.Run(ctx, report)
+}
+
+// RunMigrationTransfers resumes authorized image transfers on the listener's
+// authenticated channels. It is independent of the terminal worker and never
+// initiates a migration or exposes a user-selectable destination.
+func (c *Component) RunMigrationTransfers(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.transfers == nil {
+		return fmt.Errorf("migration transfer worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.transfers.Run(ctx, report)
+}
+
+// RunMigrationDestinations restores physically fenced operations using the
+// same configured claim planner and writer-token key as normal regional claims.
+func (c *Component) RunMigrationDestinations(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("node authority is not initialized")
+	}
+	c.migrationMu.RLock()
+	worker := c.destinations
+	c.migrationMu.RUnlock()
+	if worker == nil {
+		return fmt.Errorf("migration destination planner is not configured")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return worker.Run(ctx, report)
+}
+
+// RunMigrationHandovers delivers the exact restored-process command before
+// probing and publishing readiness through the same authenticated node hub.
+func (c *Component) RunMigrationHandovers(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("node authority is not initialized")
+	}
+	c.migrationMu.RLock()
+	worker := c.handovers
+	c.migrationMu.RUnlock()
+	if worker == nil {
+		return fmt.Errorf("migration handover is not configured")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return worker.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationPreparationCancellations(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("node authority is not initialized")
+	}
+	c.migrationMu.RLock()
+	worker := c.cancellations
+	c.migrationMu.RUnlock()
+	if worker == nil {
+		return fmt.Errorf("migration cancellation is not configured")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return worker.Run(ctx, report)
+}
+
+func (c *Component) RunMigrationSourceExecution(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("node authority is not initialized")
+	}
+	c.migrationMu.RLock()
+	worker := c.sourceExecution
+	c.migrationMu.RUnlock()
+	if worker == nil {
+		return fmt.Errorf("migration source execution is not configured")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return worker.Run(ctx, report)
+}
+
+// Adapt the existing regional planner target at the composition boundary.
+type migrationReadyNode struct{ hub *runtimeslotnode.ChannelHub }
+
+func (n migrationReadyNode) CommandReady(ctx context.Context, t protocol.NodeChannelTarget, request protocol.CommandReadyControlRequest) (protocol.NodeControlResponse, error) {
+	return n.hub.CommandReady(ctx, runtimeslotclaim.NodeTarget{SlotID: t.SlotID, ClusterID: t.ClusterID, AllocationID: t.AllocationID,
+		NodeID: t.NodeID, NodeUID: t.NodeUID, NodeBootID: t.NodeBootID, ControlEndpoint: t.ControlEndpoint}, request)
+}
+
+func (c *Component) RunMigrationFailureFinalizations(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil || c.failureFinalizations == nil {
+		return fmt.Errorf("migration failure finalization worker is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return c.failureFinalizations.Run(ctx, report)
 }

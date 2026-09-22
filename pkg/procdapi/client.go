@@ -189,6 +189,10 @@ func (c *ProcdClient) ProbeCommandReady(
 }
 
 func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {
+	return doBoundedProcdRequest[T](ctx, httpClient, method, url, internalToken, action, request, 0)
+}
+
+func doBoundedProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any, maxResponseBytes int64) (*T, error) {
 	var body io.Reader
 	if request != nil {
 		jsonBody, err := json.Marshal(request)
@@ -212,9 +216,16 @@ func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method,
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	var responseReader io.Reader = resp.Body
+	if maxResponseBytes > 0 {
+		responseReader = io.LimitReader(resp.Body, maxResponseBytes+1)
+	}
+	respBody, err := io.ReadAll(responseReader)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if maxResponseBytes > 0 && int64(len(respBody)) > maxResponseBytes {
+		return nil, fmt.Errorf("%s response exceeds %d bytes", action, maxResponseBytes)
 	}
 
 	result, errInfo, err := decodeProcdResponse[T](respBody)
@@ -226,6 +237,9 @@ func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method,
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s failed with status %d", action, resp.StatusCode)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("%s response is missing success data", action)
 	}
 
 	return result, nil

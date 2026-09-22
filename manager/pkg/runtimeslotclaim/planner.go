@@ -160,9 +160,12 @@ type Config struct {
 	Prober         CommandProber
 	TokenGenerator TokenGenerator
 	Observer       Observer
-	DemandRecorder CapacityDemandRecorder
-	DemandPoolID   string
-	DemandTTL      time.Duration
+	// MigrationObserver receives restore-planning phases separately from the
+	// ordinary claim SLO, which requires a fresh authenticated command probe.
+	MigrationObserver func(Observation)
+	DemandRecorder    CapacityDemandRecorder
+	DemandPoolID      string
+	DemandTTL         time.Duration
 	// WriterTokenKey must remain stable for the lifetime of every retryable
 	// operation, including during rolling upgrades.
 	WriterTokenKey []byte
@@ -191,35 +194,37 @@ type Request struct {
 // Result is returned only after the regional slot has accepted command-ready
 // proof for the exact procd process.
 type Result struct {
-	Slot            *sandboxstore.RuntimeSlot
-	Grant           *sandboxstore.RootFSWriterGrant
-	Stage           rootfshandoff.StageRequest
-	ProcdAddress    string
-	ProcdInstanceID string
-	CommandProof    protocol.CommandReadyProof
-	NodeClaimTiming *protocol.NodeClaimTiming
-	Duration        time.Duration
-	WithinSLO       bool
-	Phases          []PhaseObservation
+	Slot             *sandboxstore.RuntimeSlot
+	Grant            *sandboxstore.RootFSWriterGrant
+	Stage            rootfshandoff.StageRequest
+	ProcdAddress     string
+	ProcdInstanceID  string
+	CommandProof     protocol.CommandReadyProof
+	NodeClaimTiming  *protocol.NodeClaimTiming
+	MigrationRestore *protocol.MigrationRestoreObservation
+	Duration         time.Duration
+	WithinSLO        bool
+	Phases           []PhaseObservation
 }
 
 // Planner executes one region-authoritative Nomad warm-slot claim.
 type Planner struct {
-	capacityQueue  *capacityQueue
-	capacityWake   func()
-	store          Store
-	network        NetworkPreparer
-	node           NodeExecutor
-	prober         CommandProber
-	tokenGenerator TokenGenerator
-	observer       Observer
-	demandRecorder CapacityDemandRecorder
-	demandPoolID   string
-	demandTTL      time.Duration
-	writerTokenKey []byte
-	claimTTL       time.Duration
-	slo            time.Duration
-	now            func() time.Time
+	capacityQueue     *capacityQueue
+	capacityWake      func()
+	store             Store
+	network           NetworkPreparer
+	node              NodeExecutor
+	prober            CommandProber
+	tokenGenerator    TokenGenerator
+	observer          Observer
+	migrationObserver func(Observation)
+	demandRecorder    CapacityDemandRecorder
+	demandPoolID      string
+	demandTTL         time.Duration
+	writerTokenKey    []byte
+	claimTTL          time.Duration
+	slo               time.Duration
+	now               func() time.Time
 }
 
 // New validates immutable claim policy and constructs a Planner.
@@ -280,7 +285,8 @@ func New(config Config) (*Planner, error) {
 		store: config.Store, network: config.Network, node: config.Node,
 		prober: config.Prober, tokenGenerator: config.TokenGenerator,
 		observer: config.Observer, writerTokenKey: append([]byte(nil), config.WriterTokenKey...),
-		demandRecorder: config.DemandRecorder, demandPoolID: demandPoolID,
+		migrationObserver: config.MigrationObserver,
+		demandRecorder:    config.DemandRecorder, demandPoolID: demandPoolID,
 		demandTTL: demandTTL,
 		claimTTL:  claimTTL, slo: slo, now: now,
 	}, nil
@@ -289,7 +295,14 @@ func New(config Config) (*Planner, error) {
 // Claim executes acquire -> network incarnation -> writer issue/bind -> node
 // claim -> authenticated procd command -> node command-ready. Every durable
 // mutation and node call is exactly retryable from the same OperationID.
-func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, resultErr error) {
+func (p *Planner) Claim(ctx context.Context, request Request) (*Result, error) {
+	return p.claim(ctx, request, nil)
+}
+
+// claim shares storage, network, writer derivation and exact node delivery.
+// A migration stops at restore evidence; procd handover and regional readiness
+// are separate authorized phases and cannot use the ordinary startup probe.
+func (p *Planner) claim(ctx context.Context, request Request, migration *protocol.MigrationImagePrepareRequest) (result *Result, resultErr error) {
 	wallCallStarted := time.Now()
 	callStarted := p.now().UTC()
 	startedAt := request.StartedAt.UTC()
@@ -320,19 +333,24 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		if duration < 0 {
 			duration = 0
 		}
-		withinSLO := resultErr == nil && !ingressClockSkewed && duration <= p.slo
+		withinSLO := migration == nil && resultErr == nil && !ingressClockSkewed && duration <= p.slo
 		if result != nil {
 			result.Duration = duration
 			result.WithinSLO = withinSLO
 			result.Phases = append([]PhaseObservation(nil), phases...)
 		}
-		if p.observer != nil {
-			p.observer.ObserveRuntimeSlotClaim(Observation{
+		if (p.observer != nil && migration == nil) || (p.migrationObserver != nil && migration != nil) {
+			observation := Observation{
 				OperationID: request.OperationID, SandboxID: request.SandboxID, SlotID: observedSlotID,
 				StartedAt: startedAt, CompletedAt: completedAt, Duration: duration,
 				Succeeded: resultErr == nil, WithinSLO: withinSLO,
 				Phases: append([]PhaseObservation(nil), phases...),
-			})
+			}
+			if migration != nil {
+				p.migrationObserver(observation)
+			} else {
+				p.observer.ObserveRuntimeSlotClaim(observation)
+			}
 		}
 	}()
 
@@ -350,6 +368,23 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		Phase: PhaseIngressToPlanner, Duration: ingressToPlanner, Succeeded: !ingressClockSkewed,
 	})
 	ids := p.identities(normalized.OperationID)
+	claimTTL := p.claimTTL
+	var migrationAuthority migrationStore
+	if migration != nil {
+		var ok bool
+		migrationAuthority, ok = p.store.(migrationStore)
+		if !ok {
+			return nil, errors.New("migration destination authority is unavailable")
+		}
+		assignmentDigest, err := migration.Publication.Assignment.Digest()
+		if err != nil {
+			return nil, err
+		}
+		ids.claimID = "migration-" + assignmentDigest
+		ids.issueOperationID = normalized.OperationID
+		claimTTL = sandboxstore.DefaultRuntimeSlotClaimTTL
+	}
+
 	runtimeRevision := normalized.RuntimeAssignmentRevision
 	policyDigest := normalized.NetworkPolicyDigest
 
@@ -403,14 +438,20 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	recordPhase(PhaseRootFSMetadata, phaseStarted, true)
 
 	phaseStarted = time.Now()
-	slot, err := p.acquireCapacity(ctx, normalized.TeamID, &sandboxstore.AcquireRuntimeSlotRequest{
-		OperationID: normalized.OperationID, ClaimID: ids.claimID, SandboxID: normalized.SandboxID,
-		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
-		CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
-		RuntimeAssignmentRevision: runtimeRevision, NetworkPolicyDigest: policyDigest,
-		ClaimTTL:  p.claimTTL,
-		Resources: normalized.Resources,
-	})
+	var slot *sandboxstore.RuntimeSlot
+	if migration != nil {
+		slot, err = migrationAuthority.AcquireNomadSandboxMigrationTarget(ctx, migration.Publication.Assignment)
+	} else {
+		slot, err = p.acquireCapacity(ctx, normalized.TeamID, &sandboxstore.AcquireRuntimeSlotRequest{
+			OperationID: normalized.OperationID, ClaimID: ids.claimID, SandboxID: normalized.SandboxID,
+			FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
+			CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
+			RuntimeAssignmentRevision: runtimeRevision, NetworkPolicyDigest: policyDigest,
+			RuntimeAssignmentPayload: normalized.RuntimeAssignmentPayload, NetworkPolicy: normalized.NetworkPolicy,
+			ClaimTTL:  claimTTL,
+			Resources: normalized.Resources,
+		})
+	}
 	if err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && p.demandRecorder != nil && p.capacityQueue == nil {
@@ -424,9 +465,12 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		return nil, fmt.Errorf("acquire runtime slot: %w", err)
 	}
 	observedSlotID = slot.ID
-	if err := validateClaimedSlot(slot, normalized, ids, filesystem, generation, p.claimTTL); err != nil {
+	if err := validateClaimedSlot(slot, normalized, ids, filesystem, generation, claimTTL); err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		return nil, err
+	}
+	if migration != nil && (slot.ResourceLease != migration.Resources || nodeTarget(slot) != migrationNodeTarget(migration.Target)) {
+		return nil, errors.New("migration acquired another reserved destination")
 	}
 	if existingGrant != nil && existingGrant.SlotID != slot.ID {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
@@ -508,7 +552,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		return nil, errors.New("runtime slot claim lease expired before writer issue")
 	}
 
-	issueAndBind, err := p.store.IssueAndBindRuntimeSlotWriterGrant(ctx, &sandboxstore.IssueRootFSWriterGrantRequest{
+	writerRequest := &sandboxstore.IssueRootFSWriterGrantRequest{
 		GrantID: ids.grantID, SandboxID: normalized.SandboxID,
 		ExpectedFilesystemID: filesystem.ID, ClaimID: ids.claimID, SlotID: slot.ID,
 		OperationID: ids.issueOperationID, RawToken: ids.rawToken,
@@ -519,9 +563,16 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		RuntimeGeneration:   strconv.FormatInt(normalized.Runtime.RuntimeGeneration, 10),
 		InitialGenerationID: generation.ID, ExpectedWriterEpoch: expectedWriterEpoch,
 		ConsumeExpiresAt: slot.ClaimLeaseExpiresAt,
-	}, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
-		SlotID: slot.ID, OperationID: normalized.OperationID, ClaimID: ids.claimID, GrantID: ids.grantID,
-	})
+	}
+	var issueAndBind *sandboxstore.IssueAndBindRuntimeSlotWriterGrantResult
+	if migration != nil {
+		issueAndBind, err = migrationAuthority.IssueNomadSandboxMigrationTargetWriter(ctx, migration.Publication.Assignment, writerRequest)
+	} else {
+		issueAndBind, err = p.store.IssueAndBindRuntimeSlotWriterGrant(ctx, writerRequest, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
+			SlotID: slot.ID, OperationID: normalized.OperationID, ClaimID: ids.claimID, GrantID: ids.grantID,
+		})
+	}
+
 	if err != nil {
 		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, fmt.Errorf("issue and bind RootFS writer grant: %w", err)
@@ -537,7 +588,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		return nil, errors.New("writer authority returned another grant binding")
 	}
 	bound := issueAndBind.Slot
-	if err := validateClaimedSlot(bound, normalized, ids, filesystem, generation, p.claimTTL); err != nil {
+	if err := validateClaimedSlot(bound, normalized, ids, filesystem, generation, claimTTL); err != nil {
 		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, err
 	}
@@ -555,6 +606,21 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		Stage: &stage, NetworkPolicy: normalized.NetworkPolicy, Runtime: &runtimeAssignment,
 		Resources: slot.ResourceLease,
 	}
+	if migration != nil {
+		restore, err := migrationAuthority.AuthorizeNomadSandboxMigrationRestore(ctx, migration.Publication.Assignment, stage.WithoutWriterGrantToken())
+		if err != nil {
+			return nil, fmt.Errorf("authorize migration restore: %w", err)
+		}
+		if restore == nil {
+			return nil, errors.New("migration restore authority returned no command")
+		}
+		want, _ := migration.Digest()
+		actual, err := restore.Image.Digest()
+		if err != nil || actual != want {
+			return nil, errors.New("migration restore changed the reserved image")
+		}
+		nodeClaim.MigrationRestore = restore
+	}
 	if err := nodeClaim.ValidateRegional(); err != nil {
 		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("validate node claim: %w", err)
@@ -564,11 +630,18 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("deliver runtime slot claim: %w", err)
 	}
-	if err := nodeClaimResponse.Validate(); err != nil {
+	if err := nodeClaimResponse.ValidateClaimResult(nodeClaim); err != nil {
 		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("validate runtime slot claim response: %w", err)
 	}
 	recordPhase(PhaseNodeClaim, phaseStarted, true)
+	if migration != nil {
+		if nodeClaimResponse.MigrationRestore == nil || nodeClaimResponse.MigrationRestore.State != protocol.MigrationRestoreComplete {
+			return nil, errors.New("migration restore is incomplete or uncertain")
+		}
+		return &Result{Slot: bound, Grant: issued.Grant, Stage: stage, ProcdAddress: procdAddress,
+			MigrationRestore: nodeClaimResponse.MigrationRestore, NodeClaimTiming: nodeClaimResponse.ClaimTiming}, nil
+	}
 
 	phaseStarted = time.Now()
 	internalToken, err := p.tokenGenerator.GenerateToken(normalized.TeamID, normalized.UserID, normalized.SandboxID)
@@ -696,6 +769,7 @@ type normalizedRequest struct {
 	Request
 	RuntimeAssignmentRevision string
 	NetworkPolicyDigest       string
+	RuntimeAssignmentPayload  string
 }
 
 func (p *Planner) validateRequest(request Request, now time.Time) (normalizedRequest, error) {
@@ -753,6 +827,7 @@ func (p *Planner) validateRequest(request Request, now time.Time) (normalizedReq
 		return normalizedRequest{}, fmt.Errorf("derive runtime assignment revision: %w", err)
 	}
 	normalized.RuntimeAssignmentRevision = runtimeRevision
+	normalized.RuntimeAssignmentPayload = string(runtimePayload)
 	normalized.NetworkPolicyDigest = protocol.NetworkPolicyDigest(normalized.NetworkPolicy)
 	return normalized, nil
 }

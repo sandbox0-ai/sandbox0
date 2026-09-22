@@ -42,8 +42,10 @@ type statusResponse struct {
 }
 
 type claimResponse struct {
-	Phase       string                    `json:"phase"`
-	ClaimTiming *protocol.NodeClaimTiming `json:"claim_timing,omitempty"`
+	MigrationAdoption *protocol.MigrationAdoptionReceipt    `json:"migration_adoption,omitempty"`
+	MigrationRestore  *protocol.MigrationRestoreObservation `json:"migration_restore,omitempty"`
+	Phase             string                                `json:"phase"`
+	ClaimTiming       *protocol.NodeClaimTiming             `json:"claim_timing,omitempty"`
 }
 
 func (h *taskHandle) ServeControl(ctx context.Context) {
@@ -68,6 +70,40 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 		}
 
 		mux := http.NewServeMux()
+		mux.HandleFunc(protocol.NodeMigrationCPUPreflightControlPath, func(w http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPut {
+				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			var preflight protocol.MigrationCPUPreflightRequest
+			if err := decodeControlJSON(w, request, &preflight); err != nil {
+				writeControlError(w, http.StatusBadRequest, "invalid CPU preflight")
+				return
+			}
+			result, err := h.PreflightMigrationCPU(request.Context(), preflight)
+			if err != nil {
+				writeControlOperationError(w, err)
+				return
+			}
+			writeControlJSON(w, http.StatusOK, protocol.NodeControlResponse{Phase: "cpu_preflight", MigrationCPUPreflight: result})
+		})
+		mux.HandleFunc(protocol.NodeMigrationCaptureControlPath, func(w http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPut {
+				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			var capture protocol.MigrationCaptureRequest
+			if err := decodeControlJSON(w, request, &capture); err != nil {
+				writeControlError(w, http.StatusBadRequest, "invalid migration capture")
+				return
+			}
+			result, err := h.CaptureMigration(request.Context(), capture)
+			if err != nil {
+				writeControlOperationError(w, err)
+				return
+			}
+			writeControlJSON(w, http.StatusOK, protocol.NodeControlResponse{Phase: string(phaseMigrating), Migration: result})
+		})
 		mux.HandleFunc("/status", func(w http.ResponseWriter, request *http.Request) {
 			if request.Method != http.MethodGet {
 				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -90,8 +126,16 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 				writeControlOperationError(w, err)
 				return
 			}
+			var restored *protocol.MigrationRestoreObservation
+			if claim.MigrationRestore != nil {
+				restored, err = h.migrationRestoreReceipt(request.Context(), *claim.MigrationRestore)
+				if err != nil {
+					writeControlOperationError(w, err)
+					return
+				}
+			}
 			writeControlJSON(w, http.StatusOK, claimResponse{
-				Phase: string(phaseActive), ClaimTiming: claimTiming,
+				Phase: string(phaseActive), ClaimTiming: claimTiming, MigrationRestore: restored,
 			})
 		})
 		mux.HandleFunc(protocol.NodeCommandReadyControlPath, func(w http.ResponseWriter, request *http.Request) {
@@ -108,7 +152,14 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 				writeControlOperationError(w, err)
 				return
 			}
-			writeControlJSON(w, http.StatusOK, claimResponse{Phase: string(phaseActive)})
+			h.mu.Lock()
+			var adoption *protocol.MigrationAdoptionReceipt
+			if h.claim != nil && h.claim.MigrationAdoption != nil {
+				copy := *h.claim.MigrationAdoption
+				adoption = &copy
+			}
+			h.mu.Unlock()
+			writeControlJSON(w, http.StatusOK, claimResponse{Phase: string(phaseActive), MigrationAdoption: adoption})
 		})
 
 		server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}

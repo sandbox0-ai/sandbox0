@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -32,6 +33,7 @@ var ErrAllocationNodeUnavailable = errors.New("runtime slot allocation node is u
 
 // Store is the durable region authority used by the terminal reconciler.
 type Store interface {
+	RecoverExpiredNomadMigrationReservations(context.Context, int) (int, error)
 	ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlot(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
@@ -175,11 +177,12 @@ type Config struct {
 
 // Result summarizes one bounded reconciliation pass.
 type Result struct {
-	Candidates      int
-	Completed       int
-	Skipped         int
-	Failed          int
-	RefillRequested int
+	MigrationReservationsReleased int
+	Candidates                    int
+	Completed                     int
+	Skipped                       int
+	Failed                        int
+	RefillRequested               int
 }
 
 // Reconciler executes plugin-independent terminal cleanup.
@@ -216,11 +219,17 @@ func New(config Config) (*Reconciler, error) {
 func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Reservation recovery must not consume the whole physical cleanup budget
+	// when a database lock or a slow reservation stalls one preparation intent.
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, 5*time.Second)
+	released, recoveryErr := r.store.RecoverExpiredNomadMigrationReservations(recoveryCtx, r.limit)
+	cancelRecovery()
+	result := Result{MigrationReservationsReleased: released}
 	candidates, err := r.store.ListRuntimeSlotsForReconcileAfter(ctx, r.limit, r.after)
 	if err != nil {
-		return Result{}, fmt.Errorf("list runtime slots for reconcile: %w", err)
+		return result, errors.Join(recoveryErr, fmt.Errorf("list runtime slots for reconcile: %w", err))
 	}
-	result := Result{Candidates: len(candidates)}
+	result.Candidates = len(candidates)
 	// Traverse beyond an unresolved full batch, then wrap for retries. This is
 	// local scheduling state only: each candidate is re-read and fenced below.
 	// A canceled pass must leave its unprocessed suffix eligible next time.
@@ -231,6 +240,9 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 		}
 	}()
 	errs := make([]error, 0)
+	if recoveryErr != nil {
+		errs = append(errs, fmt.Errorf("recover unused migration reservations: %w", recoveryErr))
+	}
 	// An unreachable retired node can contribute hundreds of old carriers. One
 	// failed observation must not consume the pass deadline once per carrier and
 	// delay healthy nodes' cleanup. Retry every node on the next pass, without
@@ -298,6 +310,24 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	if err := validateSlotIdentity(slot); err != nil {
 		return false, err
 	}
+	if store, ok := r.store.(migrationCaptureFailureCompletionStore); ok {
+		failed, receipt, err := store.GetNomadMigrationCaptureFailureForSlot(ctx, slot.ID)
+		if err != nil {
+			return false, err
+		}
+		if failed {
+			return r.reconcileMigrationCaptureFailure(ctx, store, slot, receipt)
+		}
+	}
+	if store, ok := r.store.(migrationFailureCompletionStore); ok {
+		failed, receipt, err := store.GetNomadMigrationFailureForSlot(ctx, slot.ID)
+		if err != nil {
+			return false, err
+		}
+		if failed {
+			return r.reconcileMigrationFailure(ctx, store, slot, receipt)
+		}
+	}
 
 	target := allocationTarget(slot)
 	allocationObservation, err := r.allocation.Observe(ctx, target)
@@ -322,6 +352,9 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 		if err := validateWriterGrant(grant, slot); err != nil {
 			return false, err
+		}
+		if grant.State == sandboxstore.RootFSWriterGrantStateRetired && grant.RetireKind == sandboxstore.RootFSWriterRetireKindMigration {
+			return r.reconcileMigrationSource(ctx, slot, grant)
 		}
 		if grant.GateParent != "" {
 			canonical := rootfshandoff.CrashRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)

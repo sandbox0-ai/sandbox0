@@ -24,6 +24,20 @@ s0 sandbox exec "$SANDBOX_ID" -- \
 Use the SDK file and command helpers when the agent needs structured reads,
 writes, directory listings, or long-running command contexts.
 
+## Shared Browser
+
+The template includes Chromium, Playwright CLI, TigerVNC, Openbox, and a
+WebSocket bridge dependency. These are installed at build time; claiming a
+sandbox does not start a desktop or download a browser. Applications such as
+Sandpi start the desktop on demand and expose an authenticated viewer.
+
+Run the headed browser as the dedicated `sandbox-browser` user, retaining
+Chromium's process sandbox. A human viewer and Playwright CLI can share the
+same browser through a loopback CDP endpoint. Keep the browser profile on the
+persistent RootFS and restrict the desktop ingress to authorized viewers;
+never publish CDP directly. Pause/resume preserves profile files, but requires
+new browser and desktop processes after resume.
+
 ## Template Updates
 
 The `Update Coding Agent Template` workflow refreshes the npm `latest` stable

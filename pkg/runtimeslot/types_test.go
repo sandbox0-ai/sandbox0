@@ -196,6 +196,8 @@ func TestNodeControlResponseRejectsNegativeClaimTiming(t *testing.T) {
 	if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "runsc_create_us") {
 		t.Fatalf("Validate() error = %v, want negative timing rejection", err)
 	}
+	response.ClaimTiming = &NodeClaimTiming{CPULaunchVerifyMicros: -1}
+	require.ErrorContains(t, response.Validate(), "cpu_launch_verify_us")
 }
 
 func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {

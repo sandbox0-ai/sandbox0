@@ -42,6 +42,7 @@ const (
 )
 
 const (
+	WriterRetireKindMigration      = "migration"
 	WriterRetireKindCanceled       = "canceled"
 	WriterRetireKindCrashAbandon   = "crash_abandon"
 	WriterRetireKindPlannedPublish = "planned_publish"
@@ -253,7 +254,7 @@ func (p NodeCleanupControlProof) Request() NodeCleanupControlRequest {
 
 func validWriterRetireKind(kind string) bool {
 	switch kind {
-	case WriterRetireKindCanceled, WriterRetireKindCrashAbandon,
+	case WriterRetireKindMigration, WriterRetireKindCanceled, WriterRetireKindCrashAbandon,
 		WriterRetireKindPlannedPublish, WriterRetireKindPrelaunchAbort:
 		return true
 	default:
@@ -298,15 +299,16 @@ func (p NodeCleanupControlProof) Digest() (string, error) {
 // The raw writer token is present only in this online request and must never
 // be persisted by an intermediate node proxy.
 type NodeClaimControlRequest struct {
-	OperationID   string                      `json:"operation_id,omitempty"`
-	ClaimID       string                      `json:"claim_id,omitempty"`
-	RootfsPath    string                      `json:"rootfs_path"`
-	PolicyToken   string                      `json:"policy_token"`
-	WriterEpoch   string                      `json:"writer_epoch"`
-	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
-	NetworkPolicy string                      `json:"network_policy,omitempty"`
-	Runtime       *runtimecontrol.Assignment  `json:"runtime,omitempty"`
-	Resources     RuntimeResourceLease        `json:"resources"`
+	MigrationRestore *MigrationRestoreRequest    `json:"migration_restore,omitempty"`
+	OperationID      string                      `json:"operation_id,omitempty"`
+	ClaimID          string                      `json:"claim_id,omitempty"`
+	RootfsPath       string                      `json:"rootfs_path"`
+	PolicyToken      string                      `json:"policy_token"`
+	WriterEpoch      string                      `json:"writer_epoch"`
+	Stage            *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	NetworkPolicy    string                      `json:"network_policy,omitempty"`
+	Runtime          *runtimecontrol.Assignment  `json:"runtime,omitempty"`
+	Resources        RuntimeResourceLease        `json:"resources"`
 }
 
 // ValidateRegional rejects development-only claims before they reach the
@@ -380,6 +382,9 @@ func (r NodeClaimControlRequest) ValidateRegional() error {
 	if r.Stage.Labels[RuntimeAssignmentRevisionLabel] != revision {
 		return fmt.Errorf("runtime assignment revision does not match stage")
 	}
+	if r.MigrationRestore != nil {
+		return r.MigrationRestore.ValidateClaim(r)
+	}
 	return nil
 }
 
@@ -394,6 +399,7 @@ func NetworkPolicyDigest(raw string) string {
 // synchronous claim. Values are elapsed microseconds from the node monotonic
 // clock and are diagnostic only; they are not lifecycle proof.
 type NodeClaimTiming struct {
+	CPULaunchVerifyMicros    int64 `json:"cpu_launch_verify_us,omitempty"`
 	ClaimDurationMicros      int64 `json:"claim_duration_us"`
 	BundleWriteMicros        int64 `json:"bundle_write_us"`
 	ClaimStatePersistMicros  int64 `json:"claim_state_persist_us"`
@@ -412,6 +418,7 @@ func (t NodeClaimTiming) Validate() error {
 		value int64
 	}{
 		{name: "claim_duration_us", value: t.ClaimDurationMicros},
+		{name: "cpu_launch_verify_us", value: t.CPULaunchVerifyMicros},
 		{name: "bundle_write_us", value: t.BundleWriteMicros},
 		{name: "claim_state_persist_us", value: t.ClaimStatePersistMicros},
 		{name: "rootfs_ensure_us", value: t.RootFSEnsureMicros},
@@ -432,11 +439,24 @@ func (t NodeClaimTiming) Validate() error {
 // NodeControlResponse is returned only after the driver has durably reached
 // the requested local phase.
 type NodeControlResponse struct {
-	Phase       string           `json:"phase"`
-	ClaimTiming *NodeClaimTiming `json:"claim_timing,omitempty"`
+	MigrationCPUPreflight *MigrationCPUPreflight       `json:"migration_cpu_preflight,omitempty"`
+	MigrationAdoption     *MigrationAdoptionReceipt    `json:"migration_adoption,omitempty"`
+	MigrationRestore      *MigrationRestoreObservation `json:"migration_restore,omitempty"`
+	Migration             *MigrationCapture            `json:"migration,omitempty"`
+	Phase                 string                       `json:"phase"`
+	ClaimTiming           *NodeClaimTiming             `json:"claim_timing,omitempty"`
 }
 
 func (r NodeControlResponse) Validate() error {
+	if a := r.MigrationAdoption; a != nil && (a.Proof.ValidateFor(a.Request) != nil || r.MigrationRestore != nil) {
+		return fmt.Errorf("invalid migration adoption response")
+	}
+	if r.MigrationRestore != nil && (r.MigrationRestore.Validate() != nil || r.MigrationRestore.State != MigrationRestoreComplete) {
+		return fmt.Errorf("node restore response lacks completed execution evidence")
+	}
+	if r.Migration != nil || r.MigrationCPUPreflight != nil {
+		return fmt.Errorf("migration outcome cannot satisfy ordinary activation")
+	}
 	if r.Phase != string(StateActive) {
 		return fmt.Errorf("node control phase must be active")
 	}
@@ -652,19 +672,26 @@ func (r HeartbeatRequest) Validate() error {
 // StartingRequest records the exact runsc launch and post-claim RootFS/network
 // bindings. The regional writer grant must already be consumed.
 type StartingRequest struct {
-	AllocationID        string `json:"allocation_id"`
-	NodeBootID          string `json:"node_boot_id"`
-	OperationID         string `json:"operation_id"`
-	ClaimID             string `json:"claim_id"`
-	LaunchAttempt       string `json:"launch_attempt"`
-	RunscContainerID    string `json:"runsc_container_id"`
-	RootFSBindingDigest string `json:"rootfs_binding_digest"`
-	ClaimNetworkDigest  string `json:"claim_network_digest"`
-	ResourceLeaseID     string `json:"resource_lease_id"`
-	ResourceLeaseDigest string `json:"resource_lease_digest"`
+	MigrationRestoreDigest string `json:"migration_restore_digest,omitempty"`
+	AllocationID           string `json:"allocation_id"`
+	NodeBootID             string `json:"node_boot_id"`
+	OperationID            string `json:"operation_id"`
+	ClaimID                string `json:"claim_id"`
+	LaunchAttempt          string `json:"launch_attempt"`
+	RunscContainerID       string `json:"runsc_container_id"`
+	RootFSBindingDigest    string `json:"rootfs_binding_digest"`
+	ClaimNetworkDigest     string `json:"claim_network_digest"`
+	ResourceLeaseID        string `json:"resource_lease_id"`
+	ResourceLeaseDigest    string `json:"resource_lease_digest"`
 }
 
 func (r StartingRequest) Validate() error {
+	if r.MigrationRestoreDigest != "" {
+		if _, err := DecodeProof("migration_restore_digest", r.MigrationRestoreDigest); err != nil {
+			return err
+		}
+	}
+
 	if err := validateCaller(r.AllocationID, r.NodeBootID); err != nil {
 		return err
 	}
@@ -689,16 +716,22 @@ func (r StartingRequest) Validate() error {
 
 // CommandReadyRequest proves that the launched procd instance accepts commands.
 type CommandReadyRequest struct {
-	AllocationID       string `json:"allocation_id"`
-	NodeBootID         string `json:"node_boot_id"`
-	OperationID        string `json:"operation_id"`
-	ClaimID            string `json:"claim_id"`
-	ProcdInstanceID    string `json:"procd_instance_id"`
-	ProcdAddress       string `json:"procd_address"`
-	CommandReadyDigest string `json:"command_ready_digest"`
+	MigrationRestoreDigest string `json:"migration_restore_digest,omitempty"`
+	AllocationID           string `json:"allocation_id"`
+	NodeBootID             string `json:"node_boot_id"`
+	OperationID            string `json:"operation_id"`
+	ClaimID                string `json:"claim_id"`
+	ProcdInstanceID        string `json:"procd_instance_id"`
+	ProcdAddress           string `json:"procd_address"`
+	CommandReadyDigest     string `json:"command_ready_digest"`
 }
 
 func (r CommandReadyRequest) Validate() error {
+	if r.MigrationRestoreDigest != "" {
+		if _, err := DecodeProof("migration_restore_digest", r.MigrationRestoreDigest); err != nil {
+			return err
+		}
+	}
 	if err := validateCaller(r.AllocationID, r.NodeBootID); err != nil {
 		return err
 	}
@@ -719,14 +752,15 @@ func (r CommandReadyRequest) Validate() error {
 
 // Observation is the bounded node-visible projection of one durable slot.
 type Observation struct {
-	SlotID              string     `json:"slot_id"`
-	State               State      `json:"state"`
-	Revision            int64      `json:"revision"`
-	ServerTime          time.Time  `json:"server_time"`
-	HeartbeatExpiresAt  time.Time  `json:"heartbeat_expires_at"`
-	ClaimOperationID    string     `json:"claim_operation_id,omitempty"`
-	ClaimID             string     `json:"claim_id,omitempty"`
-	ClaimLeaseExpiresAt *time.Time `json:"claim_lease_expires_at,omitempty"`
+	MigrationAdoption   *MigrationAdoptionRequest `json:"migration_adoption,omitempty"`
+	SlotID              string                    `json:"slot_id"`
+	State               State                     `json:"state"`
+	Revision            int64                     `json:"revision"`
+	ServerTime          time.Time                 `json:"server_time"`
+	HeartbeatExpiresAt  time.Time                 `json:"heartbeat_expires_at"`
+	ClaimOperationID    string                    `json:"claim_operation_id,omitempty"`
+	ClaimID             string                    `json:"claim_id,omitempty"`
+	ClaimLeaseExpiresAt *time.Time                `json:"claim_lease_expires_at,omitempty"`
 }
 
 const (
@@ -759,6 +793,11 @@ func (e ErrorResponse) Validate() error {
 }
 
 func (o Observation) Validate() error {
+	if a := o.MigrationAdoption; a != nil {
+		if a.Validate() != nil || o.State != StateActive || a.Target.SlotID != o.SlotID || a.OperationID != o.ClaimOperationID || a.ClaimID != o.ClaimID {
+			return fmt.Errorf("migration adoption changed active claim authority")
+		}
+	}
 	if err := validateRequiredID("slot_id", o.SlotID); err != nil {
 		return err
 	}

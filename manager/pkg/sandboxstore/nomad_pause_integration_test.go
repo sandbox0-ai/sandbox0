@@ -365,10 +365,14 @@ func (f *nomadPauseStoreFixture) publishPlannedPause(t *testing.T, operationID s
 	}))
 }
 
-func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixture {
+func newNomadPauseStoreFixture(t *testing.T, suffix string, configure ...func(*AcquireRuntimeSlotRequest)) *nomadPauseStoreFixture {
+	t.Helper()
+	return newNomadPauseStoreFixtureOnNode(t, suffix, newSandboxStoreIntegrationPool(t), "", configure...)
+}
+
+func newNomadPauseStoreFixtureOnNode(t *testing.T, suffix string, pool *pgxpool.Pool, node string, configure ...func(*AcquireRuntimeSlotRequest)) *nomadPauseStoreFixture {
 	t.Helper()
 	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	sandboxID := "sandbox-nomad-pause-" + suffix
 	operationID := "claim-nomad-pause-" + suffix
@@ -392,6 +396,11 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 	require.NoError(t, err)
 	registration := runtimeSlotTestRegistration(slotID, allocationID)
 	registration.AllocationNamespace = allocationNamespace
+	if node != "" {
+		registration.NodeID = "nomad-node-" + node
+		registration.NodeUID = "node-" + node
+		registration.NodeBootID = "boot-" + node
+	}
 	_, err = registerRuntimeSlotWithTestCapacity(t, ctx, store, registration)
 	require.NoError(t, err)
 	proof := bytes.Repeat([]byte{0x91}, 32)
@@ -408,6 +417,9 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
 		Resources: runtimeSlotTestResources(),
+	}
+	for _, setup := range configure {
+		setup(acquire)
 	}
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)

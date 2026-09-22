@@ -131,6 +131,14 @@ func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 	require.Equal(t, bytes.Repeat([]byte{0xde}, 32), store.starting.ClaimNetworkDigest)
 	require.Equal(t, "node-uid", store.starting.NodeUID)
 
+	starting.MigrationRestoreDigest = strings.Repeat("ac", 32)
+	response = doJSON(t, handler, http.MethodPut, protocol.StartingPath("slot"), starting, "token")
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, starting.MigrationRestoreDigest, store.starting.MigrationRestoreDigest)
+	starting.MigrationRestoreDigest = "invalid"
+	response = doJSON(t, handler, http.MethodPut, protocol.StartingPath("slot"), starting, "token")
+	require.Equal(t, http.StatusBadRequest, response.Code)
+
 	command := protocol.CommandReadyRequest{
 		AllocationID: "allocation", NodeBootID: "boot", OperationID: "operation", ClaimID: "claim",
 		ProcdInstanceID: "procd", ProcdAddress: "http://192.0.2.2:49983",
@@ -140,6 +148,13 @@ func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, bytes.Repeat([]byte{0xef}, 32), store.commandReady.CommandReadyDigest)
 	require.Equal(t, command.ProcdAddress, store.commandReady.ProcdAddress)
+	command.MigrationRestoreDigest = strings.Repeat("ac", 32)
+	response = doJSON(t, handler, http.MethodPut, protocol.CommandReadyPath("slot"), command, "token")
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, command.MigrationRestoreDigest, store.commandReady.MigrationRestoreDigest)
+	command.MigrationRestoreDigest = "invalid"
+	response = doJSON(t, handler, http.MethodPut, protocol.CommandReadyPath("slot"), command, "token")
+	require.Equal(t, http.StatusBadRequest, response.Code)
 }
 
 func TestTransitionRejectsWrongAuthenticatedNodeBeforeMutation(t *testing.T) {
@@ -195,6 +210,7 @@ func TestStoreErrorsHaveStableClasses(t *testing.T) {
 	}{
 		{sandboxstore.ErrRuntimeSlotNotFound, http.StatusNotFound, protocol.ErrorNotFound},
 		{sandboxstore.ErrRuntimeSlotConflict, http.StatusConflict, protocol.ErrorConflict},
+		{sandboxstore.ErrNomadSandboxMigrationConflict, http.StatusConflict, protocol.ErrorConflict},
 		{sandboxstore.ErrRuntimeSlotInvalid, http.StatusPreconditionFailed, protocol.ErrorFailedPrecondition},
 		{errors.New("postgres unavailable"), http.StatusServiceUnavailable, protocol.ErrorUnavailable},
 	}
@@ -273,4 +289,25 @@ func requireErrorCode(t *testing.T, response *httptest.ResponseRecorder, code st
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	require.NoError(t, body.Validate())
 	require.Equal(t, code, body.Code)
+}
+
+func TestMigrationAdoptionObservationPreservesExactCommandAndRejectsWrongClaim(t *testing.T) {
+	slot := testSlot()
+	slot.State = string(protocol.StateActive)
+	slot.ClaimOperationID, slot.ClaimID = "operation", "claim"
+	slot.ClaimLeaseExpiresAt = time.Now().Add(time.Minute)
+	slot.MigrationAdoption = &protocol.MigrationAdoptionRequest{Target: protocol.NodeChannelTarget{SlotID: slot.ID, ClusterID: slot.ClusterID,
+		NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID, AllocationID: slot.AllocationID, ControlEndpoint: "unix:///private/control.sock"},
+		OperationID: slot.ClaimOperationID, ClaimID: slot.ClaimID, SandboxID: "sandbox", RuntimeGeneration: 2, ProcdInstanceID: "procd",
+		RestoreDigest: strings.Repeat("a", 64), CommandReadyDigest: strings.Repeat("b", 64)}
+	response := httptest.NewRecorder()
+	writeObservation(response, slot)
+	require.Equal(t, http.StatusOK, response.Code)
+	var observation protocol.Observation
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &observation))
+	require.Equal(t, slot.MigrationAdoption, observation.MigrationAdoption)
+	slot.MigrationAdoption.ClaimID = "another-claim"
+	response = httptest.NewRecorder()
+	writeObservation(response, slot)
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 }

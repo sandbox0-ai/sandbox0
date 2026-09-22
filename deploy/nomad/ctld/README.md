@@ -22,7 +22,13 @@ primary loss recovers from the last committed generation and may lose the dirty
 tail. Both processes run on the same node; durable sandbox truth remains in
 PostgreSQL and S3.
 
-Build the three pinned binaries, provision the files referenced by
+Build ctld and the driver and obtain the complete pinned official runsc archive.
+For split-runtime releases, keep `gvisor-bin/` beside the supplied `runsc`; the
+installer validates and copies all five companions. Migration requires the
+qualified complete bundle described in [live migration](../live-migration.md).
+Upgrade the bundle only on a drained node.
+
+Provision the files referenced by
 `ctld.yaml` under `/etc/sandbox0/pki` and `/etc/sandbox0/tokens`, copy the
 examples, and replace every placeholder. The supplied host check requires the
 fixed PKI/token paths from the example, root ownership, and no group/other

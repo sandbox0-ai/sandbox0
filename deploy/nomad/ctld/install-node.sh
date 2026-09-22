@@ -39,6 +39,23 @@ done
 for binary in "$ctld" "$driver" "$runsc"; do
   [ -x "$binary" ] || { echo "binary is not executable: $binary" >&2; exit 1; }
 done
+# Official split-runtime archives must be installed as one pinned bundle. A
+# partial companion directory must fail before any host assets are replaced.
+runsc_companions=$(dirname -- "$runsc")/gvisor-bin
+companion_names='checkpointgofer gvisor-sentry-prewarmer gvisor_sentry runsc-fd-parking runsc-metric-server'
+if [ -d "$runsc_companions" ]; then
+  [ ! -L "$runsc_companions" ] || { echo "runsc companion directory must not be a symlink" >&2; exit 1; }
+  for name in $companion_names; do
+    file=$runsc_companions/$name
+    [ -f "$file" ] && [ -x "$file" ] && [ ! -L "$file" ] || {
+      echo "runsc bundle lacks a regular executable companion: $name" >&2; exit 1;
+    }
+  done
+else
+  case "$("$runsc" --version)" in
+    *'runsc version release-20260914.0'*) echo "this runsc release requires the adjacent gvisor-bin directory" >&2; exit 1 ;;
+  esac
+fi
 case "$root" in /*) ;; *) echo "--root must be absolute" >&2; exit 1 ;; esac
 [ "$root" != "/" ] || root=
 
@@ -75,6 +92,12 @@ install -d -m 0755 "$(dest /run/sandbox0)" "$(dest /run/sandbox0/nomad-slots)" "
 
 install -m 0755 "$ctld" "$(dest /usr/local/bin/ctld)"
 install -m 0755 "$runsc" "$(dest /usr/local/bin/runsc)"
+if [ -d "$runsc_companions" ]; then
+  install -d -m 0755 "$(dest /usr/local/bin/gvisor-bin)"
+  for name in $companion_names; do
+    install -m 0755 "$runsc_companions/$name" "$(dest /usr/local/bin/gvisor-bin/$name)"
+  done
+fi
 rm -f "$(dest /opt/nomad/plugins/nomad-driver-sandbox0)" \
   "$(dest /opt/nomad/plugins/nomad-driver-sandbox0-gvisor)"
 install -m 0755 "$driver" "$(dest /opt/nomad/plugins/sandbox0-gvisor)"

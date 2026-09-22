@@ -11,6 +11,10 @@ on:
         description: "Dockerfile path relative to repo root"
         required: true
         default: "manager/procd/Dockerfile.default"
+      base_image:
+        description: "Immutable sandbox0ai/otemplates base (required for Dockerfile.dind)"
+        required: false
+        default: ""
 
 env:
   IMAGE_REPO: sandbox0ai/otemplates
@@ -22,6 +26,7 @@ jobs:
     permissions:
       contents: read
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -30,6 +35,13 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate Docker compatibility image base
+        if: inputs.dockerfile == 'manager/procd/Dockerfile.dind'
+        env:
+          BASE_IMAGE: ${{ inputs.base_image }}
+        run: |
+          [[ "$BASE_IMAGE" =~ ^(docker.io/)?sandbox0ai/otemplates@sha256:[a-f0-9]{64}$ ]]
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -45,10 +57,19 @@ jobs:
         with:
           context: .
           file: ${{ inputs.dockerfile }}
+          build-args: |
+            BASE_IMAGE=${{ inputs.base_image }}
           platforms: linux/${{ matrix.arch }}
           push: true
           tags: ${{ env.IMAGE_REPO }}:${{ inputs.version }}-${{ matrix.arch }}
           provenance: false
+
+      - name: Verify Docker in stock gVisor
+        if: inputs.dockerfile == 'manager/procd/Dockerfile.default' || inputs.dockerfile == 'manager/procd/Dockerfile.coding-agent' || inputs.dockerfile == 'manager/procd/Dockerfile.dind'
+        timeout-minutes: 15
+        env:
+          IMAGE: ${{ env.IMAGE_REPO }}:${{ inputs.version }}-${{ matrix.arch }}
+        run: bash tools/docker-in-sandbox/ci-smoke.sh "$IMAGE"
 
   manifest:
     name: Create multi-arch manifest

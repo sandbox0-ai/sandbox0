@@ -182,7 +182,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		return nil, fmt.Errorf("%w: sandbox runtime claim is %s", ErrNomadSandboxPauseNotReady, claim.Phase)
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE sandbox_id = $1 AND state <> $2
+		WHERE sandbox_id = $1 AND state <> $2 AND migration_source_operation_id IS NULL
 		FOR UPDATE OF runtime_slots
 	`, sandboxID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {

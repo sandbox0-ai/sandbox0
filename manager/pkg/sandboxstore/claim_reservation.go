@@ -642,6 +642,27 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 		return fmt.Errorf("lock sandbox lifecycle before claim cleanup: %w", err)
 	}
 	if lifecycle != nil {
+		if lifecycle.Kind == SandboxLifecycleKindMigrate {
+			var targetSlot, targetLease string
+			var authorized bool
+			err := tx.QueryRow(ctx, `SELECT target_slot_id,target_resource_lease_id,
+				preparation_request IS NOT NULL OR capture_request IS NOT NULL
+				FROM manager.sandbox_runtime_migrations WHERE operation_id=$1 FOR UPDATE`, lifecycle.ID).
+				Scan(&targetSlot, &targetLease, &authorized)
+			if err != nil {
+				return err
+			}
+			if !authorized && lifecycle.Phase == SandboxLifecyclePhasePreparing {
+				// Deletion must release a never-dispatched target in the same
+				// transaction that aborts migration, before fencing the source.
+				_, err := releaseUnusedMigrationDestination(ctx, tx, lifecycle, targetSlot, targetLease, "sandbox termination requested")
+				return err
+			}
+			// Desired termination is committed below, but generic deletion must
+			// preserve dispatched migration authority. Preparation cancellation
+			// and later physical fencing need the original phase and receipts.
+			return nil
+		}
 		preserveTerminalWriter := lifecycle.Kind == SandboxLifecycleKindPause &&
 			(lifecycle.Source == SandboxLifecycleSourceCrash ||
 				lifecycle.Source == SandboxLifecycleSourceHealth ||
@@ -781,6 +802,20 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 	record *SandboxRecord,
 	claim *SandboxRuntimeClaim,
 ) (*SandboxClaimCleanupCandidate, error) {
+	var migrating bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+        SELECT 1 FROM manager.sandbox_lifecycle_txns
+        WHERE sandbox_id=$1 AND kind='migrate' AND phase IN ('preparing','barriered','publishing','committing')
+    )`, record.ID).Scan(&migrating); err != nil {
+		return nil, fmt.Errorf("check migration claim cleanup fence: %w", err)
+	}
+	if migrating {
+		// The public runtime may still name the predecessor while execution
+		// custody already includes a destination. Migration recovery owns both
+		// until cancellation or completion; selecting one slot here loses that
+		// boundary and can kill the procd needed to acknowledge cancellation.
+		return nil, nil
+	}
 	candidate := &SandboxClaimCleanupCandidate{
 		SandboxID: record.ID, OperationID: claim.OperationID,
 		PhysicalStateRequired: !claim.CompletedAt.IsZero() ||
@@ -788,10 +823,11 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE sandbox_id = $1
-		ORDER BY CASE WHEN state = $2 THEN 1 ELSE 0 END, updated_at DESC
+		ORDER BY CASE WHEN allocation_id=$3 AND allocation_namespace=$4 THEN 0 ELSE 1 END,
+			CASE WHEN state = $2 THEN 1 ELSE 0 END, updated_at DESC
 		LIMIT 1
 		FOR UPDATE OF runtime_slots
-	`, record.ID, RuntimeSlotStateTerminal))
+	`, record.ID, RuntimeSlotStateTerminal, record.RuntimeID, record.RuntimeNamespace))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("lock sandbox cleanup runtime slot: %w", err)
 	}

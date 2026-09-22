@@ -16,14 +16,22 @@ import (
 )
 
 type fakeStore struct {
-	slot          *sandboxstore.RuntimeSlot
-	grant         *sandboxstore.RootFSWriterGrant
-	order         *[]string
-	fenceCalls    int
-	markCalls     int
-	finalizeCalls int
-	terminalProof []byte
-	lifecycle     *sandboxstore.SandboxLifecycleTxn
+	recoverReservations func(context.Context, int) (int, error)
+	slot                *sandboxstore.RuntimeSlot
+	grant               *sandboxstore.RootFSWriterGrant
+	order               *[]string
+	fenceCalls          int
+	markCalls           int
+	finalizeCalls       int
+	terminalProof       []byte
+	lifecycle           *sandboxstore.SandboxLifecycleTxn
+}
+
+func (f *fakeStore) RecoverExpiredNomadMigrationReservations(ctx context.Context, limit int) (int, error) {
+	if f.recoverReservations != nil {
+		return f.recoverReservations(ctx, limit)
+	}
+	return 0, nil
 }
 
 func (f *fakeStore) ListRuntimeSlotsForReconcileAfter(context.Context, int, *sandboxstore.RuntimeSlot) ([]sandboxstore.RuntimeSlot, error) {

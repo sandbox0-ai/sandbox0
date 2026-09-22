@@ -24,6 +24,7 @@ const (
 	PhaseActivating Phase = "activating"
 	PhaseReady      Phase = "ready"
 	PhaseFailed     Phase = "failed"
+	PhaseMigrating  Phase = "migrating"
 )
 
 // State is procd's local activation state.
@@ -43,11 +44,14 @@ type Controller struct {
 	httpPort          int
 	logger            *zap.Logger
 
-	mu      sync.RWMutex
-	state   State
-	applyMu sync.Mutex
-	watchMu sync.Mutex
-	watch   struct {
+	mu                 sync.RWMutex
+	state              State
+	applyMu            sync.Mutex
+	migrationDigest    string
+	migrationRebinding bool
+	migrationCanceled  bool
+	watchMu            sync.Mutex
+	watch              struct {
 		path        string
 		unsubscribe func() error
 	}
@@ -113,6 +117,8 @@ func (c *Controller) Probe(kind sandboxprobe.Kind) sandboxprobe.Response {
 		return sandboxprobe.Failed(kind, "RuntimeFailed", state.Reason, nil)
 	case PhaseActivating:
 		return sandboxprobe.Suspended(kind, "RuntimeActivating", "runtime assignment is activating", nil)
+	case PhaseMigrating:
+		return sandboxprobe.Suspended(kind, "RuntimeMigrating", "runtime migration is in progress", nil)
 	default:
 		return sandboxprobe.Suspended(kind, "RuntimePending", "runtime assignment has not been activated", nil)
 	}
@@ -134,6 +140,9 @@ func (c *Controller) Activate(ctx context.Context, assignment runtimecontrol.Ass
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	current := c.State()
+	if current.Phase == PhaseMigrating {
+		return errors.New("migration owns the runtime assignment")
+	}
 	if current.Phase == PhaseReady {
 		if current.Revision == revision && current.RuntimeGeneration == assignment.RuntimeGeneration {
 			return nil

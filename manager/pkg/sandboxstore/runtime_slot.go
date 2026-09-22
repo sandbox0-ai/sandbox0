@@ -44,6 +44,8 @@ var (
 // RuntimeSlot is the region-authoritative state of one generic warm runtime
 // allocation. Nomad's allocation catalog remains a physical placement view.
 type RuntimeSlot struct {
+	// Transient command-ready projection; the migration row owns this command.
+	MigrationAdoption              *protocol.MigrationAdoptionRequest
 	ID                             string
 	ClusterID                      string
 	AllocationID                   string
@@ -139,6 +141,8 @@ type AcquireRuntimeSlotRequest struct {
 	ClusterID                 string
 	RuntimeAssignmentRevision string
 	NetworkPolicyDigest       string
+	RuntimeAssignmentPayload  string
+	NetworkPolicy             string
 	ClaimTTL                  time.Duration
 	Resources                 protocol.RuntimeResourceRequest
 }
@@ -158,30 +162,32 @@ type IssueAndBindRuntimeSlotWriterGrantResult struct {
 }
 
 type StartRuntimeSlotRequest struct {
-	SlotID              string
-	AllocationID        string
-	NodeUID             string
-	NodeBootID          string
-	OperationID         string
-	ClaimID             string
-	LaunchAttempt       string
-	RunscContainerID    string
-	RootFSBindingDigest []byte
-	ClaimNetworkDigest  []byte
-	ResourceLeaseID     string
-	ResourceLeaseDigest []byte
+	MigrationRestoreDigest string
+	SlotID                 string
+	AllocationID           string
+	NodeUID                string
+	NodeBootID             string
+	OperationID            string
+	ClaimID                string
+	LaunchAttempt          string
+	RunscContainerID       string
+	RootFSBindingDigest    []byte
+	ClaimNetworkDigest     []byte
+	ResourceLeaseID        string
+	ResourceLeaseDigest    []byte
 }
 
 type MarkRuntimeSlotCommandReadyRequest struct {
-	SlotID             string
-	AllocationID       string
-	NodeUID            string
-	NodeBootID         string
-	OperationID        string
-	ClaimID            string
-	ProcdInstanceID    string
-	ProcdAddress       string
-	CommandReadyDigest []byte
+	MigrationRestoreDigest string
+	SlotID                 string
+	AllocationID           string
+	NodeUID                string
+	NodeBootID             string
+	OperationID            string
+	ClaimID                string
+	ProcdInstanceID        string
+	ProcdAddress           string
+	CommandReadyDigest     []byte
 }
 
 type BeginRuntimeSlotQuiesceRequest struct {
@@ -278,8 +284,9 @@ func (t sandboxStoreTx) GetRuntimeSlot(ctx context.Context, slotID string) (*Run
 	return slot, err
 }
 
-// GetRuntimeSlotBySandboxID returns the one non-terminal physical runtime
-// incarnation currently bound to a logical sandbox.
+// GetRuntimeSlotBySandboxID resolves the committed allocation when present.
+// During migration both carriers retain custody, but a prepared destination
+// must never replace the public runtime before its generation commits.
 func (s *PGSandboxStore) GetRuntimeSlotBySandboxID(ctx context.Context, sandboxID string) (*RuntimeSlot, error) {
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" {
@@ -287,6 +294,12 @@ func (s *PGSandboxStore) GetRuntimeSlotBySandboxID(ctx context.Context, sandboxI
 	}
 	slot, err := scanRuntimeSlot(s.pool.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE sandbox_id = $1 AND state <> $2
+			AND EXISTS (SELECT 1 FROM manager.sandboxes sandbox
+				WHERE sandbox.sandbox_id=runtime_slots.sandbox_id
+					AND ((sandbox.runtime_id=runtime_slots.allocation_id
+						AND sandbox.runtime_namespace=runtime_slots.allocation_namespace)
+						OR (sandbox.runtime_id='' AND sandbox.runtime_namespace=''
+							AND runtime_slots.migration_source_operation_id IS NULL)))
 	`, sandboxID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: sandbox %s", ErrRuntimeSlotNotFound, sandboxID)
@@ -468,6 +481,9 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 		if !runtimeSlotClaimMatches(existing, normalized) {
 			return nil, fmt.Errorf("%w: claim operation is already bound to different inputs", ErrRuntimeSlotConflict)
 		}
+		if err := matchRuntimeSlotClaimInputs(ctx, tx, existing.ID, normalized); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
@@ -510,7 +526,56 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `
+	err = insertRuntimeResourceLease(ctx, tx, resourceLease, resourceLeaseDigest)
+	if err != nil {
+		return nil, mapRuntimeSlotConflict("insert runtime resource lease", err)
+	}
+	result, err := attachRuntimeSlotClaim(ctx, tx, slot, normalized, resourceLease.LeaseID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapRuntimeSlotConflict("commit runtime slot claim", err)
+	}
+	return result, nil
+}
+
+// attachRuntimeSlotClaim attaches an already-reserved resource lease. Callers
+// must hold the slot lock and establish lifecycle and capacity authority first.
+func attachRuntimeSlotClaim(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot, request *AcquireRuntimeSlotRequest, leaseID string) (*RuntimeSlot, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET state = $2, revision = revision + 1,
+			claim_operation_id = $3, claim_id = $4, sandbox_id = $5,
+			filesystem_id = $6, source_generation_id = $7,
+			claim_cluster_filter = $8, claim_ttl_milliseconds = $9::bigint,
+			claim_runtime_assignment_revision = $10, claim_network_policy_digest = $11,
+			claim_lease_expires_at = NOW() + ($9::double precision * INTERVAL '1 millisecond'),
+			claimed_at = NOW(), updated_at = NOW(), resource_lease_id = $12,
+			claim_runtime_assignment = $14, claim_network_policy = $15
+		WHERE slot_id = $1 AND state = $13 AND resource_lease_id IS NULL
+	`, slot.ID, RuntimeSlotStateClaiming, request.OperationID, request.ClaimID,
+		request.SandboxID, request.FilesystemID, request.SourceGenerationID,
+		request.ClusterID, request.ClaimTTL.Milliseconds(), request.RuntimeAssignmentRevision,
+		request.NetworkPolicyDigest, leaseID, RuntimeSlotStateFastpathReady,
+		nullableRuntimeClaimInput(request.RuntimeAssignmentPayload), nullableRuntimeClaimInput(request.NetworkPolicy))
+	if err != nil {
+		return nil, mapRuntimeSlotConflict("acquire runtime slot", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("%w: selected runtime slot changed before resource lease attachment", ErrRuntimeSlotConflict)
+	}
+	result, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slot.ID))
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// insertRuntimeResourceLease records capacity in the shared ledger. The caller
+// must hold the selected slot and exact node-capacity row locks.
+func insertRuntimeResourceLease(ctx context.Context, tx pgx.Tx, resourceLease protocol.RuntimeResourceLease, resourceLeaseDigest []byte) error {
+	_, err := tx.Exec(ctx, `
 		INSERT INTO manager.runtime_resource_leases (
 			lease_id, slot_id, operation_id, claim_id,
 			cluster_id, node_id, node_uid, node_boot_id,
@@ -527,37 +592,7 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 		int64(resourceLease.CPUShares), int64(resourceLease.CPUWeight), resourceLease.CPUSetCPUs,
 		resourceLease.CPUSetMems, resourceLease.MemoryBytes, resourceLease.PIDsLimit,
 		resourceLease.CgroupName, resourceLeaseDigest, RuntimeResourceLeaseActive)
-	if err != nil {
-		return nil, mapRuntimeSlotConflict("insert runtime resource lease", err)
-	}
-	tag, err := tx.Exec(ctx, `
-		UPDATE manager.runtime_slots
-		SET state = $2, revision = revision + 1,
-			claim_operation_id = $3, claim_id = $4, sandbox_id = $5,
-			filesystem_id = $6, source_generation_id = $7,
-			claim_cluster_filter = $8, claim_ttl_milliseconds = $9::bigint,
-			claim_runtime_assignment_revision = $10, claim_network_policy_digest = $11,
-			claim_lease_expires_at = NOW() + ($9::double precision * INTERVAL '1 millisecond'),
-			claimed_at = NOW(), updated_at = NOW(), resource_lease_id = $12
-		WHERE slot_id = $1 AND state = $13 AND resource_lease_id IS NULL
-	`, slot.ID, RuntimeSlotStateClaiming, normalized.OperationID, normalized.ClaimID,
-		normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID,
-		normalized.ClusterID, normalized.ClaimTTL.Milliseconds(), normalized.RuntimeAssignmentRevision,
-		normalized.NetworkPolicyDigest, resourceLease.LeaseID, RuntimeSlotStateFastpathReady)
-	if err != nil {
-		return nil, mapRuntimeSlotConflict("acquire runtime slot", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return nil, fmt.Errorf("%w: selected runtime slot changed before resource lease attachment", ErrRuntimeSlotConflict)
-	}
-	result, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slot.ID))
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, mapRuntimeSlotConflict("commit runtime slot claim", err)
-	}
-	return result, nil
+	return err
 }
 
 func selectRuntimeSlotResourceLease(
@@ -565,6 +600,22 @@ func selectRuntimeSlotResourceLease(
 	tx pgx.Tx,
 	request *AcquireRuntimeSlotRequest,
 ) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
+	return selectRuntimeSlotResourceLeaseOutsideNode(ctx, tx, request, "", "")
+}
+
+// selectRuntimeSlotResourceLeaseOutsideNode uses normal admission and capacity
+// accounting while allowing migration to exclude the source physical node.
+func selectRuntimeSlotResourceLeaseOutsideNode(
+	ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
+	excludedNodeID, excludedNodeUID string,
+) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
+	return selectRuntimeSlotResourceLeaseExcludingNodes(ctx, tx, request, excludedNodeID, excludedNodeUID, []string{})
+}
+
+// Additional migration node exclusions preserve normal claim admission. They
+// prevent automatic moves from queuing onto an occupied exclusive staging pool.
+func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
+	excludedNodeID, excludedNodeUID string, excludedNodes []string) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -574,6 +625,11 @@ func selectRuntimeSlotResourceLease(
 					AND compatibility_digest = $2
 					AND ($3 = '' OR cluster_id = $3)
 					AND slot_id <> ALL($6::text[])
+					AND ($7 = '' OR node_id <> $7)
+					AND ($8 = '' OR node_uid <> $8)
+                    AND node_uid <> ALL($9::text[])
+					AND NOT EXISTS (SELECT 1 FROM manager.runtime_resource_leases reserved
+						WHERE reserved.slot_id = runtime_slots.slot_id)
 					AND NOT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes AS resize
 						WHERE resize.cluster_id = runtime_slots.cluster_id
 							AND resize.node_id = runtime_slots.node_id AND resize.pending
@@ -618,7 +674,7 @@ func selectRuntimeSlotResourceLease(
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
-			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots))
+			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}
@@ -912,58 +968,76 @@ func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRun
 	if err != nil {
 		return nil, err
 	}
+	if normalized.MigrationRestoreDigest != "" {
+		return s.startNomadMigrationRestore(ctx, normalized)
+	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
-		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
-			return nil, fmt.Errorf("%w: start caller does not match slot incarnation", ErrRuntimeSlotConflict)
-		}
-		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
-			return nil, fmt.Errorf("%w: start caller does not match slot claim", ErrRuntimeSlotConflict)
-		}
-		if slot.ResourceLease.LeaseID != normalized.ResourceLeaseID ||
-			!bytes.Equal(slot.ResourceLeaseDigest, normalized.ResourceLeaseDigest) ||
-			slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
-			return nil, fmt.Errorf("%w: start resource lease does not match slot claim", ErrRuntimeSlotConflict)
-		}
-		if slot.State == RuntimeSlotStateStarting || slot.State == RuntimeSlotStateActive {
-			if slot.LaunchAttempt == normalized.LaunchAttempt &&
-				slot.RunscContainerID == normalized.RunscContainerID &&
-				bytes.Equal(slot.RootFSBindingDigest, normalized.RootFSBindingDigest) &&
-				bytes.Equal(slot.ClaimNetworkDigest, normalized.ClaimNetworkDigest) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("%w: launch attempt changed", ErrRuntimeSlotConflict)
-		}
-		if slot.State != RuntimeSlotStateClaiming || slot.WriterGrantID == "" {
-			return nil, fmt.Errorf("%w: slot is not a grant-bound claim", ErrRuntimeSlotInvalid)
-		}
-		if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
-			return nil, fmt.Errorf("%w: slot heartbeat expired before start", ErrRuntimeSlotInvalid)
-		}
-		if runtimeSlotPreCommandReadyClaimExpired(slot) {
-			return nil, fmt.Errorf("%w: slot claim lease expired before start", ErrRuntimeSlotInvalid)
-		}
-		var grantState string
-		if err := tx.QueryRow(ctx, `
-			SELECT state FROM manager.rootfs_writer_grants
-			WHERE grant_id = $1
-			FOR UPDATE
-		`, slot.WriterGrantID).Scan(&grantState); err != nil {
+		var migrationTarget bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1)`, slot.ID).Scan(&migrationTarget); err != nil {
 			return nil, err
 		}
-		if grantState != RootFSWriterGrantStateConsumed {
-			return nil, fmt.Errorf("%w: writer grant must be consumed before start", ErrRuntimeSlotInvalid)
+		if migrationTarget {
+			return nil, fmt.Errorf("%w: migration destination requires image restore authority", ErrRuntimeSlotInvalid)
 		}
-		_, err := tx.Exec(ctx, `
-			UPDATE manager.runtime_slots
-			SET state = $2, revision = revision + 1,
-				launch_attempt = $3, runsc_container_id = $4,
-				rootfs_binding_digest = $5, claim_network_digest = $6,
-				starting_at = NOW(), updated_at = NOW()
-			WHERE slot_id = $1
-		`, slot.ID, RuntimeSlotStateStarting, normalized.LaunchAttempt, normalized.RunscContainerID,
-			normalized.RootFSBindingDigest, normalized.ClaimNetworkDigest)
-		return nil, err
+
+		return startRuntimeSlotTransition(ctx, tx, slot, normalized)
 	})
+}
+
+// startRuntimeSlotTransition shares the physical launch transition; callers
+// establish either ordinary claim authority or exact migration restore authority.
+func startRuntimeSlotTransition(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot, normalized *StartRuntimeSlotRequest) (*RuntimeSlot, error) {
+
+	if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
+		return nil, fmt.Errorf("%w: start caller does not match slot incarnation", ErrRuntimeSlotConflict)
+	}
+	if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
+		return nil, fmt.Errorf("%w: start caller does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if slot.ResourceLease.LeaseID != normalized.ResourceLeaseID ||
+		!bytes.Equal(slot.ResourceLeaseDigest, normalized.ResourceLeaseDigest) ||
+		slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
+		return nil, fmt.Errorf("%w: start resource lease does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if slot.State == RuntimeSlotStateStarting || slot.State == RuntimeSlotStateActive {
+		if slot.LaunchAttempt == normalized.LaunchAttempt &&
+			slot.RunscContainerID == normalized.RunscContainerID &&
+			bytes.Equal(slot.RootFSBindingDigest, normalized.RootFSBindingDigest) &&
+			bytes.Equal(slot.ClaimNetworkDigest, normalized.ClaimNetworkDigest) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: launch attempt changed", ErrRuntimeSlotConflict)
+	}
+	if slot.State != RuntimeSlotStateClaiming || slot.WriterGrantID == "" {
+		return nil, fmt.Errorf("%w: slot is not a grant-bound claim", ErrRuntimeSlotInvalid)
+	}
+	if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
+		return nil, fmt.Errorf("%w: slot heartbeat expired before start", ErrRuntimeSlotInvalid)
+	}
+	if runtimeSlotPreCommandReadyClaimExpired(slot) {
+		return nil, fmt.Errorf("%w: slot claim lease expired before start", ErrRuntimeSlotInvalid)
+	}
+	var grantState string
+	if err := tx.QueryRow(ctx, `
+		SELECT state FROM manager.rootfs_writer_grants
+		WHERE grant_id = $1
+		FOR UPDATE
+	`, slot.WriterGrantID).Scan(&grantState); err != nil {
+		return nil, err
+	}
+	if grantState != RootFSWriterGrantStateConsumed {
+		return nil, fmt.Errorf("%w: writer grant must be consumed before start", ErrRuntimeSlotInvalid)
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET state = $2, revision = revision + 1,
+			launch_attempt = $3, runsc_container_id = $4,
+			rootfs_binding_digest = $5, claim_network_digest = $6,
+			starting_at = NOW(), updated_at = NOW()
+		WHERE slot_id = $1
+	`, slot.ID, RuntimeSlotStateStarting, normalized.LaunchAttempt, normalized.RunscContainerID,
+		normalized.RootFSBindingDigest, normalized.ClaimNetworkDigest)
+	return nil, err
 }
 
 // MarkRuntimeSlotCommandReady is the slot-registry endpoint of the complete
@@ -975,6 +1049,10 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 	}
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
+	}
+
+	if normalized.MigrationRestoreDigest != "" {
+		return s.markNomadMigrationCommandReady(ctx, normalized)
 	}
 
 	// Read the immutable claim identity before opening the transaction so the
@@ -1147,68 +1225,81 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 		return nil, err
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
-		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
-			return nil, fmt.Errorf("%w: terminal caller does not match slot claim", ErrRuntimeSlotConflict)
+		var migrationSource bool
+		if err := tx.QueryRow(ctx, `SELECT migration_source_operation_id IS NOT NULL FROM manager.runtime_slots WHERE slot_id=$1`, slot.ID).Scan(&migrationSource); err != nil {
+			return nil, err
 		}
-		if slot.ResourceLease.IsZero() {
-			if normalized.ResourceLeaseID != "" || len(normalized.ResourceLeaseDigest) != 0 || normalized.ResourceCgroupAbsent {
-				return nil, fmt.Errorf("%w: legacy slot received resource cleanup facts", ErrRuntimeSlotConflict)
-			}
-		} else if normalized.ResourceLeaseID != slot.ResourceLease.LeaseID ||
-			!bytes.Equal(normalized.ResourceLeaseDigest, slot.ResourceLeaseDigest) || !normalized.ResourceCgroupAbsent {
-			return nil, fmt.Errorf("%w: resource cleanup proof does not match slot lease", ErrRuntimeSlotConflict)
+		if migrationSource {
+			return nil, fmt.Errorf("%w: migration source requires atomic lifecycle completion", ErrRuntimeSlotConflict)
 		}
-		if slot.State == RuntimeSlotStateTerminal {
-			if slot.TerminalReason == normalized.Reason &&
-				bytes.Equal(slot.TerminalProofDigest, normalized.ProofDigest) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("%w: terminal proof changed", ErrRuntimeSlotConflict)
-		}
-		if slot.WriterGrantID == "" {
-			if normalized.Reason != "prelaunch_abort" {
-				return nil, fmt.Errorf("%w: grantless claim requires prelaunch_abort", ErrRuntimeSlotInvalid)
-			}
-		} else {
-			var grantState string
-			if err := tx.QueryRow(ctx, `
-				SELECT state FROM manager.rootfs_writer_grants
-				WHERE grant_id = $1
-				FOR UPDATE
-			`, slot.WriterGrantID).Scan(&grantState); err != nil {
-				return nil, err
-			}
-			if grantState != RootFSWriterGrantStateRetired && grantState != RootFSWriterGrantStateCanceled {
-				return nil, fmt.Errorf("%w: writer grant remains %s", ErrRuntimeSlotInvalid, grantState)
-			}
-		}
-		if slot.ResourceLease.LeaseID != "" {
-			if slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
-				return nil, fmt.Errorf("%w: resource lease is not active before terminal cleanup", ErrRuntimeSlotInvalid)
-			}
-			tag, err := tx.Exec(ctx, `
-				UPDATE manager.runtime_resource_leases
-				SET lease_state = $2, released_at = NOW(), updated_at = NOW()
-				WHERE lease_id = $1 AND slot_id = $3 AND operation_id = $4 AND claim_id = $5
-					AND lease_state = $6 AND released_at IS NULL
-			`, slot.ResourceLease.LeaseID, RuntimeResourceLeaseReleased, slot.ID,
-				normalized.OperationID, normalized.ClaimID, RuntimeResourceLeaseActive)
-			if err != nil {
-				return nil, err
-			}
-			if tag.RowsAffected() != 1 {
-				return nil, fmt.Errorf("%w: resource lease changed before terminal cleanup", ErrRuntimeSlotConflict)
-			}
-		}
-		_, err := tx.Exec(ctx, `
-			UPDATE manager.runtime_slots
-			SET state = $2, revision = revision + 1,
-				terminal_reason = $3, terminal_proof_digest = $4,
-				terminal_at = NOW(), updated_at = NOW()
-			WHERE slot_id = $1
-		`, slot.ID, RuntimeSlotStateTerminal, normalized.Reason, normalized.ProofDigest)
-		return nil, err
+		return finalizeRuntimeSlotTx(ctx, tx, slot, normalized)
 	})
+}
+
+// finalizeRuntimeSlotTx shares the existing lease and terminal-slot transition
+// with migration completion, whose caller already owns the lifecycle lock.
+func finalizeRuntimeSlotTx(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot, normalized *FinalizeRuntimeSlotRequest) (*RuntimeSlot, error) {
+	if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
+		return nil, fmt.Errorf("%w: terminal caller does not match slot claim", ErrRuntimeSlotConflict)
+	}
+	if slot.ResourceLease.IsZero() {
+		if normalized.ResourceLeaseID != "" || len(normalized.ResourceLeaseDigest) != 0 || normalized.ResourceCgroupAbsent {
+			return nil, fmt.Errorf("%w: legacy slot received resource cleanup facts", ErrRuntimeSlotConflict)
+		}
+	} else if normalized.ResourceLeaseID != slot.ResourceLease.LeaseID ||
+		!bytes.Equal(normalized.ResourceLeaseDigest, slot.ResourceLeaseDigest) || !normalized.ResourceCgroupAbsent {
+		return nil, fmt.Errorf("%w: resource cleanup proof does not match slot lease", ErrRuntimeSlotConflict)
+	}
+	if slot.State == RuntimeSlotStateTerminal {
+		if slot.TerminalReason == normalized.Reason &&
+			bytes.Equal(slot.TerminalProofDigest, normalized.ProofDigest) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: terminal proof changed", ErrRuntimeSlotConflict)
+	}
+	if slot.WriterGrantID == "" {
+		if normalized.Reason != "prelaunch_abort" {
+			return nil, fmt.Errorf("%w: grantless claim requires prelaunch_abort", ErrRuntimeSlotInvalid)
+		}
+	} else {
+		var grantState string
+		if err := tx.QueryRow(ctx, `
+			SELECT state FROM manager.rootfs_writer_grants
+			WHERE grant_id = $1
+			FOR UPDATE
+		`, slot.WriterGrantID).Scan(&grantState); err != nil {
+			return nil, err
+		}
+		if grantState != RootFSWriterGrantStateRetired && grantState != RootFSWriterGrantStateCanceled {
+			return nil, fmt.Errorf("%w: writer grant remains %s", ErrRuntimeSlotInvalid, grantState)
+		}
+	}
+	if slot.ResourceLease.LeaseID != "" {
+		if slot.ResourceLeaseState != RuntimeResourceLeaseActive || !slot.ResourceLeaseReleasedAt.IsZero() {
+			return nil, fmt.Errorf("%w: resource lease is not active before terminal cleanup", ErrRuntimeSlotInvalid)
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE manager.runtime_resource_leases
+			SET lease_state = $2, released_at = NOW(), updated_at = NOW()
+			WHERE lease_id = $1 AND slot_id = $3 AND operation_id = $4 AND claim_id = $5
+				AND lease_state = $6 AND released_at IS NULL
+		`, slot.ResourceLease.LeaseID, RuntimeResourceLeaseReleased, slot.ID,
+			normalized.OperationID, normalized.ClaimID, RuntimeResourceLeaseActive)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() != 1 {
+			return nil, fmt.Errorf("%w: resource lease changed before terminal cleanup", ErrRuntimeSlotConflict)
+		}
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET state = $2, revision = revision + 1,
+			terminal_reason = $3, terminal_proof_digest = $4,
+			terminal_at = NOW(), updated_at = NOW()
+		WHERE slot_id = $1
+	`, slot.ID, RuntimeSlotStateTerminal, normalized.Reason, normalized.ProofDigest)
+	return nil, err
 }
 
 // ListRuntimeSlotsForReconcile prioritizes orphaned and explicitly quiescing
@@ -1468,6 +1559,9 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 	if err := normalized.Resources.Validate(); err != nil {
 		return nil, fmt.Errorf("resources: %w", err)
 	}
+	if err := validateRuntimeSlotClaimInputs(&normalized); err != nil {
+		return nil, err
+	}
 	return &normalized, nil
 }
 
@@ -1506,6 +1600,11 @@ func normalizeStartRuntimeSlotRequest(request *StartRuntimeSlotRequest) (*StartR
 		return nil, fmt.Errorf("start runtime slot request is required")
 	}
 	normalized := *request
+	if normalized.MigrationRestoreDigest != "" {
+		if _, err := protocol.DecodeProof("migration_restore_digest", normalized.MigrationRestoreDigest); err != nil {
+			return nil, err
+		}
+	}
 	if err := normalizeRuntimeSlotNodeClaim(
 		&normalized.SlotID, &normalized.AllocationID, &normalized.NodeUID, &normalized.NodeBootID,
 		&normalized.OperationID, &normalized.ClaimID,
@@ -1543,6 +1642,11 @@ func normalizeMarkRuntimeSlotCommandReadyRequest(request *MarkRuntimeSlotCommand
 		return nil, fmt.Errorf("mark runtime slot command ready request is required")
 	}
 	normalized := *request
+	if normalized.MigrationRestoreDigest != "" {
+		if _, err := protocol.DecodeProof("migration_restore_digest", normalized.MigrationRestoreDigest); err != nil {
+			return nil, err
+		}
+	}
 	if err := normalizeRuntimeSlotNodeClaim(
 		&normalized.SlotID, &normalized.AllocationID, &normalized.NodeUID, &normalized.NodeBootID,
 		&normalized.OperationID, &normalized.ClaimID,

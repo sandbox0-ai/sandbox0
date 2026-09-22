@@ -95,6 +95,12 @@ jobs:
           provenance: false
           tags: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
 
+      - name: Verify Docker in stock gVisor
+        timeout-minutes: 15
+        env:
+          IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+        run: bash tools/docker-in-sandbox/ci-smoke.sh "$IMAGE"
+
   publish:
     needs: [prepare, build]
     runs-on: ubuntu-latest
@@ -126,7 +132,7 @@ jobs:
           digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
           jq -n --arg version "$VERSION" --arg source "$source" \
             --arg image "sandbox0ai/otemplates@${digest}" --arg commit "$SOURCE_COMMIT" \
-            '{version: $version, source: $source, image: $image, commit: $commit}' > coding-agent-release.json
+            '{version: $version, source: $source, image: $image, commit: $commit, dockerInDocker: 1}' > coding-agent-release.json
           # A release is the promotion signal. Partial/failed builds never reach infra.
           gh release create "$VERSION" coding-agent-release.json \
             manager/procd/coding-agents/package.json \

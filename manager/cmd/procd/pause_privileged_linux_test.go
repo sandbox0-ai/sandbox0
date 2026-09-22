@@ -142,7 +142,7 @@ func filesystemResumeGuestProbe(generation int, result map[string]any) error {
 		if err != nil {
 			return err
 		}
-		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set(internalauth.DefaultTokenHeader, token)
 		r.Header.Set("Content-Type", "application/json")
 		response, err := client.Do(r)
 		if err != nil {
@@ -158,9 +158,13 @@ func filesystemResumeGuestProbe(generation int, result map[string]any) error {
 		return nil
 	}
 	deadline := time.Now().Add(25 * time.Second)
-	for request("GET", "/api/v1/sessions", nil, nil) != nil {
+	for {
+		err := request("GET", "/api/v1/sessions", nil, nil)
+		if err == nil {
+			break
+		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("procd did not become ready")
+			return fmt.Errorf("procd did not become ready: %w", err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

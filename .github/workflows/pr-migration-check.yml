@@ -90,8 +90,10 @@ jobs:
         run: |
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/checkpoint.test" ./pkg/gvisorcli
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/procd-checkpoint.test" ./manager/procd/pkg/http
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/procd-resume.test" ./manager/cmd/procd
           sudo env SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 "$RUNNER_TEMP/checkpoint.test" -test.run '^TestPrivilegedExecutionCheckpoint$' -test.v -test.timeout=10m
           sudo env SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 "$RUNNER_TEMP/procd-checkpoint.test" -test.run '^TestPrivilegedProcdSessionCheckpoint$' -test.v -test.timeout=10m
+          sudo env SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 "$RUNNER_TEMP/procd-resume.test" -test.run '^TestPrivilegedProcdFilesystemResume$' -test.v -test.timeout=5m
       - name: Verify kernel-enforced staging quotas
         shell: bash
         run: |

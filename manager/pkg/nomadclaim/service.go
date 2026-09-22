@@ -326,7 +326,9 @@ func (s *Service) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*s
 	if err != nil {
 		return nil, err
 	}
-	if candidate.AlreadyPaused {
+	// Publishing the RootFS head can precede physical slot cleanup. Resume
+	// requires terminal custody, so do not report completion in that window.
+	if candidate.AlreadyPaused && candidate.SlotID == "" {
 		return &service.PauseSandboxResponse{
 			SandboxID: sandboxID, Paused: true, Status: managerapi.SandboxStatusPaused,
 		}, nil

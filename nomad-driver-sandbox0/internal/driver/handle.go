@@ -1105,7 +1105,14 @@ func (h *taskHandle) Stop(timeout time.Duration, signal string) error {
 
 	h.setPhase(phaseStopping)
 	if phase == phaseActive {
-		if err := h.runner.Kill(context.Background(), h.containerID, signal); err != nil {
+		// Signal procd first on graceful shutdown. Broadcasting TERM also kills
+		// session children while procd can still persist their exits, destroying
+		// the recovery intent captured by the subsequent RootFS checkpoint.
+		stop := h.runner.Kill
+		if signal == "TERM" || signal == "SIGTERM" || signal == "INT" || signal == "SIGINT" {
+			stop = h.runner.SignalInit
+		}
+		if err := stop(context.Background(), h.containerID, signal); err != nil {
 			h.logger.Warn("runsc kill failed", "error", err)
 		}
 		select {

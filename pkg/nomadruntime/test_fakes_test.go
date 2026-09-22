@@ -103,6 +103,10 @@ func (r *fakeRunsc) Stats(context.Context, string) (RunscStats, error) {
 	return RunscStats{Type: "stats", ID: "fake"}, nil
 }
 
+func (r *fakeRunsc) SignalInit(ctx context.Context, id, signal string) error {
+	return r.Kill(ctx, id, signal)
+}
+
 func (r *fakeRunsc) Version(context.Context) (string, error) {
 	return "runsc version fake", nil
 }

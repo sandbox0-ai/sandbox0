@@ -69,3 +69,36 @@ exit 1
 		t.Fatalf("Create() error = %v", err)
 	}
 }
+
+func TestGracefulSignalTargetsInitWithoutWeakeningWholeContainerKill(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "runsc")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > '"+argsPath+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(Config{Path: script, Root: filepath.Join(dir, "root"), Platform: "systrap"})
+	for _, test := range []struct {
+		name   string
+		call   func(context.Context, string, string) error
+		signal string
+		want   string
+	}{
+		{"graceful", runner.SignalInit, "TERM", "kill\nguest\nTERM\n"},
+		{"default", runner.SignalInit, "", "kill\nguest\nTERM\n"},
+		{"fence", runner.Kill, "KILL", "kill\n--all\nguest\nKILL\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(t.Context(), "guest", test.signal); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(argsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(string(args), test.want) {
+				t.Fatalf("runsc arguments = %s, want suffix %s", args, test.want)
+			}
+		})
+	}
+}

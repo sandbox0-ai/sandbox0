@@ -63,6 +63,10 @@ The initial response can report `starting`/`paused: false` while this work
 continues. Poll sandbox details until `status` is `paused` and `paused` is
 `true` before treating the checkpoint as resume-ready.
 
+A repeated pause request also reports `paused: false` until the previous
+runtime slot has completed physical cleanup. A committed RootFS head alone
+does not make the sandbox ready to resume.
+
 After the pause intent is durably recorded, a temporary node-channel outage
 or completion deadline still returns `202 Accepted`; the pause controller
 retries the same operation. This response does not confirm a saved checkpoint.
@@ -178,6 +182,10 @@ Caller-visible temporary results are:
 A supervised session preserves its logical identity and retained event journal,
 then follows its `runtime_recovery` policy in the new generation. Its old PID
 and sockets do not survive.
+During graceful runtime shutdown, procd receives the stop signal before its
+children so teardown does not turn recoverable sessions into normal exits.
+Sessions that had already exited or were explicitly stopped remain terminal;
+`runtime_recovery: restart` applies to sessions active at runtime replacement.
 
 ## Typical Pattern
 

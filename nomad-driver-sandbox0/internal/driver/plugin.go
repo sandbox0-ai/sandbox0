@@ -32,6 +32,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/hashicorp/nomad/plugins/shared/structs"
+	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
@@ -39,7 +40,7 @@ import (
 
 const (
 	PluginName                   = "sandbox0-gvisor"
-	PluginVersion                = "0.3.0"
+	PluginVersion                = "0.4.0"
 	taskHandleVersion            = 2
 	fingerprintPeriod            = 30 * time.Second
 	defaultRunscOperationTimeout = 30 * time.Second
@@ -188,9 +189,12 @@ type Plugin struct {
 
 // NewPlugin returns a driver plugin wired to the production runsc runner.
 func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
-	return newPlugin(logger, func(config PluginConfig) Runsc {
-		return NewCommandRunsc(config)
-	})
+	cpuCache := gvisorcli.NewCPULaunchCache()
+	plugin := newPlugin(logger, func(config PluginConfig) Runsc {
+		return newCommandRunscWithCPUCache(config, cpuCache)
+	}).(*Plugin)
+	context.AfterFunc(plugin.ctx, func() { _ = cpuCache.Close() })
+	return plugin
 }
 
 func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) drivers.DriverPlugin {
@@ -458,6 +462,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	if err := handle.Prepare(taskConfig); err != nil {
 		return nil, nil, err
 	}
+	handle.prepareMigrationCPULaunch(p.ctx)
 	if err := p.startTaskControl(handle); err != nil {
 		_ = handle.Close(false)
 		return nil, nil, err
@@ -534,6 +539,23 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	})
 	if err := recovered.Recover(state); err != nil {
 		return err
+	}
+	if recovered.migrationFinalized {
+		// Ctld has already removed the source network and resource cgroup.
+		// Publish only the exited handle needed by Nomad's pending GC; creating
+		// a control endpoint or registering the retired carrier would revive it.
+		p.tasks.Set(state.TaskConfig.ID, recovered)
+		p.emit(state.TaskConfig.ID, "migration-source-recovered")
+		return nil
+	}
+	// A plugin restart loses the process-local CPU warm cache even when Nomad
+	// retains ready carriers. Rebuild it before exposing an unclaimed carrier;
+	// never manufacture launch history for an already running guest.
+	recovered.mu.Lock()
+	warm := recovered.phase == phaseWarm && recovered.claim == nil && !recovered.rootMounted
+	recovered.mu.Unlock()
+	if warm {
+		recovered.prepareMigrationCPULaunch(p.ctx)
 	}
 	if err := p.startTaskControl(recovered); err != nil {
 		recovered.stopExitWatch()

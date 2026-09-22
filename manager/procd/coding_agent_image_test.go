@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestCodingAgentImageKeepsPlaywrightWithoutBundledBrowser(t *testing.T) {
+func TestCodingAgentImageIncludesSharedHeadedBrowser(t *testing.T) {
 	dockerfile, err := os.ReadFile("Dockerfile.coding-agent")
 	if err != nil {
 		t.Fatalf("read coding-agent Dockerfile: %v", err)
@@ -24,17 +24,13 @@ func TestCodingAgentImageKeepsPlaywrightWithoutBundledBrowser(t *testing.T) {
 		}
 	}
 
-	for _, forbidden := range []string{
-		"playwright install chromium",
-		"openbox",
-		"tigervnc-standalone-server",
-		"x11vnc",
-		"xvfb",
-		"SANDPI_BROWSER_USER",
-		"chrome_sandbox",
+	for _, expected := range []string{
+		"playwright install chromium --with-deps --no-shell",
+		"openbox", "tigervnc-standalone-server", "SANDPI_BROWSER_USER",
+		"chrome_sandbox", "chmod 4755",
 	} {
-		if strings.Contains(contents, forbidden) {
-			t.Fatalf("coding-agent Dockerfile unexpectedly contains %q", forbidden)
+		if !strings.Contains(contents, expected) {
+			t.Fatalf("coding-agent Dockerfile does not contain %q", expected)
 		}
 	}
 }

@@ -68,6 +68,7 @@ func logManagerRuntimeSlotTerminalPass(logger *zap.Logger, report runtimeslotrec
 		return
 	}
 	fields := []zap.Field{
+		zap.Int("migration_reservations_released", report.Result.MigrationReservationsReleased),
 		zap.Int("candidates", report.Result.Candidates),
 		zap.Int("completed", report.Result.Completed),
 		zap.Int("skipped", report.Result.Skipped),
@@ -79,7 +80,7 @@ func logManagerRuntimeSlotTerminalPass(logger *zap.Logger, report runtimeslotrec
 		logger.Warn("Runtime slot terminal reconcile pass failed", append(fields, zap.Error(report.Error))...)
 		return
 	}
-	if report.Result.Completed > 0 || report.Result.Skipped > 0 || report.Result.RefillRequested > 0 {
+	if report.Result.Completed > 0 || report.Result.Skipped > 0 || report.Result.RefillRequested > 0 || report.Result.MigrationReservationsReleased > 0 {
 		logger.Info("Runtime slot terminal reconcile pass completed", fields...)
 	}
 }

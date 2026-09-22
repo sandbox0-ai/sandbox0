@@ -244,9 +244,17 @@ func CPUSetContains(parent, child string) (bool, error) {
 		for parentIndex < len(parentRanges) && parentRanges[parentIndex].end < childRange.start {
 			parentIndex++
 		}
-		if parentIndex == len(parentRanges) || parentRanges[parentIndex].start > childRange.start ||
-			parentRanges[parentIndex].end < childRange.end {
+		if parentIndex == len(parentRanges) || parentRanges[parentIndex].start > childRange.start {
 			return false, nil
+		}
+		// Linux accepts adjacent list entries as well as a single range. A
+		// child range may span several such entries, but never a missing CPU.
+		for parentRanges[parentIndex].end < childRange.end {
+			end := parentRanges[parentIndex].end
+			parentIndex++
+			if parentIndex == len(parentRanges) || parentRanges[parentIndex].start != end+1 {
+				return false, nil
+			}
 		}
 	}
 	return true, nil

@@ -411,6 +411,12 @@ func (h *taskHandle) runtimeSlotStartingRequest(
 		ResourceLeaseID:     claim.Resources.LeaseID,
 		ResourceLeaseDigest: strings.TrimPrefix(resourceDigest, "sha256:"),
 	}
+	if claim.MigrationRestore != nil {
+		request.MigrationRestoreDigest, err = claim.MigrationRestore.Digest()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := request.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("validate runtime slot starting request: %w", err)
 	}
@@ -503,11 +509,23 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 		ProcdInstanceID: proof.ProcdInstanceID, ProcdAddress: proof.ProcdAddress,
 		CommandReadyDigest: digest,
 	}
+	if claim.MigrationRestore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), runtimeSlotCommandTimeout)
+		restored, err := h.migrationRestoreReceipt(ctx, *claim.MigrationRestore)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if proof.ProcdInstanceID != restored.Request.Image.Publication.Capture.Request.ProcdInstanceID {
+			return fmt.Errorf("restored procd instance changed: %w", errdefs.ErrFailedPrecondition)
+		}
+		authorityRequest.MigrationRestoreDigest = restored.RequestDigest
+	}
 	if err := authorityRequest.Validate(); err != nil {
 		return fmt.Errorf("validate regional command-ready request: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), runtimeSlotCommandTimeout)
-	_, err = lifecycle.reportCommandReady(ctx, authorityRequest)
+	observation, err := lifecycle.reportCommandReady(ctx, authorityRequest)
 	cancel()
 	if err != nil {
 		if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) ||
@@ -528,6 +546,13 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 	if err := h.persist(); err != nil {
 		return fmt.Errorf("persist command readiness: %w", err)
 	}
+	if claim.MigrationRestore != nil {
+		return h.adoptMigrationAfterReady(observation.MigrationAdoption, *claim.MigrationRestore, digest)
+	}
+	if observation.MigrationAdoption != nil {
+		return errdefs.ErrFailedPrecondition
+	}
+
 	return nil
 }
 
@@ -632,9 +657,9 @@ func validateRecoveredRuntimeSlotState(state protocol.State, phase slotPhase) er
 	case protocol.StateStarting:
 		valid = phase == phaseClaiming || phase == phaseActive || phase == phasePoisoned
 	case protocol.StateActive:
-		valid = phase == phaseActive || phase == phasePoisoned
+		valid = phase == phaseActive || phase == phasePoisoned || phase == phaseMigrating
 	case protocol.StateQuiescing:
-		valid = phase == phaseStopping || phase == phaseExited || phase == phasePoisoned
+		valid = phase == phaseStopping || phase == phaseExited || phase == phasePoisoned || phase == phaseMigrating
 	}
 	if !valid {
 		return fmt.Errorf("runtime slot state %s does not match recovered driver phase %s: %w",
@@ -786,6 +811,9 @@ func runtimePathIdentity(path, version, description string) (string, error) {
 
 func (h *taskHandle) runtimeSlotHeartbeatLost(err error) {
 	if err == nil {
+		return
+	}
+	if h.fenceMigrationExecution(err) {
 		return
 	}
 	h.mu.Lock()

@@ -41,6 +41,7 @@ const (
 	RootFSWriterRetireKindPlannedPublish = "planned_publish"
 	RootFSWriterRetireKindPrelaunchAbort = "prelaunch_abort"
 	RootFSWriterRetireKindCrashAbandon   = "crash_abandon"
+	RootFSWriterRetireKindMigration      = "migration"
 
 	// RootFSWriterCrashAbandonReason is persisted on the aborted lifecycle
 	// transaction. It distinguishes recovery from a successful planned pause.

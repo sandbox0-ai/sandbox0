@@ -18,7 +18,7 @@ Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_
 | `template_id` | Template used to create this sandbox |
 | `team_id` | Team that owns this sandbox |
 | `runtime_id` | Opaque identifier of the current physical runtime allocation. Empty while paused. |
-| `runtime_generation` | Monotonically increasing logical runtime generation. Resume commits a new generation. |
+| `runtime_generation` | Monotonically increasing logical runtime generation. Resume and successful system migration commit a new generation. |
 | `cluster_id` | Cluster where sandbox runs in multi-cluster deployments. Present on claim and list responses, not on sandbox detail responses. |
 
 ### Lifecycle States
@@ -42,6 +42,24 @@ procd command readiness for that generation. During recovery, status returns to
 <Callout variant="info">
 Pause and resume use internal lifecycle transactions, but `pausing` and `resuming` are not caller-visible statuses. Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
+
+### System Maintenance Migration
+
+Experimental system migration can move an eligible running sandbox to another
+compatible node during planned maintenance. The system selects the destination;
+there is no user migration API, SDK option, CLI command, or template setting.
+
+A successful migration keeps the sandbox ID and preserves supported process
+state, memory, guest PIDs, open files, and runtime tmpfs data. The physical
+`runtime_id` changes and `runtime_generation` advances. Execution pauses during
+the move, and requests or existing connections may fail temporarily. Existing
+SSH, streaming, and external TCP connections are not guaranteed to survive.
+A failed restore is never reported as a successful migration by restarting the
+entrypoint. Recovery after an unrecoverable failure follows the existing
+filesystem checkpoint policy; it cannot reconstruct lost volatile memory.
+
+This capability is still undergoing failure and capacity validation. It does
+not change user pause/resume semantics or recover live memory from a dead host.
 
 ### Persistent Root Filesystem
 

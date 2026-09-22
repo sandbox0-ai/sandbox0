@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodepoolautoscaler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodepoollifecycle"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportdiscovery"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsimportworker"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
@@ -211,6 +212,25 @@ func (a *managerApp) startNodeAuthority() bool {
 			a.cancel()
 		}
 	}()
+	for _, worker := range []struct {
+		name string
+		run  func(context.Context, func(nomadmigration.Report)) error
+	}{{"capture-failure", a.nodeAuthority.RunMigrationCaptureFailures}, {"failure", a.nodeAuthority.RunMigrationFailures}, {"failure-stop", a.nodeAuthority.RunMigrationFailureStops}, {"failure-cleanup", a.nodeAuthority.RunMigrationFailureCleanups}, {"failure-finalization", a.nodeAuthority.RunMigrationFailureFinalizations}, {"evacuation", a.nodeAuthority.RunMigrationEvacuation}, {"cpu-preflight", a.nodeAuthority.RunMigrationCPUPreflights}, {"staging", a.nodeAuthority.RunMigrationStaging}, {"staging-release", a.nodeAuthority.RunMigrationStagingRelease}, {"preparation-cancel", a.nodeAuthority.RunMigrationPreparationCancellations}, {"source-execution", a.nodeAuthority.RunMigrationSourceExecution}, {"source-recovery", a.nodeAuthority.RunMigrationSourceRecovery}, {"transfer", a.nodeAuthority.RunMigrationTransfers}, {"destination", a.nodeAuthority.RunMigrationDestinations}, {"handover", a.nodeAuthority.RunMigrationHandovers}} {
+		go func() {
+			err := worker.run(a.ctx, func(report nomadmigration.Report) {
+				fields := []zap.Field{zap.String("phase", worker.name), zap.Int("candidates", report.Result.Candidates), zap.Int("advanced", report.Result.Advanced), zap.Int("failed", report.Result.Failed)}
+				if report.Error != nil {
+					a.logger.Warn("Migration pass failed", append(fields, zap.Error(report.Error))...)
+				} else if report.Result.Advanced > 0 {
+					a.logger.Info("Migration pass advanced", fields...)
+				}
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				a.logger.Error("Migration worker stopped", zap.String("phase", worker.name), zap.Error(err))
+				a.cancel()
+			}
+		}()
+	}
 	if a.nodeAuthority.TerminalEnabled() {
 		go func() {
 			err := a.nodeAuthority.RunTerminal(a.ctx, func(report runtimeslotreconciler.WorkerReport) {

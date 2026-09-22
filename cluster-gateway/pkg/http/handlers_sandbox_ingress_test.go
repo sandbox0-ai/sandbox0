@@ -157,3 +157,44 @@ func TestCreateSandboxPreservesSignedIngressAndSLOHeaders(t *testing.T) {
 		t.Fatalf("manager audit = %#v, want %#v", claims.Audit, wantAudit)
 	}
 }
+
+func TestDirectPublicManagerDelegationWithoutAuditBackend(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg: &config.ClusterGatewayConfig{},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller: internalauth.ServiceClusterGateway, PrivateKey: privateKey, TTL: time.Minute,
+		}),
+	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target: internalauth.ServiceManager, PublicKey: publicKey,
+		AllowedCallers: []string{internalauth.ServiceClusterGateway}, ClockSkewTolerance: time.Second,
+	})
+	for _, method := range []gatewayauthn.AuthMethod{gatewayauthn.AuthMethodJWT, gatewayauthn.AuthMethodAPIKey} {
+		t.Run(string(method), func(t *testing.T) {
+			authCtx := &gatewayauthn.AuthContext{TeamID: "team-1", UserID: "user-1", AuthMethod: method}
+			var previous string
+			for attempt := 0; attempt < 2; attempt++ {
+				token, err := server.generateManagerToken(authCtx, nil, []string{gatewayauthn.PermSandboxCreate})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claims, err := validator.Validate(token)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if claims.TeamID != "team-1" || claims.Audit == nil || claims.Audit.OperationID == "" ||
+					claims.Audit.RequestID == "" || claims.Audit.Origin != internalauth.ServiceClusterGateway {
+					t.Fatalf("missing signed lifecycle identity: %#v", claims)
+				}
+				if previous != "" && claims.Audit.OperationID != previous {
+					t.Fatal("delegation changed the operation within one authenticated request")
+				}
+				previous = claims.Audit.OperationID
+			}
+		})
+	}
+}

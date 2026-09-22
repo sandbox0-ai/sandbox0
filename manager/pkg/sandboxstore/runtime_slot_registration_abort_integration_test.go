@@ -82,9 +82,10 @@ func TestRegistrationAbortPreservesRegisteredAuthorityIntegration(t *testing.T) 
 }
 
 func TestRegistrationAbortDatabaseFenceSerializesLegacyInsertIntegration(t *testing.T) {
+	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
+	// Bound the concurrent fence exercise, independently of schema setup.
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
 	registration := runtimeSlotTestRegistration("race-slot", "race-allocation")
 	request := abortRegistrationFixture(registration)
 	cleanup, err := request.CleanupRequest()

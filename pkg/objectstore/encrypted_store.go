@@ -1,6 +1,7 @@
 package objectstore
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -536,6 +537,17 @@ func (s *encryptedStore) List(prefix, startAfter, token, delimiter string, limit
 }
 
 func (s *encryptedStore) encryptTo(out io.Writer, key string, in io.Reader) error {
+	// RootFS uses small authenticated frames for bounded range reads. Buffer
+	// their length prefixes and ciphertext instead of issuing two scratch-file
+	// writes per frame; retain the exact existing on-disk frame geometry.
+	buffered := bufio.NewWriterSize(out, 64<<10)
+	if err := s.encryptFramesTo(buffered, key, in); err != nil {
+		return err
+	}
+	return buffered.Flush()
+}
+
+func (s *encryptedStore) encryptFramesTo(out io.Writer, key string, in io.Reader) error {
 	dataKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, dataKey); err != nil {
 		return fmt.Errorf("generate object data key: %w", err)
@@ -566,6 +578,7 @@ func (s *encryptedStore) encryptTo(out io.Writer, key string, in io.Reader) erro
 		return err
 	}
 	buf := make([]byte, int(header.ChunkSize))
+	var ciphertext []byte
 	for chunkIndex := uint64(0); ; chunkIndex++ {
 		n, readErr := io.ReadFull(in, buf)
 		if readErr == io.EOF {
@@ -578,7 +591,9 @@ func (s *encryptedStore) encryptTo(out io.Writer, key string, in io.Reader) erro
 			return readErr
 		}
 		nonce := encryptedObjectNonce(aead.NonceSize(), noncePrefix, chunkIndex)
-		ciphertext := aead.Seal(nil, nonce, buf[:n], encryptedObjectChunkAAD(key, chunkIndex, header.Algorithm))
+		// io.Writer cannot retain its input after Write returns. Reuse the
+		// previous ciphertext allocation once that frame has been copied out.
+		ciphertext = aead.Seal(ciphertext[:0], nonce, buf[:n], encryptedObjectChunkAAD(key, chunkIndex, header.Algorithm))
 		if int64(len(ciphertext)) > maxUint32 {
 			return fmt.Errorf("encrypted object chunk is too large: %d", len(ciphertext))
 		}

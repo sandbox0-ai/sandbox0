@@ -310,7 +310,7 @@ func TestNodeChannelHubReconnectWaitHonorsContext(t *testing.T) {
 	}
 }
 
-func TestNodeChannelHubRoutesOnlyCleanupThroughAuthenticatedSuccessorBoot(t *testing.T) {
+func TestNodeChannelHubRoutesCleanupAndRetentionAckThroughAuthenticatedSuccessorBoot(t *testing.T) {
 	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +329,8 @@ func TestNodeChannelHubRoutesOnlyCleanupThroughAuthenticatedSuccessorBoot(t *tes
 		ClusterID: "cluster-1", NodeID: "node-1", Executor: executor,
 		Capacity:     channelTestCapacity(),
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
-		AgentInstanceID: "agent-boot-2",
+		AgentInstanceID:           "agent-boot-2",
+		MigrationSourceGCExecutor: &migrationChannelExecutor{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,6 +339,11 @@ func TestNodeChannelHubRoutesOnlyCleanupThroughAuthenticatedSuccessorBoot(t *tes
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(ctx) }()
 	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-2")
+	gc := protocol.MigrationSourceGCRequest{Target: protocol.NodeChannelTarget{SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1", ControlEndpoint: "unix:///source/control.sock"}, FinalizationDigest: strings.Repeat("a", 64), CleanupProofDigest: strings.Repeat("b", 64), AllocationAbsenceDigest: strings.Repeat("c", 64)}
+	ack, err := hub.AcknowledgeMigrationSourceGC(ctx, gc)
+	if err != nil || ack == nil || ack.ValidateFor(gc) != nil {
+		t.Fatalf("successor GC acknowledgement: %+v, %v", ack, err)
+	}
 
 	cleanup := testChannelCleanupRequest()
 	resources, err := protocol.NewRuntimeResourceLease(
@@ -410,6 +416,10 @@ func TestNodeChannelHubRoutesOnlyCleanupThroughAuthenticatedSuccessorBoot(t *tes
 	agent3Done := make(chan error, 1)
 	go func() { agent3Done <- agent3.Run(agent3Ctx) }()
 	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-3")
+	_, err = hub.AcknowledgeMigrationSourceGC(t.Context(), gc)
+	if !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("ambiguous successor GC acknowledgement: %v", err)
+	}
 	_, err = hub.CleanupRuntimeSlot(t.Context(), Target{
 		ClusterID: cleanup.ClusterID, NodeID: cleanup.NodeID,
 		NodeUID: cleanup.NodeUID, NodeBootID: cleanup.NodeBootID,
@@ -774,7 +784,33 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("coalesced cleanup did not reach the node")
 	}
-	time.Sleep(10 * time.Millisecond)
+	// A scheduling delay is not evidence that both callers joined the same
+	// pending command. Keep the node blocked until the hub records both waiters.
+	coalescedDeadline := time.Now().Add(3 * time.Second)
+	for {
+		connection, _, _, _ := hub.connectionForCommand(nodeChannelKey{
+			clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1", nodeBootID: "boot-1",
+		}, protocol.NodeChannelCommandCleanup)
+		joined := false
+		if connection != nil {
+			connection.mu.Lock()
+			for _, pending := range connection.pending {
+				if pending.command.Cleanup != nil && pending.command.Cleanup.OperationID == coalescedRequest.OperationID && pending.waiters == 2 {
+					joined = true
+					break
+				}
+			}
+			connection.mu.Unlock()
+		}
+		if joined {
+			break
+		}
+		if time.Now().After(coalescedDeadline) {
+			close(coalescedRelease)
+			t.Fatal("both cleanup callers did not join the pending command")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	close(coalescedRelease)
 	for range 2 {
 		if err := <-coalescedResults; err != nil {

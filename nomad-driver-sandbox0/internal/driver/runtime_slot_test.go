@@ -62,6 +62,7 @@ type fakeRuntimeSlotAuthority struct {
 	heartbeatNotify chan struct{}
 	startingHook    func(protocol.StartingRequest)
 	commandHook     func(protocol.CommandReadyRequest)
+	adoption        *protocol.MigrationAdoptionRequest
 	readyHook       func()
 	claimOperation  string
 	claimID         string
@@ -240,6 +241,11 @@ func (a *fakeRuntimeSlotAuthority) CommandReady(
 	}
 	a.state = protocol.StateActive
 	observation := a.observationLocked(slotID)
+	if a.adoption != nil && request.MigrationRestoreDigest != "" {
+		copy := *a.adoption
+		copy.CommandReadyDigest = request.CommandReadyDigest
+		observation.MigrationAdoption = &copy
+	}
 	a.mu.Unlock()
 	if hook != nil {
 		hook(request)

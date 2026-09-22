@@ -35,36 +35,53 @@ import (
 )
 
 const (
-	nodeRuntimeRPCMaxBytes         = 2 << 20
-	runtimeSlotJournalRegisterPath = "/v1/runtime-slots/register"
-	runtimeMetricTargetsPath       = "/v1/runtime-metrics/targets"
-	runtimeMetricStatsPath         = "/v1/runtime-metrics/stats"
+	nodeRuntimeRPCMaxBytes              = 2 << 20
+	runtimeSlotJournalRegisterPath      = "/v1/runtime-slots/register"
+	runtimeMetricTargetsPath            = "/v1/runtime-metrics/targets"
+	runtimeMetricStatsPath              = "/v1/runtime-metrics/stats"
+	runtimeMigrationDestinationGetPath  = "/v1/runtime-slots/migration/destination/get"
+	runtimeMigrationAdoptPath           = "/v1/runtime-slots/migration/destination/adopt"
+	runtimeMigrationRestoreRecordPath   = "/v1/runtime-slots/migration/restore/record"
+	runtimeMigrationGetPath             = "/v1/runtime-slots/migration/get"
+	runtimeMigrationFinalizationGetPath = "/v1/runtime-slots/migration/finalization/get"
+	runtimeMigrationRecordPath          = "/v1/runtime-slots/migration/record"
+	runtimeMigrationSealPath            = "/v1/runtime-slots/migration/seal-rootfs"
 )
 
 type nodeRuntimeRPCRequest struct {
-	Stage        rootfshandoff.StageRequest                 `json:"stage"`
-	Consumer     ConsumerRequest                            `json:"consumer,omitempty"`
-	Lease        ConsumerLease                              `json:"lease,omitempty"`
-	Fork         rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
-	OperationID  string                                     `json:"operation_id,omitempty"`
-	Observation  CrashTaskObservation                       `json:"observation,omitempty"`
-	SlotRegister RuntimeSlotRegistration                    `json:"slot_register,omitempty"`
-	SlotCleanup  protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
-	MetricTarget RuntimeMetricTarget                        `json:"metric_target,omitempty"`
+	MigrationAdoption *protocol.MigrationAdoptionRequest         `json:"migration_adoption,omitempty"`
+	MigrationRestore  *protocol.MigrationRestoreObservation      `json:"migration_restore,omitempty"`
+	MigrationRequest  *protocol.MigrationCaptureRequest          `json:"migration_request,omitempty"`
+	Migration         *protocol.MigrationCapture                 `json:"migration,omitempty"`
+	MigrationSlotID   string                                     `json:"migration_slot_id,omitempty"`
+	Stage             rootfshandoff.StageRequest                 `json:"stage"`
+	Consumer          ConsumerRequest                            `json:"consumer,omitempty"`
+	Lease             ConsumerLease                              `json:"lease,omitempty"`
+	Fork              rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
+	OperationID       string                                     `json:"operation_id,omitempty"`
+	Observation       CrashTaskObservation                       `json:"observation,omitempty"`
+	SlotRegister      RuntimeSlotRegistration                    `json:"slot_register,omitempty"`
+	SlotCleanup       protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
+	MetricTarget      RuntimeMetricTarget                        `json:"metric_target,omitempty"`
 }
 
 type nodeRuntimeRPCResponse struct {
-	Info          *RuntimeInfo                              `json:"info,omitempty"`
-	Mount         rootfssession.Mount                       `json:"mount,omitempty"`
-	Lease         ConsumerLease                             `json:"lease,omitempty"`
-	Retire        rootfssession.RetireResult                `json:"retire,omitempty"`
-	Crash         rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
-	Checkpoint    rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
-	SlotCleanup   protocol.NodeCleanupControlProof          `json:"slot_cleanup,omitempty"`
-	MetricTargets []RuntimeMetricTarget                     `json:"metric_targets,omitempty"`
-	MetricSample  *RuntimeMetricSample                      `json:"metric_sample,omitempty"`
-	Error         string                                    `json:"error,omitempty"`
-	ErrorClass    string                                    `json:"error_class,omitempty"`
+	MigrationFinalization *protocol.MigrationSourceFinalizationReceipt `json:"migration_finalization,omitempty"`
+	MigrationAdoption     *protocol.MigrationAdoptionProof             `json:"migration_adoption,omitempty"`
+	MigrationDestination  *MigrationDestinationCustody                 `json:"migration_destination,omitempty"`
+	MigrationRootFS       *rootfshandoff.MigrationRootFSCut            `json:"migration_rootfs,omitempty"`
+	Migration             *MigrationCaptureCustody                     `json:"migration,omitempty"`
+	Info                  *RuntimeInfo                                 `json:"info,omitempty"`
+	Mount                 rootfssession.Mount                          `json:"mount,omitempty"`
+	Lease                 ConsumerLease                                `json:"lease,omitempty"`
+	Retire                rootfssession.RetireResult                   `json:"retire,omitempty"`
+	Crash                 rootfshandoff.CrashFenceProof                `json:"crash,omitempty"`
+	Checkpoint            rootfshandoff.RunningForkCheckpointResult    `json:"checkpoint,omitempty"`
+	SlotCleanup           protocol.NodeCleanupControlProof             `json:"slot_cleanup,omitempty"`
+	MetricTargets         []RuntimeMetricTarget                        `json:"metric_targets,omitempty"`
+	MetricSample          *RuntimeMetricSample                         `json:"metric_sample,omitempty"`
+	Error                 string                                       `json:"error,omitempty"`
+	ErrorClass            string                                       `json:"error_class,omitempty"`
 }
 
 type Client struct {
@@ -464,6 +481,75 @@ func nodeRuntimeRPCHandler(
 			return nodeRuntimeRPCResponse{}, fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
 		}
 		return nodeRuntimeRPCResponse{}, cleaner.RegisterRuntimeSlot(ctx, request.SlotRegister)
+	})
+	handle(runtimeMigrationAdoptPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		adopter, ok := cleaner.(MigrationAdopter)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		if request.MigrationAdoption == nil {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrInvalidArgument
+		}
+		proof, err := adopter.AdoptMigrationDestination(ctx, *request.MigrationAdoption)
+		return nodeRuntimeRPCResponse{MigrationAdoption: proof}, err
+	})
+	handle(runtimeMigrationDestinationGetPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		custodian, ok := cleaner.(MigrationRestoreCustodian)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		custody, err := custodian.GetMigrationDestination(ctx, request.MigrationSlotID)
+		return nodeRuntimeRPCResponse{MigrationDestination: custody}, err
+	})
+	handle(runtimeMigrationRestoreRecordPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		custodian, ok := cleaner.(MigrationRestoreCustodian)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		if request.MigrationRestore == nil {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrInvalidArgument
+		}
+		return nodeRuntimeRPCResponse{}, custodian.RecordMigrationRestore(ctx, *request.MigrationRestore)
+	})
+	handle(runtimeMigrationGetPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		custodian, ok := cleaner.(MigrationCustodian)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		capture, err := custodian.GetMigrationCapture(ctx, request.MigrationSlotID)
+		return nodeRuntimeRPCResponse{Migration: capture}, err
+	})
+	handle(runtimeMigrationFinalizationGetPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		reader, ok := cleaner.(MigrationSourceFinalizationReader)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		receipt, err := reader.GetMigrationSourceFinalization(ctx, request.MigrationSlotID)
+		return nodeRuntimeRPCResponse{MigrationFinalization: receipt}, err
+	})
+	handle(runtimeMigrationSealPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		sealer, ok := cleaner.(MigrationRootFSSealer)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		if request.MigrationRequest == nil {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrInvalidArgument
+		}
+		cut, err := sealer.SealMigrationRootFS(ctx, *request.MigrationRequest)
+		if err != nil {
+			return nodeRuntimeRPCResponse{}, err
+		}
+		return nodeRuntimeRPCResponse{MigrationRootFS: &cut}, nil
+	})
+	handle(runtimeMigrationRecordPath, func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		custodian, ok := cleaner.(MigrationCustodian)
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrUnavailable
+		}
+		if request.Migration == nil {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrInvalidArgument
+		}
+		return nodeRuntimeRPCResponse{}, custodian.RecordMigrationCapture(ctx, *request.Migration)
 	})
 	handle(runtimeMetricTargetsPath, func(ctx context.Context, _ nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
 		provider, ok := cleaner.(runtimeMetricProvider)

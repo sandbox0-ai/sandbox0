@@ -77,6 +77,7 @@ const (
 	SandboxLifecycleKindFork     = "fork"
 	SandboxLifecycleKindSnapshot = "snapshot"
 	SandboxLifecycleKindRebase   = "rebase"
+	SandboxLifecycleKindMigrate  = "migrate"
 
 	SandboxLifecycleSourceManual = "manual"
 	SandboxLifecycleSourceAuto   = "auto"
@@ -635,6 +636,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		return fmt.Errorf("lock sandbox before marking deleted: %w", err)
 	}
 	if err == nil {
+		if migrationErr := releaseDeletedSandboxMigrationStorage(ctx, tx, sandboxID); migrationErr != nil {
+			return migrationErr
+		}
 		blocked, blockErr := sandboxClaimCleanupBlockedByPausedRebase(ctx, tx, sandboxID)
 		if blockErr != nil {
 			return blockErr

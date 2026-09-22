@@ -19,6 +19,7 @@ type Store interface {
 	BeginRuntimeCarrierResize(context.Context, sandboxstore.RuntimeCarrierNode, int, []string, []string) (int64, error)
 	RuntimeCarrierBusyAllocations(context.Context, sandboxstore.RuntimeCarrierNode) ([]string, error)
 	RuntimeCarrierReadyAllocations(context.Context, sandboxstore.RuntimeCarrierNode) ([]string, error)
+	AdmitRuntimeCarrierReadyAllocations(context.Context, sandboxstore.RuntimeCarrierNode, []string) error
 	CompleteRuntimeCarrierResize(context.Context, sandboxstore.RuntimeCarrierNode, []string) error
 }
 
@@ -263,6 +264,7 @@ func (w *Worker) prepare(ctx context.Context, n *sandboxstore.RuntimeCarrierNode
 		}
 	}
 	n.Revision, err = w.store.BeginRuntimeCarrierResize(ctx, *n, n.MaxCarriers, n.Groups, retained)
+	n.RetainedAllocations = retained
 	n.Pending = err == nil
 	return err
 }
@@ -288,6 +290,11 @@ func (w *Worker) reconcileNode(ctx context.Context, n sandboxstore.RuntimeCarrie
 	}
 	removed := []string{}
 	observed := map[string]bool{}
+	retained := map[string]bool{}
+	for _, id := range n.RetainedAllocations {
+		retained[id] = true
+	}
+	newReady := []string{}
 	ready, err := w.store.RuntimeCarrierReadyAllocations(ctx, n)
 	if err != nil {
 		return err
@@ -299,6 +306,9 @@ func (w *Worker) reconcileNode(ctx context.Context, n sandboxstore.RuntimeCarrie
 	for _, a := range allocations {
 		if allowed[a.TaskGroup] && a.ClientStatus == "running" && usable[a.ID] {
 			observed[a.TaskGroup] = true
+			if !retained[a.ID] {
+				newReady = append(newReady, a.ID)
+			}
 		}
 		if !allowed[a.TaskGroup] && a.ClientStatus != "complete" && a.ClientStatus != "failed" && a.ClientStatus != "lost" {
 			return nil
@@ -311,7 +321,10 @@ func (w *Worker) reconcileNode(ctx context.Context, n sandboxstore.RuntimeCarrie
 	// refill pending so the cloud scaler's bounded provisioning credit expires.
 	// Revoked nodes only remove membership; they must not recreate carriers.
 	if !n.Retiring && len(observed) != len(allowed) {
-		return nil
+		// A slow sibling must not hide carriers already confirmed by both
+		// Nomad and ctld. Keep the resize pending for provisioning accounting;
+		// extend only its exact allowlist, after removed carriers stop.
+		return w.store.AdmitRuntimeCarrierReadyAllocations(ctx, n, newReady)
 	}
 	return w.store.CompleteRuntimeCarrierResize(ctx, n, removed)
 }

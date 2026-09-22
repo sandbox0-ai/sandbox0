@@ -15,6 +15,8 @@ type fakeStore struct {
 	node                    sandboxstore.RuntimeCarrierNode
 	busy                    []string
 	ready                   []string
+	admitted                []string
+	admitErr                error
 	begun, saved, completed int
 }
 
@@ -41,6 +43,14 @@ func (s *fakeStore) RuntimeCarrierBusyAllocations(context.Context, sandboxstore.
 }
 func (s *fakeStore) RuntimeCarrierReadyAllocations(context.Context, sandboxstore.RuntimeCarrierNode) ([]string, error) {
 	return s.ready, nil
+}
+func (s *fakeStore) AdmitRuntimeCarrierReadyAllocations(_ context.Context, _ sandboxstore.RuntimeCarrierNode, ids []string) error {
+	if s.admitErr != nil {
+		return s.admitErr
+	}
+	s.admitted = append(s.admitted, ids...)
+	s.node.RetainedAllocations = append(s.node.RetainedAllocations, ids...)
+	return nil
 }
 func (s *fakeStore) CompleteRuntimeCarrierResize(context.Context, sandboxstore.RuntimeCarrierNode, []string) error {
 	s.completed++
@@ -169,4 +179,48 @@ func TestUnmigratedCatalogDoesNotFenceAdmission(t *testing.T) {
 	_, err := testWorker(t, s, n).Reconcile(t.Context())
 	require.Error(t, err)
 	require.Zero(t, s.begun)
+}
+
+func TestPartialRefillAdmitsOnlyProvenAllowedAllocations(t *testing.T) {
+	s := &fakeStore{node: sandboxstore.RuntimeCarrierNode{Pending: true, Revision: 7, Groups: catalog(16), RetainedAllocations: []string{"existing"}}, ready: []string{"existing", "ready", "unplaced", "stopped"}}
+	n := &fakeNomad{allocs: []nomadinventory.Allocation{
+		{ID: "existing", TaskGroup: "warm-0", ClientStatus: "running"},
+		{ID: "ready", TaskGroup: "warm-1", ClientStatus: "running"},
+		{ID: "unregistered", TaskGroup: "warm-2", ClientStatus: "running"},
+		{ID: "unplaced", TaskGroup: "warm-100", ClientStatus: "complete"},
+		{ID: "stopped", TaskGroup: "warm-3", ClientStatus: "complete"},
+	}}
+	w := testWorker(t, s, n)
+	_, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"ready"}, s.admitted)
+	require.True(t, s.node.Pending, "provisioning remains incomplete")
+	require.Zero(t, s.completed)
+	_, err = w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"ready"}, s.admitted, "published allocations need no repeated store write")
+}
+
+func TestPartialRefillPreservesRemovalAndApplyFences(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		applyErr      error
+		removedStatus string
+	}{
+		{name: "uncertain_apply", applyErr: errors.New("uncertain")},
+		{name: "running_removal", removedStatus: "running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &fakeStore{node: sandboxstore.RuntimeCarrierNode{Pending: true, Revision: 7, Groups: catalog(16)}, ready: []string{"ready"}}
+			n := &fakeNomad{applyErr: tc.applyErr, allocs: []nomadinventory.Allocation{{ID: "ready", TaskGroup: "warm-1", ClientStatus: "running"}, {ID: "removed", TaskGroup: "warm-100", ClientStatus: tc.removedStatus}}}
+			_, err := testWorker(t, s, n).Reconcile(t.Context())
+			if tc.applyErr != nil {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Empty(t, s.admitted)
+			require.Zero(t, s.completed)
+		})
+	}
 }

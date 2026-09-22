@@ -76,8 +76,8 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if !strings.Contains(db.execQuery, ") SETTINGS async_insert = 0, wait_for_async_insert = 1 VALUES") {
 		t.Fatalf("exec query must require a durable ClickHouse acknowledgement: %s", db.execQuery)
 	}
-	if strings.Count(db.execQuery, dateTime64NanoPlaceholder) != 2 {
-		t.Fatalf("exec query must preserve both DateTime64 values at nanosecond precision: %s", db.execQuery)
+	if strings.Contains(db.execQuery, "fromUnixTimestamp64Nano") {
+		t.Fatalf("insert must use typed timestamp literals instead of per-row expressions: %s", db.execQuery)
 	}
 	if len(db.execArgs) != 38 {
 		t.Fatalf("exec args count = %d, want 38", len(db.execArgs))
@@ -85,11 +85,11 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if db.execArgs[2] != "team-1" || db.execArgs[3] != "sb-1" {
 		t.Fatalf("identity args = %#v", db.execArgs[2:4])
 	}
-	if got := db.execArgs[6]; got != dateTime64NanoArg(occurredAt) {
-		t.Fatalf("occurred_at arg = %#v, want Unix nanoseconds", got)
+	if got := db.execArgs[6]; got != dateTime64NanoInsertArg(occurredAt) {
+		t.Fatalf("occurred_at arg = %#v, want UTC nanosecond timestamp", got)
 	}
-	if got := db.execArgs[7]; got != dateTime64NanoArg(now) {
-		t.Fatalf("ingested_at arg = %#v, want Unix nanoseconds", got)
+	if got := db.execArgs[7]; got != dateTime64NanoInsertArg(now) {
+		t.Fatalf("ingested_at arg = %#v, want UTC nanosecond timestamp", got)
 	}
 	if attributes, ok := db.execArgs[33].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
 		t.Fatalf("attributes arg = %#v", db.execArgs[33])
@@ -351,5 +351,25 @@ func TestNormalizeWatchEventQueryRejectsEventID(t *testing.T) {
 	}, sandboxobservability.WatchOptions{})
 	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined with watch") {
 		t.Fatalf("normalizeWatchEventQuery() error = %v, want exact watch error", err)
+	}
+}
+
+func TestDateTime64NanoInsertBinding(t *testing.T) {
+	for _, tc := range []struct {
+		value time.Time
+		want  string
+	}{
+		{time.Date(1960, 7, 1, 1, 2, 3, 123456789, time.UTC), "1960-07-01 01:02:03.123456789"},
+		{time.Date(2026, 9, 22, 8, 1, 2, 1, time.FixedZone("offset", 8*3600)), "2026-09-22 00:01:02.000000001"},
+		{time.Unix(0, -1), "1969-12-31 23:59:59.999999999"},
+	} {
+		got := dateTime64NanoInsertArg(tc.value)
+		if got != tc.want {
+			t.Fatalf("binding = %q, want %q", got, tc.want)
+		}
+		parsed, err := time.Parse("2006-01-02 15:04:05.000000000", got)
+		if err != nil || !parsed.Equal(tc.value) {
+			t.Fatalf("timestamp changed: %v, %v", parsed, err)
+		}
 	}
 }

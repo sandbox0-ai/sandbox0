@@ -363,6 +363,14 @@ func dateTime64NanoArg(value time.Time) int64 {
 	return value.UTC().UnixNano()
 }
 
+// dateTime64NanoInsertArg lets the VALUES reader parse a typed timestamp directly.
+// Function expressions in VALUES trigger expression-template deduction and
+// per-row evaluation in ClickHouse 24.8. A UTC string preserves all nine digits
+// without that fallback; the destination columns explicitly use the UTC zone.
+func dateTime64NanoInsertArg(value time.Time) string {
+	return value.UTC().Format("2006-01-02 15:04:05.000000000")
+}
+
 func scanEvents(rows *sql.Rows) ([]sandboxobservability.Event, error) {
 	var events []sandboxobservability.Event
 	for rows.Next() {

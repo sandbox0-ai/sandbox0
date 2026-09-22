@@ -15,17 +15,16 @@ func TestRefillRequestsOnlyExactFailedCarrierScheduling(t *testing.T) {
 		t.Run("recheck-"+changed, func(t *testing.T) {
 			server, resolver, _ := newNomadMTLSTestServer(t, &nomadTestServerState{token: "test-token"})
 			defer server.Close()
-			stops := 0
+			evaluations := 0
 			server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "test-token", r.Header.Get("X-Nomad-Token"))
-				if strings.HasSuffix(r.URL.Path, "/stop") {
-					stops++
+				if strings.HasSuffix(r.URL.Path, "/evaluate") {
+					evaluations++
 					require.Equal(t, http.MethodPost, r.Method)
-					require.Equal(t, "/v1/allocation/"+testHTTPAllocationID+"/stop", r.URL.Path)
-					require.Equal(t, "false", r.URL.Query().Get("reschedule"))
-					require.Equal(t, "true", r.URL.Query().Get("no_shutdown_delay"))
-					require.True(t, strings.HasPrefix(r.URL.Query().Get("idempotency_token"), "carrier-refill-"))
-					w.WriteHeader(http.StatusOK)
+					require.Equal(t, "/v1/job/"+nomadinventory.DefaultWarmJobID+"/evaluate", r.URL.Path)
+					require.Equal(t, "default", r.URL.Query().Get("namespace"))
+					require.Zero(t, r.ContentLength, "never force rescheduling healthy siblings")
+					_, _ = w.Write([]byte(`{"EvalID":"evaluation"}`))
 					return
 				}
 				require.Equal(t, "/v1/allocations", r.URL.Path, "no client GC or physical cleanup endpoint is permitted")
@@ -55,26 +54,28 @@ func TestRefillRequestsOnlyExactFailedCarrierScheduling(t *testing.T) {
 				require.NoError(t, err)
 			}
 			if changed == "" {
-				require.Equal(t, 1, stops)
+				require.Equal(t, 1, evaluations)
 				require.Equal(t, 1, count)
 			} else {
-				require.Zero(t, stops)
+				require.Zero(t, evaluations)
 				require.Zero(t, count)
 			}
 		})
 	}
 }
 
-func TestRefillRetriesUncertainStopWithSameOperationAndCursor(t *testing.T) {
+func TestRefillRetriesUncertainEvaluationWithSameJobAndCursor(t *testing.T) {
 	server, resolver, _ := newNomadMTLSTestServer(t, &nomadTestServerState{token: "test-token"})
 	defer server.Close()
 	var operations []string
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/stop") {
-			operations = append(operations, r.URL.Query().Get("idempotency_token"))
+		if strings.HasSuffix(r.URL.Path, "/evaluate") {
+			operations = append(operations, r.URL.Path+"?"+r.URL.RawQuery)
 			if len(operations) == 1 {
 				w.WriteHeader(http.StatusServiceUnavailable)
+				return
 			}
+			_, _ = w.Write([]byte(`{"EvalID":"evaluation"}`))
 			return
 		}
 		if r.URL.Query().Get("prefix") == "" {

@@ -11,16 +11,18 @@ import (
 )
 
 type fakeAPI struct {
-	allocation  *Allocation
-	serverErr   error
-	client      bool
-	clientErr   error
-	stopErr     error
-	gcErr       error
-	stopCalls   []string
-	gcCalls     int
-	clientCalls int
-	serverCalls int
+	allocation    *Allocation
+	serverErr     error
+	client        bool
+	clientErr     error
+	stopErr       error
+	evaluateErr   error
+	evaluateCalls []string
+	gcErr         error
+	stopCalls     []string
+	gcCalls       int
+	clientCalls   int
+	serverCalls   int
 }
 
 func (a *fakeAPI) ServerAllocation(
@@ -50,6 +52,11 @@ func (a *fakeAPI) StopAllocation(
 ) error {
 	a.stopCalls = append(a.stopCalls, operationID)
 	return a.stopErr
+}
+
+func (a *fakeAPI) EvaluateTerminalAllocation(_ context.Context, _ runtimeslotreconciler.AllocationTarget, operationID string) error {
+	a.evaluateCalls = append(a.evaluateCalls, operationID)
+	return a.evaluateErr
 }
 
 func (a *fakeAPI) GarbageCollectAllocation(
@@ -195,7 +202,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 2 || api.gcCalls != 1 {
+	if len(api.stopCalls) != 1 || api.gcCalls != 1 {
 		t.Fatalf("retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 
@@ -203,7 +210,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 2 || api.gcCalls != 2 {
+	if len(api.stopCalls) != 1 || api.gcCalls != 2 {
 		t.Fatalf("server-GC retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 
@@ -211,7 +218,7 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	if err := controller.Purge(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.stopCalls) != 2 || api.gcCalls != 2 {
+	if len(api.stopCalls) != 1 || api.gcCalls != 2 {
 		t.Fatalf("absent retry stop = %v, gc = %d", api.stopCalls, api.gcCalls)
 	}
 }

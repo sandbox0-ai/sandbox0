@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -95,7 +96,7 @@ func (a *HTTPAPI) ServerAllocation(
 	if allocation == nil {
 		return nil, nil
 	}
-	return &Allocation{ID: allocation.ID, Namespace: allocation.Namespace, NodeID: allocation.NodeID, DesiredStatus: allocation.DesiredStatus, ClientStatus: allocation.ClientStatus}, nil
+	return &Allocation{ID: allocation.ID, JobID: allocation.JobID, Namespace: allocation.Namespace, NodeID: allocation.NodeID, DesiredStatus: allocation.DesiredStatus, ClientStatus: allocation.ClientStatus}, nil
 }
 
 func (a *HTTPAPI) ClientAllocationPresent(
@@ -158,6 +159,45 @@ func (a *HTTPAPI) StopAllocation(
 		return nil
 	}
 	return nomadResponseError("stop server allocation", status, payload)
+}
+
+// EvaluateTerminalAllocation queues reconciliation of the owned carrier job.
+// Retrying may queue another evaluation, but the scheduler reconciles the same
+// desired group counts. No force-reschedule option or allocation mutation is
+// used, so healthy siblings and terminal allocation versions remain unchanged.
+func (a *HTTPAPI) EvaluateTerminalAllocation(
+	ctx context.Context,
+	target runtimeslotreconciler.AllocationTarget,
+	operationID string,
+) error {
+	if err := validateOperationID(operationID); err != nil {
+		return err
+	}
+	allocation, err := a.ServerAllocation(ctx, target)
+	if err != nil || allocation == nil {
+		return err
+	}
+	if !nomadinventory.IsWarmJob(nomadinventory.DefaultWarmJobID, allocation.JobID) ||
+		!allocationSchedulingTerminal(allocation) {
+		return fmt.Errorf("carrier evaluation requires an exact terminal warm allocation: %w", errdefs.ErrFailedPrecondition)
+	}
+	endpoint, err := a.serverEndpoint(ctx, target)
+	if err != nil {
+		return err
+	}
+	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodPost,
+		"/v1/job/"+url.PathEscape(allocation.JobID)+"/evaluate", namespaceQuery(target.AllocationNamespace), true)
+	if err != nil {
+		return err
+	}
+	if status/100 != 2 {
+		return nomadResponseError("evaluate terminal carrier job", status, payload)
+	}
+	var receipt struct{ EvalID string }
+	if err := json.Unmarshal(payload, &receipt); err != nil || strings.TrimSpace(receipt.EvalID) == "" {
+		return fmt.Errorf("carrier evaluation returned no acknowledgement: %w", errdefs.ErrUnavailable)
+	}
+	return nil
 }
 
 func (a *HTTPAPI) GarbageCollectAllocation(

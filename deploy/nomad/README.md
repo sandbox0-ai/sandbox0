@@ -48,10 +48,16 @@ Startup can fail before regional registration, leaving no PostgreSQL slot for
 the terminal worker to discover. After terminal work, at most once every 30
 seconds, manager visits one configured Nomad cluster and up to eight failed
 carriers, with a five-second request budget. It revalidates each exact allocation
-before requesting replacement of that exact failed allocation. Retries recheck
-whether it already has a replacement. This
-scheduling repair does not release regional leases, garbage-collect client
+before evaluating its exact owned carrier job for replacement. Retries recheck
+whether the failed allocation already has a replacement. This scheduling repair does not release regional leases, garbage-collect client
 state, or discard node journals; physical retirement remains a separate proof.
+
+After terminal state is observed, replacement notifications use job evaluation
+without force-rescheduling healthy allocations. They do not send another stop
+for the finished allocation: stock Nomad 1.11.3 can repeatedly download and
+persist that newer allocation version after its runner has exited. Evaluation
+acknowledgement is still required before client GC and terminal reconciliation
+can complete. Live stop intent and all physical cleanup proofs remain separate.
 
 ctld also reconciles registrations left only in its durable journal. Every ten
 seconds, one bounded pass scans at most 256 records and processes up to eight

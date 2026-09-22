@@ -4,6 +4,9 @@
 
 FROM sandbox0ai/otemplates:default-v0.2.0
 
+# Keep Docker startup compatible even when the pinned base predates this helper.
+COPY --chmod=0755 manager/procd/sandbox0-dockerd-entrypoint /usr/local/bin/sandbox0-dockerd-entrypoint
+
 # Docker BuildKit supplies TARGETARCH for the selected output platform. Do not
 # give it a default: that would override BuildKit during native arm64 builds.
 ARG TARGETARCH

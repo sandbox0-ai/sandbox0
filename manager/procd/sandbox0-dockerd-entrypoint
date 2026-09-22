@@ -1,24 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /var/lib/docker /var/run/docker
-
 if docker info >/dev/null 2>&1; then
   exec tail -f /dev/null
 fi
 
-storage_driver="${DOCKER_STORAGE_DRIVER:-}"
-if [ -z "${storage_driver}" ]; then
-  if [ -e /dev/fuse ] && command -v fuse-overlayfs >/dev/null 2>&1; then
-    storage_driver="fuse-overlayfs"
-  else
-    storage_driver="vfs"
+data_root="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+exec_root="${DOCKER_EXEC_ROOT:-/tmp/sandbox0-docker}"
+mkdir -p "${data_root}" "${exec_root}"
+
+# Docker state must stay outside the persistent RootFS. The template supplies
+# this bounded tmpfs; do not silently allocate an unbounded mount at startup.
+if [ "$(stat -f -c %T "${data_root}")" != tmpfs ]; then
+  echo "Docker requires a size-bounded template ephemeralMounts entry at ${data_root}" >&2
+  exit 1
+fi
+
+# Stock runsc implements guest cgroup controllers, but older Sandbox0 OCI
+# bundles do not mount them. Mount only guest filesystems, never host cgroups.
+# This requires the template's privileged guest security class.
+if ! mountpoint -q /sys/fs/cgroup; then
+  if ! mount -t tmpfs -o mode=755,size=1m,nosuid,nodev,noexec tmpfs /sys/fs/cgroup; then
+    echo "Docker requires mainContainer.securityClass: privileged and guest cgroup mounts" >&2
+    exit 1
   fi
+fi
+if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+  for controller in $(awk 'NR > 1 && $4 == 1 {print $1}' /proc/cgroups); do
+    case "${controller}" in
+      cpu|cpuacct|cpuset|devices|memory|pids)
+        mkdir -p "/sys/fs/cgroup/${controller}"
+        if ! mountpoint -q "/sys/fs/cgroup/${controller}"; then
+          mount -t cgroup -o "${controller}" cgroup "/sys/fs/cgroup/${controller}"
+        fi
+        ;;
+    esac
+  done
+  if ! mountpoint -q /sys/fs/cgroup/devices; then
+    echo "Docker requires the guest devices cgroup controller" >&2
+    exit 1
+  fi
+fi
+
+# Docker 29 defaults to the containerd image store. Explicitly select the
+# classic store so vfs does not depend on nested overlayfs support.
+extra_flags=()
+version=$(dockerd --version)
+if [[ ${version} =~ version\ ([0-9]+) ]] && (( BASH_REMATCH[1] >= 29 )); then
+  extra_flags+=(--feature containerd-snapshotter=false)
 fi
 
 exec dockerd \
   --host="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
-  --data-root="${DOCKER_DATA_ROOT:-/var/lib/docker}" \
-  --exec-root="${DOCKER_EXEC_ROOT:-/var/run/docker}" \
-  --pidfile="${DOCKER_PIDFILE:-/var/run/docker.pid}" \
-  --storage-driver="${storage_driver}"
+  --data-root="${data_root}" \
+  --exec-root="${exec_root}" \
+  --pidfile="${DOCKER_PIDFILE:-${exec_root}/docker.pid}" \
+  --storage-driver="${DOCKER_STORAGE_DRIVER:-vfs}" \
+  --iptables=false --ip6tables=false --bridge=none \
+  --ip-forward=false --ip-masq=false \
+  "${extra_flags[@]}" "$@"

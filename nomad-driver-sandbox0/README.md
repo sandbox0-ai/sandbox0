@@ -58,6 +58,12 @@ serializes concurrent claims against the admission budget. Capacity cannot be
 resized within a node boot, including reconnects. Resource reservations remain
 charged until the existing physical cgroup absence proof releases the lease.
 
+For interactive agent workloads, a conservative starting point on that node is
+28000 millicores of CPU admission and 56GiB of memory admission. Validate
+simultaneous command bursts, command latency, CPU throttling, memory pressure,
+and OOM events before increasing either budget. This is an admission policy,
+not a guarantee that all guests can use their full CPU quota at once.
+
 Overcommitted nodes require a predelegated parent cgroup with `cpu.max` equal
 to the physical CPU budget using a 100000-microsecond period, `memory.max`
 equal to the physical memory budget, and `memory.swap.max=0`. ctld rejects an

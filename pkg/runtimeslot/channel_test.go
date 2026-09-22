@@ -392,3 +392,20 @@ func testNodeChannelCleanupRequest() NodeCleanupControlRequest {
 		RunscContainerID: NomadRunscContainerID("slot-1"),
 	}
 }
+
+func TestNodeChannelHelloAcceptsAllMigrationCapabilities(t *testing.T) {
+	hello := testNodeChannelHello()
+	hello.Capabilities = []NodeChannelCommandKind{
+		NodeChannelCommandNetworkPrepare, NodeChannelCommandClaim, NodeChannelCommandCommandReady,
+		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
+		NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence,
+		NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationSourceGC, NodeChannelCommandCleanup,
+	}
+	if err := hello.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	hello.Capabilities[8], hello.Capabilities[9] = hello.Capabilities[9], hello.Capabilities[8]
+	if err := hello.Validate(); err == nil {
+		t.Fatal("reordered migration capabilities were accepted")
+	}
+}

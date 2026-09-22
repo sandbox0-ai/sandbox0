@@ -44,12 +44,13 @@ const (
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
 	durableBindingSchemaVersion    = 4
-	sessionSchemaVersion           = 7
+	sessionSchemaVersion           = 12
 	stateReserved                  = "reserved"
 	stateDeviceReserved            = "device_reserved"
 	stateDeviceReady               = "device_ready"
 	stateXFSMounted                = "xfs_mounted"
 	stateReady                     = "ready"
+	stateMigration                 = "migration"
 	stateRetireRequested           = "retire_requested"
 	stateReleasing                 = "releasing"
 	stateTombstoned                = "tombstoned"
@@ -170,6 +171,8 @@ type EnsureTiming struct {
 }
 
 type record struct {
+	AbandonedMigration        *abandonedMigrationCut                      `json:"abandoned_migration,omitempty"`
+	Migration                 *migrationCutRecord                         `json:"migration,omitempty"`
 	Version                   int                                         `json:"version"`
 	Parent                    string                                      `json:"parent"`
 	BindingDigest             string                                      `json:"binding_digest"`
@@ -243,6 +246,7 @@ const (
 	RecoveryUnavailable   RecoveryKind = "unavailable"
 	RecoveryCrashAbandon  RecoveryKind = "crash_abandon"
 	RecoveryPlannedRetire RecoveryKind = "planned_retire"
+	RecoveryMigration     RecoveryKind = "migration"
 )
 
 // RecoverySession is the tokenless durable input required by a node daemon to
@@ -260,6 +264,7 @@ type RecoverySession struct {
 	ExternalCrash          bool
 	BranchRemoved          bool
 	Live                   bool
+	MigrationCutOwnerLost  bool
 	Consumer               *ConsumerRegistration
 	CreatedAt              time.Time
 }
@@ -441,7 +446,7 @@ func (m *Manager) ReconcileReleases(ctx context.Context) error {
 			if current.Parent != string(key) {
 				return fmt.Errorf("RootFS session key does not match record parent %q", current.Parent)
 			}
-			if current.State == stateReleasing {
+			if current.State == stateReleasing && current.Migration == nil {
 				parents = append(parents, current.Parent)
 			}
 			return nil
@@ -456,7 +461,7 @@ func (m *Manager) ReconcileReleases(ctx context.Context) error {
 		}
 		unlock := m.lock(parent)
 		current, err := m.load(parent)
-		if err == nil && current.State == stateReleasing {
+		if err == nil && current.State == stateReleasing && current.Migration == nil {
 			err = m.releaseLocked(ctx, current)
 		}
 		unlock()
@@ -467,9 +472,10 @@ func (m *Manager) ReconcileReleases(ctx context.Context) error {
 	return result
 }
 
-// ReconcileFreezes thaws every filesystem whose durable freeze intent
-// survived a session-owner crash. Thaw is idempotent for an already thawed or
-// absent mount, so clearing the intent is safe only after this call succeeds.
+// ReconcileFreezes thaws interrupted running-fork barriers. Migration barriers
+// retain custody across owner death and require explicit migration handoff.
+// Thaw is idempotent for an already thawed or absent mount, so clearing a fork
+// intent is safe only after this call succeeds.
 func (m *Manager) ReconcileFreezes(ctx context.Context) error {
 	var parents []string
 	if err := m.db.View(func(tx *bolt.Tx) error {
@@ -484,7 +490,13 @@ func (m *Manager) ReconcileFreezes(ctx context.Context) error {
 			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
 				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
 			}
-			if current.FreezeOperationID != "" {
+			if current.AbandonedMigration != nil {
+				return validateAbandonedMigrationCut(current)
+			}
+			if current.Migration != nil || current.State == stateMigration {
+				return validateMigrationCutRecord(current)
+			}
+			if current.FreezeOperationID != "" && current.Migration == nil {
 				parents = append(parents, current.Parent)
 			}
 			return nil
@@ -499,7 +511,7 @@ func (m *Manager) ReconcileFreezes(ctx context.Context) error {
 		}
 		unlock := m.lock(parent)
 		current, err := m.load(parent)
-		if err == nil && current.FreezeOperationID != "" {
+		if err == nil && current.FreezeOperationID != "" && current.Migration == nil && current.AbandonedMigration == nil {
 			if err = m.runtime.ThawXFS(current.XFSRoot); err == nil {
 				current.FreezeOperationID = ""
 				err = m.save(current)
@@ -979,6 +991,12 @@ func recoverySessionFromRecord(key string, current record, live bool) (RecoveryS
 	if current.Parent != key || !supportedSessionVersion(current.Version) {
 		return RecoverySession{}, fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
 	}
+	if err := validateAbandonedMigrationCut(current); err != nil {
+		return RecoverySession{}, err
+	}
+	if current.State == stateMigration && current.Migration == nil {
+		return RecoverySession{}, fmt.Errorf("migration RootFS custody record is missing")
+	}
 	if current.Version >= durableBindingSchemaVersion && current.Stage == nil {
 		return RecoverySession{}, fmt.Errorf("RootFS recovery record %q lacks its durable Stage binding", key)
 	}
@@ -1051,7 +1069,16 @@ func recoverySessionFromRecord(key string, current record, live bool) (RecoveryS
 			return RecoverySession{}, fmt.Errorf("RootFS recovery binding %q does not match its physical session", key)
 		}
 		recovery.Stage = stage
-		if current.RetireOperationID != "" {
+		if current.Migration != nil {
+			if err := validateMigrationCutRecord(current); err != nil {
+				return RecoverySession{}, err
+			}
+			recovery.Kind = RecoveryMigration
+			recovery.MigrationCutOwnerLost = !live && current.Migration.Sequence == nil
+		} else if current.AbandonedMigration != nil {
+			recovery.Kind = RecoveryMigration
+			recovery.MigrationCutOwnerLost = true
+		} else if current.RetireOperationID != "" {
 			recovery.Kind = RecoveryPlannedRetire
 		} else {
 			recovery.Kind = RecoveryCrashAbandon
@@ -1153,7 +1180,7 @@ func (m *Manager) RenewConsumer(parent string, identity rootfshandoff.Identity, 
 		return err
 	}
 	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch || current.Consumer == nil ||
-		current.Consumer.LeaseID != leaseID || current.State != stateReady {
+		current.Consumer.LeaseID != leaseID || (current.State != stateReady && current.State != stateMigration) {
 		return fmt.Errorf("RootFS consumer lease does not match the ready writer: %w", errdefs.ErrFailedPrecondition)
 	}
 	current.Consumer.LeaseExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
@@ -1593,6 +1620,9 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch {
 		return fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
 	}
+	if current.Migration != nil {
+		return fmt.Errorf("migration custody requires explicit completion before reclaim: %w", errdefs.ErrFailedPrecondition)
+	}
 	terminal, err := terminalDeviceProof(current)
 	if err != nil {
 		return err
@@ -1600,7 +1630,14 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 	if current.State != stateTombstoned || !terminal {
 		return fmt.Errorf("RootFS session has no terminal detach proof: %w", errdefs.ErrFailedPrecondition)
 	}
-	expected := sessionPaths(m.branchRoot, m.mountRoot, parent).branch
+	return m.reclaimTerminalArtifactsLocked(&current)
+}
+
+// reclaimTerminalArtifactsLocked is shared by ordinary terminal cleanup and
+// explicitly authorized migration completion. Callers hold the session lock
+// and verify the exact durable physical fence before entering.
+func (m *Manager) reclaimTerminalArtifactsLocked(current *record) error {
+	expected := sessionPaths(m.branchRoot, m.mountRoot, current.Parent).branch
 	if current.BranchPath != expected {
 		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -1611,22 +1648,35 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 		if err := os.Remove(expected); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove terminal RootFS branch: %w", err)
 		}
+		if err := syncTerminalDirectory(filepath.Dir(expected)); err != nil {
+			return fmt.Errorf("sync terminal RootFS branch removal: %w", err)
+		}
 		if err := m.nodeDirty.ReleaseOwner(expected); err != nil {
 			return fmt.Errorf("release terminal RootFS dirty tail: %w", err)
 		}
 		current.BranchRemoved = true
-		if err := m.save(current); err != nil {
+		if err := m.save(*current); err != nil {
 			return err
 		}
 	}
-	mountRoot := filepath.Dir(sessionPaths(m.branchRoot, m.mountRoot, parent).xfs)
+	mountRoot := filepath.Dir(sessionPaths(m.branchRoot, m.mountRoot, current.Parent).xfs)
 	if filepath.Dir(mountRoot) != m.mountRoot {
 		return fmt.Errorf("RootFS mount path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
 	}
 	if err := os.RemoveAll(mountRoot); err != nil {
 		return fmt.Errorf("remove terminal RootFS mount directory: %w", err)
 	}
-	return nil
+	return syncTerminalDirectory(m.mountRoot)
+}
+
+// Sync only the directory entry updates; syncfs would flush unrelated live
+// writers on the same filesystem during every terminal cleanup.
+func syncTerminalDirectory(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Sync(), file.Close())
 }
 
 // ForgetVerifiedTerminal removes one terminal session record after the caller
@@ -1696,10 +1746,32 @@ func reclaimedExternalProof(current record) (bool, error) {
 	return true, nil
 }
 
+func (m *Manager) validateTerminalArtifactAbsence(current record) error {
+	paths := sessionPaths(m.branchRoot, m.mountRoot, current.Parent)
+	if current.BranchPath != paths.branch {
+		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := m.nodeDirty.ValidateOwnerDetached(paths.branch); err != nil {
+		return fmt.Errorf("validate terminal RootFS branch owner absence: %w", err)
+	}
+	for _, path := range []string{paths.branch, filepath.Dir(paths.xfs)} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // forgetTerminal serializes the physical absence check, optional expiry policy,
 // and exact journal/index deletion under the same parent lock. The predicate is
 // repeated in the write transaction, never trusted from a recovery snapshot.
 func (m *Manager) forgetTerminal(parent string, identity rootfshandoff.Identity, eligible func(record) (bool, error)) (bool, error) {
+	return m.forgetTerminalWithMigration(parent, identity, eligible, false)
+}
+
+func (m *Manager) forgetTerminalWithMigration(parent string, identity rootfshandoff.Identity, eligible func(record) (bool, error), migrationAllowed bool) (bool, error) {
 	if strings.TrimSpace(parent) == "" || strings.TrimSpace(identity.RootFSID) == "" || identity.WriterEpoch <= 0 {
 		return false, fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
 	}
@@ -1726,6 +1798,9 @@ func (m *Manager) forgetTerminal(parent string, identity rootfshandoff.Identity,
 			return false, err
 		}
 	}
+	if current.Migration != nil && !migrationAllowed {
+		return false, fmt.Errorf("migration custody requires explicit completion before forget: %w", errdefs.ErrFailedPrecondition)
+	}
 	terminal, err := terminalDeviceProof(current)
 	if err != nil {
 		return false, err
@@ -1733,19 +1808,8 @@ func (m *Manager) forgetTerminal(parent string, identity rootfshandoff.Identity,
 	if current.State != stateTombstoned || !terminal || !current.BranchRemoved {
 		return false, fmt.Errorf("RootFS session has not reclaimed verified terminal artifacts: %w", errdefs.ErrFailedPrecondition)
 	}
-	paths := sessionPaths(m.branchRoot, m.mountRoot, parent)
-	if current.BranchPath != paths.branch {
-		return false, fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
-	}
-	if err := m.nodeDirty.ValidateOwnerDetached(paths.branch); err != nil {
-		return false, fmt.Errorf("validate terminal RootFS branch owner absence: %w", err)
-	}
-	for _, path := range []string{paths.branch, filepath.Dir(paths.xfs)} {
-		if _, err := os.Lstat(path); err == nil {
-			return false, fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return false, fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
-		}
+	if err := m.validateTerminalArtifactAbsence(current); err != nil {
+		return false, err
 	}
 	forgotten := false
 	err = m.db.Update(func(tx *bolt.Tx) error {
@@ -1836,6 +1900,12 @@ func (m *Manager) crashFence(
 	current, err := m.load(parent)
 	if err != nil {
 		return rootfshandoff.CrashFenceSessionObservation{}, err
+	}
+	if current.AbandonedMigration != nil && (!external || current.AbandonedMigration.WriterOperationID != operationID) {
+		return rootfshandoff.CrashFenceSessionObservation{}, errdefs.ErrFailedPrecondition
+	}
+	if current.Migration != nil {
+		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("migration custody cannot become crash abandonment: %w", errdefs.ErrFailedPrecondition)
 	}
 	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch {
 		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
@@ -2058,6 +2128,15 @@ func (m *Manager) Release(ctx context.Context, identity rootfshandoff.Identity) 
 }
 
 func (m *Manager) releaseLocked(ctx context.Context, current record) error {
+	if current.Migration != nil || current.State == stateMigration {
+		return fmt.Errorf("migration RootFS requires explicit custody handoff: %w", errdefs.ErrFailedPrecondition)
+	}
+	return m.releasePhysicalLocked(ctx, current)
+}
+
+// releasePhysicalLocked is shared teardown. Migration callers must first
+// persist exact handoff intent; the public release path rejects their custody.
+func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) error {
 	parent := current.Parent
 	plannedRetire := current.RetireOperationID != ""
 	if current.DirtyTailPressure != nil && !plannedRetire {
@@ -2520,6 +2599,12 @@ func terminalDeviceProof(value record) (bool, error) {
 	if value.State != stateTombstoned {
 		return false, nil
 	}
+	if value.Migration != nil {
+		if err := validateMigrationCutRecord(value); err != nil {
+			return false, err
+		}
+		return value.Migration.DetachProof != nil, nil
+	}
 	if value.RetireOperationID != "" && value.DetachProof != "" {
 		proof, err := hex.DecodeString(value.DetachProof)
 		if err != nil || len(proof) != sha256.Size || len(value.SealedDescriptor) == 0 || value.SealedBlockHead == "" {
@@ -2538,7 +2623,7 @@ func terminalDeviceProof(value record) (bool, error) {
 
 func legacyReservationNeedsAdoption(state string) bool {
 	return containsSessionState(
-		state, stateReserved, stateDeviceReady, stateXFSMounted, stateReady, stateRetireRequested, stateReleasing,
+		state, stateReserved, stateDeviceReady, stateXFSMounted, stateReady, stateMigration, stateRetireRequested, stateReleasing,
 	)
 }
 
@@ -2560,6 +2645,9 @@ func (m *Manager) load(parent string) (record, error) {
 		}
 		return json.Unmarshal(payload, &value)
 	})
+	if err == nil {
+		err = validateAbandonedMigrationCut(value)
+	}
 	return value, err
 }
 
@@ -2672,6 +2760,9 @@ func externalProofQuietUntil(current record) (time.Time, bool, error) {
 }
 
 func putRecord(bucket *bolt.Bucket, value record) error {
+	if err := validateAbandonedMigrationCut(value); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err

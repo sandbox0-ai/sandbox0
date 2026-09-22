@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,14 @@ type Server struct {
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response
 	runtimeGate func() (bool, string)
 	instanceID  string
+
+	migrationController       MigrationController
+	migrationMu               sync.Mutex
+	migrationPrepared         bool
+	migrationCanceled         bool
+	migrationDrained          bool
+	migrationEpoch            int64
+	migrationAssignmentDigest string
 }
 
 // NewServer creates a new HTTP server.
@@ -68,6 +77,7 @@ func NewServer(
 	obsProvider *coreobs.Provider,
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response,
 	runtimeGate func() (bool, string),
+	options ...ServerOption,
 ) *Server {
 	s := &Server{
 		router:            mux.NewRouter(),
@@ -83,6 +93,9 @@ func NewServer(
 		probeRunner:       probeRunner,
 		runtimeGate:       runtimeGate,
 		instanceID:        uuid.NewString(),
+	}
+	for _, option := range options {
+		option(s)
 	}
 
 	s.setupRoutes()
@@ -103,6 +116,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/healthz", s.healthHandler).Methods("GET")
 	s.router.HandleFunc("/readyz", s.readyHandler).Methods("GET")
 	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
+	s.router.Handle(procdapi.RuntimeMigrationPath,
+		s.authMiddleware(s.internalTokenMiddleware(http.HandlerFunc(s.runtimeMigrationHandler)))).Methods("PUT")
 
 	// Local-only API (localhost access only, no auth)
 	local := s.router.PathPrefix(apiV1Prefix).Subrouter()
@@ -119,6 +134,7 @@ func (s *Server) setupRoutes() {
 	api.Use(s.authMiddleware)
 	api.Use(s.internalTokenMiddleware)
 	api.Use(s.runtimeReadyMiddleware)
+	api.Use(s.migrationLifecycleMiddleware)
 	api.Use(s.barrier.middleware)
 
 	// Sandbox-level handlers (pause/resume all processes)

@@ -349,11 +349,11 @@ func (s *PGSandboxStore) CommitNomadSandboxNetworkMutation(
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE manager.runtime_slots
-		SET claim_network_policy_digest = $2,
+		SET claim_network_policy_digest = $2, claim_network_policy = $5,
 			revision = revision + 1,
 			updated_at = NOW()
 		WHERE slot_id = $1 AND revision = $3 AND state = $4
-	`, mutation.SlotID, mutation.DesiredPolicyDigest, mutation.SlotRevision, RuntimeSlotStateActive)
+	`, mutation.SlotID, mutation.DesiredPolicyDigest, mutation.SlotRevision, RuntimeSlotStateActive, mutation.DesiredPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("publish runtime slot network policy: %w", err)
 	}
@@ -460,9 +460,9 @@ func lockActiveNomadSandboxNetworkSlot(ctx context.Context, tx pgx.Tx, record *S
 		return nil, fmt.Errorf("%w: active sandbox allocation is missing", ErrNomadSandboxNetworkMutationNotReady)
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE sandbox_id = $1 AND state <> $2
+		WHERE sandbox_id = $1 AND state <> $2 AND allocation_id=$3 AND allocation_namespace=$4
 		FOR UPDATE OF runtime_slots
-	`, record.ID, RuntimeSlotStateTerminal))
+	`, record.ID, RuntimeSlotStateTerminal, record.RuntimeID, record.RuntimeNamespace))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: active runtime slot is missing", ErrNomadSandboxNetworkMutationNotReady)
 	}

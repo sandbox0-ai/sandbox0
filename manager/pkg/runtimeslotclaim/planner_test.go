@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -485,6 +486,13 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 		t.Fatalf("store calls = acquire %d issue %d bind %d", len(fixture.store.acquires), len(fixture.store.issues), len(fixture.store.binds))
 	}
 	issue := fixture.store.issues[0]
+	launchPayload, err := json.Marshal(fixture.request.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.store.acquires[0].RuntimeAssignmentPayload != string(launchPayload) || fixture.store.acquires[0].NetworkPolicy != fixture.request.NetworkPolicy {
+		t.Fatal("claim did not retain the exact runtime and network input")
+	}
 	fixture.store.mu.Unlock()
 	binding, err := result.Stage.BindingDigest()
 	if err != nil {

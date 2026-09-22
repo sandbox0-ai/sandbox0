@@ -1883,12 +1883,18 @@ func (r *fakeHostRuntime) MountOverlay(_, _ string) error {
 func (r *fakeHostRuntime) UnmountOverlay(_ string, requireSync bool) error {
 	r.record("unmount-overlay")
 	r.recordUnmountSync(requireSync)
+	if r.failAt == "unmount-overlay" {
+		return fmt.Errorf("injected OverlayFS unmount failure")
+	}
 	return nil
 }
 
 func (r *fakeHostRuntime) UnmountXFS(_ string, requireSync bool) error {
 	r.record("unmount-xfs")
 	r.recordUnmountSync(requireSync)
+	if r.failAt == "unmount-xfs" {
+		return fmt.Errorf("injected XFS unmount failure")
+	}
 	return nil
 }
 

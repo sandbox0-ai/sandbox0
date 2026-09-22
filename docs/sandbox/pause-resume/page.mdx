@@ -11,6 +11,10 @@ preserve processes, memory, sockets, PIDs, open file descriptors, or live REPL
 connections.
 </Callout>
 
+Experimental [system maintenance migration](/docs/sandbox#system-maintenance-migration)
+has a separate execution-state transfer path. Users cannot request migration,
+and a successful migration does not make pause/resume preserve process state.
+
 ## What Persists
 
 | State | Across a successful pause/resume | After delete or `hard_ttl` |
@@ -24,7 +28,7 @@ connections.
 
 The writable RootFS is a block-COW filesystem. Ordinary RootFS paths such as
 `/var/tmp` and workspace directories persist after a successful checkpoint.
-`/tmp` is a runtime tmpfs and is recreated for each runtime generation, as are
+`/tmp` is a runtime tmpfs and is recreated on pause/resume, as are
 virtual mounts such as `/proc`, `/dev`, and `/sys`. Template-defined
 `ephemeralMounts` are also excluded from pause, resume, snapshots, and forks.
 Do not store durable data under any of these runtime-only mounts.

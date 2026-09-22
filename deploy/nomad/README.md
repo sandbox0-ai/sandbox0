@@ -15,6 +15,8 @@ host namespaces.
   NBD devices, and Nomad client plugin configuration.
 - [`nomad-driver-sandbox0/example/`](../../nomad-driver-sandbox0/example/)
   contains the runtime-class catalog, endpoint catalog, and warm-slot job.
+- [`live-migration.md`](live-migration.md) specifies system-owned execution
+  migration, its implementation status, and the required acceptance gates.
 
 ## Immutable deployment inputs
 

@@ -67,7 +67,11 @@ func (c *NodeClient) Claim(ctx context.Context, endpoint string, request NodeCla
 	if err := request.ValidateRegional(); err != nil {
 		return NodeControlResponse{}, fmt.Errorf("validate regional node claim: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
-	return c.exchange(ctx, endpoint, NodeClaimControlPath, request)
+	result, err := c.exchange(ctx, endpoint, NodeClaimControlPath, request)
+	if err == nil && result.ValidateClaimResult(request) != nil {
+		return NodeControlResponse{}, errdefs.ErrUnavailable
+	}
+	return result, err
 }
 
 // CommandReady submits the exact authenticated procd command proof.
@@ -75,10 +79,64 @@ func (c *NodeClient) CommandReady(ctx context.Context, endpoint string, request 
 	if err := request.Proof.Validate(); err != nil {
 		return NodeControlResponse{}, fmt.Errorf("validate node command readiness: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
-	return c.exchange(ctx, endpoint, NodeCommandReadyControlPath, request)
+	result, err := c.exchange(ctx, endpoint, NodeCommandReadyControlPath, request)
+	if err == nil && result.ValidateCommandReadyResult(request) != nil {
+		return NodeControlResponse{}, errdefs.ErrUnavailable
+	}
+	return result, err
+}
+
+// CaptureMigration calls the source driver's private socket after the caller
+// has acquired regional migration authority. It does not authorize restore.
+func (c *NodeClient) CaptureMigration(ctx context.Context, request MigrationCaptureRequest) (*MigrationCapture, error) {
+	digest, err := request.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("migration request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := c.exchangeWithMigration(ctx, request.Target.ControlEndpoint, NodeMigrationCaptureControlPath, request, true)
+	if err != nil {
+		return nil, err
+	}
+	if result.Phase != "migrating" || result.Migration == nil || result.Migration.RequestDigest != digest {
+		return nil, fmt.Errorf("node migration response changed request identity: %w", errdefs.ErrUnavailable)
+	}
+	return result.Migration, nil
 }
 
 func (c *NodeClient) exchange(ctx context.Context, endpoint, path string, body any) (NodeControlResponse, error) {
+	return c.exchangeWithMigration(ctx, endpoint, path, body, false)
+}
+
+func (c *NodeClient) exchangeWithMigration(ctx context.Context, endpoint, path string, body any, migration bool) (NodeControlResponse, error) {
+	return c.exchangeValidated(ctx, endpoint, path, body, func(result NodeControlResponse) error {
+		if !migration {
+			return result.Validate()
+		}
+		if result.Phase != "migrating" || result.Migration == nil || result.ClaimTiming != nil || result.MigrationRestore != nil || result.MigrationAdoption != nil || result.MigrationCPUPreflight != nil {
+			return fmt.Errorf("missing or mixed migration capture outcome")
+		}
+		return result.Migration.Validate()
+	})
+}
+
+func (c *NodeClient) PreflightMigrationCPU(ctx context.Context, request MigrationCPUPreflightRequest) (*MigrationCPUPreflight, error) {
+	if err := request.Validate(); err != nil {
+		return nil, fmt.Errorf("CPU preflight request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if c == nil {
+		return nil, errdefs.ErrUnavailable
+	}
+	observer := *c
+	observer.timeout = MigrationCPUPreflightTimeout
+	result, err := observer.exchangeValidated(ctx, request.Target.ControlEndpoint, NodeMigrationCPUPreflightControlPath, request,
+		func(result NodeControlResponse) error { return result.validateCPUPreflightResult(request) })
+	if err != nil {
+		return nil, err
+	}
+	return result.MigrationCPUPreflight, nil
+}
+
+func (c *NodeClient) exchangeValidated(ctx context.Context, endpoint, path string, body any, validate func(NodeControlResponse) error) (NodeControlResponse, error) {
 	if c == nil {
 		return NodeControlResponse{}, fmt.Errorf("node control client is not initialized: %w", errdefs.ErrUnavailable)
 	}
@@ -138,7 +196,8 @@ func (c *NodeClient) exchange(ctx context.Context, endpoint, path string, body a
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return NodeControlResponse{}, fmt.Errorf("node control response contains trailing data: %w", errdefs.ErrUnavailable)
 	}
-	if err := result.Validate(); err != nil {
+	err = validate(result)
+	if err != nil {
 		return NodeControlResponse{}, fmt.Errorf("validate node control response: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	return result, nil

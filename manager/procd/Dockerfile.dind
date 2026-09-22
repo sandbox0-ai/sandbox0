@@ -1,0 +1,5 @@
+# Add the verified Docker startup helper to an existing immutable template image
+# without changing its bundled agents, browsers, or Docker package versions.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chmod=0755 manager/procd/sandbox0-dockerd-entrypoint /usr/local/bin/sandbox0-dockerd-entrypoint

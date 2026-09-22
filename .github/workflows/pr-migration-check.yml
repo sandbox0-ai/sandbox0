@@ -44,9 +44,24 @@ jobs:
           cache: true
       - name: Verify PostgreSQL migration authority and recovery
         run: go test -race -count=1 -timeout=20m ./manager/pkg/sandboxstore
+
+  nomad-driver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            nomad-driver-sandbox0/go.sum
       - name: Verify the independent Nomad driver module
         working-directory: nomad-driver-sandbox0
-        run: go test -race -count=1 -timeout=20m ./...
+        # Production node sockets require UID 0 for both the file and peer.
+        # Build as the runner; execute test binaries with that real UID contract.
+        run: go test -exec 'sudo --preserve-env=PATH' -race -count=1 -timeout=20m ./...
 
   stock-runsc-checkpoint:
     runs-on: ubuntu-24.04

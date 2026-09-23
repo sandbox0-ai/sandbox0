@@ -303,6 +303,20 @@ func (s *PGSandboxStore) CancelRuntimeNodeConsolidation(ctx context.Context, poo
 	if err != nil {
 		return false, err
 	}
+	// Migration reservation holds this fence FOR SHARE. Lock it before the
+	// occupied-node check so a new reservation cannot commit between the
+	// check and fence removal.
+	var fenceState, fenceReason string
+	err = tx.QueryRow(ctx, `SELECT state,reason FROM manager.runtime_node_fences
+		WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 FOR UPDATE`,
+		clusterID, nodeID, nodeUID).Scan(&fenceState, &fenceReason)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil &&
+		(fenceState != "draining" || fenceReason != RuntimeNodeConsolidationReason) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
 	var activeLeases int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM manager.runtime_resource_leases
 		WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 AND lease_state='active'`,

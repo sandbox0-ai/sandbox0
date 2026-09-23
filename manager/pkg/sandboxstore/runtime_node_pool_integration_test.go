@@ -75,6 +75,8 @@ func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
 	require.Equal(t, 8, snapshot.ClusterFixedUsableSlots)
 	require.EqualValues(t, 14000, snapshot.ClusterFixedCPU)
 	require.EqualValues(t, 56<<30, snapshot.ClusterFixedMemory)
+	require.EqualValues(t, 14000, snapshot.ClusterFixedPhysicalCPU)
+	require.EqualValues(t, 56<<30, snapshot.ClusterFixedPhysicalMemory)
 	require.Len(t, snapshot.PlacementNodes, 1)
 	_, err = pool.Exec(ctx, `UPDATE manager.runtime_node_capacities
 		SET admission_cpu_millicores=64000, admission_memory_bytes=75161927680
@@ -84,6 +86,8 @@ func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
 	require.NoError(t, err)
 	require.EqualValues(t, 64000, snapshot.ClusterFixedCPU)
 	require.EqualValues(t, 70<<30, snapshot.ClusterFixedMemory)
+	require.EqualValues(t, 14000, snapshot.ClusterFixedPhysicalCPU)
+	require.EqualValues(t, 56<<30, snapshot.ClusterFixedPhysicalMemory)
 	require.EqualValues(t, 64000, snapshot.PlacementNodes[0].FreeCPU)
 	require.EqualValues(t, 14000, snapshot.PlacementNodes[0].PhysicalCPU)
 

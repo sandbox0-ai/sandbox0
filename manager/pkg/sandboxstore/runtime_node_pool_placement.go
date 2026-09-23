@@ -125,6 +125,8 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 		if !elastic && (node.ReadySlots > 0 || activeLeases > 0) {
 			snapshot.ClusterFixedCPU += admissionCPU
 			snapshot.ClusterFixedMemory += admissionMemory
+			snapshot.ClusterFixedPhysicalCPU += node.PhysicalCPU
+			snapshot.ClusterFixedPhysicalMemory += node.PhysicalMemory
 		}
 	}
 	if err := rows.Err(); err != nil {

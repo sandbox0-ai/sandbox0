@@ -7268,8 +7268,8 @@ components:
         securityClass:
           type: string
           enum: [standard, privileged]
-          default: standard
-          description: Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
+          default: privileged
+          description: New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
       required: [image, resources]
 
     EphemeralMountSpec:

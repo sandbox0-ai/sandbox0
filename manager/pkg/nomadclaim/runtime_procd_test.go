@@ -15,7 +15,9 @@ func TestRuntimeProcdSelectionIsIndependentOfEmbeddedArtifact(t *testing.T) {
 	f.config.RuntimeProcd = selected
 	_, err := New(f.config)
 	require.ErrorContains(t, err, "does not support node-mounted")
-	f.config.RuntimeClasses.classes[0].Compatibility.DriverVersion = "0.3.0"
+	for index := range f.config.RuntimeClasses.classes {
+		f.config.RuntimeClasses.classes[index].Compatibility.DriverVersion = "0.3.0"
+	}
 	s, err := New(f.config)
 	require.NoError(t, err)
 	original := *selected
@@ -43,7 +45,9 @@ func TestRuntimeProcdSelectionIsIndependentOfEmbeddedArtifact(t *testing.T) {
 func TestColdResumeUsesSelectedProcdWithoutChangingCarrierOrRootFS(t *testing.T) {
 	f := newClaimServiceFixture(t)
 	sandboxID := preparePausedNomadResume(t, f)
-	f.config.RuntimeClasses.classes[0].Compatibility.DriverVersion = "0.3.0"
+	for index := range f.config.RuntimeClasses.classes {
+		f.config.RuntimeClasses.classes[index].Compatibility.DriverVersion = "0.3.0"
+	}
 	selected := &procdartifact.Artifact{Digest: digest.FromString("upgraded daemon").String(), Protocol: f.config.RootFSProcdProtocol}
 	f.config.RuntimeProcd = selected
 	var err error

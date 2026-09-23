@@ -204,8 +204,13 @@ func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpe
 	if err := rejectExplicitTemplateCPU(raw); err != nil {
 		return out, err
 	}
-	if securityClass, ok := v1alpha1.EffectiveSandboxSecurityClass(out.MainContainer.SecurityClass); ok {
-		out.MainContainer.SecurityClass = securityClass
+	// New templates use the single guest-privileged class. Keep the legacy
+	// standard decoder for persisted sandboxes, which resume from their own spec.
+	switch out.MainContainer.SecurityClass {
+	case "", v1alpha1.SandboxSecurityClassPrivileged:
+		out.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassPrivileged
+	case v1alpha1.SandboxSecurityClassStandard:
+		return out, fmt.Errorf("spec.mainContainer.securityClass standard is only supported for existing sandboxes")
 	}
 	return out, nil
 }
@@ -566,6 +571,7 @@ func (h *Handler) writeAcceptedTemplate(c *gin.Context, tpl *template.Template, 
 
 func templateSpecFromSandboxSource(source v1alpha1.SandboxTemplateSpec, overrides *TemplateFromSandboxSpecOverrides) v1alpha1.SandboxTemplateSpec {
 	out := *source.DeepCopy()
+	out.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassPrivileged
 	if overrides == nil {
 		return out
 	}

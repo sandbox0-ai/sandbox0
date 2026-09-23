@@ -101,6 +101,8 @@ func (s *Service) ForkSandbox(
 		ClaimedAt:         startedAt, ExpiresAt: expiresAt, HardExpiresAt: hardExpiresAt,
 		CreatedAt: startedAt, UpdatedAt: startedAt,
 	}
+	target.TemplateSpec = *source.TemplateSpec.DeepCopy()
+	target.TemplateSpec.MainContainer.SecurityClass = "privileged"
 	existingTarget, err := s.store.GetSandbox(ctx, targetID)
 	if err != nil {
 		return nil, mapNomadForkError("load Nomad fork target retry", sourceSandboxID, err)

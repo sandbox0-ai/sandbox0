@@ -30,3 +30,18 @@ func TestNomadForkDigestPreservesLegacyEncodingWhileValidationBindsResources(t *
 		t.Fatal("fork target validation ignored numeric metering resources")
 	}
 }
+
+func TestNomadForkAllowsOnlyStandardToPrivilegedClassUpgrade(t *testing.T) {
+	source := rootFSTestSandboxRecord("source", "team-1")
+	source.TemplateSpec.MainContainer.SecurityClass = "standard"
+	target := *source
+	target.TemplateSpec = *source.TemplateSpec.DeepCopy()
+	target.TemplateSpec.MainContainer.SecurityClass = "privileged"
+	if !nomadForkTemplateSpecDerivedFromSource(source, &target) {
+		t.Fatal("new fork did not accept the privileged class")
+	}
+	target.TemplateSpec.MainContainer.Image = "different"
+	if nomadForkTemplateSpecDerivedFromSource(source, &target) {
+		t.Fatal("fork accepted an unrelated template change")
+	}
+}

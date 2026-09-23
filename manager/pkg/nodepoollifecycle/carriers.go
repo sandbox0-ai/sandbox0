@@ -87,7 +87,7 @@ func (n *NomadClient) CarrierCatalog(ctx context.Context, node string) ([]string
 // the same snapshot for validation and CAS updates. Refetching the full family
 // here doubles serialization and network work on every pending resize retry.
 func (n *NomadClient) carrierCatalog(ctx context.Context, node string) ([]string, []map[string]json.RawMessage, error) {
-	standard, privileged := 512, 64
+	standard, privileged := 512, 256
 	if node != "" {
 		id, err := uuid.Parse(node)
 		if err != nil || id.String() != node {

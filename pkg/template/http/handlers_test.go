@@ -100,11 +100,23 @@ func TestCreateTemplatePersistsRuntimeNeutralSpec(t *testing.T) {
 	if got := store.createdOrUpdatedSpec.MainContainer.Resources.EphemeralStorage; got != "768Mi" {
 		t.Fatalf("ephemeral storage = %q, want 768Mi", got)
 	}
-	if got := store.createdOrUpdatedSpec.MainContainer.SecurityClass; got != v1alpha1.SandboxSecurityClassStandard {
+	if got := store.createdOrUpdatedSpec.MainContainer.SecurityClass; got != v1alpha1.SandboxSecurityClassPrivileged {
 		t.Fatalf("default security class = %q", got)
 	}
 	if strings.Contains(response.Body.String(), `"cpu"`) {
 		t.Fatalf("public response leaked platform-derived CPU: %s", response.Body.String())
+	}
+}
+
+func TestCreateTemplateRejectsNewStandardClass(t *testing.T) {
+	store := &testTemplateStore{}
+	handler := &Handler{Store: store, Logger: zap.NewNop()}
+	router := templateTestRouter(http.MethodPost, "/api/v1/templates", handler.CreateTemplate,
+		&internalauth.Claims{TeamID: "team-1", UserID: "user-1"})
+	body := `{"template_id":"legacy","spec":{"mainContainer":{"image":"registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","securityClass":"standard","resources":{"memory":"1Gi"}}}}`
+	response := performTemplateRequest(router, http.MethodPost, "/api/v1/templates", body)
+	if response.Code != http.StatusBadRequest || store.createCalled {
+		t.Fatalf("new standard template status=%d created=%v body=%s", response.Code, store.createCalled, response.Body.String())
 	}
 }
 

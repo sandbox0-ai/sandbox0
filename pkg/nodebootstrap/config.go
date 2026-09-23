@@ -32,6 +32,8 @@ type Config struct {
 	ReservedCPUMHz     int      `json:"reserved_cpu_mhz"`
 	ReservedMemoryMB   int      `json:"reserved_memory_mb"`
 	ReservedDiskMB     int      `json:"reserved_disk_mb"`
+	StandardCarriers   int      `json:"standard_carriers,omitempty"`
+	PrivilegedCarriers int      `json:"privileged_carriers,omitempty"`
 	RuntimeRoot        string   `json:"runtime_root,omitempty"`
 	DataMount          string   `json:"data_mount,omitempty"`
 	NomadKeyFile       string   `json:"nomad_key_file,omitempty"`
@@ -104,6 +106,14 @@ func (c *Config) normalize() error {
 	}
 	if c.ReservedCPUMHz < 1000 || c.ReservedMemoryMB < 4096 || c.ReservedDiskMB < 10240 {
 		return errors.New("node bootstrap host reservations are below the safe minimum")
+	}
+	if c.StandardCarriers == 0 && c.PrivilegedCarriers == 0 {
+		c.StandardCarriers, c.PrivilegedCarriers = 6, 2
+	}
+	if c.StandardCarriers < 6 || c.StandardCarriers > 512 ||
+		c.PrivilegedCarriers < 2 || c.PrivilegedCarriers > 256 ||
+		c.StandardCarriers+c.PrivilegedCarriers > 576 {
+		return errors.New("node bootstrap carrier ceilings are invalid")
 	}
 	if c.RuntimeRoot == "" {
 		c.RuntimeRoot = "/opt/sandbox0"

@@ -116,7 +116,10 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 			resultErr = w.store.HeartbeatRuntimeCarrierController(ctx, w.config.ClusterID, 30*time.Second)
 		}
 	}()
-	if err := w.store.RecordRuntimeCarrierSurplus(ctx, w.config.ClusterID, 2*w.config.Spare); err != nil {
+	// Reclaim surplus after the configured idle inventory remains quiet. The
+	// class-specific plan still retains every busy and enrollment carrier.
+	idleTarget := w.config.Spare
+	if err := w.store.RecordRuntimeCarrierSurplus(ctx, w.config.ClusterID, idleTarget); err != nil {
 		return 0, err
 	}
 	nodes, err := w.store.ListRuntimeCarrierNodes(ctx, w.config.ClusterID)
@@ -155,8 +158,8 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 					std := w.config.StandardDigest
 					priv := w.config.PrivilegedDigest
 					grow = n.FreeCPU > 0 && n.FreeMemory >= 64<<20 &&
-						((n.ReadyByCompatibility[std] < w.config.LowWatermark && counts["standard"] < n.CompatibilityCapacity[std]) ||
-							(n.ReadyByCompatibility[priv] < 2 && counts["privileged"] < n.CompatibilityCapacity[priv])) &&
+						((n.ReadyByCompatibility[std] < 2 && counts["standard"] < n.CompatibilityCapacity[std]) ||
+							(n.ReadyByCompatibility[priv] < w.config.LowWatermark && counts["privileged"] < n.CompatibilityCapacity[priv])) &&
 						(len(n.Groups) < ceiling || n.Ready > 0)
 				}
 				for class, count := range targets[n.NodeID] {
@@ -173,7 +176,7 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 				// prepare forever: refresh through the normal durable resize proof.
 				refreshCompatibility := w.config.StandardDigest != "" && w.config.PrivilegedDigest != "" &&
 					(n.CompatibilityCapacity[w.config.StandardDigest] == 0 || n.CompatibilityCapacity[w.config.PrivilegedDigest] == 0)
-				shrink := n.Ready > 2*w.config.Spare && n.SurplusSince != nil && time.Since(*n.SurplusSince) >= w.config.ShrinkAfter
+				shrink := n.Ready > idleTarget && n.SurplusSince != nil && time.Since(*n.SurplusSince) >= w.config.ShrinkAfter
 				if !grow && !shrink && !refreshCompatibility && n.Revision != 0 && !n.Retiring && !n.StaleIdentity {
 					continue
 				}

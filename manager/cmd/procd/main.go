@@ -195,6 +195,7 @@ func main() {
 		runtimeController.Probe,
 		runtimeController.CanServe,
 		procdhttp.WithMigrationController(runtimeController),
+		procdhttp.WithCheckpointController(runtimeController),
 	)
 
 	// Bind and serve before loading historical session journals. Accepting a TCP

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 var (
@@ -20,12 +21,15 @@ var (
 	ErrNomadSandboxResumeNotReady = errors.New("nomad sandbox resume is not ready")
 )
 
+const nomadSandboxResumeOperationPrefix = "nomad-resume-"
+
 // RequestNomadSandboxResumeRequest contains the quota decision that must be
 // serialized with a paused-to-resuming transition. A nil limit is unlimited.
 type RequestNomadSandboxResumeRequest struct {
 	SandboxID          string
 	ExpectedTeamID     string
 	ActiveSandboxLimit *int64
+	Memory             bool
 }
 
 // RetryNomadSandboxResumeRequest identifies a resume that may already be
@@ -33,6 +37,7 @@ type RequestNomadSandboxResumeRequest struct {
 type RetryNomadSandboxResumeRequest struct {
 	SandboxID      string
 	ExpectedTeamID string
+	Memory         bool
 }
 
 // NomadSandboxResumeCandidate is the immutable logical input for one exact
@@ -49,8 +54,10 @@ type NomadSandboxResumeCandidate struct {
 	// another sandbox's session identity and has not yet been activated and
 	// republished by this sandbox. procd must clear the copied identity before
 	// it can activate this runtime.
-	ResetCopiedSessionState bool
-	Record                  *SandboxRecord
+	ResetCopiedSessionState       bool
+	Record                        *SandboxRecord
+	Checkpoint                    *protocol.CheckpointRestoreAuthority
+	CheckpointCompatibilityDigest string
 }
 
 // CompleteNomadSandboxResumeRequest commits only an exact command-ready slot
@@ -77,7 +84,7 @@ func NomadSandboxResumeOperationID(
 ) string {
 	payload := fmt.Sprintf("%s\x00%d\x00%s\x00%d", sandboxID, fromGeneration, sourceGenerationID, lifecycleEpoch)
 	digest := sha256.Sum256([]byte(payload))
-	return "nomad-resume-" + hex.EncodeToString(digest[:16])
+	return nomadSandboxResumeOperationPrefix + hex.EncodeToString(digest[:16])
 }
 
 // RetryNomadSandboxResume returns an already-active runtime or an existing
@@ -165,12 +172,14 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if !nomadResumeLifecycleMatches(activeLifecycle, record, operationID, sourceGenerationID, false) {
 		return nil, false, fmt.Errorf("%w: lifecycle %s owns the paused sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("commit Nomad sandbox resume retry: %w", err)
+	candidate, err := nomadResumeCandidateForMode(ctx, tx, record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState, normalized.Memory, false)
+	if err != nil {
+		return nil, false, err
 	}
-	return nomadSandboxResumeCandidate(
-		record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
-	), true, nil
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return candidate, true, nil
 }
 
 // RequestNomadSandboxResume reserves active-sandbox quota and creates the
@@ -195,6 +204,16 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		return nil, fmt.Errorf("lock team sandbox resumes: %w", err)
 	}
 
+	candidate, err := requestNomadSandboxResumeTx(ctx, tx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	return candidate, tx.Commit(ctx)
+}
+
+// requestNomadSandboxResumeTx requires the team quota lock before any sandbox
+// row lock. A composed fork uses the same admission inside its atomic handoff.
+func requestNomadSandboxResumeTx(ctx context.Context, tx pgx.Tx, normalized *RequestNomadSandboxResumeRequest) (*NomadSandboxResumeCandidate, error) {
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SandboxID)
 	if err != nil {
 		return nil, err
@@ -219,9 +238,6 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		}
 		if err := validateAlreadyActiveNomadSandbox(ctx, tx, record); err != nil {
 			return nil, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit already-active Nomad sandbox resume: %w", err)
 		}
 		return &NomadSandboxResumeCandidate{
 			SandboxID: record.ID, AlreadyActive: true,
@@ -257,12 +273,11 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		if !nomadResumeLifecycleMatches(activeLifecycle, record, operationID, sourceGenerationID, false) {
 			return nil, fmt.Errorf("%w: lifecycle %s owns the paused sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit Nomad sandbox resume retry: %w", err)
+		candidate, err := nomadResumeCandidateForMode(ctx, tx, record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState, normalized.Memory, false)
+		if err != nil {
+			return nil, err
 		}
-		return nomadSandboxResumeCandidate(
-			record, activeLifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
-		), nil
+		return candidate, nil
 	}
 	if err := ensureNomadResumePhysicalStateTerminal(ctx, tx, record.ID); err != nil {
 		return nil, err
@@ -282,12 +297,11 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 	if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad resume lifecycle: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit Nomad sandbox resume request: %w", err)
+	candidate, err := nomadResumeCandidateForMode(ctx, tx, record, lifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState, normalized.Memory, true)
+	if err != nil {
+		return nil, err
 	}
-	return nomadSandboxResumeCandidate(
-		record, lifecycle, filesystemID, sourceGenerationID, resetCopiedSessionState,
-	), nil
+	return candidate, nil
 }
 
 // AbortNomadSandboxResume terminally closes only the exact uncommitted resume
@@ -347,6 +361,18 @@ func (s *PGSandboxStore) AbortNomadSandboxResume(
 			return false, fmt.Errorf("commit terminal Nomad resume abort retry: %w", err)
 		}
 		return false, nil
+	}
+	// An image may already be downloading on the node. Persist its exact
+	// cancellation before allowing ordinary slot and lifecycle cleanup.
+	checkpoint, err := beginNomadCheckpointRestoreCancellation(ctx, tx, record, lifecycle, reason)
+	if err != nil {
+		return false, err
+	}
+	if checkpoint {
+		if err := tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	filesystemID, sourceGenerationID, _, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
 	if err != nil {
@@ -510,6 +536,10 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 			expiresAt = record.HardExpiresAt
 		}
 	}
+	expiresAt, err = runningMemoryForkParentExpiration(ctx, tx, lifecycle.ID, expiresAt)
+	if err != nil {
+		return nil, err
+	}
 	locked := sandboxStoreTx{tx: tx}
 	if err := locked.SaveRuntime(ctx, record.ID, slot.AllocationNamespace, slot.AllocationID,
 		lifecycle.ToGeneration, expiresAt, record.HardExpiresAt, ""); err != nil {
@@ -526,6 +556,14 @@ func (s *PGSandboxStore) CompleteNomadSandboxResume(
 		return nil, err
 	}
 	if err := locked.CommitLifecycleTxn(ctx, lifecycle.ID, ""); err != nil {
+		return nil, err
+	}
+	if err := persistNomadCheckpointAdoption(ctx, tx, slot); err != nil {
+		return nil, err
+	}
+	// A completed resume supersedes this owner's paused image in either mode.
+	// Restore history still pins memory custody until explicit image retirement.
+	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_runtime_checkpoint_refs WHERE sandbox_id=$1 AND runtime_generation=$2`, record.ID, lifecycle.FromGeneration); err != nil {
 		return nil, err
 	}
 	completed, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxRecordSelectSQL()+`

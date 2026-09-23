@@ -66,7 +66,7 @@ func (r *Reconciler) reconcileMigrationFailure(ctx context.Context, store migrat
 	if ack == nil || ack.ValidateFor(request) != nil {
 		return false, errors.New("failed migration allocation acknowledgement changed identity")
 	}
-	operation := receipt.Request.Request.Failure.Request.Restore.Image.Publication.Assignment.OperationID
+	operation := receipt.Request.Request.Failure.Request.Restore.Image.OperationID()
 	terminal, err := store.CompleteNomadSandboxMigrationFailure(ctx, operation, request, *ack)
 	if err != nil {
 		return false, err

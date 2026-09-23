@@ -63,6 +63,10 @@ func (s *Server) runtimeMigrationHandler(w http.ResponseWriter, r *http.Request)
 	}
 	s.migrationMu.Lock()
 	defer s.migrationMu.Unlock()
+	if s.checkpointPrepared {
+		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "checkpoint owns the source process")
+		return
+	}
 	assignmentDigest, _ := request.Assignment.Digest()
 	if request.LifecycleEpoch < s.migrationEpoch ||
 		(request.LifecycleEpoch == s.migrationEpoch && s.migrationAssignmentDigest != "" && s.migrationAssignmentDigest != assignmentDigest) {
@@ -144,7 +148,7 @@ func (s *Server) migrationLifecycleMiddleware(next http.Handler) http.Handler {
 		}
 		s.migrationMu.Lock()
 		defer s.migrationMu.Unlock()
-		if s.migrationPrepared {
+		if s.migrationPrepared || s.checkpointPrepared {
 			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "runtime migration owns lifecycle control")
 			return
 		}

@@ -228,7 +228,7 @@ func (r runtimeSlotJournalRecord) matchesMigration(capture protocol.MigrationCap
 	target, registration := capture.Request.Target, r.Registration
 	if c := r.MigrationDestination; c != nil && c.Adopted() {
 		adopted := c.Adoption.Request
-		revision, _ := c.Restore.Request.Image.Publication.Assignment.Target.Revision()
+		revision, _ := c.Restore.Request.Image.RuntimeAssignment().Revision()
 		binding, _ := c.Restore.Request.Stage.BindingDigest()
 		resources, _ := c.Restore.Request.Image.Resources.Digest()
 		if capture.Request.Target != adopted.Target || capture.Request.OperationID == adopted.OperationID ||

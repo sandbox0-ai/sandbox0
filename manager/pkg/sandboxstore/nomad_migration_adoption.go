@@ -21,7 +21,7 @@ func (s *PGSandboxStore) GetNomadSandboxMigrationAdoptionForSlot(ctx context.Con
 	err := s.pool.QueryRow(ctx, `SELECT operation_id,adoption_request,adoption_digest,restore_receipt
 		FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1 AND generation_committed_at IS NOT NULL`, slot).Scan(&operation, &payload, &storedDigest, &restorePayload)
 	if err == pgx.ErrNoRows {
-		return nil, nil
+		return s.getNomadCheckpointAdoptionForSlot(ctx, slot)
 	}
 	if err != nil {
 		return nil, err
@@ -76,6 +76,9 @@ func persistNomadMigrationAdoption(ctx context.Context, tx pgx.Tx, restored prot
 // receipt. Recording historical cleanup remains possible after TTL expiry; it
 // grants no execution authority and never releases either resource lease.
 func (s *PGSandboxStore) CommitNomadSandboxMigrationAdoption(ctx context.Context, request protocol.MigrationAdoptionRequest, receipt protocol.MigrationAdoptionProof) error {
+	if request.CheckpointRestoreDigest != "" {
+		return s.commitNomadCheckpointAdoption(ctx, request, receipt)
+	}
 	if receipt.ValidateFor(request) != nil {
 		return ErrNomadSandboxMigrationConflict
 	}

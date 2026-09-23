@@ -137,6 +137,27 @@ func (s *FileStore) ResetForSandbox(sandboxID string) error {
 	return nil
 }
 
+// rebindCheckpointOwner runs under the restored supervisor's lock after all
+// session records have been saved. Unlike cold-fork activation it preserves
+// journals and attempts. Missing or unrelated ownership is never adopted.
+func (s *FileStore) rebindCheckpointOwner(sourceID, targetID string) error {
+	path := filepath.Join(s.root, sandboxIDFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read checkpoint session owner: %w", err)
+	}
+	owner := strings.TrimSpace(string(data))
+	if owner != sourceID && owner != targetID {
+		return errors.New("checkpoint session store belongs to another sandbox")
+	}
+	// Rewrite on an exact retry too: rename may have succeeded before a
+	// directory fsync failed, so owner equality is not durability proof.
+	if err := writeFileAtomic(path, []byte(targetID+"\n"), 0o600); err != nil {
+		return fmt.Errorf("persist checkpoint session owner: %w", err)
+	}
+	return nil
+}
+
 func (s *FileStore) Save(value Session) error {
 	dir, err := s.sessionDir(value.ID)
 	if err != nil {

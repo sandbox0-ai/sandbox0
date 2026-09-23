@@ -49,6 +49,7 @@ const (
 	NodeChannelCommandMigrationFailureStop            NodeChannelCommandKind = "migration_failure_stop"
 	NodeChannelCommandMigrationFailureCleanup         NodeChannelCommandKind = "migration_failure_cleanup"
 	NodeChannelCommandMigrationFailureFinalize        NodeChannelCommandKind = "migration_failure_finalize"
+	NodeChannelCommandCheckpointImageCancel           NodeChannelCommandKind = "checkpoint_image_cancel"
 	NodeChannelCommandMigrationCaptureFailureCleanup  NodeChannelCommandKind = "migration_capture_failure_cleanup"
 	NodeChannelCommandMigrationCaptureFailureFinalize NodeChannelCommandKind = "migration_capture_failure_finalize"
 	NodeChannelCommandMigrationImagePrepare           NodeChannelCommandKind = "migration_image_prepare"
@@ -167,7 +168,7 @@ func (h NodeChannelHello) Validate() error {
 		NodeChannelCommandPlannedRetire, NodeChannelCommandRunningFork, NodeChannelCommandPausedRebase,
 		NodeChannelCommandMigrationCapture, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationCapturePeer, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationSourceGC,
 		NodeChannelCommandMigrationCPUPreflight, NodeChannelCommandMigrationRecover,
-		NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize,
+		NodeChannelCommandMigrationStagingReserve, NodeChannelCommandMigrationStagingRelease, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandCheckpointImageCancel, NodeChannelCommandMigrationFailureFinalize,
 		NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize,
 	}
 	if len(capabilities) < 3 || len(capabilities) > 3+len(canonical) ||
@@ -270,6 +271,7 @@ type NodeChannelCommand struct {
 	MigrationCapturePeer            *MigrationCapturePeerRequest            `json:"migration_capture_peer,omitempty"`
 	MigrationFailureStop            *MigrationFailureRequest                `json:"migration_failure_stop,omitempty"`
 	MigrationFailureCleanup         *MigrationFailureCleanupRequest         `json:"migration_failure_cleanup,omitempty"`
+	CheckpointImageCancel           *CheckpointImageCancelRequest           `json:"checkpoint_image_cancel,omitempty"`
 	MigrationFailureFinalize        *MigrationFailureFinalizeRequest        `json:"migration_failure_finalize,omitempty"`
 	MigrationCaptureFailureCleanup  *MigrationCaptureFailureRequest         `json:"migration_capture_failure_cleanup,omitempty"`
 	MigrationCaptureFailureFinalize *MigrationCaptureFailureFinalizeRequest `json:"migration_capture_failure_finalize,omitempty"`
@@ -661,6 +663,13 @@ func (c NodeChannelCommand) Validate() error {
 		if _, err := c.MigrationCaptureFailureFinalize.Digest(); err != nil {
 			return err
 		}
+	case NodeChannelCommandCheckpointImageCancel:
+		if c.CheckpointImageCancel == nil || c.payloadCount() != 1 || c.CheckpointImageCancel.Image.Target != c.Target {
+			return fmt.Errorf("checkpoint image cancellation changed destination")
+		}
+		if _, err := c.CheckpointImageCancel.Digest(); err != nil {
+			return err
+		}
 	case NodeChannelCommandMigrationFailureFinalize:
 		if c.MigrationFailureFinalize == nil || c.payloadCount() != 1 || c.MigrationFailureFinalize.Request.Failure.Request.Restore.Image.Target != c.Target {
 			return fmt.Errorf("migration failure cleanup changed its destination")
@@ -844,6 +853,7 @@ func (c NodeChannelCommand) payloadCount() int {
 		c.MigrationFailureStop != nil,
 		c.MigrationFailureCleanup != nil,
 		c.MigrationFailureFinalize != nil,
+		c.CheckpointImageCancel != nil,
 		c.MigrationCaptureFailureCleanup != nil,
 		c.MigrationCaptureFailureFinalize != nil,
 		c.MigrationImagePrepare != nil,
@@ -882,6 +892,7 @@ type NodeChannelResult struct {
 	MigrationCapturePeer            *MigrationCapturePeerPrepared              `json:"migration_capture_peer,omitempty"`
 	MigrationFailureStop            *MigrationFailureStopProof                 `json:"migration_failure_stop,omitempty"`
 	MigrationFailureCleanup         *MigrationFailureCleanupProof              `json:"migration_failure_cleanup,omitempty"`
+	CheckpointImageCancel           *CheckpointImageCancelProof                `json:"checkpoint_image_cancel,omitempty"`
 	MigrationFailureFinalize        *MigrationFailureFinalizeProof             `json:"migration_failure_finalize,omitempty"`
 	MigrationCaptureFailureCleanup  *MigrationCaptureFailureProof              `json:"migration_capture_failure_cleanup,omitempty"`
 	MigrationCaptureFailureFinalize *MigrationCaptureFailureFinalizeProof      `json:"migration_capture_failure_finalize,omitempty"`
@@ -955,6 +966,11 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 			return fmt.Errorf("failed capture proof is missing")
 		}
 		return r.MigrationCaptureFailureFinalize.ValidateFor(*command.MigrationCaptureFailureFinalize)
+	case NodeChannelCommandCheckpointImageCancel:
+		if r.CheckpointImageCancel == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("checkpoint image cancellation proof is missing")
+		}
+		return r.CheckpointImageCancel.ValidateFor(*command.CheckpointImageCancel)
 	case NodeChannelCommandMigrationFailureFinalize:
 		if r.MigrationFailureFinalize == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("migration failure cleanup proof is missing")
@@ -1120,6 +1136,7 @@ func (r NodeChannelResult) payloadCount() int {
 		r.MigrationFailureStop != nil,
 		r.MigrationFailureCleanup != nil,
 		r.MigrationFailureFinalize != nil,
+		r.CheckpointImageCancel != nil,
 		r.MigrationCaptureFailureCleanup != nil,
 		r.MigrationCaptureFailureFinalize != nil,
 		r.MigrationImagePrepare != nil,

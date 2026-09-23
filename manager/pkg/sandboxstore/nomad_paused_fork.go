@@ -30,6 +30,16 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	target, err := forkNomadPausedSandboxTx(ctx, tx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	return target, tx.Commit(ctx)
+}
+
+// forkNomadPausedSandboxTx keeps child creation, RootFS and optional memory
+// custody in the caller's transaction, including running-memory-fork handoff.
+func forkNomadPausedSandboxTx(ctx context.Context, tx pgx.Tx, normalized *NomadSandboxForkRequest) (*SandboxRecord, error) {
 	source, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SourceSandboxID)
 	if err != nil {
 		return nil, err
@@ -44,12 +54,12 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 		return nil, fmt.Errorf("lock Nomad paused-fork lifecycle: %w", err)
 	}
 	if lifecycle != nil {
+		if err := validateNomadCheckpointForkRetry(ctx, tx, lifecycle, normalized); err != nil {
+			return nil, err
+		}
 		target, retryErr := loadCompletedNomadPausedFork(ctx, tx, source, lifecycle, normalized)
 		if retryErr != nil {
 			return nil, retryErr
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit Nomad paused-fork retry: %w", err)
 		}
 		return target, nil
 	}
@@ -135,11 +145,13 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 	if err := locked.BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad paused-fork lifecycle: %w", err)
 	}
+	if normalized.Memory {
+		if err := retainNomadCheckpointFork(ctx, tx, source, normalized.Target, lifecycle); err != nil {
+			return nil, err
+		}
+	}
 	if err := locked.CommitLifecycleTxn(ctx, lifecycle.ID, filesystem.HeadGenerationID); err != nil {
 		return nil, fmt.Errorf("commit Nomad paused-fork lifecycle: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit Nomad paused-fork: %w", err)
 	}
 	return normalized.Target, nil
 }

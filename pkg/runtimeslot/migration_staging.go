@@ -14,6 +14,9 @@ import (
 // configured XFS project quota remains the hard limit. No host path is supplied.
 // Source identity here does not authorize capture or destination execution.
 type MigrationStagingRequest struct {
+	// CaptureOnly retains the same bounded source pool and custody journal
+	// while allowing memory pause to defer destination placement until resume.
+	CaptureOnly                    bool                    `json:"capture_only,omitempty"`
 	Target                         NodeChannelTarget       `json:"target"`
 	Source                         MigrationCaptureRequest `json:"source"`
 	Destination                    NodeChannelTarget       `json:"destination"`
@@ -29,18 +32,24 @@ func (r MigrationStagingRequest) Validate() error {
 	if err := r.Source.Validate(); err != nil {
 		return err
 	}
-	if err := r.Destination.validate(true); err != nil {
-		return err
-	}
-	if r.Target != r.Source.Target && r.Target != r.Destination {
-		return fmt.Errorf("staging reservation must target its exact source or destination")
-	}
-	s, d := r.Source.Target, r.Destination
-	if s.ClusterID != d.ClusterID || s.NodeID == d.NodeID || s.NodeUID == d.NodeUID || s.SlotID == d.SlotID || s.AllocationID == d.AllocationID {
-		return fmt.Errorf("staging reservation requires distinct nodes in one cluster")
-	}
-	if _, err := DecodeProof("destination_resource_lease_digest", r.DestinationResourceLeaseDigest); err != nil {
-		return err
+	if r.CaptureOnly {
+		if !r.IsSource() || r.Destination != (NodeChannelTarget{}) || r.DestinationResourceLeaseDigest != "" {
+			return fmt.Errorf("capture-only staging requires only its exact source")
+		}
+	} else {
+		if err := r.Destination.validate(true); err != nil {
+			return err
+		}
+		if r.Target != r.Source.Target && r.Target != r.Destination {
+			return fmt.Errorf("staging reservation must target its exact source or destination")
+		}
+		s, d := r.Source.Target, r.Destination
+		if s.ClusterID != d.ClusterID || s.NodeID == d.NodeID || s.NodeUID == d.NodeUID || s.SlotID == d.SlotID || s.AllocationID == d.AllocationID {
+			return fmt.Errorf("staging reservation requires distinct nodes in one cluster")
+		}
+		if _, err := DecodeProof("destination_resource_lease_digest", r.DestinationResourceLeaseDigest); err != nil {
+			return err
+		}
 	}
 	if r.Bytes < 1<<20 || r.Bytes > 1<<50 || r.Bytes%4096 != 0 || r.Inodes < 2 || r.Inodes > 16384 {
 		return fmt.Errorf("staging reservation requires aligned 1 MiB–1 PiB capacity and 2–16384 inodes")

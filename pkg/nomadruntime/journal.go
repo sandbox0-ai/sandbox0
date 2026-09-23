@@ -51,6 +51,9 @@ const (
 	runtimeSlotPrefetchJournalVersion           = 14
 	runtimeSlotCaptureUploadJournalVersion      = 15
 	runtimeSlotCapturePeerJournalVersion        = 16
+	runtimeSlotCheckpointStagingJournalVersion  = 17
+	runtimeSlotCheckpointRestoreJournalVersion  = 18
+	runtimeSlotCheckpointCancelJournalVersion   = 19
 	runtimeSlotLegacyFinalizationJournalVersion = 5
 	runtimeSlotFinalizationJournalVersion       = 6
 	runtimeSlotProofRetention                   = 24 * time.Hour
@@ -434,6 +437,37 @@ func decodeRuntimeSlotJournalRecord(payload []byte) (runtimeSlotJournalRecord, e
 		return runtimeSlotJournalRecord{}, fmt.Errorf("decode runtime slot journal record: %w", err)
 	}
 	originalVersion := record.Version
+	hasCheckpointCancel := record.MigrationDestination != nil && record.MigrationDestination.Cancellation != nil
+	if hasCheckpointCancel != (record.Version == runtimeSlotCheckpointCancelJournalVersion) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("checkpoint cancellation requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCheckpointCancel {
+		record.Version = runtimeSlotCheckpointRestoreJournalVersion
+	}
+	hasCheckpointRestore := record.MigrationDestination != nil && record.MigrationDestination.Request.Checkpoint != nil
+	if hasCheckpointRestore != (record.Version == runtimeSlotCheckpointRestoreJournalVersion) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("checkpoint restore requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCheckpointRestore {
+		record.Version = runtimeSlotJournalTransferEnvelopeVersion(record)
+		if record.MigrationStaging != nil && record.MigrationStaging.Request.CaptureOnly {
+			record.Version = runtimeSlotCheckpointStagingJournalVersion
+		}
+	}
+	hasCheckpointStaging := record.MigrationStaging != nil && record.MigrationStaging.Request.CaptureOnly
+	if record.Migration != nil && record.Migration.PublicationRequest != nil &&
+		record.Migration.PublicationRequest.CheckpointSource != nil && !hasCheckpointStaging {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("checkpoint publication lost source-only staging: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCheckpointStaging != (record.Version == runtimeSlotCheckpointStagingJournalVersion) {
+		return runtimeSlotJournalRecord{}, fmt.Errorf("checkpoint staging requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
+	}
+	if hasCheckpointStaging {
+		// Keep the existing quota, upload, and capture custody validators.
+		// Older ctld instances must refuse this envelope instead of forgetting
+		// that no destination reservation exists.
+		record.Version = runtimeSlotJournalTransferEnvelopeVersion(record)
+	}
 	hasCapturePeer := record.MigrationStaging != nil && (record.MigrationStaging.Peer != (runtimecheckpoint.PeerEndpoint{}) || record.MigrationStaging.CapturePeer != nil)
 	if hasCapturePeer != (record.Version == runtimeSlotCapturePeerJournalVersion) || record.validateMigrationCapturePeer() != nil {
 		return runtimeSlotJournalRecord{}, fmt.Errorf("capture peer requires its non-downgradable journal envelope: %w", errdefs.ErrFailedPrecondition)
@@ -621,10 +655,7 @@ func runtimeSlotJournalBaseEnvelopeVersion(record runtimeSlotJournalRecord) int 
 	return record.Version
 }
 
-func putRuntimeSlotJournalRecord(bucket *bolt.Bucket, record runtimeSlotJournalRecord) error {
-	if bucket == nil {
-		return fmt.Errorf("runtime slot journal bucket is absent: %w", errdefs.ErrUnavailable)
-	}
+func runtimeSlotJournalTransferEnvelopeVersion(record runtimeSlotJournalRecord) int {
 	record.Version = runtimeSlotJournalBaseEnvelopeVersion(record)
 	if record.MigrationStaging != nil && record.MigrationStaging.Prefetch != nil {
 		record.Version = runtimeSlotPrefetchJournalVersion
@@ -634,6 +665,23 @@ func putRuntimeSlotJournalRecord(bucket *bolt.Bucket, record runtimeSlotJournalR
 	}
 	if record.MigrationStaging != nil && (record.MigrationStaging.Peer != (runtimecheckpoint.PeerEndpoint{}) || record.MigrationStaging.CapturePeer != nil) {
 		record.Version = runtimeSlotCapturePeerJournalVersion
+	}
+	return record.Version
+}
+
+func putRuntimeSlotJournalRecord(bucket *bolt.Bucket, record runtimeSlotJournalRecord) error {
+	if bucket == nil {
+		return fmt.Errorf("runtime slot journal bucket is absent: %w", errdefs.ErrUnavailable)
+	}
+	record.Version = runtimeSlotJournalTransferEnvelopeVersion(record)
+	if record.MigrationStaging != nil && record.MigrationStaging.Request.CaptureOnly {
+		record.Version = runtimeSlotCheckpointStagingJournalVersion
+	}
+	if record.MigrationDestination != nil && record.MigrationDestination.Request.Checkpoint != nil {
+		record.Version = runtimeSlotCheckpointRestoreJournalVersion
+	}
+	if record.MigrationDestination != nil && record.MigrationDestination.Cancellation != nil {
+		record.Version = runtimeSlotCheckpointCancelJournalVersion
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

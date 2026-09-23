@@ -14,6 +14,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +25,11 @@ func migrationRestoreNodeFixture(t *testing.T, beforeImage ...func(*nodeRuntime,
 	for _, prepare := range beforeImage {
 		prepare(daemon, image)
 	}
+	return migrationRestoreForImageFixture(t, daemon, image, runtime)
+}
+
+func migrationRestoreForImageFixture(t *testing.T, daemon *nodeRuntime, image protocol.MigrationImagePrepareRequest, runtime *migrationImageDownloadTestRuntime) (*nodeRuntime, protocol.MigrationRestoreObservation, *migrationImageDownloadTestRuntime, *migrationSourceTestRunsc) {
+	t.Helper()
 	prepared, err := daemon.PrepareMigrationImage(t.Context(), image)
 	require.NoError(t, err)
 	fence := protocol.MigrationSourceFenceRequest{PublicationRequest: image.Publication, Publication: image.Receipt}
@@ -55,15 +61,18 @@ func migrationRestoreNodeFixture(t *testing.T, beforeImage ...func(*nodeRuntime,
 func migrationRestoreStageForImage(t *testing.T, image protocol.MigrationImagePrepareRequest) rootfshandoff.StageRequest {
 	t.Helper()
 	cut := image.Publication.Capture.RootFS.Generation
+	if image.Checkpoint != nil && image.Checkpoint.Assignment.Kind == runtimecontrol.CheckpointFork {
+		cut.FilesystemID = image.RuntimeAssignment().SandboxID
+	}
 	stage := testNomadNodeClaimControlRequest(t).Stage.WithoutWriterGrantToken()
 	stage.Generation, stage.InitialGeneration = &cut, cut.GenerationID
 	stage.Identity.RootFSID, stage.Identity.SourceOCIDigest, stage.Identity.WriterEpoch = cut.FilesystemID, cut.SourceOCIDigest, cut.WriterEpoch+1
 	stage.Identity.NodeUID, stage.Identity.BootID = image.Target.NodeUID, image.Target.NodeBootID
 	stage.Identity.AllocationID, stage.Identity.SlotNonce, stage.Identity.ClaimID = image.Target.AllocationID, image.Target.SlotID, image.Resources.ClaimID
 	stage.Identity.TaskName, stage.Identity.RuntimeClass, stage.Identity.RootFSDriver = protocol.NomadTaskName, "sandbox0-gvisor", "nomad-driver"
-	stage.Identity.RuntimeGeneration = strconv.FormatInt(image.Publication.Assignment.Target.RuntimeGeneration, 10)
+	stage.Identity.RuntimeGeneration = strconv.FormatInt(image.RuntimeAssignment().RuntimeGeneration, 10)
 	stage.ExpectedPolicyToken.AllocationID, stage.ExpectedPolicyToken.ClaimID = stage.Identity.AllocationID, stage.Identity.ClaimID
-	revision, err := image.Publication.Assignment.Target.Revision()
+	revision, err := image.RuntimeAssignment().Revision()
 	require.NoError(t, err)
 	resourceDigest, err := image.Resources.Digest()
 	require.NoError(t, err)

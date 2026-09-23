@@ -1,21 +1,23 @@
 # Pause And Resume
 
-Sandbox0 can release runtime compute without deleting a sandbox. Pause
+Sandbox0 can release runtime compute without deleting a sandbox. By default, pause
 publishes the writable block-COW RootFS head and retires the current runtime
 allocation. Resume claims a fresh resource-neutral carrier and starts a new
 runtime generation from the latest committed head.
 
 <Callout variant="info">
-Pause preserves files, identity, and durable configuration. It does not
+The default filesystem-only pause preserves files, identity, and durable configuration. It does not
 preserve processes, memory, sockets, PIDs, open file descriptors, or live REPL
 connections.
 </Callout>
 
-Experimental [system maintenance migration](/docs/sandbox#system-maintenance-migration)
-has a separate execution-state transfer path. Users cannot request migration,
-and a successful migration does not make pause/resume preserve process state.
+Experimental memory pause/resume explicitly opts into preserving supported process
+state with `memory: true`. It reuses the execution capture and restore machinery
+of [system maintenance migration](/docs/sandbox#system-maintenance-migration),
+but retains a checkpoint while no runtime is allocated. Existing calls, TTL pause,
+and automatic resume keep their filesystem-only behavior.
 
-## What Persists
+## Default Filesystem-Only Behavior
 
 | State | Across a successful pause/resume | After delete or `hard_ttl` |
 | --- | --- | --- |
@@ -36,7 +38,119 @@ Do not store durable data under any of these runtime-only mounts.
 For named restore points, fork, and rebase, see
 [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-## Pause Transaction
+## Explicit Memory Pause And Resume
+
+This experimental mode is still undergoing failure and capacity validation.
+Use it only with a deployment that supports memory checkpoints. Both actions
+accept an optional JSON object:
+
+```json
+{
+    "memory": true
+}
+```
+
+Omitting the body, using an empty object, or setting `memory: false` keeps the
+filesystem-only behavior. Choose memory on **both** pause and resume. An explicit
+memory resume requires a retained memory checkpoint matching the committed
+RootFS generation; a filesystem-only pause cannot later recover its discarded
+process memory. Unsupported or incompatible memory operations return an error
+without falling back to an entrypoint restart.
+
+A successful memory pause retains supported guest processes, memory, PIDs,
+open files and runtime tmpfs state, together with the matching RootFS checkpoint.
+Resume restores that execution image into a fresh compatible carrier. The
+sandbox ID stays the same; `runtime_id` changes and `runtime_generation` advances.
+Existing SSH, streaming and external TCP connections are not guaranteed to
+survive. Reconnect clients after resume. A named RootFS snapshot still contains
+filesystem state only.
+
+```python
+client.sandboxes.pause_and_wait(
+    sandbox.id,
+    memory=True,
+    timeout_sec=360,
+)
+
+client.sandboxes.resume_and_wait(
+    sandbox.id,
+    memory=True,
+    timeout_sec=360,
+)
+```
+
+```typescript
+await client.sandboxes.pauseAndWait(sandbox.id, {
+    memory: true,
+    timeoutMs: 360_000,
+});
+await client.sandboxes.resumeAndWait(sandbox.id, {
+    memory: true,
+    timeoutMs: 360_000,
+});
+```
+
+```go
+options := &sandbox0.SandboxLifecycleWaitOptions{
+    Memory: true,
+    Timeout: 6 * time.Minute,
+}
+if _, err := client.PauseSandboxAndWait(ctx, sandbox.ID, options); err != nil {
+    return err
+}
+if _, err := client.ResumeSandboxAndWait(ctx, sandbox.ID, options); err != nil {
+    return err
+}
+```
+
+Memory checkpoint cost depends on the live working set, image transfer,
+storage bandwidth and restore compatibility. A warm carrier does not remove
+these costs; the normal claim latency target is not a memory restore guarantee.
+The example wait budget is a caller setting, not a completion-time guarantee.
+Capture uses a bounded regional upload reservation shared with migration. If
+that temporary budget is full, preparation retries until its deadline, then
+cancels without capture. An image larger than the supported reservation limit
+fails at admission. After pause commits and the source is physically terminal, the
+temporary budget is released while the retained image stays available to its
+owners. Neither case silently switches to filesystem-only pause.
+Before capture is authorized, expired preparation is canceled through the exact
+source protocol: API admission reopens and unused image staging is released.
+The existing process, writer and resource lease stay owned by the running sandbox.
+Once capture is authorized, this cancellation path is forbidden; an uncertain
+capture requires physical failure resolution. It never retries capture or reports
+successful memory retention. After exact source cleanup, the last committed
+RootFS remains available, but memory resume fails without a retained image.
+The public status is `failed` even though `paused` remains true for filesystem
+recovery. Memory pause wait helpers raise `SandboxLifecycleFailedError` instead
+of treating that recovery state as a successful pause.
+Deletion records termination intent and waits for this cleanup or preparation
+cancellation before reclaiming the source's resources.
+
+After restore execution is authorized, a failed target is stopped and physically
+reclaimed before its resource lease is released. The failed attempt consumes its
+runtime generation while retaining the paused checkpoint and committed disk head.
+A later explicit `memory: true` resume creates a new attempt using that image;
+failure cleanup never silently starts a replacement. If restoring the parent of
+a running memory fork fails, retrying the fork reports that failure instead of
+recapturing the parent or creating another child.
+After cleanup, the public status is `failed`; memory resume wait helpers raise
+`SandboxLifecycleFailedError` for the failed generation.
+
+An HTTP timeout or client disconnection does not cancel an accepted durable
+operation. Inspect the sandbox and retry the same memory mode; never retry with
+`memory: false` as an error-recovery shortcut.
+
+Memory capture must match the destination's runsc/platform/CPU and immutable
+runtime configuration. Changing configuration after capture can prevent restore.
+If webhooks are configured, capture requires a durable webhook outbox; in-flight
+delivery and its acknowledgement drain before capture. Restored sessions retain
+their captured process identity rather than starting a new recovery attempt.
+
+Automatic wake-up still uses the default filesystem-only mode. Disable
+`auto_resume` when a paused memory checkpoint must only be resumed explicitly,
+and avoid runtime/file access until the memory resume completes.
+
+## Filesystem Pause Transaction
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
@@ -84,7 +198,7 @@ If S3 or PostgreSQL is unavailable after local seal, Sandbox0 keeps the exact
 retirement retryable and keeps its capacity fenced. It does not silently mark
 the sandbox paused or release a writer before the regional transaction commits.
 
-## Resume Transaction
+## Filesystem Resume Transaction
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
@@ -179,7 +293,7 @@ Caller-visible temporary results are:
   committed; and
 - `503 sandbox_resume_failed`: that resume attempt ended unsuccessfully.
 
-A supervised session preserves its logical identity and retained event journal,
+In filesystem-only mode, a supervised session preserves its logical identity and retained event journal,
 then follows its `runtime_recovery` policy in the new generation. Its old PID
 and sockets do not survive.
 During graceful runtime shutdown, procd receives the stop signal before its

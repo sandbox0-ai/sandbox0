@@ -103,7 +103,15 @@ func (fakeProber) MigrateRuntime(context.Context, string, procdapi.RuntimeMigrat
 	return nil, nil
 }
 
+func (fakeProber) CheckpointRuntime(context.Context, string, procdapi.RuntimeCheckpointRequest, string) (*procdapi.RuntimeCheckpointResponse, error) {
+	return nil, nil
+}
+
 type fakeTokenGenerator struct{}
+
+func (fakeTokenGenerator) GenerateCheckpointToken(procdapi.RuntimeCheckpointRequest) (string, error) {
+	return "checkpoint-scoped", nil
+}
 
 func (fakeTokenGenerator) GenerateMigrationToken(procdapi.RuntimeMigrationRequest) (string, error) {
 	return "scoped", nil
@@ -137,6 +145,7 @@ func TestNewAssemblesSharedNodeAuthorityAndClaimPlanner(t *testing.T) {
 	require.NotNil(t, component.handovers)
 	require.NotNil(t, component.cancellations)
 	require.NotNil(t, component.sourceExecution)
+	require.NotNil(t, component.checkpointPauses)
 	require.NotNil(t, component.evacuation)
 	require.NotNil(t, component.preflights)
 	require.NotNil(t, component.sourceRecovery)

@@ -10,10 +10,12 @@ import (
 )
 
 // MigrationSourceFinalizeRequest is issued by the region after it commits the
-// target adoption or irreversible execution-stop receipt. It authorizes destruction only of the fenced source
+// target adoption, irreversible execution-stop, or retained memory checkpoint
+// receipt. It authorizes destruction only of the fenced source
 // artifacts and physical carrier. Allocation purge and lease release remain
 // regional operations after this command returns its full physical proof.
 type MigrationSourceFinalizeRequest struct {
+	Checkpoint  *CheckpointRetained          `json:"checkpoint,omitempty"`
 	Fence       MigrationSourceFenceRequest  `json:"fence"`
 	SourceProof MigrationSourceFenceProof    `json:"source_proof"`
 	Adoption    MigrationAdoptionReceipt     `json:"adoption"`
@@ -30,7 +32,16 @@ func (r MigrationSourceFinalizeRequest) Validate() error {
 	if err := r.SourceProof.ValidateFor(r.Fence); err != nil {
 		return err
 	}
-	if r.Failure == nil {
+	if r.Checkpoint != nil {
+		if r.Failure != nil || r.Adoption != (MigrationAdoptionReceipt{}) {
+			return fmt.Errorf("checkpoint source cleanup cannot carry a destination outcome")
+		}
+		if err := r.Checkpoint.ValidateFor(r.Fence.PublicationRequest, r.Fence.Publication); err != nil {
+			return err
+		}
+	} else if r.Fence.PublicationRequest.CheckpointSource != nil {
+		return fmt.Errorf("checkpoint source cleanup requires regional retention")
+	} else if r.Failure == nil {
 		if err := r.Adoption.Proof.ValidateFor(r.Adoption.Request); err != nil {
 			return err
 		}
@@ -54,11 +65,11 @@ func (r MigrationSourceFinalizeRequest) Validate() error {
 	capture := r.Fence.PublicationRequest.Capture.Request
 	assignment := r.Fence.PublicationRequest.Assignment
 	a, c := r.Adoption.Request, r.Cleanup
-	if r.Failure == nil && (a.OperationID != assignment.OperationID || a.SandboxID != capture.SandboxID || a.RuntimeGeneration != assignment.Target.RuntimeGeneration ||
+	if r.Checkpoint == nil && r.Failure == nil && (a.OperationID != assignment.OperationID || a.SandboxID != capture.SandboxID || a.RuntimeGeneration != assignment.Target.RuntimeGeneration ||
 		a.ProcdInstanceID != capture.ProcdInstanceID || a.Target.ClusterID != capture.Target.ClusterID || a.Target.NodeUID == capture.Target.NodeUID) {
 		return fmt.Errorf("migration finalization changed adopted destination")
 	}
-	if c.OperationID != MigrationSourceCleanupOperationID(assignment.OperationID) || c.WriterOperationID != assignment.OperationID || c.WriterRetireKind != WriterRetireKindMigration ||
+	if c.OperationID != MigrationSourceCleanupOperationID(capture.OperationID) || c.WriterOperationID != capture.OperationID || c.WriterRetireKind != WriterRetireKindMigration ||
 		c.WriterGrantID == "" || c.WriterAuthorityDigest != r.SourceProof.Digest || c.RunscContainerID != r.SourceProof.ContainerID ||
 		c.SlotID != capture.Target.SlotID || c.ClusterID != capture.Target.ClusterID || c.NodeID != capture.Target.NodeID || c.NodeUID != capture.Target.NodeUID ||
 		c.NodeBootID != capture.Target.NodeBootID || c.AllocationID != capture.Target.AllocationID || c.Resources.IsZero() || c.ResourceLeaseDigest != capture.ResourceLeaseDigest {
@@ -68,7 +79,8 @@ func (r MigrationSourceFinalizeRequest) Validate() error {
 }
 
 // Destination returns the exact target whose adoption or failed execution has
-// already been attested. Callers must validate the whole request first.
+// already been attested, or zero for a retained checkpoint without a target.
+// Callers must validate the whole request first.
 func (r MigrationSourceFinalizeRequest) Destination() NodeChannelTarget {
 	if r.Failure != nil {
 		return r.Failure.Request.Restore.Image.Target
@@ -93,7 +105,7 @@ func (r MigrationSourceFinalizeRequest) RootFSRequest() (rootfshandoff.Migration
 	if err != nil {
 		return rootfshandoff.MigrationRootFSFinalizeRequest{}, err
 	}
-	return rootfshandoff.MigrationRootFSFinalizeRequest{OperationID: r.Fence.PublicationRequest.Assignment.OperationID, DetachProofDigest: r.SourceProof.RootFS.Digest, AuthorizationDigest: digest}, nil
+	return rootfshandoff.MigrationRootFSFinalizeRequest{OperationID: r.Fence.PublicationRequest.Capture.Request.OperationID, DetachProofDigest: r.SourceProof.RootFS.Digest, AuthorizationDigest: digest}, nil
 }
 
 // MigrationSourceFinalizeProof includes the ordinary node cleanup evidence as

@@ -2,12 +2,87 @@ package runtimeslot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCheckpointRestoreCPUPreflightUsesArchivedSourceAndNewCarrier(t *testing.T) {
+	launch, source, claim := cpuLaunchFixture(t)
+	capture, err := runtimecontrol.NewCheckpointCaptureAssignment(source.OperationID, *claim.Runtime)
+	require.NoError(t, err)
+	assignment := *claim.Runtime
+	assignment.RuntimeGeneration++
+	restore := runtimecontrol.CheckpointRestoreAssignment{OperationID: "later-resume", Kind: runtimecontrol.CheckpointResume, Capture: capture, Target: assignment}
+	target := source.Target
+	target.SlotID, target.AllocationID, target.ControlEndpoint = "restore-slot", "restore-allocation", "unix:///restore/control.sock"
+	resources, err := NewRuntimeResourceLease(restore.OperationID, "restore-claim", target.SlotID,
+		target.ClusterID, target.NodeID, target.NodeUID, target.NodeBootID,
+		RuntimeResourceRequest{Version: RuntimeResourceRequestVersion, CPUMillicores: 1000, MemoryBytes: 1 << 30, PIDsLimit: DefaultRuntimePIDsLimit}, launch.Observation.CPUSet, "0")
+	require.NoError(t, err)
+	request := MigrationCPUPreflightRequest{Checkpoint: &restore, Target: target, Destination: target,
+		DestinationResources: resources, Source: source, SourceResources: claim.Resources, Launch: &launch}
+	digest, err := request.Digest()
+	require.NoError(t, err)
+	result := MigrationCPUPreflight{RequestDigest: digest, Launch: launch, Observation: launch.Observation}
+	require.NoError(t, result.ValidateFor(request))
+	command, err := NewNodeChannelMigrationCPUPreflightCommand(request)
+	require.NoError(t, err)
+	require.NoError(t, command.Validate())
+	for _, mutate := range []func(*MigrationCPUPreflightRequest){
+		func(r *MigrationCPUPreflightRequest) { r.Checkpoint = nil },
+		func(r *MigrationCPUPreflightRequest) { r.Target = source.Target },
+		func(r *MigrationCPUPreflightRequest) { r.CaptureOnly = true },
+		func(r *MigrationCPUPreflightRequest) { r.Checkpoint.Capture.Revision = assignment.SecurityClass },
+		func(r *MigrationCPUPreflightRequest) { r.Checkpoint.OperationID = source.OperationID },
+		func(r *MigrationCPUPreflightRequest) { r.Checkpoint.Target.TeamID = "another-team" },
+		func(r *MigrationCPUPreflightRequest) { r.Launch = nil },
+	} {
+		copy := request
+		a := *request.Checkpoint
+		copy.Checkpoint = &a
+		mutate(&copy)
+		require.Error(t, copy.Validate())
+	}
+}
+
+func TestCheckpointCPUPreflightDoesNotReserveADestination(t *testing.T) {
+	paired, oldResult := cpuPreflightProtocolFixture(t)
+	request := paired
+	request.CaptureOnly = true
+	request.Destination = NodeChannelTarget{}
+	request.DestinationResources = RuntimeResourceLease{}
+	digest, err := request.Digest()
+	require.NoError(t, err)
+	result := oldResult
+	result.RequestDigest = digest
+	require.NoError(t, result.ValidateFor(request))
+	require.Error(t, oldResult.ValidateFor(request), "paired evidence cannot authorize a different observation")
+	command, err := NewNodeChannelMigrationCPUPreflightCommand(request)
+	require.NoError(t, err)
+	require.NoError(t, command.Validate())
+
+	for _, mutate := range []func(*MigrationCPUPreflightRequest){
+		func(r *MigrationCPUPreflightRequest) { r.CaptureOnly = false },
+		func(r *MigrationCPUPreflightRequest) { r.Target = paired.Destination },
+		func(r *MigrationCPUPreflightRequest) { r.Destination = paired.Destination },
+		func(r *MigrationCPUPreflightRequest) { r.DestinationResources = paired.DestinationResources },
+		func(r *MigrationCPUPreflightRequest) { r.Launch = &result.Launch },
+		func(r *MigrationCPUPreflightRequest) { r.SourceResources.MemoryBytes++ },
+		func(r *MigrationCPUPreflightRequest) { r.SourceResources.NodeBootID = "rebooted" },
+	} {
+		changed := request
+		mutate(&changed)
+		require.Error(t, changed.Validate())
+	}
+	payload, err := json.Marshal(paired)
+	require.NoError(t, err)
+	require.NotContains(t, string(payload), "capture_only", "old migration command digests remain unchanged")
+}
 
 func cpuPreflightProtocolFixture(t *testing.T) (MigrationCPUPreflightRequest, MigrationCPUPreflight) {
 	t.Helper()

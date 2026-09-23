@@ -33,6 +33,12 @@ func (h *taskHandle) PreflightMigrationCPU(ctx context.Context, request protocol
 		return nil, errdefs.ErrUnavailable
 	}
 	defer h.closeMu.Unlock()
+	// Regional command readiness may have committed adoption after the
+	// restored driver's reply was lost. Import that exact ctld receipt before
+	// deciding whether this runtime can become a source again.
+	if err := h.refreshMigrationAdoption(); err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
 	err = h.validateMigrationCPUPreflightLocked(request)
 	var launch *protocol.MigrationCPULaunch

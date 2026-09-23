@@ -146,6 +146,17 @@ func (r *NomadSandboxReader) projectPaused(
 ) (*managerapi.Sandbox, error) {
 	slot, err := r.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
 	if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+		if store, ok := r.store.(interface {
+			NomadCheckpointFailed(context.Context, string, int64, int64) (bool, error)
+		}); ok {
+			failed, err := store.NomadCheckpointFailed(ctx, record.ID, record.RuntimeGeneration, record.LifecycleEpoch)
+			if err != nil {
+				return nil, fmt.Errorf("get memory checkpoint failure projection: %w", err)
+			}
+			if failed {
+				projected.Status = managerapi.SandboxStatusFailed
+			}
+		}
 		return projected, nil
 	}
 	if err != nil {

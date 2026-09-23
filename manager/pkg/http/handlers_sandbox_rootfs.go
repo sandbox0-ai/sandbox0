@@ -1,6 +1,8 @@
 package http
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/operationid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -136,7 +139,7 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		return
 	}
 	var req service.ForkSandboxRequest
-	if err := bindOptionalJSON(c, &req); err != nil {
+	if err := bindOptionalExecutionJSON(c, &req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
@@ -147,7 +150,27 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox fork backend is not configured")
 		return
 	}
-	resp, err := forker.ForkSandbox(c.Request.Context(), sandboxID, claims.TeamID, claims.UserID, &req)
+	var resp *service.ForkSandboxResponse
+	var err error
+	if req.Memory {
+		key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+		if key == "" || len(key) > 255 {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "memory fork requires Idempotency-Key of at most 255 characters")
+			return
+		}
+		if req.OperationID != operationid.FromIdempotencyKey("sandbox.fork", claims.TeamID, claims.UserID, sandboxID, key) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "memory fork requires the signed idempotency operation")
+			return
+		}
+		backend, ok := forker.(service.SandboxMemoryForker)
+		if !ok {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "memory fork is unavailable")
+			return
+		}
+		resp, err = backend.ForkMemorySandbox(c.Request.Context(), sandboxID, claims.TeamID, claims.UserID, &req)
+	} else {
+		resp, err = forker.ForkSandbox(c.Request.Context(), sandboxID, claims.TeamID, claims.UserID, &req)
+	}
 	if err != nil {
 		s.writeSandboxRootFSError(c, "fork sandbox", sandboxID, err)
 		return
@@ -246,4 +269,54 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 	default:
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to %s: %v", action, err))
 	}
+}
+
+// A misspelled memory selector must not silently request a cold transition.
+func bindOptionalExecutionJSON(c *gin.Context, target any) error {
+	if c.Request.Body == nil || c.Request.Body == http.NoBody {
+		return nil
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("request must contain one JSON object")
+	}
+	// Reject null, duplicate fields and non-boolean selectors before decoding
+	// into Go types, which otherwise accept null as the zero value.
+	fields := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := fields.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("request must be a JSON object")
+	}
+	seen := make(map[string]bool)
+	for fields.More() {
+		token, err := fields.Token()
+		if err != nil {
+			return err
+		}
+		key := token.(string)
+		if key != "memory" && key != "config" {
+			return fmt.Errorf("unknown execution request field %q", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("duplicate request field %q", key)
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := fields.Decode(&value); err != nil {
+			return err
+		}
+		if key == "memory" && string(value) != "true" && string(value) != "false" {
+			return errors.New("memory must be a boolean")
+		}
+	}
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	strict.DisallowUnknownFields()
+	return strict.Decode(target)
 }

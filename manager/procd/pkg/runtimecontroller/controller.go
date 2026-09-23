@@ -20,11 +20,12 @@ import (
 type Phase string
 
 const (
-	PhasePending    Phase = "pending"
-	PhaseActivating Phase = "activating"
-	PhaseReady      Phase = "ready"
-	PhaseFailed     Phase = "failed"
-	PhaseMigrating  Phase = "migrating"
+	PhasePending       Phase = "pending"
+	PhaseActivating    Phase = "activating"
+	PhaseReady         Phase = "ready"
+	PhaseFailed        Phase = "failed"
+	PhaseMigrating     Phase = "migrating"
+	PhaseCheckpointing Phase = "checkpointing"
 )
 
 // State is procd's local activation state.
@@ -50,6 +51,9 @@ type Controller struct {
 	migrationDigest    string
 	migrationRebinding bool
 	migrationCanceled  bool
+	checkpointDigest   string
+	checkpointRestore  string
+	checkpointCanceled bool
 	watchMu            sync.Mutex
 	watch              struct {
 		path        string
@@ -119,6 +123,8 @@ func (c *Controller) Probe(kind sandboxprobe.Kind) sandboxprobe.Response {
 		return sandboxprobe.Suspended(kind, "RuntimeActivating", "runtime assignment is activating", nil)
 	case PhaseMigrating:
 		return sandboxprobe.Suspended(kind, "RuntimeMigrating", "runtime migration is in progress", nil)
+	case PhaseCheckpointing:
+		return sandboxprobe.Suspended(kind, "RuntimeCheckpointing", "runtime checkpoint is in progress", nil)
 	default:
 		return sandboxprobe.Suspended(kind, "RuntimePending", "runtime assignment has not been activated", nil)
 	}
@@ -140,8 +146,8 @@ func (c *Controller) Activate(ctx context.Context, assignment runtimecontrol.Ass
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	current := c.State()
-	if current.Phase == PhaseMigrating {
-		return errors.New("migration owns the runtime assignment")
+	if current.Phase == PhaseMigrating || current.Phase == PhaseCheckpointing {
+		return errors.New("execution-state transfer owns the runtime assignment")
 	}
 	if current.Phase == PhaseReady {
 		if current.Revision == revision && current.RuntimeGeneration == assignment.RuntimeGeneration {
@@ -219,7 +225,9 @@ func (c *Controller) configureAssignment(assignment runtimecontrol.Assignment) e
 		watchDir = strings.TrimSpace(assignment.Webhook.WatchDir)
 	}
 	c.dispatcher.SetConfig(webhookURL, webhookSecret)
-	c.dispatcher.SetIdentity(assignment.SandboxID, assignment.TeamID)
+	if err := c.dispatcher.SetIdentity(assignment.SandboxID, assignment.TeamID); err != nil {
+		return err
+	}
 	return c.configureWebhookWatch(webhookURL, watchDir)
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -528,7 +529,23 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox pause is unavailable")
 		return
 	}
-	resp, err := s.sandboxPauser.PauseSandboxAndWait(c.Request.Context(), sandboxID)
+	var request apispec.SandboxExecutionStateRequest
+	if err := bindOptionalExecutionJSON(c, &request); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid execution state request: "+err.Error())
+		return
+	}
+	var resp *service.PauseSandboxResponse
+	var err error
+	if request.Memory != nil && *request.Memory {
+		backend, ok := s.sandboxPauser.(service.SandboxMemoryPauser)
+		if !ok {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "memory pause is unavailable")
+			return
+		}
+		resp, err = backend.PauseMemorySandboxAndWait(c.Request.Context(), sandboxID)
+	} else {
+		resp, err = s.sandboxPauser.PauseSandboxAndWait(c.Request.Context(), sandboxID)
+	}
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "pause", sandboxID, err)
 		return
@@ -559,7 +576,23 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume is unavailable")
 		return
 	}
-	resp, err := s.sandboxResumer.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
+	var request apispec.SandboxExecutionStateRequest
+	if err := bindOptionalExecutionJSON(c, &request); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid execution state request: "+err.Error())
+		return
+	}
+	var resp *managerapi.ResumeSandboxResponse
+	var err error
+	if request.Memory != nil && *request.Memory {
+		backend, ok := s.sandboxResumer.(service.SandboxMemoryResumer)
+		if !ok {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "memory resume is unavailable")
+			return
+		}
+		resp, err = backend.ResumeMemorySandboxAndWait(c.Request.Context(), sandboxID)
+	} else {
+		resp, err = s.sandboxResumer.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
+	}
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "resume", sandboxID, err)
 		return
@@ -577,6 +610,8 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 	switch {
 	case errors.Is(err, service.ErrSandboxLifecycleUnavailable):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+	case errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox has no retained memory checkpoint for memory resume")
 	case apierror.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
 	case apierror.IsNotFound(err):

@@ -98,6 +98,7 @@ type Coordinator struct {
 	after        string
 	list         func(context.Context, string, int) ([]string, error)
 	step         func(context.Context, string) (bool, error)
+	idleDelay    time.Duration
 }
 
 func New(store Store, node Node) (*Coordinator, error) {
@@ -249,6 +250,9 @@ func (c *Coordinator) Run(ctx context.Context, report func(Report)) error {
 			c.progress.notify()
 		}
 		delay := time.Second
+		if result.Candidates == 0 && c.idleDelay > 0 {
+			delay = c.idleDelay
+		}
 		if err != nil {
 			// Other lanes progressing must not spin retries of a failed RPC.
 			changed = nil

@@ -33,7 +33,7 @@ func (r MigrationSourceFenceRequest) RootFSRequest() (rootfshandoff.MigrationRoo
 	if err != nil {
 		return rootfshandoff.MigrationRootFSDetachRequest{}, err
 	}
-	return rootfshandoff.MigrationRootFSDetachRequest{OperationID: r.PublicationRequest.Assignment.OperationID,
+	return rootfshandoff.MigrationRootFSDetachRequest{OperationID: r.PublicationRequest.Capture.Request.OperationID,
 		CutDigest: r.PublicationRequest.Capture.RootFS.Digest, AuthorizationDigest: digest}, nil
 }
 

@@ -17,6 +17,13 @@ type migrationCompletionStore interface {
 	CompleteNomadSandboxMigrationSource(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 }
 
+type checkpointCompletionStore interface {
+	GetNomadCheckpointSourceFinalization(context.Context, string) (*protocol.MigrationSourceFinalizationReceipt, bool, error)
+	AuthorizeNomadCheckpointSourceFinalization(context.Context, string) (*protocol.MigrationSourceFinalizeRequest, error)
+	CommitNomadCheckpointSourceFinalization(context.Context, protocol.MigrationSourceFinalizeRequest, protocol.MigrationSourceFinalizeProof) error
+	CompleteNomadSandboxMemoryPause(context.Context, string) (*sandboxstore.RuntimeSlot, error)
+}
+
 // MigrationSourceFinalizer is optional during rolling upgrades. Unsupported
 // transports retain source custody instead of invoking ordinary crash cleanup.
 type MigrationSourceFinalizer interface {
@@ -39,7 +46,26 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 	if operation == "" || len(grant.RetireProofDigest) != 32 {
 		return false, errors.New("migration source lacks terminal writer evidence")
 	}
-	receipt, err := store.GetNomadSandboxMigrationSourceFinalization(ctx, operation)
+	authorize := store.AuthorizeNomadSandboxMigrationSourceFinalization
+	commit := store.CommitNomadSandboxMigrationSourceFinalization
+	complete := store.CompleteNomadSandboxMigrationSource
+	terminalReason := "migration_source"
+	var receipt *protocol.MigrationSourceFinalizationReceipt
+	var err error
+	checkpoint := false
+	if memory, ok := r.store.(checkpointCompletionStore); ok {
+		receipt, checkpoint, err = memory.GetNomadCheckpointSourceFinalization(ctx, operation)
+		if err != nil {
+			return false, err
+		}
+		if checkpoint {
+			authorize, commit, complete = memory.AuthorizeNomadCheckpointSourceFinalization, memory.CommitNomadCheckpointSourceFinalization, memory.CompleteNomadSandboxMemoryPause
+			terminalReason = "memory_pause"
+		}
+	}
+	if !checkpoint {
+		receipt, err = store.GetNomadSandboxMigrationSourceFinalization(ctx, operation)
+	}
 	if err != nil {
 		return false, fmt.Errorf("read migration source receipt: %w", err)
 	}
@@ -50,7 +76,7 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 		}
 		request = receipt.Request
 	} else {
-		command, err := store.AuthorizeNomadSandboxMigrationSourceFinalization(ctx, operation)
+		command, err := authorize(ctx, operation)
 		if errors.Is(err, sandboxstore.ErrNomadSandboxMigrationNotReady) {
 			return false, nil
 		}
@@ -63,7 +89,7 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 		request = *command
 	}
 	c := request.Cleanup
-	if request.Validate() != nil || request.Fence.PublicationRequest.Assignment.OperationID != operation ||
+	if request.Validate() != nil || (request.Checkpoint != nil) != checkpoint || request.Fence.PublicationRequest.Capture.Request.OperationID != operation ||
 		c.SlotID != slot.ID || c.ClusterID != slot.ClusterID || c.AllocationID != slot.AllocationID || c.NodeID != slot.NodeID ||
 		c.NodeUID != slot.NodeUID || c.NodeBootID != slot.NodeBootID || c.NetNSIdentity != slot.NetNSIdentity || c.RunscContainerID != slot.RunscContainerID ||
 		c.WriterGrantID != grant.ID || c.WriterAuthorityDigest != hex.EncodeToString(grant.RetireProofDigest) || c.Resources != slot.ResourceLease || c.ResourceLeaseDigest != hex.EncodeToString(slot.ResourceLeaseDigest) {
@@ -81,7 +107,7 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 		if proof == nil || proof.ValidateFor(request) != nil {
 			return false, errors.New("migration source node returned invalid evidence")
 		}
-		if err := store.CommitNomadSandboxMigrationSourceFinalization(ctx, request, *proof); err != nil {
+		if err := commit(ctx, request, *proof); err != nil {
 			return false, fmt.Errorf("commit migration source receipt: %w", err)
 		}
 		receipt = &protocol.MigrationSourceFinalizationReceipt{Request: request, Proof: *proof}
@@ -125,11 +151,11 @@ func (r *Reconciler) reconcileMigrationSource(ctx context.Context, slot *sandbox
 	if ack == nil || ack.ValidateFor(gcRequest) != nil {
 		return false, errors.New("migration source GC acknowledgement changed request")
 	}
-	terminal, err := store.CompleteNomadSandboxMigrationSource(ctx, operation)
+	terminal, err := complete(ctx, operation)
 	if err != nil {
 		return false, fmt.Errorf("complete migration source release: %w", err)
 	}
-	if terminal == nil || terminal.ID != c.SlotID || terminal.State != sandboxstore.RuntimeSlotStateTerminal || terminal.TerminalReason != "migration_source" ||
+	if terminal == nil || terminal.ID != c.SlotID || terminal.State != sandboxstore.RuntimeSlotStateTerminal || terminal.TerminalReason != terminalReason ||
 		terminal.ResourceLease != c.Resources || terminal.ResourceLeaseState != sandboxstore.RuntimeResourceLeaseReleased {
 		return false, errors.New("migration source authority did not commit terminal release")
 	}

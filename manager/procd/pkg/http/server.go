@@ -63,6 +63,13 @@ type Server struct {
 	migrationDrained          bool
 	migrationEpoch            int64
 	migrationAssignmentDigest string
+	checkpointController      CheckpointController
+	checkpointPrepared        bool
+	checkpointCanceled        bool
+	checkpointDrained         bool
+	checkpointEpoch           int64
+	checkpointCaptureDigest   string
+	checkpointRestoreDigest   string
 }
 
 // NewServer creates a new HTTP server.
@@ -118,6 +125,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
 	s.router.Handle(procdapi.RuntimeMigrationPath,
 		s.authMiddleware(s.internalTokenMiddleware(http.HandlerFunc(s.runtimeMigrationHandler)))).Methods("PUT")
+	s.router.Handle(procdapi.RuntimeCheckpointPath,
+		s.authMiddleware(s.internalTokenMiddleware(http.HandlerFunc(s.runtimeCheckpointHandler)))).Methods("PUT")
 
 	// Local-only API (localhost access only, no auth)
 	local := s.router.PathPrefix(apiV1Prefix).Subrouter()

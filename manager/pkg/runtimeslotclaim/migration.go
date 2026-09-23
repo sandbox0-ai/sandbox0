@@ -30,7 +30,7 @@ func (p *Planner) RestoreMigration(ctx context.Context, image protocol.Migration
 	result, err := p.claim(ctx, Request{OperationID: assignment.OperationID, SandboxID: assignment.Target.SandboxID, TeamID: assignment.Target.TeamID,
 		CompatibilityDigest: image.Publication.CompatibilityDigest, ClusterID: image.Target.ClusterID, NetworkPolicy: policy,
 		Runtime: assignment.Target, Resources: protocol.RuntimeResourceRequest{Version: protocol.RuntimeResourceRequestVersion,
-			CPUMillicores: lease.CPUMillicores, MemoryBytes: lease.MemoryBytes, PIDsLimit: lease.PIDsLimit}}, &image)
+			CPUMillicores: lease.CPUMillicores, MemoryBytes: lease.MemoryBytes, PIDsLimit: lease.PIDsLimit}}, &image, nil)
 	if err != nil {
 		return nil, err
 	}

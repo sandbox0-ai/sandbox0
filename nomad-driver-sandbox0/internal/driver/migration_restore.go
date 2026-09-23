@@ -87,7 +87,7 @@ func (h *taskHandle) restoreMigrationExecution(ctx context.Context, request prot
 		if h.logger != nil {
 			// The enclosing claim timer includes node RPCs and journal commits.
 			// Keep those separate from stock runsc loading when diagnosing tails.
-			h.logger.Info("Migration restore execution timing", "operation_id", request.Image.Publication.Assignment.OperationID,
+			h.logger.Info("Migration restore execution timing", "operation_id", request.Image.OperationID(),
 				"restore_success", completed, "restore_total_us", time.Since(started).Microseconds(),
 				"restore_intent_us", intentElapsed.Microseconds(), "restore_cpu_before_us", beforeElapsed.Microseconds(),
 				"restore_command_us", restoreElapsed.Microseconds(), "restore_cpu_after_us", afterElapsed.Microseconds(),
@@ -261,7 +261,7 @@ func (h *taskHandle) recoverMigrationRestore(state PersistedState) (bool, error)
 		if h.claim == nil {
 			h.claim = &claimMetadata{Stage: &request.Stage, WriterEpoch: strconv.FormatInt(request.Stage.Identity.WriterEpoch, 10)}
 		}
-		revision, _ := request.Image.Publication.Assignment.Target.Revision()
+		revision, _ := request.Image.RuntimeAssignment().Revision()
 		binding, _ := request.Stage.BindingDigest()
 		resources, _ := request.Image.Resources.Digest()
 		h.rootMounted = true

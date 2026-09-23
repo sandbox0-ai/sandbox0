@@ -3,6 +3,8 @@ package driver
 import (
 	"context"
 	"errors"
+	"maps"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -93,21 +95,34 @@ func migrationRestoreHandleFixture(t *testing.T) (*taskHandle, ClaimRequest, *re
 	return migrationRestoreHandleCPUFixture(t, true)
 }
 
-func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*taskHandle, ClaimRequest, *restoreRunsc, *restoreCustodian, *runtimeSlotPluginFixture) {
+func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool, checkpointKinds ...runtimecontrol.CheckpointRestoreKind) (*taskHandle, ClaimRequest, *restoreRunsc, *restoreCustodian, *runtimeSlotPluginFixture) {
 	t.Helper()
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle, stage, token, policy, _ := prepareRuntimeSlotClaim(t, fixture)
 	source := runtimeSlotAssignment()
 	sourceRevision, err := source.Revision()
 	require.NoError(t, err)
+	kind := runtimecontrol.CheckpointRestoreKind("")
+	if len(checkpointKinds) != 0 {
+		kind = checkpointKinds[0]
+	}
 	targetAssignment := *source
 	targetAssignment.RuntimeGeneration++
+	if kind == runtimecontrol.CheckpointFork {
+		targetAssignment.SandboxID, targetAssignment.RuntimeGeneration = "memory-child", 1
+		targetAssignment.EnvVars = maps.Clone(source.EnvVars)
+		targetAssignment.EnvVars[runtimecontrol.EnvSandboxID] = targetAssignment.SandboxID
+	}
 	targetRevision, err := targetAssignment.Revision()
 	require.NoError(t, err)
 	captureRequest := protocol.MigrationCaptureRequest{
 		Target:      protocol.NodeChannelTarget{SlotID: "source-slot", ClusterID: "cluster-1", NodeID: "source-node", NodeUID: "source-uid", NodeBootID: "source-boot", AllocationID: "source-allocation", ControlEndpoint: "unix:///source/control.sock"},
 		OperationID: "operation-1", LifecycleEpoch: 2, SandboxID: source.SandboxID, SourceGeneration: source.RuntimeGeneration,
 		AssignmentRevision: sourceRevision, BindingDigest: strings.Repeat("ab", 32), ResourceLeaseDigest: strings.Repeat("cd", 32), ProcdInstanceID: "source-procd",
+	}
+	memory := kind != ""
+	if memory {
+		captureRequest.OperationID = "memory-capture"
 	}
 	launch := migrationExecutionCPUFixture(t, &captureRequest, "source-launch")
 	profile, err := launch.Observation.Profile.Digest()
@@ -116,12 +131,16 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*tas
 	require.NoError(t, err)
 	generation := *stage.Generation
 	generation.GenerationID, generation.WriterEpoch = "migration-"+captureDigest, 1
-	cut, err := rootfshandoff.NewMigrationRootFSCut(rootfshandoff.MigrationRootFSCutRequest{OperationID: "operation-1", CaptureRequestDigest: captureDigest, SourceBindingDigest: captureRequest.BindingDigest, GenerationID: generation.GenerationID}, generation, 1)
+	cut, err := rootfshandoff.NewMigrationRootFSCut(rootfshandoff.MigrationRootFSCutRequest{OperationID: captureRequest.OperationID, CaptureRequestDigest: captureDigest, SourceBindingDigest: captureRequest.BindingDigest, GenerationID: generation.GenerationID}, generation, 1)
 	require.NoError(t, err)
 	publication := protocol.MigrationPublicationRequest{
 		Capture:             protocol.MigrationCapture{Request: captureRequest, RequestDigest: captureDigest, State: protocol.MigrationCaptureComplete, RootFS: &cut},
 		Assignment:          runtimecontrol.MigrationAssignment{OperationID: "operation-1", SourceGeneration: 1, SourceRevision: sourceRevision, Target: targetAssignment},
 		CompatibilityDigest: digest.FromString("compatibility").String(), CPUFeaturesDigest: profile, CPULaunch: launch,
+	}
+	if memory {
+		publication.Assignment = runtimecontrol.MigrationAssignment{}
+		publication.CheckpointSource = source
 	}
 	if !retainCPUHistory {
 		publication.CPULaunch = nil
@@ -136,6 +155,15 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*tas
 	resources := runtimeSlotResourceLease(t, fixture, stage)
 	image := protocol.MigrationImagePrepareRequest{Publication: publication, Receipt: receipt, Resources: resources,
 		Target: protocol.NodeChannelTarget{SlotID: fixture.task.ID, AllocationID: fixture.task.AllocID, ClusterID: "cluster-1", NodeID: fixture.task.NodeID, NodeUID: stage.Identity.NodeUID, NodeBootID: stage.Identity.BootID, ControlEndpoint: "unix://" + handle.socketPath}}
+	if memory {
+		capture, err := runtimecontrol.NewCheckpointCaptureAssignment(captureRequest.OperationID, *source)
+		require.NoError(t, err)
+		image.Checkpoint = &protocol.CheckpointRestoreAuthority{
+			Assignment:     runtimecontrol.CheckpointRestoreAssignment{OperationID: resources.OperationID, Capture: capture, Kind: kind, Target: targetAssignment},
+			LifecycleEpoch: 3,
+			Retained:       protocol.CheckpointRetained{CheckpointID: captureRequest.OperationID, PublicationRequestDigest: receipt.RequestDigest, Reference: receipt.Reference},
+		}
+	}
 	imageDigest, err := image.Digest()
 	require.NoError(t, err)
 	prepared := protocol.MigrationImagePrepared{RequestDigest: imageDigest, ManifestDigest: receipt.Reference.ManifestDigest, TotalBytes: 128}
@@ -143,7 +171,7 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*tas
 	detach, err := fence.RootFSRequest()
 	require.NoError(t, err)
 	rootProof, err := rootfshandoff.NewMigrationRootFSDetachProof(detach, rootfshandoff.CrashFenceSessionObservation{Parent: stage.Parent, RootFSID: generation.FilesystemID, WriterEpoch: 1,
-		OperationID: "operation-1", BindingDigest: captureRequest.BindingDigest, SessionState: rootfshandoff.StateTombstoned, BranchPath: "/private/source.wal", DeviceBound: true, DevicePath: "/dev/fake0",
+		OperationID: captureRequest.OperationID, BindingDigest: captureRequest.BindingDigest, SessionState: rootfshandoff.StateTombstoned, BranchPath: "/private/source.wal", DeviceBound: true, DevicePath: "/dev/fake0",
 		LiveSessionAbsent: true, MergedMountAbsent: true, XFSMountAbsent: true, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	require.NoError(t, err)
 	fenceDigest, err := fence.Digest()
@@ -151,8 +179,13 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*tas
 	proof := protocol.MigrationSourceFenceProof{RequestDigest: fenceDigest, RootFS: rootProof, ContainerID: protocol.NomadRunscContainerID("source-slot"), MountNamespaceID: "mnt:source", ContainerAbsent: true, StableMountAbsent: true}
 	proof.Digest, err = proof.ProofDigest()
 	require.NoError(t, err)
-	stage.InitialGeneration, stage.Generation = generation.GenerationID, &generation
-	stage.Identity.WriterEpoch, stage.Identity.RuntimeGeneration = 2, "2"
+	targetGeneration := generation
+	if kind == runtimecontrol.CheckpointFork {
+		targetGeneration.FilesystemID = targetAssignment.SandboxID
+		stage.Identity.RootFSID = targetAssignment.SandboxID
+	}
+	stage.InitialGeneration, stage.Generation = generation.GenerationID, &targetGeneration
+	stage.Identity.WriterEpoch, stage.Identity.RuntimeGeneration = 2, strconv.FormatInt(targetAssignment.RuntimeGeneration, 10)
 	stage.Labels[protocol.RuntimeAssignmentRevisionLabel] = targetRevision
 	restore := protocol.MigrationRestoreRequest{Image: image, Prepared: prepared, Fence: fence, Proof: proof, Stage: stage.WithoutWriterGrantToken()}
 	require.NoError(t, restore.Validate())
@@ -164,9 +197,13 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool) (*tas
 	restoreDigest, err := restore.Digest()
 	require.NoError(t, err)
 	fixture.authority.mu.Lock()
-	fixture.authority.adoption = &protocol.MigrationAdoptionRequest{Target: image.Target, OperationID: publication.Assignment.OperationID,
+	fixture.authority.adoption = &protocol.MigrationAdoptionRequest{Target: image.Target, OperationID: image.OperationID(),
 		ClaimID: resources.ClaimID, SandboxID: targetAssignment.SandboxID, RuntimeGeneration: targetAssignment.RuntimeGeneration,
 		ProcdInstanceID: captureRequest.ProcdInstanceID, RestoreDigest: restoreDigest}
+	if image.Checkpoint != nil {
+		fixture.authority.adoption.CheckpointRestoreDigest, err = image.Checkpoint.Assignment.Digest()
+		require.NoError(t, err)
+	}
 	fixture.authority.mu.Unlock()
 	t.Cleanup(func() {
 		handle.stopExitWatch()

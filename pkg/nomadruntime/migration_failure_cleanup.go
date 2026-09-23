@@ -16,7 +16,8 @@ type MigrationFailureCleanupCustody struct {
 }
 
 func (c *MigrationDestinationCustody) readyForCleanup(request protocol.NodeCleanupControlRequest) bool {
-	return c != nil && (c.Adopted() || c.Failure != nil && c.Failure.Cleanup != nil && c.Failure.Cleanup.Request.Cleanup == request)
+	return c != nil && (c.Adopted() || c.ImageCanceled() && request.Resources == c.Request.Resources ||
+		c.Failure != nil && c.Failure.Cleanup != nil && c.Failure.Cleanup.Request.Cleanup == request)
 }
 
 // CleanupFailedMigrationDestination reuses physical carrier cleanup but keeps

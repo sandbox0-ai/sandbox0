@@ -25,7 +25,7 @@ func NewFailureCleanup(store FailureCleanupStore, node protocol.NodeChannelMigra
 		if err != nil || request == nil {
 			return false, err
 		}
-		if _, err := request.Digest(); err != nil || request.Failure.Request.Restore.Image.Publication.Assignment.OperationID != id {
+		if _, err := request.Digest(); err != nil || request.Failure.Request.Restore.Image.OperationID() != id {
 			return false, errors.New("failure cleanup changed migration authority")
 		}
 		proof, err := node.CleanupFailedMigrationDestination(ctx, *request)

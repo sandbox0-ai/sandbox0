@@ -14,6 +14,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/runtimecontroller"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
@@ -94,6 +95,10 @@ func TestMigrationHTTPCancelDoesNotClearAnUnownedBarrier(t *testing.T) {
 }
 
 func newMigrationHTTPFixture(t *testing.T, supervisor *session.Supervisor) migrationHTTPFixture {
+	return newMigrationHTTPFixtureWithWebhook(t, supervisor, nil, nil)
+}
+
+func newMigrationHTTPFixtureWithWebhook(t *testing.T, supervisor *session.Supervisor, dispatcher *webhook.Dispatcher, config *runtimecontrol.WebhookConfig) migrationHTTPFixture {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -103,8 +108,8 @@ func newMigrationHTTPFixture(t *testing.T, supervisor *session.Supervisor) migra
 	if supervisor != nil {
 		contextManager = ctxpkg.NewManagerWithSupervisor(supervisor)
 	}
-	controller := runtimecontroller.New(contextManager, supervisor, nil, nil, 49983, zap.NewNop())
-	source := runtimecontrol.Assignment{SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard"}
+	controller := runtimecontroller.New(contextManager, supervisor, nil, dispatcher, 49983, zap.NewNop())
+	source := runtimecontrol.Assignment{SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard", Webhook: config}
 	if err := controller.Activate(context.Background(), source); err != nil {
 		t.Fatal(err)
 	}

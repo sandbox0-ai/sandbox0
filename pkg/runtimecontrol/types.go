@@ -38,7 +38,8 @@ type EphemeralMount struct {
 
 // Assignment is the complete input that the Nomad driver passes to a fresh
 // procd process. Workload configuration is immutable during the process lifetime;
-// only an exact system migration may advance its runtime generation.
+// an authorized execution-state restore may rebind its sandbox identity and
+// generation without changing the captured workload configuration.
 type Assignment struct {
 	// Procd is omitted only by legacy deployments executing the embedded binary.
 	Procd                   *procdartifact.Artifact `json:"procd,omitempty"`

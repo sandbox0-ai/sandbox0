@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -26,6 +27,8 @@ type managerControllerSet struct {
 	cfg                              *config.ManagerConfig
 	clock                            *clock.Clock
 	logger                           *zap.Logger
+	memoryResumeWorker               *nomadclaim.CheckpointResumeWorker
+	memoryRestoreCancellationWorker  *nomadclaim.CheckpointRestoreCancellationWorker
 	sandboxPauseController           *service.SandboxPauseController
 	sandboxTTLController             *service.SandboxTTLController
 	sandboxRootFSController          *service.SandboxRootFSController
@@ -39,6 +42,16 @@ type managerControllerSet struct {
 }
 
 func (s *managerControllerSet) Start(ctx context.Context) {
+	if s.memoryResumeWorker != nil {
+		go logControllerError(ctx, s.logger, "Memory resume recovery stopped", func() error {
+			return s.memoryResumeWorker.Run(ctx)
+		})
+	}
+	if s.memoryRestoreCancellationWorker != nil {
+		go logControllerError(ctx, s.logger, "Memory restore cancellation stopped", func() error {
+			return s.memoryRestoreCancellationWorker.Run(ctx)
+		})
+	}
 	if s.templateBuildWorker != nil {
 		go logControllerError(ctx, s.logger, "Template RootFS build worker stopped", func() error {
 			return s.templateBuildWorker.Run(ctx)
@@ -92,6 +105,18 @@ func (s *managerControllerSet) startMigrationImageGC(ctx context.Context) {
 			}
 		})
 	})
+	checkpointWorker, err := nomadmigration.NewCheckpointImageGC(s.sandboxStore, collector)
+	if err != nil {
+		s.logger.Error("Checkpoint image GC unavailable", zap.Error(err))
+		return
+	}
+	go logControllerError(ctx, s.logger, "Checkpoint image GC stopped", func() error {
+		return checkpointWorker.Run(ctx, func(report nomadmigration.Report) {
+			if report.Error != nil {
+				s.logger.Warn("Checkpoint image GC pass failed", zap.Error(report.Error))
+			}
+		})
+	})
 	captureWorker, err := nomadmigration.NewCaptureUploadGC(s.sandboxStore, collector)
 	if err != nil {
 		s.logger.Error("Capture upload GC unavailable", zap.Error(err))
@@ -101,6 +126,18 @@ func (s *managerControllerSet) startMigrationImageGC(ctx context.Context) {
 		return captureWorker.Run(ctx, func(report nomadmigration.Report) {
 			if report.Error != nil {
 				s.logger.Warn("Capture upload GC pass failed", zap.Error(report.Error))
+			}
+		})
+	})
+	checkpointCaptureWorker, err := nomadmigration.NewCheckpointCaptureUploadGC(s.sandboxStore, collector)
+	if err != nil {
+		s.logger.Error("Checkpoint capture upload GC unavailable", zap.Error(err))
+		return
+	}
+	go logControllerError(ctx, s.logger, "Checkpoint capture upload GC stopped", func() error {
+		return checkpointCaptureWorker.Run(ctx, func(report nomadmigration.Report) {
+			if report.Error != nil {
+				s.logger.Warn("Checkpoint capture upload GC pass failed", zap.Error(report.Error))
 			}
 		})
 	})

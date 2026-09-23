@@ -45,6 +45,7 @@ type LinuxRuntimeConfig struct {
 type LinuxRuntime struct {
 	config       LinuxRuntimeConfig
 	sysBlockRoot string
+	sysXFSRoot   string
 	mu           sync.Mutex
 	reserved     map[string]string
 	freezeMu     sync.Mutex
@@ -75,7 +76,7 @@ func NewLinuxRuntime(config LinuxRuntimeConfig) (*LinuxRuntime, error) {
 		return nil, fmt.Errorf("sys block root must be a non-root absolute path")
 	}
 	config.SysBlockRoot = sysBlockRoot
-	return &LinuxRuntime{config: config, sysBlockRoot: sysBlockRoot, reserved: make(map[string]string)}, nil
+	return &LinuxRuntime{config: config, sysBlockRoot: sysBlockRoot, sysXFSRoot: "/sys/fs/xfs", reserved: make(map[string]string)}, nil
 }
 
 func (r *LinuxRuntime) ReserveDevice(allocationID string) (string, error) {
@@ -433,6 +434,37 @@ func (r *LinuxRuntime) UnmountXFS(xfsRoot string, requireSync bool) error {
 		}
 	}
 	return errors.Join(lowerErr, unmountExact(xfsRoot))
+}
+
+// WaitFilesystemRelease checks the kernel's XFS superblock lifetime, not just
+// the caller's mount table. A detached gofer mount can outlive all visible host
+// paths and still hold the NBD block device open.
+func (r *LinuxRuntime) WaitFilesystemRelease(ctx context.Context, devicePath string) error {
+	if ctx == nil || !r.configuredDevice(devicePath) {
+		return fmt.Errorf("XFS release requires a configured NBD device")
+	}
+	if _, err := os.Stat(r.sysXFSRoot); err != nil {
+		return fmt.Errorf("inspect XFS kernel state: %w", err)
+	}
+	path := filepath.Join(r.sysXFSRoot, filepath.Base(devicePath))
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect XFS superblock %s: %w", path, err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("XFS superblock %s remains attached: %w", path, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *LinuxRuntime) configuredDevice(devicePath string) bool {

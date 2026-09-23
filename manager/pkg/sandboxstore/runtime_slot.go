@@ -27,8 +27,11 @@ const (
 	RuntimeSlotStateOrphaned      = string(protocol.StateOrphaned)
 	RuntimeSlotStateTerminal      = string(protocol.StateTerminal)
 
-	DefaultRuntimeSlotHeartbeatTTL   = 30 * time.Second
-	DefaultRuntimeSlotClaimTTL       = time.Minute
+	DefaultRuntimeSlotHeartbeatTTL = 30 * time.Second
+	DefaultRuntimeSlotClaimTTL     = time.Minute
+	// MemoryRuntimeSlotClaimTTL includes the node's bounded five-minute image
+	// download plus execution/handover. Retries keep the original deadline.
+	MemoryRuntimeSlotClaimTTL        = 6 * time.Minute
 	MaxRuntimeSlotReconcileLimit     = 1_000
 	maxRuntimeSlotCapacityCandidates = 1_024
 )
@@ -144,7 +147,9 @@ type AcquireRuntimeSlotRequest struct {
 	RuntimeAssignmentPayload  string
 	NetworkPolicy             string
 	ClaimTTL                  time.Duration
-	Resources                 protocol.RuntimeResourceRequest
+	// MemoryRestore requests an image budget; persisted restore authority must match.
+	MemoryRestore bool
+	Resources     protocol.RuntimeResourceRequest
 }
 
 type BindRuntimeSlotWriterGrantRequest struct {
@@ -471,6 +476,11 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	allowNewSlot, err := lockRuntimeSlotClaimAdmission(ctx, tx, normalized)
 	if err != nil {
 		return nil, err
+	}
+	if normalized.MemoryRestore {
+		if err := validateRuntimeSlotMemoryBudget(ctx, tx, normalized); err != nil {
+			return nil, err
+		}
 	}
 
 	existing, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -969,15 +979,23 @@ func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRun
 		return nil, err
 	}
 	if normalized.MigrationRestoreDigest != "" {
+		authority, err := s.getNomadCheckpointRestoreAuthority(ctx, normalized.OperationID)
+		if err != nil {
+			return nil, err
+		}
+		if authority != nil {
+			return s.startNomadCheckpointRestore(ctx, *authority, normalized)
+		}
 		return s.startNomadMigrationRestore(ctx, normalized)
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
 		var migrationTarget bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1)`, slot.ID).Scan(&migrationTarget); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1)
+			OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_restores WHERE operation_id=$2)`, slot.ID, slot.ClaimOperationID).Scan(&migrationTarget); err != nil {
 			return nil, err
 		}
 		if migrationTarget {
-			return nil, fmt.Errorf("%w: migration destination requires image restore authority", ErrRuntimeSlotInvalid)
+			return nil, fmt.Errorf("%w: destination requires image restore authority", ErrRuntimeSlotInvalid)
 		}
 
 		return startRuntimeSlotTransition(ctx, tx, slot, normalized)
@@ -1052,7 +1070,23 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 	}
 
 	if normalized.MigrationRestoreDigest != "" {
+		authority, err := s.getNomadCheckpointRestoreAuthority(ctx, normalized.OperationID)
+		if err != nil {
+			return nil, err
+		}
+		if authority != nil {
+			return s.markNomadCheckpointCommandReady(ctx, *authority, normalized)
+		}
 		return s.markNomadMigrationCommandReady(ctx, normalized)
+	}
+	// All retained-image restores use canonical resume operation IDs. Avoid
+	// adding a database round trip to the ordinary initial-claim fast path.
+	if strings.HasPrefix(normalized.OperationID, nomadSandboxResumeOperationPrefix) {
+		if authority, err := s.getNomadCheckpointRestoreAuthority(ctx, normalized.OperationID); err != nil {
+			return nil, err
+		} else if authority != nil {
+			return nil, fmt.Errorf("%w: memory command readiness requires restore authority", ErrRuntimeSlotInvalid)
+		}
 	}
 
 	// Read the immutable claim identity before opening the transaction so the
@@ -1226,11 +1260,15 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
 		var migrationSource bool
-		if err := tx.QueryRow(ctx, `SELECT migration_source_operation_id IS NOT NULL FROM manager.runtime_slots WHERE slot_id=$1`, slot.ID).Scan(&migrationSource); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT migration_source_operation_id IS NOT NULL OR EXISTS (
+            SELECT 1 FROM manager.sandbox_runtime_checkpoints c
+            JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=c.operation_id
+            WHERE c.source_slot_id=$1 AND l.phase IN ('preparing','barriered','publishing','committing'))
+            FROM manager.runtime_slots WHERE slot_id=$1`, slot.ID).Scan(&migrationSource); err != nil {
 			return nil, err
 		}
 		if migrationSource {
-			return nil, fmt.Errorf("%w: migration source requires atomic lifecycle completion", ErrRuntimeSlotConflict)
+			return nil, fmt.Errorf("%w: checkpoint or migration source requires atomic lifecycle completion", ErrRuntimeSlotConflict)
 		}
 		return finalizeRuntimeSlotTx(ctx, tx, slot, normalized)
 	})
@@ -1550,7 +1588,11 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 	if err != nil {
 		return nil, err
 	}
-	normalized.ClaimTTL, err = normalizeRuntimeSlotTTL(normalized.ClaimTTL, DefaultRuntimeSlotClaimTTL, time.Minute)
+	defaultTTL, maxTTL := DefaultRuntimeSlotClaimTTL, time.Minute
+	if normalized.MemoryRestore {
+		defaultTTL, maxTTL = MemoryRuntimeSlotClaimTTL, MemoryRuntimeSlotClaimTTL
+	}
+	normalized.ClaimTTL, err = normalizeRuntimeSlotTTL(normalized.ClaimTTL, defaultTTL, maxTTL)
 	if err != nil {
 		return nil, fmt.Errorf("claim_ttl: %w", err)
 	}

@@ -74,10 +74,16 @@ func matchRuntimeSlotClaimInputs(ctx context.Context, tx pgx.Tx, slotID string, 
 // must recheck active generation, lifecycle, writer and placement when issuing
 // migration authority; reading these historical bytes grants no execution.
 func (s *PGSandboxStore) GetRuntimeSlotClaimInputs(ctx context.Context, slotID string) (*RuntimeSlotClaimInputs, error) {
+	return getRuntimeSlotClaimInputs(ctx, s.pool, slotID)
+}
+
+func getRuntimeSlotClaimInputs(ctx context.Context, query interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, slotID string) (*RuntimeSlotClaimInputs, error) {
 	var assignment, policy *string
 	var request AcquireRuntimeSlotRequest
 	var team string
-	err := s.pool.QueryRow(ctx, `SELECT r.claim_runtime_assignment,r.claim_network_policy,r.sandbox_id,s.team_id,
+	err := query.QueryRow(ctx, `SELECT r.claim_runtime_assignment,r.claim_network_policy,r.sandbox_id,s.team_id,
         r.claim_runtime_assignment_revision,r.claim_network_policy_digest
         FROM manager.runtime_slots r JOIN manager.sandboxes s ON s.sandbox_id=r.sandbox_id
         WHERE r.slot_id=$1`, slotID).Scan(&assignment, &policy, &request.SandboxID, &team,

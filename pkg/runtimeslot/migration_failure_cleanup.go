@@ -29,7 +29,7 @@ func (r MigrationFailureCleanupRequest) Digest() (string, error) {
 	}
 	s := r.Failure.Request.Restore
 	t, c := s.Image.Target, r.Cleanup
-	op := s.Image.Publication.Assignment.OperationID
+	op := s.Image.OperationID()
 	resources, err := s.Image.Resources.Digest()
 	if err != nil {
 		return "", err

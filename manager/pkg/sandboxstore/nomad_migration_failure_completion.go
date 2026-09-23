@@ -21,9 +21,22 @@ func (s *PGSandboxStore) GetNomadMigrationFailureForSlot(ctx context.Context, sl
 	var operation string
 	var command, cleanup, finalized []byte
 	err := s.pool.QueryRow(ctx, `SELECT operation_id,failure_cleanup_request,failure_cleanup_receipt,failure_finalization_receipt
-        FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1 AND failure_request IS NOT NULL`, slot).Scan(&operation, &command, &cleanup, &finalized)
+        FROM manager.sandbox_runtime_migrations WHERE target_slot_id=$1 AND failure_request IS NOT NULL
+        UNION ALL SELECT r.operation_id,r.evidence->'failure_cleanup',r.evidence->'failure_cleaned',r.evidence->'failure_finalized'
+        FROM manager.sandbox_runtime_checkpoint_restores r JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=r.operation_id
+        WHERE r.evidence->'image'->'target'->>'slot_id'=$1 AND r.evidence ? 'restore' AND l.phase<>'committed'`, slot).Scan(&operation, &command, &cleanup, &finalized)
 	if err == pgx.ErrNoRows {
-		return false, nil, nil
+		// A speculative checkpoint image can still arrive after the slot's
+		// ordinary cleanup starts. The node cancellation proof is the gate for
+		// generic writer, image, cgroup and allocation reconciliation.
+		var pending bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_restores r
+			JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=r.operation_id
+			WHERE r.evidence->'image'->'target'->>'slot_id'=$1 AND r.evidence ? 'image'
+				AND NOT r.evidence ? 'restore' AND NOT r.evidence ? 'cancel_proof' AND l.phase<>'committed')`, slot).Scan(&pending); err != nil {
+			return false, nil, err
+		}
+		return pending, nil, nil
 	}
 	if err != nil {
 		return false, nil, err
@@ -34,7 +47,7 @@ func (s *PGSandboxStore) GetNomadMigrationFailureForSlot(ctx context.Context, sl
 	var receipt protocol.MigrationFailureFinalizationReceipt
 	if json.Unmarshal(command, &receipt.Request.Request) != nil || json.Unmarshal(cleanup, &receipt.Request.Proof) != nil ||
 		json.Unmarshal(finalized, &receipt.Proof) != nil || receipt.Validate() != nil ||
-		receipt.Request.Request.Cleanup.SlotID != slot || receipt.Request.Request.Failure.Request.Restore.Image.Publication.Assignment.OperationID != operation {
+		receipt.Request.Request.Cleanup.SlotID != slot || receipt.Request.Request.Failure.Request.Restore.Image.OperationID() != operation {
 		return true, nil, ErrNomadSandboxMigrationConflict
 	}
 	return true, &receipt, nil
@@ -59,6 +72,13 @@ func (s *PGSandboxStore) CompleteNomadSandboxMigrationFailure(ctx context.Contex
 	}
 	if !authorized {
 		return nil, ErrNomadSandboxMigrationConflict
+	}
+	if life.Kind == SandboxLifecycleKindResume {
+		terminal, err := completeNomadCheckpointRestoreFailure(ctx, tx, life, cleanup, gc, ack)
+		if err != nil {
+			return nil, err
+		}
+		return terminal, tx.Commit(ctx)
 	}
 	var sourceID string
 	var finalized, cleanupProof, sourceCommand, sourceProof, oldGC, oldAck []byte

@@ -40,7 +40,7 @@ procd command readiness for that generation. During recovery, status returns to
 </Callout>
 
 <Callout variant="info">
-Pause and resume use internal lifecycle transactions, but `pausing` and `resuming` are not caller-visible statuses. Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
+Pause and resume use internal lifecycle transactions, but `pausing` and `resuming` are not caller-visible statuses. Use the `paused` boolean as a convenience for `status == "paused"`. Default filesystem-only pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions. Experimental [memory pause/resume](/docs/sandbox/pause-resume#explicit-memory-pause-and-resume) requires an explicit `memory: true` request.
 </Callout>
 
 ### System Maintenance Migration

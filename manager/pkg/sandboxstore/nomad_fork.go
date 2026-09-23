@@ -30,6 +30,7 @@ type NomadSandboxForkRequest struct {
 	ExpectedTeamID     string
 	Target             *SandboxRecord
 	TargetRecordDigest []byte
+	Memory             bool
 }
 
 // NomadSandboxRunningForkCandidate is the exact live writer and node
@@ -75,6 +76,9 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningFork(
 	normalized, err := normalizeNomadSandboxForkRequest(request)
 	if err != nil {
 		return nil, err
+	}
+	if normalized.Memory {
+		return nil, fmt.Errorf("%w: memory fork requires execution checkpoint coordination", ErrNomadCheckpointConflict)
 	}
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")

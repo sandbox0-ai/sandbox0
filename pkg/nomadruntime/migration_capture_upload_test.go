@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -90,13 +91,42 @@ func captureUploadNodeFixture(t *testing.T, objects objectstore.Store, beforeRes
 }
 
 func TestNodeCaptureUploadsOnlyAfterIntentAndPublishesVerifiedVersionTwo(t *testing.T) {
+	testNodeCapturePublication(t, false)
+}
+
+func TestNodeCheckpointUploadsDuringCaptureWithoutReservingDestination(t *testing.T) {
+	testNodeCapturePublication(t, true)
+}
+
+func testNodeCapturePublication(t *testing.T, checkpoint bool) {
+	t.Helper()
 	objects := objectstore.NewMemoryStore("")
-	d, capture, staging, runtime, _ := captureUploadNodeFixture(t, objects)
+	var sourceLaunch *protocol.MigrationCPULaunch
+	d, capture, staging, runtime, _ := captureUploadNodeFixture(t, objects, func(d *nodeRuntime, staging *protocol.MigrationStagingRequest) {
+		if !checkpoint {
+			return
+		}
+		staging.CaptureOnly = true
+		staging.Destination = protocol.NodeChannelTarget{}
+		staging.DestinationResourceLeaseDigest = ""
+		c := staging.Source
+		runtime := d.runtime.(*captureUploadNodeRuntime)
+		sourceStage := runtime.recoverySessions[0].Stage
+		sourceLaunch = checkpointSourceLaunchFixture(t, c, sourceStage)
+		profile, err := sourceLaunch.GuestCPUProfile().Digest()
+		require.NoError(t, err)
+		staging.CaptureUpload, err = protocol.NewMigrationCaptureUpload(c, "team", staging.CaptureUpload.CompatibilityDigest, profile, staging.Bytes)
+		require.NoError(t, err)
+	})
 	require.Zero(t, runtime.opens.Load(), "staging alone cannot start uploads")
 	require.NoError(t, d.RecordMigrationCapture(t.Context(), capture))
 	record, err := d.journal.Get(capture.Request.Target.SlotID)
 	require.NoError(t, err)
-	require.Equal(t, runtimeSlotCaptureUploadJournalVersion, record.Version)
+	expectedVersion := runtimeSlotCaptureUploadJournalVersion
+	if checkpoint {
+		expectedVersion = runtimeSlotCheckpointStagingJournalVersion
+	}
+	require.Equal(t, expectedVersion, record.Version)
 	bad := record
 	bad.Version = runtimeSlotStagingJournalVersion
 	payload, err := json.Marshal(bad)
@@ -123,9 +153,54 @@ func TestNodeCaptureUploadsOnlyAfterIntentAndPublishesVerifiedVersionTwo(t *test
 	capture.RootFS = &cut
 	source := runtimecontrol.Assignment{SandboxID: capture.Request.SandboxID, TeamID: "team", RuntimeGeneration: capture.Request.SourceGeneration + 1, SecurityClass: "standard"}
 	request := protocol.MigrationPublicationRequest{Capture: capture, Assignment: runtimecontrol.MigrationAssignment{OperationID: capture.Request.OperationID, SourceGeneration: capture.Request.SourceGeneration, SourceRevision: capture.Request.AssignmentRevision, Target: source}, CompatibilityDigest: staging.CaptureUpload.CompatibilityDigest, CPUFeaturesDigest: staging.CaptureUpload.CPUFeaturesDigest}
+	if checkpoint {
+		request.CPULaunch = sourceLaunch
+		migrationBinding, err := request.Binding()
+		require.NoError(t, err)
+		_, err = d.PublishMigration(t.Context(), request)
+		require.ErrorIs(t, err, errdefs.ErrFailedPrecondition, "source-only custody cannot become a paired migration")
+		source.RuntimeGeneration--
+		request.CheckpointSource = &source
+		request.Assignment = runtimecontrol.MigrationAssignment{}
+		checkpointBinding, err := request.Binding()
+		require.NoError(t, err)
+		require.Equal(t, migrationBinding, checkpointBinding, "same immutable image format serves both lifecycles")
+		for _, mutate := range []func(*protocol.MigrationPublicationRequest){
+			func(r *protocol.MigrationPublicationRequest) { r.CPULaunch = nil },
+			func(r *protocol.MigrationPublicationRequest) { r.Assignment.OperationID = "mixed-authority" },
+			func(r *protocol.MigrationPublicationRequest) {
+				r.DestinationPeerCertificateSHA256 = strings.Repeat("a", 64)
+			},
+			func(r *protocol.MigrationPublicationRequest) {
+				copy := *r.CheckpointSource
+				copy.RuntimeGeneration++
+				r.CheckpointSource = &copy
+			},
+		} {
+			changed := request
+			mutate(&changed)
+			_, err := changed.Digest()
+			require.Error(t, err)
+		}
+	}
 	receipt, err := d.PublishMigration(t.Context(), request)
 	require.NoError(t, err)
 	require.NoError(t, receipt.ValidateFor(request))
+	if checkpoint {
+		require.Empty(t, receipt.Peer)
+		_, err := (protocol.MigrationImagePrepareRequest{Publication: request, Receipt: *receipt}).Digest()
+		require.ErrorContains(t, err, "independent restore authorization")
+		// Reopening the journal must retain the source-only publication and
+		// return the original receipt without another image transfer.
+		path := d.journal.db.Path()
+		require.NoError(t, d.journal.Close())
+		d.journal, err = newRuntimeSlotJournal(path, time.Hour)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, d.journal.Close()) })
+		retry, err := d.PublishMigration(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, receipt, retry)
+	}
 	manifest, err := runtime.uploads.checkpoints.Download(t.Context(), receipt.Binding, receipt.Reference, filepath.Join(t.TempDir(), "downloaded"))
 	require.NoError(t, err)
 	require.Equal(t, runtimecheckpoint.StagedManifestVersion, manifest.Version)

@@ -38,8 +38,13 @@ func reserveNomadMigrationCaptureUpload(ctx context.Context, tx pgx.Tx, r *Nomad
 		return zero, err
 	}
 	var used int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(manager.runtime_migration_capture_upload_reserved_bytes(staging_request)),0)
-        FROM manager.sandbox_runtime_migrations WHERE capture_upload_gc_completed_at IS NULL`).Scan(&used); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT
+		(SELECT COALESCE(SUM(manager.runtime_migration_capture_upload_reserved_bytes(staging_request)),0)
+		 FROM manager.sandbox_runtime_migrations WHERE capture_upload_gc_completed_at IS NULL)
+		+
+		(SELECT COALESCE(SUM(manager.runtime_migration_capture_upload_reserved_bytes(evidence->'staging')),0)
+		 FROM manager.sandbox_runtime_checkpoints
+		 WHERE capture_upload_gc_completed_at IS NULL AND capture_upload_reservation_released_at IS NULL)`).Scan(&used); err != nil {
 		return zero, err
 	}
 	if used > nomadMigrationCaptureUploadRegionBytes-grant.ReservedBytes() {

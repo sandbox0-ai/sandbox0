@@ -91,6 +91,83 @@ func migrationStagingReservationFixture(t *testing.T) (*nodeRuntime, protocol.Mi
 	return d, request
 }
 
+func TestCheckpointStagingSharesCaptureCustodyAcrossRestart(t *testing.T) {
+	for _, upload := range []bool{false, true} {
+		for _, peer := range []bool{false, true} {
+			t.Run(fmt.Sprintf("upload_%t_peer_%t", upload, peer), func(t *testing.T) {
+				d, request := migrationStagingReservationFixture(t)
+				request.CaptureOnly = true
+				request.Destination = protocol.NodeChannelTarget{}
+				request.DestinationResourceLeaseDigest = ""
+				if upload {
+					var err error
+					request.CaptureUpload, err = protocol.NewMigrationCaptureUpload(request.Source, "team-1",
+						"sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), request.Bytes)
+					require.NoError(t, err)
+				}
+				if peer {
+					cert, err := runtimecheckpoint.NewPeerIdentity()
+					require.NoError(t, err)
+					endpoint, err := runtimecheckpoint.NewPeerEndpoint("127.0.0.1:19001", cert)
+					require.NoError(t, err)
+					d.migrationPeer = &migrationPeer{identity: cert, endpoint: endpoint}
+				}
+				first, err := d.ReserveMigrationStaging(t.Context(), request)
+				require.NoError(t, err)
+				require.NoError(t, first.ValidateFor(request))
+				record, err := d.journal.Get(request.Target.SlotID)
+				require.NoError(t, err)
+				require.Equal(t, runtimeSlotCheckpointStagingJournalVersion, record.Version)
+				for _, version := range []int{runtimeSlotStagingJournalVersion, runtimeSlotCaptureUploadJournalVersion, runtimeSlotCapturePeerJournalVersion} {
+					changed := record
+					changed.Version = version
+					payload, err := json.Marshal(changed)
+					require.NoError(t, err)
+					_, err = decodeRuntimeSlotJournalRecord(payload)
+					require.ErrorContains(t, err, "non-downgradable")
+				}
+				path := d.journal.db.Path()
+				require.NoError(t, d.journal.Close())
+				d.journal, err = newRuntimeSlotJournal(path, time.Hour)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, d.journal.Close()) })
+				again, err := d.ReserveMigrationStaging(t.Context(), request)
+				require.NoError(t, err)
+				require.Equal(t, first, again)
+
+				competitor := testRuntimeSlotJournalRegistration(t, "migration-competitor")
+				require.NoError(t, d.journal.Register(competitor))
+				paired := migrationStagingSourceRequest(t, competitor)
+				_, err = d.ReserveMigrationStaging(t.Context(), paired)
+				require.ErrorIs(t, err, errdefs.ErrResourceExhausted, "memory and migration share the same bounded pool")
+				require.NoError(t, d.journal.RecordMigrationCapture(stagingCapture(t, request)))
+				require.ErrorIs(t, d.ReleaseMigrationStaging(t.Context(), request), errdefs.ErrFailedPrecondition, "capture intent still pins custody")
+				record, err = d.journal.Get(request.Target.SlotID)
+				require.NoError(t, err)
+				require.Equal(t, runtimeSlotCheckpointStagingJournalVersion, record.Version)
+				require.Equal(t, request.Source, record.Migration.Capture.Request)
+			})
+		}
+	}
+}
+
+func TestCheckpointStagingCancellationCannotReviveAfterRestart(t *testing.T) {
+	d, request := migrationStagingReservationFixture(t)
+	request.CaptureOnly = true
+	request.Destination = protocol.NodeChannelTarget{}
+	request.DestinationResourceLeaseDigest = ""
+	require.NoError(t, d.ReleaseMigrationStaging(t.Context(), request))
+	path := d.journal.db.Path()
+	require.NoError(t, d.journal.Close())
+	var err error
+	d.journal, err = newRuntimeSlotJournal(path, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, d.journal.Close()) })
+	_, err = d.ReserveMigrationStaging(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.ErrorIs(t, d.journal.RecordMigrationCapture(stagingCapture(t, request)), errdefs.ErrFailedPrecondition)
+}
+
 func stagingCapture(t *testing.T, request protocol.MigrationStagingRequest) protocol.MigrationCapture {
 	t.Helper()
 	digest, err := request.Source.Digest()
@@ -366,51 +443,64 @@ func TestMigrationStagingReservationCannotReleaseDuringDownload(t *testing.T) {
 }
 
 func TestMigrationStagingCancellationOvertakesReserveWithoutRevival(t *testing.T) {
-	d, request := migrationStagingReservationFixture(t)
-	d.migrationStaging = nil
-	require.NoError(t, d.ReleaseMigrationStaging(t.Context(), request))
-	record, err := d.journal.Get(request.Target.SlotID)
-	require.NoError(t, err)
-	require.True(t, record.MigrationStaging.Released)
-	require.False(t, record.MigrationStaging.Ready)
-	require.Equal(t, runtimeSlotStagingJournalVersion, record.Version)
-	path := d.journal.db.Path()
-	require.NoError(t, d.journal.Close())
-	d.journal, err = newRuntimeSlotJournal(path, time.Hour)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, d.journal.Close()) })
-	_, err = d.ReserveMigrationStaging(t.Context(), request)
-	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
-	require.ErrorIs(t, d.journal.RecordMigrationCapture(stagingCapture(t, request)), errdefs.ErrFailedPrecondition)
-	next := request
-	next.Source.OperationID = "next-migration"
-	for _, epoch := range []int64{request.Source.LifecycleEpoch - 1, request.Source.LifecycleEpoch} {
-		next.Source.LifecycleEpoch = epoch
-		_, err = d.ReserveMigrationStaging(t.Context(), next)
-		require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
-		if epoch < request.Source.LifecycleEpoch {
-			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next), "superseded release is safe to acknowledge")
-		} else {
-			require.ErrorIs(t, d.ReleaseMigrationStaging(t.Context(), next), errdefs.ErrFailedPrecondition)
-		}
+	for _, captureOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("capture_only_%t", captureOnly), func(t *testing.T) {
+			d, request := migrationStagingReservationFixture(t)
+			if captureOnly {
+				request.CaptureOnly = true
+				request.Destination = protocol.NodeChannelTarget{}
+				request.DestinationResourceLeaseDigest = ""
+			}
+			d.migrationStaging = nil
+			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), request))
+			record, err := d.journal.Get(request.Target.SlotID)
+			require.NoError(t, err)
+			require.True(t, record.MigrationStaging.Released)
+			require.False(t, record.MigrationStaging.Ready)
+			if captureOnly {
+				require.Equal(t, runtimeSlotCheckpointStagingJournalVersion, record.Version)
+			} else {
+				require.Equal(t, runtimeSlotStagingJournalVersion, record.Version)
+			}
+			path := d.journal.db.Path()
+			require.NoError(t, d.journal.Close())
+			d.journal, err = newRuntimeSlotJournal(path, time.Hour)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, d.journal.Close()) })
+			_, err = d.ReserveMigrationStaging(t.Context(), request)
+			require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+			require.ErrorIs(t, d.journal.RecordMigrationCapture(stagingCapture(t, request)), errdefs.ErrFailedPrecondition)
+			next := request
+			next.Source.OperationID = "next-migration"
+			for _, epoch := range []int64{request.Source.LifecycleEpoch - 1, request.Source.LifecycleEpoch} {
+				next.Source.LifecycleEpoch = epoch
+				_, err = d.ReserveMigrationStaging(t.Context(), next)
+				require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+				if epoch < request.Source.LifecycleEpoch {
+					require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next), "superseded release is safe to acknowledge")
+				} else {
+					require.ErrorIs(t, d.ReleaseMigrationStaging(t.Context(), next), errdefs.ErrFailedPrecondition)
+				}
+			}
+			next.Source.LifecycleEpoch = request.Source.LifecycleEpoch + 1
+			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next), "new cancellation may also arrive before its reserve")
+			_, err = d.ReserveMigrationStaging(t.Context(), request)
+			require.ErrorIs(t, err, errdefs.ErrAlreadyExists, "old reserve must not replace the newer tombstone")
+			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), request))
+			latest := next
+			latest.Source.OperationID = "latest-migration"
+			latest.Source.LifecycleEpoch++
+			d.migrationStaging = testMigrationStagingGuard{}
+			_, err = d.ReserveMigrationStaging(t.Context(), latest)
+			require.NoError(t, err)
+			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next))
+			record, err = d.journal.Get(latest.Target.SlotID)
+			require.NoError(t, err)
+			require.True(t, record.MigrationStaging.Ready)
+			require.False(t, record.MigrationStaging.Released)
+			require.Equal(t, latest, record.MigrationStaging.Request)
+		})
 	}
-	next.Source.LifecycleEpoch = request.Source.LifecycleEpoch + 1
-	require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next), "new cancellation may also arrive before its reserve")
-	_, err = d.ReserveMigrationStaging(t.Context(), request)
-	require.ErrorIs(t, err, errdefs.ErrAlreadyExists, "old reserve must not replace the newer tombstone")
-	require.NoError(t, d.ReleaseMigrationStaging(t.Context(), request))
-	latest := next
-	latest.Source.OperationID = "latest-migration"
-	latest.Source.LifecycleEpoch++
-	d.migrationStaging = testMigrationStagingGuard{}
-	_, err = d.ReserveMigrationStaging(t.Context(), latest)
-	require.NoError(t, err)
-	require.NoError(t, d.ReleaseMigrationStaging(t.Context(), next))
-	record, err = d.journal.Get(latest.Target.SlotID)
-	require.NoError(t, err)
-	require.True(t, record.MigrationStaging.Ready)
-	require.False(t, record.MigrationStaging.Released)
-	require.Equal(t, latest, record.MigrationStaging.Request)
 }
 
 func TestMigrationStagingDestinationCancellationRejectsDelayedDownload(t *testing.T) {

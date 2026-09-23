@@ -465,11 +465,26 @@ func main() {
 		ReadinessProbe:          pool.Ping,
 	})
 
+	memoryResumer, ok := sandboxRuntime.(nomadclaim.CheckpointResumer)
+	if !ok {
+		logger.Fatal("Nomad runtime has no exact memory resume backend")
+	}
+	memoryResumeWorker, err := nomadclaim.NewCheckpointResumeWorker(sandboxStore, memoryResumer, logger)
+	if err != nil {
+		logger.Fatal("Failed to configure memory resume recovery", zap.Error(err))
+	}
+	memoryRestoreCancellationWorker, err := nomadclaim.NewCheckpointRestoreCancellationWorker(sandboxStore, managerNodeAuthority, logger)
+	if err != nil {
+		logger.Fatal("Failed to configure memory restore cancellation", zap.Error(err))
+	}
+
 	controllers := &managerControllerSet{
 		cfg:                              cfg,
 		clock:                            clk,
 		logger:                           logger,
 		sandboxPauseController:           sandboxPauseController,
+		memoryResumeWorker:               memoryResumeWorker,
+		memoryRestoreCancellationWorker:  memoryRestoreCancellationWorker,
 		sandboxTTLController:             sandboxTTLController,
 		sandboxRootFSController:          sandboxRootFSController,
 		sandboxNetworkMutationController: sandboxNetworkMutationController,

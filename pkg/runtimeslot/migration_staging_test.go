@@ -1,11 +1,46 @@
 package runtimeslot
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestCheckpointStagingRetainsBoundedCaptureWithoutDestination(t *testing.T) {
+	source := migrationProtocolRequest()
+	request := MigrationStagingRequest{CaptureOnly: true, Target: source.Target, Source: source, Bytes: 8 << 20, Inodes: 64}
+	digest, err := request.Digest()
+	require.NoError(t, err)
+	receipt := MigrationStagingReserved{RequestDigest: digest}
+	require.NoError(t, receipt.ValidateFor(request))
+	command, err := NewNodeChannelMigrationStagingReserveCommand(request)
+	require.NoError(t, err)
+	require.NoError(t, command.Validate())
+	for _, mutate := range []func(*MigrationStagingRequest){
+		func(r *MigrationStagingRequest) { r.CaptureOnly = false },
+		func(r *MigrationStagingRequest) { r.Destination = source.Target },
+		func(r *MigrationStagingRequest) { r.DestinationResourceLeaseDigest = strings.Repeat("12", 32) },
+		func(r *MigrationStagingRequest) { r.Target.SlotID = "other-slot" },
+		func(r *MigrationStagingRequest) { r.Bytes = 0 },
+		func(r *MigrationStagingRequest) { r.Bytes++ },
+		func(r *MigrationStagingRequest) { r.Inodes = 16385 },
+	} {
+		changed := request
+		mutate(&changed)
+		require.Error(t, changed.Validate())
+	}
+	request.CaptureUpload, err = NewMigrationCaptureUpload(source, "team-1", "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), request.Bytes)
+	require.NoError(t, err)
+	require.NoError(t, request.Validate())
+	require.Error(t, receipt.ValidateFor(request), "upload grant must be bound to its own reservation")
+	_, err = request.CaptureUpload.Scope(source)
+	require.NoError(t, err)
+	payload, err := json.Marshal(MigrationStagingRequest{})
+	require.NoError(t, err)
+	require.NotContains(t, string(payload), "capture_only")
+}
 
 func TestMigrationStagingBindsPlacementResourcesAndCapacity(t *testing.T) {
 	source := migrationProtocolRequest()

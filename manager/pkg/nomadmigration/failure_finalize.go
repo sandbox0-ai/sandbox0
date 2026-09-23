@@ -25,7 +25,7 @@ func NewFailureFinalization(store FailureFinalizationStore, node protocol.NodeCh
 		if err != nil || request == nil {
 			return false, err
 		}
-		if _, err := request.Digest(); err != nil || request.Request.Failure.Request.Restore.Image.Publication.Assignment.OperationID != id {
+		if _, err := request.Digest(); err != nil || request.Request.Failure.Request.Restore.Image.OperationID() != id {
 			return false, errors.New("failure finalization changed migration authority")
 		}
 		proof, err := node.FinalizeFailedMigrationDestination(ctx, *request)

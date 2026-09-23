@@ -85,6 +85,10 @@ for controller in cpu cpuset memory pids; do
 done
 
 [ -n "${SANDBOX0_NODE_NAME:-}" ] || { echo "SANDBOX0_NODE_NAME is required" >&2; exit 1; }
+[ "$(cat /sys/module/nbd/parameters/max_part 2>/dev/null)" = 0 ] || {
+  echo "nbd must be loaded with max_part=0 before ctld starts" >&2
+  exit 1
+}
 
 if [ "${SANDBOX0_SKIP_HOST_NAMESPACE_CHECK:-0}" != 1 ]; then
   host_mount_ns=$(readlink /proc/1/ns/mnt)

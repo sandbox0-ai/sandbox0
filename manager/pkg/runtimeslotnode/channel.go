@@ -1237,3 +1237,15 @@ func (h *ChannelHub) PrepareMigrationCapturePeer(ctx context.Context, request pr
 	}
 	return result.MigrationCapturePeer, nil
 }
+
+func (h *ChannelHub) CancelCheckpointImage(ctx context.Context, request protocol.CheckpointImageCancelRequest) (*protocol.CheckpointImageCancelProof, error) {
+	command, err := protocol.NewNodeChannelCheckpointImageCancelCommand(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	return result.CheckpointImageCancel, nil
+}

@@ -46,6 +46,7 @@ type migrationGuestEvidence struct {
 	Token           string `json:"token"`
 	Generation      int64  `json:"generation"`
 	ReceiptSurvived bool   `json:"receipt_survived"`
+	WebhookVerified bool   `json:"webhook_verified,omitempty"`
 }
 
 // TestPrivilegedProcdSessionCheckpoint runs the real supervisor, authenticated
@@ -53,6 +54,24 @@ type migrationGuestEvidence struct {
 // runtime roots and copied readonly filesystems exercise process restoration;
 // they do not replace two-node block-COW, cgroup or network-handover acceptance.
 func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
+	runPrivilegedProcdSessionCheckpoint(t, "migration")
+}
+
+func TestPrivilegedProcdMemoryPauseResume(t *testing.T) {
+	runPrivilegedProcdSessionCheckpoint(t, "resume")
+}
+
+func TestPrivilegedProcdMemoryFork(t *testing.T) {
+	runPrivilegedProcdSessionCheckpoint(t, "fork")
+}
+
+func TestPrivilegedProcdMemoryRetryAfterFailedRestore(t *testing.T) {
+	for _, operation := range []string{"resume", "fork"} {
+		t.Run(operation, func(t *testing.T) { runPrivilegedProcdSessionCheckpoint(t, operation, 2) })
+	}
+}
+
+func runPrivilegedProcdSessionCheckpoint(t *testing.T, operation string, failedAttempts ...int) {
 	if os.Getenv("SANDBOX0_RUN_PRIVILEGED_CHECKPOINT") != "1" {
 		t.Skip("requires isolated Linux runsc test host")
 	}
@@ -73,6 +92,19 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 	defer executable.Close()
 	for _, p := range executable.Progs {
 		require.NotEqual(t, elf.PT_INTERP, p.Type, "compile with CGO_ENABLED=0")
+	}
+	guestTest := "^TestMigrationSessionGuest$"
+	firstGeneration := int64(2)
+	if operation != "migration" {
+		guestTest = "^TestMemoryCheckpointSessionGuest$"
+	}
+	if operation == "fork" {
+		firstGeneration = 1
+	}
+	failed := 0
+	if len(failedAttempts) != 0 {
+		failed = failedAttempts[0]
+		firstGeneration += int64(failed)
 	}
 	for _, mode := range []struct{ directFS, diskTmp bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
 		t.Run(fmt.Sprintf("directfs_%t_disk_tmp_%t", mode.directFS, mode.diskTmp), func(t *testing.T) {
@@ -104,8 +136,9 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 					generation = "3"
 				}
 				spec := oci.Spec{Version: oci.Version, Root: &oci.Root{Path: rootfs, Readonly: true},
-					Process: &oci.Process{Cwd: "/", Args: []string{"/payload", "-test.run=^TestMigrationSessionGuest$"},
-						Env: []string{migrationGuestEnv + "=1", "GOMAXPROCS=2", "SANDBOX0_PROBE_SPEC_GENERATION=" + generation}},
+					Process: &oci.Process{Cwd: "/", Args: []string{"/payload", "-test.run=" + guestTest},
+						Env: []string{migrationGuestEnv + "=1", "GOMAXPROCS=2", "SANDBOX0_CHECKPOINT_TEST_MODE=" + operation,
+							"SANDBOX0_CHECKPOINT_FAILED_ATTEMPTS=" + strconv.Itoa(failed), "SANDBOX0_PROBE_SPEC_GENERATION=" + generation}},
 					Mounts: []oci.Mount{
 						{Destination: "/proc", Type: "proc", Source: "proc"},
 						{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}},
@@ -153,6 +186,15 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 			restored := filepath.Join(root, "restored-image")
 			_, err = store.Download(ctx, binding, ref, restored)
 			require.NoError(t, err)
+			// Execute then destroy failed destinations while API admission is
+			// still closed. Later attempts use the same original retained image.
+			for i := range failed {
+				name := fmt.Sprintf("failed-%d", i)
+				attempt, bundle := makeRuntime(name)
+				require.NoError(t, attempt.Create(ctx, bundle, name))
+				require.NoError(t, attempt.Restore(ctx, name, restored))
+				require.NoError(t, attempt.Delete(ctx, name, true))
+			}
 			require.NoError(t, target.Create(ctx, targetBundle, "target"))
 			require.NoError(t, target.Restore(ctx, "target", restored))
 			require.NoError(t, os.WriteFile(filepath.Join(evidence, "restore"), nil, 0600))
@@ -161,8 +203,11 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 			require.Equal(t, before.Attempt, after.Attempt)
 			require.Equal(t, before.PID, after.PID)
 			require.Equal(t, before.Token, after.Token)
-			require.EqualValues(t, 2, after.Generation)
+			require.EqualValues(t, firstGeneration, after.Generation)
 			require.True(t, after.ReceiptSurvived)
+			if operation != "migration" {
+				require.True(t, after.WebhookVerified)
+			}
 			waitMigrationGuestEvidence(t, ctx, filepath.Join(evidence, "prepared-again.json"))
 			secondImage := filepath.Join(root, "second-image")
 			require.NoError(t, target.Checkpoint(ctx, "target", secondImage))
@@ -176,8 +221,11 @@ func TestPrivilegedProcdSessionCheckpoint(t *testing.T) {
 			require.Equal(t, before.Attempt, again.Attempt)
 			require.Equal(t, before.PID, again.PID)
 			require.Equal(t, before.Token, again.Token)
-			require.EqualValues(t, 3, again.Generation)
+			require.EqualValues(t, firstGeneration+1, again.Generation)
 			require.True(t, again.ReceiptSurvived)
+			if operation != "migration" {
+				require.True(t, again.WebhookVerified)
+			}
 		})
 	}
 }

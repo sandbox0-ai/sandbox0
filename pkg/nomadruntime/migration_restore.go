@@ -48,7 +48,7 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 	defer func() {
 		// Keep physical observations separate from journal work; a delayed
 		// receipt does not by itself identify the restore command as the cause.
-		d.logMigrationTiming(observation.Request.Image.Publication.Assignment.OperationID, "restore-observation", started,
+		d.logMigrationTiming(observation.Request.Image.OperationID(), "restore-observation", started,
 			"restore_state", observation.State, "success", resultErr == nil,
 			"journal_read_us", readElapsed.Microseconds(), "image_verify_us", verifyElapsed.Microseconds(),
 			"sessions_read_us", sessionsElapsed.Microseconds(), "runsc_state_us", stateElapsed.Microseconds(),
@@ -73,7 +73,7 @@ func (d *nodeRuntime) RecordMigrationRestore(ctx context.Context, observation pr
 	}
 	custody := record.MigrationDestination
 	imageDigest, _ := observation.Request.Image.Digest()
-	if custody == nil || custody.Adoption != nil || custody.Failure != nil || custody.RequestDigest != imageDigest || custody.Prepared == nil || *custody.Prepared != observation.Request.Prepared {
+	if custody == nil || custody.Adoption != nil || custody.Failure != nil || custody.Cancellation != nil || custody.RequestDigest != imageDigest || custody.Prepared == nil || *custody.Prepared != observation.Request.Prepared {
 		return errdefs.ErrFailedPrecondition
 	}
 	switch observation.State {
@@ -165,7 +165,7 @@ func (j *runtimeSlotJournal) recordMigrationRestoreObserved(observation protocol
 		}
 		custody := current.MigrationDestination
 		digest, _ := observation.Request.Image.Digest()
-		if custody == nil || custody.Adoption != nil || custody.Failure != nil || custody.Prepared == nil || custody.RequestDigest != digest || *custody.Prepared != observation.Request.Prepared || current.Cleanup != nil {
+		if custody == nil || custody.Adoption != nil || custody.Failure != nil || custody.Cancellation != nil || custody.Prepared == nil || custody.RequestDigest != digest || *custody.Prepared != observation.Request.Prepared || current.Cleanup != nil {
 			return errdefs.ErrFailedPrecondition
 		}
 		prior := custody.Restore

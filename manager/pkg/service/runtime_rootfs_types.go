@@ -67,6 +67,7 @@ type RestoreSandboxRootFSResponse struct {
 }
 
 type ForkSandboxRequest struct {
+	Memory      bool               `json:"memory,omitempty"`
 	Config      *ForkSandboxConfig `json:"config,omitempty"`
 	OperationID string             `json:"-"`
 	StartedAt   time.Time          `json:"-"`

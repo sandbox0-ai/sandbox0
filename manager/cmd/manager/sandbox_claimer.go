@@ -59,18 +59,9 @@ func buildSandboxRuntime(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDe
 		CapacityWait: runtimeslotclaim.CapacityWaitConfig{Timeout: claim.CapacityWaitTimeout.Duration, MaxPending: claim.CapacityWaitMaxPending, MaxPendingPerTeam: claim.CapacityWaitMaxPendingPerTeam},
 		CapacityWake: deps.capacityWake,
 		Prober:       deps.prober, TokenGenerator: deps.tokenGenerator, Observer: deps.observer,
-		MigrationObserver: func(observation runtimeslotclaim.Observation) {
-			if deps.logger == nil {
-				return
-			}
-			fields := []zap.Field{zap.String("operation_id", observation.OperationID),
-				zap.Bool("success", observation.Succeeded), zap.Int64("duration_us", observation.Duration.Microseconds())}
-			for _, phase := range observation.Phases {
-				fields = append(fields, zap.Int64(phase.Phase+"_us", phase.Duration.Microseconds()))
-			}
-			deps.logger.Info("Migration destination planning timing", fields...)
-		},
-		WriterTokenKey: writerTokenKey, ClaimTTL: claim.ClaimTTL.Duration,
+		MigrationObserver:  restorePlanningObserver(deps.logger, "Migration destination planning timing"),
+		CheckpointObserver: restorePlanningObserver(deps.logger, "Memory restore planning timing"),
+		WriterTokenKey:     writerTokenKey, ClaimTTL: claim.ClaimTTL.Duration,
 		SLO: claim.SLO.Duration, Now: deps.now,
 		DemandPoolID: demandPoolID(cfg), DemandTTL: cfg.NodePoolAutoscaler.DemandTTL.Duration,
 	})
@@ -130,4 +121,20 @@ func loadWriterTokenKey(path string) ([]byte, error) {
 		return nil, fmt.Errorf("writer token key must contain exactly 32 bytes")
 	}
 	return key, nil
+}
+
+// restorePlanningObserver records only the execution-planning portion. The
+// service logs the full command-ready resume duration after regional commit.
+func restorePlanningObserver(logger *zap.Logger, message string) func(runtimeslotclaim.Observation) {
+	return func(observation runtimeslotclaim.Observation) {
+		if logger == nil {
+			return
+		}
+		fields := []zap.Field{zap.String("operation_id", observation.OperationID),
+			zap.Bool("success", observation.Succeeded), zap.Int64("duration_us", observation.Duration.Microseconds())}
+		for _, phase := range observation.Phases {
+			fields = append(fields, zap.Int64(phase.Phase+"_us", phase.Duration.Microseconds()))
+		}
+		logger.Info(message, fields...)
+	}
 }

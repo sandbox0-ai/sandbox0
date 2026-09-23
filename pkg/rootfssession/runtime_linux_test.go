@@ -3,14 +3,30 @@
 package session
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxRuntimeWaitsForKernelXFSSuperblockRelease(t *testing.T) {
+	runtime, err := NewLinuxRuntime(LinuxRuntimeConfig{DevicePaths: []string{"/dev/nbd0"}})
+	require.NoError(t, err)
+	runtime.sysXFSRoot = t.TempDir()
+	superblock := filepath.Join(runtime.sysXFSRoot, "nbd0")
+	require.NoError(t, os.Mkdir(superblock, 0o700))
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorContains(t, runtime.WaitFilesystemRelease(ctx, "/dev/nbd0"), "remains attached")
+	require.NoError(t, os.Remove(superblock))
+	require.NoError(t, runtime.WaitFilesystemRelease(t.Context(), "/dev/nbd0"))
+	require.Error(t, runtime.WaitFilesystemRelease(t.Context(), "/dev/nbd1"))
+}
 
 func TestXFSMountOptionsKeepGenericFlagsOutOfFilesystemData(t *testing.T) {
 	require.NotZero(t, xfsMountFlags&unix.MS_NOATIME)

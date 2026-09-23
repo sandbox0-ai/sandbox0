@@ -152,6 +152,10 @@ headroom. The supplied environment example configures 16 devices, while the
 default warm job reserves eight slots. A density profile must expand both this
 list and the kernel device pool before admission; increasing carrier count alone
 does not increase RootFS concurrency.
+Load `nbd` with `max_part=0` before starting ctld. Partition scanning on
+RootFS NBD devices can keep a disconnected device busy and delay checkpoint
+fencing; the installer and host check reject an already loaded module with a
+different value.
 
 Carrier networking uses stock CNI `ptp`. Before admitting a carrier, ctld
 proves that its veth peer belongs to the held namespace, is up, and has no

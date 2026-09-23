@@ -83,6 +83,10 @@ type NodeChannelMigrationFailureCleanupExecutor interface {
 	CleanupFailedMigrationDestination(context.Context, MigrationFailureCleanupRequest) (*MigrationFailureCleanupProof, error)
 }
 
+type NodeChannelCheckpointImageCancelExecutor interface {
+	CancelCheckpointImage(context.Context, CheckpointImageCancelRequest) (*CheckpointImageCancelProof, error)
+}
+
 type NodeChannelMigrationFailureFinalizeExecutor interface {
 	FinalizeFailedMigrationDestination(context.Context, MigrationFailureFinalizeRequest) (*MigrationFailureFinalizeProof, error)
 }
@@ -170,6 +174,7 @@ type NodeChannelAgentConfig struct {
 	MigrationCapturePeerExecutor     NodeChannelMigrationCapturePeerExecutor
 	MigrationFailureExecutor         NodeChannelMigrationFailureExecutor
 	MigrationFailureCleanupExecutor  NodeChannelMigrationFailureCleanupExecutor
+	CheckpointImageCancelExecutor    NodeChannelCheckpointImageCancelExecutor
 	MigrationFailureFinalizeExecutor NodeChannelMigrationFailureFinalizeExecutor
 	MigrationCaptureFailureExecutor  NodeChannelMigrationCaptureFailureExecutor
 	MigrationFenceExecutor           NodeChannelMigrationFenceExecutor
@@ -438,6 +443,9 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	if a.config.MigrationFailureCleanupExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationFailureCleanup)
 	}
+	if a.config.CheckpointImageCancelExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandCheckpointImageCancel)
+	}
 	if a.config.MigrationFailureFinalizeExecutor != nil {
 		capabilities = append(capabilities, NodeChannelCommandMigrationFailureFinalize)
 	}
@@ -535,7 +543,7 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	switch command.Kind {
 	case NodeChannelCommandMigrationCPUPreflight:
 		timeout = MigrationCPUPreflightTimeout
-	case NodeChannelCommandMigrationRecover, NodeChannelCommandRunningFork, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationCapturePeer, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize:
+	case NodeChannelCommandCheckpointImageCancel, NodeChannelCommandMigrationRecover, NodeChannelCommandRunningFork, NodeChannelCommandMigrationPublish, NodeChannelCommandMigrationPublicationPlan, NodeChannelCommandMigrationFence, NodeChannelCommandMigrationImagePrepare, NodeChannelCommandMigrationImagePrefetch, NodeChannelCommandMigrationCapturePeer, NodeChannelCommandMigrationFinalize, NodeChannelCommandMigrationFailureStop, NodeChannelCommandMigrationFailureCleanup, NodeChannelCommandMigrationFailureFinalize, NodeChannelCommandMigrationCaptureFailureCleanup, NodeChannelCommandMigrationCaptureFailureFinalize:
 		timeout = a.config.RunningForkTimeout
 	case NodeChannelCommandPausedRebase:
 		timeout = a.config.PausedRebaseTimeout
@@ -644,6 +652,15 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		result.MigrationCaptureFailureFinalize, err = a.config.MigrationCaptureFailureExecutor.FinalizeFailedMigrationCapture(operationCtx, *command.MigrationCaptureFailureFinalize)
 		if err != nil {
 			result.MigrationCaptureFailureFinalize = nil
+		}
+	case NodeChannelCommandCheckpointImageCancel:
+		if a.config.CheckpointImageCancelExecutor == nil {
+			err = errdefs.ErrFailedPrecondition
+			break
+		}
+		result.CheckpointImageCancel, err = a.config.CheckpointImageCancelExecutor.CancelCheckpointImage(operationCtx, *command.CheckpointImageCancel)
+		if err != nil {
+			result.CheckpointImageCancel = nil
 		}
 	case NodeChannelCommandMigrationFailureFinalize:
 		if a.config.MigrationFailureFinalizeExecutor == nil {

@@ -147,10 +147,19 @@ func validateNomadMigrationRestoreWriter(ctx context.Context, tx pgx.Tx, reserva
 		target.WriterGrantID != request.Stage.Identity.WriterGrantID {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
+	return validateNomadExecutionRestoreWriter(ctx, tx, target, request)
+}
+
+// Both migration and retained-image restore use the same exact writer fence.
+// The caller has locked the owner and matching filesystem before the slot.
+func validateNomadExecutionRestoreWriter(ctx context.Context, tx pgx.Tx, target *RuntimeSlot, request protocol.MigrationRestoreRequest) (*rootFSWriterGrantRecord, error) {
+	if target.WriterGrantID == "" || target.WriterGrantID != request.Stage.Identity.WriterGrantID {
+		return nil, ErrNomadSandboxMigrationConflict
+	}
 	// The handoff validator already locks this filesystem before the slot.
 	// Recheck its current epoch so an old consumed grant cannot revive after
 	// another fencing transition advanced storage authority.
-	filesystem, _, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, reservation.Lifecycle.SandboxID)
+	filesystem, _, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, target.SandboxID)
 	if err != nil {
 		return nil, err
 	}

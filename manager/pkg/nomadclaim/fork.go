@@ -31,6 +31,16 @@ func (s *Service) ForkSandbox(
 	sourceSandboxID, teamID, userID string,
 	request *service.ForkSandboxRequest,
 ) (*service.ForkSandboxResponse, error) {
+	return s.forkSandboxMode(ctx, sourceSandboxID, teamID, userID, request, request != nil && request.Memory)
+}
+
+// ForkMemorySandbox explicitly retains processes; the ordinary entry point
+// keeps its filesystem-only contract.
+func (s *Service) ForkMemorySandbox(ctx context.Context, sourceSandboxID, teamID, userID string, request *service.ForkSandboxRequest) (*service.ForkSandboxResponse, error) {
+	return s.forkSandboxMode(ctx, sourceSandboxID, teamID, userID, request, true)
+}
+
+func (s *Service) forkSandboxMode(ctx context.Context, sourceSandboxID, teamID, userID string, request *service.ForkSandboxRequest, memory bool) (*service.ForkSandboxResponse, error) {
 	if request == nil {
 		request = &service.ForkSandboxRequest{}
 	}
@@ -103,6 +113,24 @@ func (s *Service) ForkSandbox(
 	}
 	target.TemplateSpec = *source.TemplateSpec.DeepCopy()
 	target.TemplateSpec.MainContainer.SecurityClass = "privileged"
+	if memory {
+		store, ok := s.store.(checkpointForkStore)
+		if !ok {
+			return nil, fmt.Errorf("%w: memory fork authority is unavailable", service.ErrSandboxLifecycleUnavailable)
+		}
+		intent, err := store.GetNomadSandboxRunningMemoryFork(ctx, operationID)
+		if err != nil {
+			return nil, mapNomadForkError("load memory fork intent", sourceSandboxID, err)
+		}
+		if intent != nil {
+			if intent.SourceSandboxID != sourceSandboxID || intent.Target == nil || intent.Target.ID != targetID ||
+				intent.Target.TeamID != teamID || intent.Target.UserID != userID ||
+				!nomadForkExplicitTTLMatches(request.Config, &intent.Target.Config) {
+				return nil, apierror.NewConflict("sandbox", sourceSandboxID, fmt.Errorf("memory fork retry changed its accepted target"))
+			}
+			return s.completeNomadMemoryFork(ctx, source, intent.Target, operationID, true)
+		}
+	}
 	existingTarget, err := s.store.GetSandbox(ctx, targetID)
 	if err != nil {
 		return nil, mapNomadForkError("load Nomad fork target retry", sourceSandboxID, err)
@@ -121,7 +149,17 @@ func (s *Service) ForkSandbox(
 	}
 	storeRequest := &sandboxstore.NomadSandboxForkRequest{
 		OperationID: operationID, SourceSandboxID: sourceSandboxID,
-		ExpectedTeamID: teamID, Target: target,
+		ExpectedTeamID: teamID, Target: target, Memory: memory,
+	}
+	if memory {
+		if existingTarget != nil {
+			child, err := s.store.ForkNomadPausedSandbox(ctx, storeRequest)
+			if err != nil {
+				return nil, mapNomadForkError("retry paused memory fork", sourceSandboxID, err)
+			}
+			return nomadForkResponse(sourceSandboxID, child), nil
+		}
+		return s.completeNomadMemoryFork(ctx, source, target, operationID, false)
 	}
 	if existingTarget != nil {
 		pausedTarget, pausedErr := s.store.ForkNomadPausedSandbox(ctx, storeRequest)

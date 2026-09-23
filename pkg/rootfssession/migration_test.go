@@ -284,7 +284,7 @@ func TestMigrationRootFSDetachRetainsPublishedCutAndAttestsPhysicalAbsence(t *te
 	require.Empty(t, stored.SealedDescriptor)
 	require.Nil(t, stored.CrashFence)
 	require.True(t, stored.DeviceReservationReleased)
-	require.Equal(t, []string{"attach", "mount-xfs", "mount-overlay", "freeze-xfs", "thaw-xfs", "unmount-overlay", "unmount-xfs", "close-device"}, runtime.callsSnapshot())
+	require.Equal(t, []string{"attach", "mount-xfs", "mount-overlay", "freeze-xfs", "thaw-xfs", "unmount-overlay", "unmount-xfs", "wait-xfs-release", "close-device"}, runtime.callsSnapshot())
 	before := runtime.callsSnapshot()
 	again, err := manager.DetachMigrationRootFS(t.Context(), stage, request)
 	require.NoError(t, err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 // MigrationImagePrepareRequest grants custody of one verified execution image
@@ -17,6 +18,7 @@ type MigrationImagePrepareRequest struct {
 	Publication MigrationPublicationRequest `json:"publication"`
 	Receipt     MigrationPublication        `json:"receipt"`
 	Resources   RuntimeResourceLease        `json:"resources"`
+	Checkpoint  *CheckpointRestoreAuthority `json:"checkpoint,omitempty"`
 }
 
 func (r MigrationImagePrepareRequest) Validate() error {
@@ -31,13 +33,37 @@ func (r MigrationImagePrepareRequest) Validate() error {
 	}
 	source := r.Publication.Capture.Request.Target
 	l := r.Resources
-	if r.Target.ClusterID != source.ClusterID || r.Target.NodeID == source.NodeID || r.Target.NodeUID == source.NodeUID ||
-		r.Target.SlotID == source.SlotID || r.Target.AllocationID == source.AllocationID ||
-		l.OperationID != r.Publication.Assignment.OperationID || l.SlotID != r.Target.SlotID || l.ClusterID != r.Target.ClusterID ||
+	if r.Target.ClusterID != source.ClusterID || r.Target.SlotID == source.SlotID || r.Target.AllocationID == source.AllocationID ||
+		l.OperationID != r.OperationID() || l.SlotID != r.Target.SlotID || l.ClusterID != r.Target.ClusterID ||
 		l.NodeID != r.Target.NodeID || l.NodeUID != r.Target.NodeUID || l.NodeBootID != r.Target.NodeBootID {
-		return fmt.Errorf("migration image destination does not match reserved capacity on a different node")
+		return fmt.Errorf("image destination does not match independently reserved carrier capacity")
+	}
+	if r.Checkpoint != nil {
+		return r.Checkpoint.ValidateFor(r.Publication, r.Receipt)
+	}
+	if r.Publication.CheckpointSource != nil {
+		return fmt.Errorf("checkpoint images require independent restore authorization")
+	}
+	if r.Target.NodeID == source.NodeID || r.Target.NodeUID == source.NodeUID {
+		return fmt.Errorf("migration requires a destination on a different node")
 	}
 	return nil
+}
+
+// OperationID and RuntimeAssignment identify this image's destination use,
+// which may differ from its immutable capture identity.
+func (r MigrationImagePrepareRequest) OperationID() string {
+	if r.Checkpoint != nil {
+		return r.Checkpoint.Assignment.OperationID
+	}
+	return r.Publication.Assignment.OperationID
+}
+
+func (r MigrationImagePrepareRequest) RuntimeAssignment() runtimecontrol.Assignment {
+	if r.Checkpoint != nil {
+		return r.Checkpoint.Assignment.Target
+	}
+	return r.Publication.Assignment.Target
 }
 
 func (r MigrationImagePrepareRequest) Digest() (string, error) {

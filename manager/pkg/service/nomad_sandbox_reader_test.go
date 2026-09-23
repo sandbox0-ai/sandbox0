@@ -124,3 +124,45 @@ func TestNomadSandboxReaderFailsClosedForInvalidRequests(t *testing.T) {
 		t.Fatal("nil projection store was accepted")
 	}
 }
+
+type failedCheckpointProjectionStore struct {
+	*memorySandboxStore
+	failed            bool
+	err               error
+	generation, epoch int64
+}
+
+func (s *failedCheckpointProjectionStore) NomadCheckpointFailed(_ context.Context, _ string, generation, epoch int64) (bool, error) {
+	s.generation, s.epoch = generation, epoch
+	return s.failed, s.err
+}
+
+func TestNomadSandboxReaderDoesNotReportFailedMemoryCaptureAsSuccessfulPause(t *testing.T) {
+	store := &failedCheckpointProjectionStore{memorySandboxStore: &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{"sandbox": {ID: "sandbox", TeamID: "team", DesiredState: sandboxstore.SandboxDesiredStatePaused, RuntimeGeneration: 3, LifecycleEpoch: 7}},
+	}, failed: true}
+	reader, err := NewNomadSandboxReader(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.GetSandbox(t.Context(), "sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != managerapi.SandboxStatusFailed || !got.Paused || got.RuntimeID != "" || store.generation != 3 || store.epoch != 7 {
+		t.Fatalf("failed capture projection: %+v", got)
+	}
+	listed, err := reader.ListSandboxes(t.Context(), &sandboxstore.ListSandboxesRequest{TeamID: "team"})
+	if err != nil || len(listed.Sandboxes) != 1 || listed.Sandboxes[0].Status != managerapi.SandboxStatusFailed {
+		t.Fatalf("failed capture list: %+v, %v", listed, err)
+	}
+	store.err = errors.New("checkpoint authority unavailable")
+	if _, err := reader.GetSandbox(t.Context(), "sandbox"); !errors.Is(err, store.err) {
+		t.Fatalf("projection must fail closed: %v", err)
+	}
+	store.err, store.failed = nil, false
+	got, err = reader.GetSandbox(t.Context(), "sandbox")
+	if err != nil || got.Status != managerapi.SandboxStatusPaused {
+		t.Fatalf("ordinary pause: %+v, %v", got, err)
+	}
+}

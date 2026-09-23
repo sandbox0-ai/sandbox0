@@ -78,30 +78,27 @@ budgets. Carrier count, NBD device count, address space, quotas, and actual
 memory pressure are separate bounds. Increasing admission alone does not prove
 500 resident sandboxes or improve a 100-way startup burst.
 
-The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6),
-`privileged_slots` (default 2), and `warm_shard` (default 0). Each job contains
+The canonical `example/warm-slot.nomad` accepts `privileged_slots` (default 256)
+and `warm_shard` (default 0). Each job contains
 at most 32 task groups because Nomad embeds the full job in every allocation.
 For a larger inventory, render shards 0 through 23 with the same counts and
 register each nonempty job. Shard zero retains `sandbox0-warm-slots`; additional
-IDs are `sandbox0-warm-slots-shard-01` through `-23`. Existing `warm-0` through
-`warm-7` names, classes, and shard placement remain stable as counts grow.
-New sandbox claims use privileged carriers. Standard carriers remain available
-for existing standard sandboxes to resume until those sandboxes are retired.
+IDs are `sandbox0-warm-slots-shard-01` through `-23`. The privileged enrollment
+groups `warm-6` and `warm-7` and all `privileged-N` groups keep stable shard
+placement as counts grow.
 Moving an existing unsharded pool requires claim fencing and physical drain on
 every affected node before registering additional jobs and shrinking shard zero.
-Extra carriers require
-the target node's `sandbox0_standard_carriers` or
-`sandbox0_privileged_carriers` metadata to include their ordinal. For example,
-`standard_slots=500` across its nonempty shards plus
-`sandbox0_standard_carriers=500` permits 500 standard
-carriers on an explicitly configured node; unconfigured nodes retain their
-original six. Metadata is an operator-owned capacity profile, not a workload or
+Extra carriers require the target node's `sandbox0_privileged_carriers` metadata
+to include their ordinal. For example, `privileged_slots=256` plus
+`sandbox0_privileged_carriers=256` permits 256 carriers on an explicitly
+configured node; unconfigured nodes retain the two enrollment carriers.
+Metadata is an operator-owned capacity profile, not a workload or
 benchmark selector. Provision enough NBD devices, private addresses, and host
 overhead first, and use `nomad job plan` to verify placement. Decreasing counts
 or node metadata requires draining the affected carriers.
 
-Set the elastic pool's `warm_slots_per_node` to the total standard and
-privileged inventory (502 for 500 plus 2). Lifecycle admission waits for that
+Set the elastic pool's `warm_slots_per_node` to the privileged inventory.
+Lifecycle admission waits for that
 many live, ready carriers and a current capacity heartbeat; the database
 rechecks both before removing the node's warming fence.
 
@@ -143,10 +140,9 @@ contains immutable execution inputs only:
 - security class.
 
 CPU and memory do not belong in the digest. The checked-in outer class catalog
-format is version `3`; each compatibility entry is version `2`. A cluster may
-publish both `standard` and `privileged` classes. The template
-`mainContainer.securityClass` selects one exact class; omitting it selects
-`standard`.
+format is version `3`; each compatibility entry is version `2`. A cluster
+publishes one `privileged` class. The template `mainContainer.securityClass`
+defaults to `privileged`.
 
 `privileged` grants Linux capabilities only inside the gVisor guest kernel; it
 does not bypass runsc or expose host devices. Template `ephemeralMounts` become

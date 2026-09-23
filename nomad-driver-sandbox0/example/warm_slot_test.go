@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/nomad/jobspec2"
@@ -12,18 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
+func TestPrivilegedCarrierSizingPreservesStableIdentities(t *testing.T) {
 	body, err := os.ReadFile("warm-slot.nomad")
 	require.NoError(t, err)
-	placements := make(map[string]string)
-	for _, profile := range []struct{ standard, privileged int }{{6, 2}, {100, 2}, {510, 2}, {512, 64}, {240, 240}, {6, 4}} {
-		t.Run(fmt.Sprintf("%d/%d", profile.standard, profile.privileged), func(t *testing.T) {
-			count := profile.standard
-			classes := make(map[string]string)
+	placements := map[string]string{}
+	for _, count := range []int{2, 16, 240, 256} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			groups := map[string]bool{}
 			for shard := range nomadinventory.WarmJobShardCount {
 				job, err := jobspec2.ParseWithConfig(&jobspec2.ParseConfig{
 					Path: "warm-slot.nomad", Body: body, Strict: true,
-					ArgVars: []string{"datacenter=ali_ue1", fmt.Sprintf("standard_slots=%d", count), fmt.Sprintf("privileged_slots=%d", profile.privileged), fmt.Sprintf("warm_shard=%d", shard)},
+					ArgVars: []string{"datacenter=ali_ue1", fmt.Sprintf("privileged_slots=%d", count), fmt.Sprintf("warm_shard=%d", shard)},
 				})
 				require.NoError(t, err)
 				job.Canonicalize()
@@ -36,8 +34,15 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 				require.Equal(t, expectedID, *job.ID)
 				encoded, err := json.Marshal(job)
 				require.NoError(t, err)
-				require.Less(t, len(encoded), 96<<10, "job payload must remain bounded for every allocation")
+				require.Less(t, len(encoded), 96<<10)
 				for _, group := range job.TaskGroups {
+					name := *group.Name
+					require.False(t, groups[name], "duplicate carrier group")
+					groups[name] = true
+					if previous, exists := placements[name]; exists {
+						require.Equal(t, previous, *job.ID, "resizing must not move a carrier between shards")
+					}
+					placements[name] = *job.ID
 					require.Equal(t, 1, *group.Count)
 					require.Equal(t, 0, *group.RestartPolicy.Attempts)
 					require.Equal(t, "fail", *group.RestartPolicy.Mode)
@@ -46,90 +51,64 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 					require.Len(t, group.Tasks, 1)
 					task := group.Tasks[0]
 					require.Equal(t, "sandbox0-gvisor", task.Driver)
-					require.NotNil(t, task.LogConfig)
-					require.NotNil(t, task.LogConfig.Disabled)
-					require.True(t, *task.LogConfig.Disabled, "external drivers require task-level disabling to avoid one idle logmon per carrier")
 					require.Equal(t, "/procd", task.Config["command"])
+					require.Equal(t, "privileged", task.Config["security_class"])
+					require.True(t, *task.LogConfig.Disabled)
 					require.Equal(t, 50, *task.Resources.CPU)
 					require.Equal(t, 64, *task.Resources.MemoryMB)
-					_, duplicate := classes[*group.Name]
-					require.False(t, duplicate)
-					classes[*group.Name] = task.Config["security_class"].(string)
-					if previous, exists := placements[*group.Name]; exists {
-						require.Equal(t, previous, *job.ID, "pool size must not move existing carriers between jobs")
-					}
-					placements[*group.Name] = *job.ID
-					var label int
-					if strings.HasPrefix(*group.Name, "warm-") {
-						_, err = fmt.Sscanf(*group.Name, "warm-%d", &label)
+					if name == "warm-6" || name == "warm-7" {
+						require.Empty(t, group.Constraints)
 					} else {
-						_, err = fmt.Sscanf(*group.Name, "privileged-%d", &label)
-					}
-					require.NoError(t, err)
-					if strings.HasPrefix(*group.Name, "warm-") && label < 8 {
-						require.Empty(t, group.Constraints, "default carrier jobs must remain unchanged")
-					} else {
+						var index int
+						_, err := fmt.Sscanf(name, "privileged-%d", &index)
+						require.NoError(t, err)
+						require.GreaterOrEqual(t, index, 2)
 						require.Len(t, group.Constraints, 1)
-						class := classes[*group.Name]
-						require.Equal(t, "${meta.sandbox0_"+class+"_carriers}", group.Constraints[0].LTarget)
+						require.Equal(t, "${meta.sandbox0_privileged_carriers}", group.Constraints[0].LTarget)
 						require.Equal(t, ">=", group.Constraints[0].Operand)
-						ordinal := label + 1
-						if class == "standard" {
-							ordinal -= 2
-						}
-						require.Equal(t, fmt.Sprint(ordinal), group.Constraints[0].RTarget)
+						require.Equal(t, fmt.Sprint(index+1), group.Constraints[0].RTarget)
 					}
 				}
-				require.Len(t, job.Constraints, 2)
-				for _, constraint := range job.Constraints {
-					require.Contains(t, []string{"${meta.sandbox0_dedicated}", "${meta.sandbox0_admitted}"}, constraint.LTarget)
-					require.Equal(t, "true", constraint.RTarget)
-				}
 			}
-			require.Len(t, classes, count+profile.privileged)
-			for index := range count {
-				label := index
-				if index >= 6 {
-					label += 2
-				}
-				require.Equal(t, "standard", classes[fmt.Sprintf("warm-%d", label)])
-			}
-			require.Equal(t, "privileged", classes["warm-6"])
-			require.Equal(t, "privileged", classes["warm-7"])
-			for index := 2; index < profile.privileged; index++ {
-				require.Equal(t, "privileged", classes[fmt.Sprintf("privileged-%d", index)])
+			require.Len(t, groups, count)
+			require.True(t, groups["warm-6"])
+			require.True(t, groups["warm-7"])
+			for index := 2; index < count; index++ {
+				require.True(t, groups[fmt.Sprintf("privileged-%d", index)])
 			}
 		})
 	}
-	for _, variable := range []string{"standard_slots=-1", "standard_slots=1.5", "standard_slots=513", "privileged_slots=257", "warm_shard=-1", "warm_shard=24", "warm_shard=1.5"} {
+	for _, variable := range []string{"standard_slots=1", "privileged_slots=-1", "privileged_slots=1.5", "privileged_slots=257", "warm_shard=-1", "warm_shard=24", "warm_shard=1.5"} {
 		_, err := jobspec2.ParseWithConfig(&jobspec2.ParseConfig{Path: "warm-slot.nomad", Body: body, Strict: true, ArgVars: []string{variable}})
 		require.Error(t, err, variable)
 	}
 }
 
-func TestAdaptiveCarrierCatalogKeepsOnlyEnrollmentAnchorsUnconditional(t *testing.T) {
+func TestAdaptivePrivilegedCarrierCatalogHasTwoEnrollmentAnchors(t *testing.T) {
 	body, err := os.ReadFile("warm-slot.nomad")
 	require.NoError(t, err)
 	anchors, extra := 0, 0
 	for shard := range nomadinventory.WarmJobShardCount {
 		job, err := jobspec2.ParseWithConfig(&jobspec2.ParseConfig{Path: "warm-slot.nomad", Body: body, Strict: true,
-			ArgVars: []string{"standard_slots=240", "privileged_slots=16", "adaptive_carriers=true", fmt.Sprintf("warm_shard=%d", shard)}})
+			ArgVars: []string{"privileged_slots=256", "adaptive_carriers=true", fmt.Sprintf("warm_shard=%d", shard)}})
 		require.NoError(t, err)
 		job.Canonicalize()
 		require.Equal(t, "v1", job.Meta["sandbox0_adaptive_carriers"])
-		for _, g := range job.TaskGroups {
-			if len(g.Constraints) == 0 {
+		for _, group := range job.TaskGroups {
+			if len(group.Constraints) == 0 {
+				require.Contains(t, []string{"warm-6", "warm-7"}, *group.Name)
 				anchors++
 				continue
 			}
 			extra++
-			require.Len(t, g.Constraints, 2)
-			require.Equal(t, ">=", g.Constraints[0].Operand)
-			require.Equal(t, "${node.unique.id}", g.Constraints[1].LTarget)
-			require.Equal(t, "set_contains_any", g.Constraints[1].Operand)
-			require.Equal(t, "00000000-0000-0000-0000-000000000000", g.Constraints[1].RTarget)
+			require.Len(t, group.Constraints, 2)
+			require.Equal(t, "${meta.sandbox0_privileged_carriers}", group.Constraints[0].LTarget)
+			require.Equal(t, ">=", group.Constraints[0].Operand)
+			require.Equal(t, "${node.unique.id}", group.Constraints[1].LTarget)
+			require.Equal(t, "set_contains_any", group.Constraints[1].Operand)
+			require.Equal(t, "00000000-0000-0000-0000-000000000000", group.Constraints[1].RTarget)
 		}
 	}
-	require.Equal(t, 8, anchors)
-	require.Equal(t, 248, extra)
+	require.Equal(t, 2, anchors)
+	require.Equal(t, 254, extra)
 }

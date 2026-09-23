@@ -19,18 +19,18 @@ variable "privileged_slots" {
   description = "Single-use guest-confined privileged carriers per admitted node"
   default     = 2
   validation {
-    condition     = var.privileged_slots >= 0 && var.privileged_slots <= 64 && floor(var.privileged_slots) == var.privileged_slots
-    error_message = "Privileged slots must be an integer from 0 through 64."
+    condition     = var.privileged_slots >= 0 && var.privileged_slots <= 256 && floor(var.privileged_slots) == var.privileged_slots
+    error_message = "Privileged slots must be an integer from 0 through 256."
   }
 }
 
 variable "warm_shard" {
   type        = number
-  description = "Render one bounded carrier job; register each nonempty shard from 0 through 17"
+  description = "Render one bounded carrier job; register each nonempty shard from 0 through 23"
   default     = 0
   validation {
-    condition     = var.warm_shard >= 0 && var.warm_shard <= 17 && floor(var.warm_shard) == var.warm_shard
-    error_message = "Warm shard must be an integer from 0 through 17."
+    condition     = var.warm_shard >= 0 && var.warm_shard <= 23 && floor(var.warm_shard) == var.warm_shard
+    error_message = "Warm shard must be an integer from 0 through 23."
   }
 }
 

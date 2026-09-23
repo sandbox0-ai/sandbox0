@@ -23,6 +23,32 @@ func TestNomadBlockCOWTemplateFreshSchemaIntegration(t *testing.T) {
 	assertFinalTemplateSchema(t, ctx, pool)
 }
 
+func TestExistingTemplatesBecomePrivilegedWithoutChangingOtherFieldsIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, schema := newTemplateMigrationIntegrationPool(t)
+	applyTemplateBaselineOnly(t, ctx, pool, schema)
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	_, err := pool.Exec(ctx, `
+		INSERT INTO scheduler_templates (template_id, scope, team_id, spec)
+		VALUES
+			('legacy', 'team', 'team-1', jsonb_build_object(
+				'description', 'keep me', 'mainContainer', jsonb_build_object(
+					'image', 'registry.invalid/legacy@' || $1, 'securityClass', 'standard'))),
+			('implicit', 'public', '', jsonb_build_object(
+				'mainContainer', jsonb_build_object('image', 'registry.invalid/implicit@' || $1)))
+	`, digest)
+	require.NoError(t, err)
+	require.NoError(t, migrateTemplateSchema(ctx, pool, schema))
+	var class, description string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT spec #>> '{mainContainer,securityClass}', spec->>'description'
+		FROM scheduler_templates WHERE template_id = 'legacy'`).Scan(&class, &description))
+	require.Equal(t, "privileged", class)
+	require.Equal(t, "keep me", description)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT spec #>> '{mainContainer,securityClass}'
+		FROM scheduler_templates WHERE template_id = 'implicit'`).Scan(&class))
+	require.Equal(t, "privileged", class)
+}
+
 func TestNomadBlockCOWTemplateTerminalCutoverIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool, schema := newTemplateMigrationIntegrationPool(t)

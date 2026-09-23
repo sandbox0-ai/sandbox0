@@ -81,10 +81,12 @@ memory pressure are separate bounds. Increasing admission alone does not prove
 The canonical `example/warm-slot.nomad` accepts `standard_slots` (default 6),
 `privileged_slots` (default 2), and `warm_shard` (default 0). Each job contains
 at most 32 task groups because Nomad embeds the full job in every allocation.
-For a larger inventory, render shards 0 through 17 with the same counts and
+For a larger inventory, render shards 0 through 23 with the same counts and
 register each nonempty job. Shard zero retains `sandbox0-warm-slots`; additional
-IDs are `sandbox0-warm-slots-shard-01` through `-17`. Existing `warm-0` through
+IDs are `sandbox0-warm-slots-shard-01` through `-23`. Existing `warm-0` through
 `warm-7` names, classes, and shard placement remain stable as counts grow.
+New sandbox claims use privileged carriers. Standard carriers remain available
+for existing standard sandboxes to resume until those sandboxes are retired.
 Moving an existing unsharded pool requires claim fencing and physical drain on
 every affected node before registering additional jobs and shrinking shard zero.
 Extra carriers require

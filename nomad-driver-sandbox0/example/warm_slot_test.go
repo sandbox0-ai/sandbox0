@@ -16,7 +16,7 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 	body, err := os.ReadFile("warm-slot.nomad")
 	require.NoError(t, err)
 	placements := make(map[string]string)
-	for _, profile := range []struct{ standard, privileged int }{{6, 2}, {100, 2}, {510, 2}, {512, 64}, {6, 4}} {
+	for _, profile := range []struct{ standard, privileged int }{{6, 2}, {100, 2}, {510, 2}, {512, 64}, {240, 240}, {6, 4}} {
 		t.Run(fmt.Sprintf("%d/%d", profile.standard, profile.privileged), func(t *testing.T) {
 			count := profile.standard
 			classes := make(map[string]string)
@@ -101,7 +101,7 @@ func TestWarmCarrierSizingPreservesDefaultIdentities(t *testing.T) {
 			}
 		})
 	}
-	for _, variable := range []string{"standard_slots=-1", "standard_slots=1.5", "standard_slots=513", "privileged_slots=65", "warm_shard=-1", "warm_shard=18", "warm_shard=1.5"} {
+	for _, variable := range []string{"standard_slots=-1", "standard_slots=1.5", "standard_slots=513", "privileged_slots=257", "warm_shard=-1", "warm_shard=24", "warm_shard=1.5"} {
 		_, err := jobspec2.ParseWithConfig(&jobspec2.ParseConfig{Path: "warm-slot.nomad", Body: body, Strict: true, ArgVars: []string{variable}})
 		require.Error(t, err, variable)
 	}

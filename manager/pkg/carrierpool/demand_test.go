@@ -103,8 +103,24 @@ func TestRuntimeRolloutRefreshesStaleCapacityBeforeDemandRefill(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, changed)
 	require.Equal(t, map[string]int{"std": 126, "priv": 2}, s.node.CompatibilityCapacity)
-	require.ElementsMatch(t, n.Groups, s.node.Groups, "refresh preserves existing membership even above the low watermark")
-	require.False(t, s.node.Pending, "existing ready registrations complete the normal resize proof")
+	require.Len(t, s.node.Groups, 8, "refresh may reclaim surplus while retaining enrollment anchors")
+	for _, group := range catalog(8) {
+		require.Contains(t, s.node.Groups, group)
+	}
+	require.True(t, s.node.Pending, "removed carriers must stop before the resize completes")
+	retained := map[string]bool{}
+	for _, group := range s.node.Groups {
+		retained[group] = true
+	}
+	for i := range nomad.allocs {
+		if !retained[nomad.allocs[i].TaskGroup] {
+			nomad.allocs[i].ClientStatus = "complete"
+		}
+	}
+	changed, err = w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, changed)
+	require.False(t, s.node.Pending)
 	s.shapes = []sandboxstore.RuntimeNodePoolDemandShape{{CompatibilityDigest: "std", CPUMillicores: 150, MemoryBytes: 128 << 20, Slots: 60}}
 	changed, err = w.Reconcile(t.Context())
 	require.NoError(t, err)

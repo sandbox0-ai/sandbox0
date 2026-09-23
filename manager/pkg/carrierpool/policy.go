@@ -15,7 +15,7 @@ func GroupIndex(name string) (security string, index int, err error) {
 	limit := 514
 	if strings.HasPrefix(name, "privileged-") {
 		prefix = "privileged-"
-		limit = 64
+		limit = 256
 	}
 	raw := strings.TrimPrefix(name, prefix)
 	v, e := strconv.Atoi(raw)
@@ -94,8 +94,10 @@ func planDemand(catalog, busy []string, spare, maximum int, freeCPU, freeMemory 
 		spare = 0
 		demand = nil
 	}
-	standardSpare := max(max(0, spare-2), demand["standard"])
-	privilegedSpare := max(min(2, spare), demand["privileged"])
+	// Legacy standard sandboxes keep a small compatible reserve. All new
+	// claims use privileged, so the main ready buffer belongs to that class.
+	standardSpare := max(min(2, spare), demand["standard"])
+	privilegedSpare := max(max(0, spare-2), demand["privileged"])
 	target := min(maximum, max(8, len(occupied)+standardSpare+privilegedSpare))
 	counts := map[string]int{}
 	wanted := map[string]int{}

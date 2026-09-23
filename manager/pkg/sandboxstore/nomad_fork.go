@@ -487,7 +487,7 @@ func nomadForkTargetDerivedFromSource(source, target *SandboxRecord) bool {
 		source.OwnerKind != target.OwnerKind ||
 		source.ResourceMillicpu != target.ResourceMillicpu ||
 		source.ResourceMemoryMiB != target.ResourceMemoryMiB ||
-		!reflect.DeepEqual(source.TemplateSpec, target.TemplateSpec) {
+		!nomadForkTemplateSpecDerivedFromSource(source, target) {
 		return false
 	}
 	sourceConfig := source.Config
@@ -495,6 +495,15 @@ func nomadForkTargetDerivedFromSource(source, target *SandboxRecord) bool {
 	sourceConfig.TTL, sourceConfig.HardTTL = nil, nil
 	targetConfig.TTL, targetConfig.HardTTL = nil, nil
 	return reflect.DeepEqual(sourceConfig, targetConfig)
+}
+
+func nomadForkTemplateSpecDerivedFromSource(source, target *SandboxRecord) bool {
+	if reflect.DeepEqual(source.TemplateSpec, target.TemplateSpec) {
+		return true // Existing pre-cutover fork retries retain their stored class.
+	}
+	upgraded := *source.TemplateSpec.DeepCopy()
+	upgraded.MainContainer.SecurityClass = "privileged"
+	return reflect.DeepEqual(upgraded, target.TemplateSpec)
 }
 
 func lockNomadRunningForkLiveWriter(

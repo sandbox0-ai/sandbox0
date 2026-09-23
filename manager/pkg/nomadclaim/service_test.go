@@ -975,7 +975,8 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 	}
 	planned := fixture.planner.requests[0]
 	if planned.OperationID != "operation-1" || planned.SandboxID != expectedID ||
-		planned.CompatibilityDigest != fixture.runtimeClass.CompatibilityDigest ||
+		planned.CompatibilityDigest != fixture.privilegedClass.CompatibilityDigest ||
+		planned.Runtime.SecurityClass != "privileged" ||
 		!planned.StartedAt.Equal(startedAt) {
 		t.Fatalf("planner request = %+v", planned)
 	}
@@ -996,7 +997,8 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 		t.Fatalf("initial RootFS calls = %+v", fixture.store.ensureCalls)
 	}
 	record := fixture.store.records[expectedID]
-	if record == nil || record.RuntimeID != "allocation-1" || record.RuntimeNamespace != "default" ||
+	if record == nil || record.TemplateSpec.MainContainer.SecurityClass != "privileged" ||
+		record.RuntimeID != "allocation-1" || record.RuntimeNamespace != "default" ||
 		record.RuntimeGeneration != 1 || record.ExpiresAt.Sub(fixture.now) != time.Hour {
 		t.Fatalf("persisted sandbox = %+v", record)
 	}
@@ -1009,6 +1011,34 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 		fixture.planner.requests[1].OperationID != fixture.planner.requests[0].OperationID {
 		t.Fatalf("retry response=%+v requests=%+v", retried, fixture.planner.requests)
 	}
+}
+
+func TestPreCutoverStandardClaimRetryKeepsStoredClass(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	request := &service.ClaimRequest{TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "legacy-retry"}
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), request)
+	require.NoError(t, err)
+	fixture.store.records[claimed.SandboxID].TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+
+	_, err = fixture.service.ClaimSandbox(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, fixture.planner.requests, 2)
+	require.Equal(t, fixture.standardClass.CompatibilityDigest, fixture.planner.requests[1].CompatibilityDigest)
+	require.Equal(t, "standard", fixture.planner.requests[1].Runtime.SecurityClass)
+}
+
+func TestPreCutoverStandardSandboxResumesWithStoredClass(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.store.records[sandboxID].TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+	fixture.store.resumeCandidate.Record.TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+
+	response, err := fixture.service.ResumeSandboxAndWait(t.Context(), sandboxID)
+	require.NoError(t, err)
+	require.True(t, response.Resumed)
+	require.Len(t, fixture.planner.requests, 1)
+	require.Equal(t, fixture.standardClass.CompatibilityDigest, fixture.planner.requests[0].CompatibilityDigest)
+	require.Equal(t, "standard", fixture.planner.requests[0].Runtime.SecurityClass)
 }
 
 func TestServiceClaimsAndResumesWithExternalCredentialBindings(t *testing.T) {
@@ -2945,18 +2975,20 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 }
 
 type claimServiceFixture struct {
-	config        Config
-	service       *Service
-	store         *fakeClaimStore
-	planner       *fakePlanner
-	allocation    *fakeAllocationStopper
-	plannedRetire *fakePlannedRetireController
-	runningFork   *fakeRunningForkController
-	pausedRebase  *fakePausedRebaseController
-	quotaLimits   *fakeQuotaLimitStore
-	runtimeClass  RuntimeClass
-	now           time.Time
-	pauseOrder    *[]string
+	config          Config
+	service         *Service
+	store           *fakeClaimStore
+	planner         *fakePlanner
+	allocation      *fakeAllocationStopper
+	plannedRetire   *fakePlannedRetireController
+	runningFork     *fakeRunningForkController
+	pausedRebase    *fakePausedRebaseController
+	quotaLimits     *fakeQuotaLimitStore
+	runtimeClass    RuntimeClass
+	privilegedClass RuntimeClass
+	standardClass   RuntimeClass
+	now             time.Time
+	pauseOrder      *[]string
 }
 
 type fakePlannedRetireController struct {
@@ -3108,6 +3140,18 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		ArtifactPlatform: sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		Compatibility:    compatibility, CompatibilityDigest: compatibilityDigest,
 	}
+	privilegedCompatibility := compatibility
+	privilegedCompatibility.SecurityClass = "privileged"
+	privilegedDigest, err := privilegedCompatibility.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	privilegedClass := runtimeClass
+	privilegedClass.Name = "privileged"
+	privilegedClass.Compatibility = privilegedCompatibility
+	privilegedClass.CompatibilityDigest = privilegedDigest
+	standardClass := runtimeClass
+	runtimeClass = privilegedClass
 	store := &fakeClaimStore{
 		records: make(map[string]*sandboxstore.SandboxRecord), operations: make(map[string]string),
 		claimPhases: make(map[string]string),
@@ -3132,7 +3176,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimConfig := Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
-		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{runtimeClass}}, Planner: planner, Allocation: allocation,
+		RuntimeClasses: &RuntimeClassCatalog{classes: []RuntimeClass{standardClass, privilegedClass}}, Planner: planner, Allocation: allocation,
 		PlannedRetire:          plannedRetire,
 		RunningFork:            runningFork,
 		PausedRebase:           pausedRebase,
@@ -3154,7 +3198,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		service: claimService, store: store, planner: planner, allocation: allocation,
 		plannedRetire: plannedRetire, runningFork: runningFork,
 		pausedRebase: pausedRebase,
-		quotaLimits:  quotaLimits, runtimeClass: runtimeClass, now: now, pauseOrder: pauseOrder,
+		quotaLimits:  quotaLimits, runtimeClass: runtimeClass, privilegedClass: privilegedClass, standardClass: standardClass, now: now, pauseOrder: pauseOrder,
 	}
 }
 

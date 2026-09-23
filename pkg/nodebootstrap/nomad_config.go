@@ -84,6 +84,8 @@ client {
     sandbox0_dedicated = "true"
     sandbox0_runtime   = "gvisor"
     sandbox0_admitted  = %[7]q
+    sandbox0_standard_carriers   = %[11]q
+    sandbox0_privileged_carriers = %[12]q
   }
 
   reserved {
@@ -94,6 +96,7 @@ client {
 }
 `, datacenter, nodeName, address.String()+":4646", address.String()+":4647",
 		address.String()+":4648", strings.Join(servers, ", "), strconv.FormatBool(admitted),
-		config.ReservedCPUMHz, config.ReservedMemoryMB, config.ReservedDiskMB)
+		config.ReservedCPUMHz, config.ReservedMemoryMB, config.ReservedDiskMB,
+		strconv.Itoa(config.StandardCarriers), strconv.Itoa(config.PrivilegedCarriers))
 	return []byte(payload), nil
 }

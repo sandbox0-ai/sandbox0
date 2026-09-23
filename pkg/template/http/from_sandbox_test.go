@@ -45,6 +45,16 @@ type fromSandboxSourceResolver struct {
 	resolve func(context.Context, string, string) (*template.SandboxTemplateSource, error)
 }
 
+func TestTemplateFromLegacySandboxUsesPrivilegedClass(t *testing.T) {
+	source := validTemplateSpec()
+	source.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+	target := templateSpecFromSandboxSource(source, nil)
+	if target.MainContainer.SecurityClass != v1alpha1.SandboxSecurityClassPrivileged ||
+		source.MainContainer.SecurityClass != v1alpha1.SandboxSecurityClassStandard {
+		t.Fatalf("source class=%q target class=%q", source.MainContainer.SecurityClass, target.MainContainer.SecurityClass)
+	}
+}
+
 func (r *fromSandboxSourceResolver) ResolveSandboxTemplateSource(ctx context.Context, sandboxID, teamID string) (*template.SandboxTemplateSource, error) {
 	r.calls++
 	if r.resolve == nil {

@@ -938,6 +938,10 @@ func mapNomadSandboxPauseError(sandboxID string, err error) error {
 // ClaimSandbox prepares a durable block-COW filesystem and returns only after
 // authenticated procd command readiness has been committed regionally.
 func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimRequest) (*service.ClaimResponse, error) {
+	return s.claimSandbox(ctx, request, nil)
+}
+
+func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimRequest, legacy *sandboxstore.SandboxRecord) (*service.ClaimResponse, error) {
 	if request == nil {
 		return nil, fmt.Errorf("%w: claim request is required", service.ErrInvalidClaimRequest)
 	}
@@ -973,6 +977,16 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if !tpl.ReadyForClaim() {
 		return nil, templatepkg.ErrTemplateNotReady
 	}
+	// A template may predate the privileged-only policy. New sandboxes receive
+	// the privileged class while an exact retry keeps its original stored spec.
+	copyTemplate := *tpl
+	copyTemplate.Spec = *tpl.Spec.DeepCopy()
+	if legacy == nil {
+		copyTemplate.Spec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassPrivileged
+	} else {
+		copyTemplate.Spec = *legacy.TemplateSpec.DeepCopy()
+	}
+	tpl = &copyTemplate
 	quota, err := s.effectiveResources(tpl.Spec, req.Config)
 	if err != nil {
 		return nil, err
@@ -1029,6 +1043,23 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, runtimeClass, resourceRequest, now)
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
+		if legacy == nil && errors.Is(err, service.ErrClaimConflict) {
+			// A pre-cutover claim may be retried after its template was upgraded.
+			// The fallback is outside the new-claim hot path and the store still
+			// verifies the exact operation before any physical claim.
+			existing, loadErr := s.store.GetSandbox(ctx, sandboxID)
+			if loadErr != nil {
+				return nil, fmt.Errorf("load legacy sandbox claim: %w", loadErr)
+			}
+			if existing != nil && existing.TeamID == req.TeamID && existing.UserID == req.UserID &&
+				existing.TemplateID == req.Template && existing.RuntimeGeneration == 1 &&
+				existing.DesiredState == sandboxstore.SandboxDesiredStateActive && existing.DeletedAt.IsZero() {
+				class, valid := v1alpha1.EffectiveSandboxSecurityClass(existing.TemplateSpec.MainContainer.SecurityClass)
+				if valid && class == v1alpha1.SandboxSecurityClassStandard {
+					return s.claimSandbox(ctx, request, existing)
+				}
+			}
+		}
 		return nil, err
 	}
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {

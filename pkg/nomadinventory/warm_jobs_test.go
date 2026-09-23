@@ -12,7 +12,7 @@ func TestWarmJobFamilyRejectsUnrelatedAndNoncanonicalNames(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, IsWarmJob("warm", id))
 	}
-	for _, candidate := range []string{"", "other", "warm-other", "warm-shard-00", "warm-shard-1", "warm-shard-001", "warm-shard-18", "warm-shard-01-extra"} {
+	for _, candidate := range []string{"", "other", "warm-other", "warm-shard-00", "warm-shard-1", "warm-shard-001", "warm-shard-24", "warm-shard-01-extra"} {
 		require.False(t, IsWarmJob("warm", candidate), candidate)
 	}
 	for _, base := range []string{"", " warm", "warm "} {

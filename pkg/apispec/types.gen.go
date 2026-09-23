@@ -849,11 +849,11 @@ type ContainerSpec struct {
 	Image     string        `json:"image"`
 	Resources ResourceQuota `json:"resources"`
 
-	// SecurityClass Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
+	// SecurityClass New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
 	SecurityClass *ContainerSpecSecurityClass `json:"securityClass,omitempty"`
 }
 
-// ContainerSpecSecurityClass Immutable gVisor guest privilege class. Privileged capabilities remain confined by runsc and do not expose host devices.
+// ContainerSpecSecurityClass New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
 type ContainerSpecSecurityClass string
 
 // ContextExecResponse defines model for ContextExecResponse.

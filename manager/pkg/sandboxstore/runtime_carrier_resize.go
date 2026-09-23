@@ -63,7 +63,8 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
         WITH live AS (SELECT DISTINCT ON (c.node_id) c.* FROM manager.runtime_node_capacities c
             LEFT JOIN manager.runtime_carrier_resizes r USING(cluster_id,node_id)
             WHERE c.cluster_id=$1 AND (c.heartbeat_expires_at>NOW() OR r.pending OR
-                (cardinality(r.allowed_groups)>2 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
+                (cardinality(r.allowed_groups)>CASE WHEN r.allowed_groups @> ARRAY['warm-0','warm-1','warm-2','warm-3','warm-4','warm-5','warm-6','warm-7']::text[] THEN 8 ELSE 2 END
+                 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
                     WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked')))
             ORDER BY c.node_id,(c.heartbeat_expires_at>NOW()) DESC,c.updated_at DESC)
         SELECT c.cluster_id,c.node_id,c.node_uid,c.node_boot_id,c.cpu_millicores,c.memory_bytes,
@@ -90,7 +91,8 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
                     AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=s.slot_id)
                     AND s.heartbeat_expires_at>NOW() GROUP BY compatibility_digest) ready),'{}'::jsonb)
         FROM live c LEFT JOIN manager.runtime_carrier_resizes r USING(cluster_id,node_id)
-        WHERE r.pending OR (cardinality(r.allowed_groups)>2 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
+        WHERE r.pending OR (cardinality(r.allowed_groups)>CASE WHEN r.allowed_groups @> ARRAY['warm-0','warm-1','warm-2','warm-3','warm-4','warm-5','warm-6','warm-7']::text[] THEN 8 ELSE 2 END
+            AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
             WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked'))
         OR (c.heartbeat_expires_at>NOW() AND NOT EXISTS (SELECT 1 FROM manager.runtime_node_fences f
             WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid

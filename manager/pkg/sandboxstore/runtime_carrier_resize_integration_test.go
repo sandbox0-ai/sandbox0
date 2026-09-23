@@ -57,7 +57,7 @@ func TestPrivilegedOnlyCarrierResizeRetiresToTwoAnchorsIntegration(t *testing.T)
 	require.Len(t, nodes, 1, "a revoked node with a privileged surplus still needs reconciliation")
 	require.True(t, nodes[0].Retiring)
 	revision, err = s.BeginRuntimeCarrierResize(t.Context(), nodes[0], 128,
-		[]string{"warm-6", "warm-7"}, nil)
+		[]string{"warm-6", "warm-7"}, []string{})
 	require.NoError(t, err)
 	require.Greater(t, revision, n.Revision)
 	n.Revision = revision
@@ -67,7 +67,7 @@ func TestPrivilegedOnlyCarrierResizeRetiresToTwoAnchorsIntegration(t *testing.T)
 	require.Empty(t, nodes)
 
 	_, err = s.BeginRuntimeCarrierResize(t.Context(), n, 128,
-		[]string{"warm-0", "warm-6", "warm-7"}, nil)
+		[]string{"warm-0", "warm-6", "warm-7"}, []string{})
 	require.ErrorIs(t, err, ErrRuntimeSlotInvalid, "partial historical anchors cannot be published")
 }
 

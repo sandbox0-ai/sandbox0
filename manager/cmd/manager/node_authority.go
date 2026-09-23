@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -77,10 +78,28 @@ func logManagerRuntimeSlotTerminalPass(logger *zap.Logger, report runtimeslotrec
 		zap.Duration("duration", report.Duration),
 	}
 	if report.Error != nil {
-		logger.Warn("Runtime slot terminal reconcile pass failed", append(fields, zap.Error(report.Error))...)
+		// A batch may join hundreds of slot errors. Journald can drop an
+		// oversized JSON line, hiding the failure and its retry count.
+		logger.Warn("Runtime slot terminal reconcile pass failed", append(fields,
+			zap.String("first_error", terminalErrorSummary(report.Error)))...)
 		return
 	}
 	if report.Result.Completed > 0 || report.Result.Skipped > 0 || report.Result.RefillRequested > 0 || report.Result.MigrationReservationsReleased > 0 {
 		logger.Info("Runtime slot terminal reconcile pass completed", fields...)
 	}
+}
+
+var terminalSensitiveValue = regexp.MustCompile(`(?i)(Bearer[[:space:]]+|(?:authorization|password|secret|token)[=:][[:space:]]*)[^ ,;]+`)
+
+func terminalErrorSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+	first := strings.SplitN(err.Error(), "\n", 2)[0]
+	first = terminalSensitiveValue.ReplaceAllString(first, "[REDACTED]")
+	runes := []rune(first)
+	if len(runes) > 512 {
+		first = string(runes[:512])
+	}
+	return first
 }

@@ -483,7 +483,7 @@ func TestStartTaskRegistrationFailureCleansLocalSlot(t *testing.T) {
 	if _, statErr := os.Stat(socketPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("control socket still exists after failed registration: %v", statErr)
 	}
-	bundleDir := filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
+	bundleDir := driverBundleDir(fixture.task)
 	if _, statErr := os.Stat(bundleDir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("bundle still exists after failed registration: %v", statErr)
 	}
@@ -1240,7 +1240,7 @@ func TestRecoverTaskRegistrationFailureDoesNotDestroyActiveRuntime(t *testing.T)
 	fixture := newRuntimeSlotPluginFixture(t)
 	fixture.runner.setState("running")
 	fixture.authority.registerErr = fmtErrorUnavailable("regional outage")
-	bundleDir := filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
+	bundleDir := driverBundleDir(fixture.task)
 	rootMount := filepath.Join(bundleDir, "rootfs")
 	if err := os.MkdirAll(rootMount, 0o755); err != nil {
 		t.Fatalf("create recovered root mount: %v", err)

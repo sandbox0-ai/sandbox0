@@ -41,7 +41,7 @@ import (
 const (
 	PluginName                   = "sandbox0-gvisor"
 	PluginVersion                = "0.4.0"
-	taskHandleVersion            = 2
+	taskHandleVersion            = 3
 	fingerprintPeriod            = 30 * time.Second
 	defaultRunscOperationTimeout = 30 * time.Second
 	maxRunscOperationTimeout     = 2 * time.Minute
@@ -423,8 +423,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		return nil, nil, err
 	}
 
-	taskDir := config.TaskDir().Dir
-	bundleDir := filepath.Join(taskDir, "gvisor-bundle")
+	bundleDir := driverBundleDir(config)
 	containerID := safeContainerID(config.ID)
 	rootMount := filepath.Join(bundleDir, "rootfs")
 	socketPath := controlSocketPath(p.config.ControlDir, config.ID)
@@ -674,6 +673,13 @@ func (p *Plugin) emit(taskID, message string) {
 
 func safeContainerID(taskID string) string {
 	return protocol.NomadRunscContainerID(taskID)
+}
+
+// driverBundleDir lives beside Nomad's allocation root. Nomad ignores
+// DestroyTask failures and removes allocation directories during GC, so a
+// mounted task root inside an allocation can be lost before ctld retries it.
+func driverBundleDir(config *drivers.TaskConfig) string {
+	return filepath.Join(filepath.Dir(config.AllocDir), "sandbox0-bundles", safeContainerID(config.ID))
 }
 
 func controlSocketPath(controlDir, taskID string) string {

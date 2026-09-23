@@ -36,14 +36,21 @@ func (System) Bind(source, target string) error {
 		return fmt.Errorf("bind %s to %s: %w", source, target, err)
 	}
 	if err := unix.Mount("", target, "none", unix.MS_PRIVATE, ""); err != nil {
-		_ = unix.Unmount(target, unix.MNT_DETACH)
+		unmountErr := NormalizeUnmountError(target, unix.Unmount(target, 0))
+		if unmountErr != nil {
+			return errors.Join(fmt.Errorf("make %s private: %w", target, err),
+				fmt.Errorf("undo bind at %s: %w", target, unmountErr))
+		}
 		return fmt.Errorf("make %s private: %w", target, err)
 	}
 	return nil
 }
 
 func (System) Unmount(target string) error {
-	if err := NormalizeUnmountError(target, unix.Unmount(target, unix.MNT_DETACH)); err != nil {
+	// A lazy detach can hide a busy task root while its XFS superblock still
+	// owns the NBD device. Keep the mount visible and retryable until the
+	// kernel confirms that no consumer holds it.
+	if err := NormalizeUnmountError(target, unix.Unmount(target, 0)); err != nil {
 		return fmt.Errorf("unmount %s: %w", target, err)
 	}
 	return nil

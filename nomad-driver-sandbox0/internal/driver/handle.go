@@ -809,23 +809,7 @@ func (h *taskHandle) executeClaim(
 	err = h.persist()
 	timings.activeStatePersist = time.Since(stepStarted)
 	if err != nil {
-		if request.MigrationRestore != nil {
-			return h.failMigrationRestore(fmt.Errorf("persist restored state: %w", err))
-		}
-		_ = h.runner.Kill(context.Background(), h.containerID, "KILL")
-		_ = h.mounter.Unmount(h.rootMount)
-		_ = h.runner.Delete(context.Background(), h.containerID, true)
-		h.mu.Lock()
-		h.rootMounted = false
-		h.phase = phasePoisoned
-		h.exitResult = &drivers.ExitResult{Err: fmt.Errorf("persist active state: %w", err)}
-		if h.completedAt.IsZero() {
-			h.completedAt = time.Now()
-		}
-		closeDoneLocked(h.done)
-		h.mu.Unlock()
-		_ = h.persist()
-		return fmt.Errorf("persist active state: %w", err)
+		return h.poisonClaimLaunch(fmt.Errorf("persist active state: %w", err), true)
 	}
 	h.startExitWatch()
 	return nil
@@ -940,14 +924,26 @@ func (h *taskHandle) retryWriterLeaseFence() {
 
 func (h *taskHandle) rollbackClaim() error {
 	h.stopConsumerRenewal()
-	_ = h.mounter.Unmount(h.rootMount)
+	unmountErr := h.mounter.Unmount(h.rootMount)
 	h.mu.Lock()
-	h.rootMounted = false
-	h.phase = phaseWarm
-	h.claim = nil
-	h.stage = nil
+	if unmountErr == nil {
+		h.rootMounted = false
+		h.phase = phaseWarm
+		h.claim = nil
+		h.stage = nil
+	} else {
+		// A busy task root still owns its backing filesystem. Preserve the
+		// claim identity so recovery can retry its physical cleanup.
+		h.rootMounted = true
+		h.phase = phasePoisoned
+		h.exitResult = &drivers.ExitResult{Err: unmountErr}
+		if h.completedAt.IsZero() {
+			h.completedAt = time.Now()
+		}
+		closeDoneLocked(h.done)
+	}
 	h.mu.Unlock()
-	return h.persist()
+	return errors.Join(unmountErr, h.persist())
 }
 
 func (h *taskHandle) failClaimBeforeLaunch(cause error, writerConsumed bool) error {
@@ -970,16 +966,19 @@ func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error 
 		return h.failMigrationRestore(cause)
 	}
 	h.stopConsumerRenewal()
-	unmountErr := h.mounter.Unmount(h.rootMount)
 	var deleteErr error
 	if deleteContainer {
 		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		deleteErr = h.runner.Delete(deleteCtx, h.containerID, true)
 		deleteCancel()
 	}
+	var unmountErr error
+	if deleteErr == nil || errdefs.IsNotFound(deleteErr) {
+		unmountErr = h.mounter.Unmount(h.rootMount)
+	}
 	result := errors.Join(cause, unmountErr, deleteErr)
 	h.mu.Lock()
-	h.rootMounted = unmountErr != nil
+	h.rootMounted = deleteErr != nil && !errdefs.IsNotFound(deleteErr) || unmountErr != nil
 	h.phase = phasePoisoned
 	h.exitResult = &drivers.ExitResult{Err: result}
 	if h.completedAt.IsZero() {
@@ -1166,7 +1165,8 @@ func (h *taskHandle) Signal(signal string) error {
 	return h.runner.Kill(context.Background(), h.containerID, signal)
 }
 
-// Close unmounts D, deletes runsc state, and removes the private bundle.
+// Close deletes runsc, unmounts its task root, and removes the private bundle.
+// Each step retains the next retry target until the previous step succeeds.
 func (h *taskHandle) Close(force bool) error {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
@@ -1205,12 +1205,22 @@ func (h *taskHandle) Close(force bool) error {
 		if force {
 			_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 		}
-		firstErr = h.runner.Delete(cleanupCtx, h.containerID, true)
-		if rootMounted {
+		deleteErr := h.runner.Delete(cleanupCtx, h.containerID, true)
+		if deleteErr != nil && !errdefs.IsNotFound(deleteErr) {
+			firstErr = deleteErr
+		} else if rootMounted {
 			if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
+	}
+	if firstErr != nil {
+		// The task root is inside the private bundle. Removing the bundle
+		// while it is mounted can delete guest files and lose our retry path.
+		h.mu.Lock()
+		h.closed = false
+		h.mu.Unlock()
+		return firstErr
 	}
 	// The regional reconciler is the sole terminal writer owner. The plugin
 	// removes only its task-facing bind and leaves the durable RootFS session

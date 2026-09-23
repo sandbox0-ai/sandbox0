@@ -66,6 +66,28 @@ func TestDestroyTaskRetainsHandleUntilCleanupSucceeds(t *testing.T) {
 	}
 }
 
+func TestDriverBundleSurvivesNomadAllocationGC(t *testing.T) {
+	root := t.TempDir()
+	config := &drivers.TaskConfig{ID: "slot-1", AllocDir: filepath.Join(root, "alloc", "allocation-1")}
+	bundle := driverBundleDir(config)
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.AllocDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(bundle, "cleanup-state")
+	if err := os.WriteFile(marker, []byte("retry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(config.AllocDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("Nomad allocation GC removed the driver cleanup target: %v", err)
+	}
+}
+
 func TestSetConfigRejectsNilConfig(t *testing.T) {
 	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return newFakeRunsc() }).(*Plugin)
 	if err := plugin.SetConfig(nil); err == nil {

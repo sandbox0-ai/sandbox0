@@ -6,8 +6,8 @@ variable "datacenter" {
 
 variable "standard_slots" {
   type        = number
-  description = "Single-use standard carriers per admitted node; size NBD, IP, and host resources consistently"
-  default     = 6
+  description = "Retired carrier class; keep zero for production deployments"
+  default     = 0
   validation {
     condition     = var.standard_slots >= 0 && var.standard_slots <= 512 && floor(var.standard_slots) == var.standard_slots
     error_message = "Standard slots must be an integer from 0 through 512."
@@ -17,7 +17,7 @@ variable "standard_slots" {
 variable "privileged_slots" {
   type        = number
   description = "Single-use guest-confined privileged carriers per admitted node"
-  default     = 2
+  default     = 256
   validation {
     condition     = var.privileged_slots >= 0 && var.privileged_slots <= 256 && floor(var.privileged_slots) == var.privileged_slots
     error_message = "Privileged slots must be an integer from 0 through 256."
@@ -64,9 +64,8 @@ job "sandbox0-warm-slots" {
     value     = "true"
   }
 
-  # Carrier identities remain stable when counts change. The default retains
-  # warm-0..5 as standard and warm-6..7 as privileged; added standard carriers
-  # start at warm-8. Nomad embeds the entire job in every allocation, so each
+  # Carrier identities remain stable when counts change. The default uses only
+  # privileged carriers. Nomad embeds the entire job in every allocation, so each
   # shard has at most 32 groups. Keep a carrier's shard independent of the
   # requested pool size. Scale only after validating memory, NBD and IP capacity.
   dynamic "group" {
@@ -77,7 +76,7 @@ job "sandbox0-warm-slots" {
     labels = [group.key]
     content {
       # Additional carriers require an explicit per-node density profile.
-      # Expanding the job therefore leaves unconfigured existing nodes at 6/2.
+      # Expanding the job leaves existing nodes capped by their metadata.
       dynamic "constraint" {
         for_each = group.value.index >= (group.value.security_class == "standard" ? 6 : 2) ? [1] : []
         content {

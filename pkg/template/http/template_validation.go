@@ -68,7 +68,7 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 		return err
 	}
 	if _, ok := v1alpha1.EffectiveSandboxSecurityClass(spec.MainContainer.SecurityClass); !ok {
-		return fmt.Errorf("spec.mainContainer.securityClass must be one of: standard, privileged")
+		return fmt.Errorf("spec.mainContainer.securityClass must be privileged")
 	}
 	if _, err := s0template.ResolveEphemeralMounts(spec); err != nil {
 		return err

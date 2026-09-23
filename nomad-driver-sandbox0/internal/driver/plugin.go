@@ -118,7 +118,7 @@ var (
 		"args": hclspec.NewAttr("args", "list(string)", false),
 		"security_class": hclspec.NewDefault(
 			hclspec.NewAttr("security_class", "string", false),
-			hclspec.NewLiteral(`"standard"`),
+			hclspec.NewLiteral(`"privileged"`),
 		),
 	})
 
@@ -593,7 +593,7 @@ func normalizeRuntimeSlotTaskConfig(config *PluginConfig, task *TaskConfig) erro
 		task.Command = "/procd"
 	}
 	if task.SecurityClass == "" {
-		task.SecurityClass = string(sandboxspec.SandboxSecurityClassStandard)
+		task.SecurityClass = string(sandboxspec.SandboxSecurityClassPrivileged)
 	}
 	if !filepath.IsAbs(task.Command) {
 		return errors.New("task command must be absolute")

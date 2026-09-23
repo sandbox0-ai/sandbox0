@@ -1013,32 +1013,27 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 	}
 }
 
-func TestPreCutoverStandardClaimRetryKeepsStoredClass(t *testing.T) {
+func TestStandardClaimRetryIsRejected(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	request := &service.ClaimRequest{TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "legacy-retry"}
 	claimed, err := fixture.service.ClaimSandbox(t.Context(), request)
 	require.NoError(t, err)
-	fixture.store.records[claimed.SandboxID].TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+	fixture.store.records[claimed.SandboxID].TemplateSpec.MainContainer.SecurityClass = "standard"
 
 	_, err = fixture.service.ClaimSandbox(t.Context(), request)
-	require.NoError(t, err)
-	require.Len(t, fixture.planner.requests, 2)
-	require.Equal(t, fixture.standardClass.CompatibilityDigest, fixture.planner.requests[1].CompatibilityDigest)
-	require.Equal(t, "standard", fixture.planner.requests[1].Runtime.SecurityClass)
+	require.Error(t, err)
+	require.Len(t, fixture.planner.requests, 1)
 }
 
-func TestPreCutoverStandardSandboxResumesWithStoredClass(t *testing.T) {
+func TestStandardSandboxResumeIsRejected(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	sandboxID := preparePausedNomadResume(t, fixture)
-	fixture.store.records[sandboxID].TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
-	fixture.store.resumeCandidate.Record.TemplateSpec.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassStandard
+	fixture.store.records[sandboxID].TemplateSpec.MainContainer.SecurityClass = "standard"
+	fixture.store.resumeCandidate.Record.TemplateSpec.MainContainer.SecurityClass = "standard"
 
-	response, err := fixture.service.ResumeSandboxAndWait(t.Context(), sandboxID)
-	require.NoError(t, err)
-	require.True(t, response.Resumed)
-	require.Len(t, fixture.planner.requests, 1)
-	require.Equal(t, fixture.standardClass.CompatibilityDigest, fixture.planner.requests[0].CompatibilityDigest)
-	require.Equal(t, "standard", fixture.planner.requests[0].Runtime.SecurityClass)
+	_, err := fixture.service.ResumeSandboxAndWait(t.Context(), sandboxID)
+	require.Error(t, err)
+	require.Empty(t, fixture.planner.requests)
 }
 
 func TestServiceClaimsAndResumesWithExternalCredentialBindings(t *testing.T) {

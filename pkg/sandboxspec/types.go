@@ -10,7 +10,6 @@ const DefaultSandboxEphemeralStorage = "8Gi"
 type SandboxSecurityClass string
 
 const (
-	SandboxSecurityClassStandard   SandboxSecurityClass = "standard"
 	SandboxSecurityClassPrivileged SandboxSecurityClass = "privileged"
 )
 
@@ -43,13 +42,10 @@ type EphemeralMountSpec struct {
 	SizeLimit string `json:"sizeLimit"`
 }
 
-// EffectiveSandboxSecurityClass returns the canonical class and treats the
-// omitted legacy value as standard.
+// EffectiveSandboxSecurityClass returns the single supported guest class.
 func EffectiveSandboxSecurityClass(value SandboxSecurityClass) (SandboxSecurityClass, bool) {
 	switch value {
-	case "", SandboxSecurityClassStandard:
-		return SandboxSecurityClassStandard, true
-	case SandboxSecurityClassPrivileged:
+	case "", SandboxSecurityClassPrivileged:
 		return SandboxSecurityClassPrivileged, true
 	default:
 		return "", false

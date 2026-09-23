@@ -26,7 +26,6 @@ const (
 // Defines values for ContainerSpecSecurityClass.
 const (
 	Privileged ContainerSpecSecurityClass = "privileged"
-	Standard   ContainerSpecSecurityClass = "standard"
 )
 
 // Defines values for CredentialProjectionType.
@@ -849,11 +848,11 @@ type ContainerSpec struct {
 	Image     string        `json:"image"`
 	Resources ResourceQuota `json:"resources"`
 
-	// SecurityClass New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
+	// SecurityClass Sandboxes use privileged capabilities inside the gVisor guest. This does not bypass runsc or expose host devices.
 	SecurityClass *ContainerSpecSecurityClass `json:"securityClass,omitempty"`
 }
 
-// ContainerSpecSecurityClass New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
+// ContainerSpecSecurityClass Sandboxes use privileged capabilities inside the gVisor guest. This does not bypass runsc or expose host devices.
 type ContainerSpecSecurityClass string
 
 // ContextExecResponse defines model for ContextExecResponse.

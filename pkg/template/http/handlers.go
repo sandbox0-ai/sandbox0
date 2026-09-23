@@ -204,13 +204,12 @@ func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpe
 	if err := rejectExplicitTemplateCPU(raw); err != nil {
 		return out, err
 	}
-	// New templates use the single guest-privileged class. Keep the legacy
-	// standard decoder for persisted sandboxes, which resume from their own spec.
+	// New templates use the single guest-privileged class.
 	switch out.MainContainer.SecurityClass {
 	case "", v1alpha1.SandboxSecurityClassPrivileged:
 		out.MainContainer.SecurityClass = v1alpha1.SandboxSecurityClassPrivileged
-	case v1alpha1.SandboxSecurityClassStandard:
-		return out, fmt.Errorf("spec.mainContainer.securityClass standard is only supported for existing sandboxes")
+	case "standard":
+		return out, fmt.Errorf("spec.mainContainer.securityClass must be privileged")
 	}
 	return out, nil
 }

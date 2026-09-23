@@ -8,6 +8,8 @@ The `coding-agent` template installs these pinned third-party packages:
 | `@anthropic-ai/claude-code` | `2.1.257` | See the license distributed with the package and Anthropic's applicable terms |
 | `opencode-ai` | `1.18.25` | MIT |
 | `@earendil-works/pi-coding-agent` | `0.84.4` | MIT |
+| `@moonshot-ai/kimi-code` | `2.1.0` | See the license distributed with the package |
+| `zai-org/ZCode` | `328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f` | Apache-2.0 |
 | `@playwright/cli` | `0.1.19` | Apache-2.0 |
 | `ws` | `8.21.0` | MIT |
 | `ttyd` | `1.7.7` | MIT |

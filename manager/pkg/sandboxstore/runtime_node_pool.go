@@ -85,6 +85,7 @@ type RuntimeNodePoolNodeUsage struct {
 	ProviderReady      bool
 	AdmittedAt         time.Time
 	DrainStartedAt     time.Time
+	DrainReason        string
 }
 
 type RuntimeNodePoolSnapshot struct {
@@ -358,7 +359,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			COALESCE(leases.active_leases, 0), COALESCE(slots.ready_slots, 0),
 			COALESCE(slots.nonterminal_slots, 0), capacity.node_uid IS NOT NULL,
 			instance.provider_ready_at IS NOT NULL,
-			instance.admitted_at, instance.drain_started_at
+			instance.admitted_at, instance.drain_started_at, COALESCE(fence.reason, '')
 		FROM manager.runtime_node_instances AS instance
 		LEFT JOIN live_capacity AS capacity
 			ON capacity.cluster_id = instance.cluster_id
@@ -372,6 +373,10 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			ON slots.cluster_id = instance.cluster_id
 			AND slots.node_id = instance.nomad_node_id
 			AND slots.node_uid = instance.node_uid
+		LEFT JOIN manager.runtime_node_fences AS fence
+			ON fence.cluster_id = instance.cluster_id
+			AND fence.node_id = instance.nomad_node_id
+			AND fence.node_uid = instance.node_uid
 		WHERE instance.pool_id = $1 AND instance.state <> 'revoked'
 		ORDER BY instance.provider_instance_id
 	`, poolID, state.ClusterID)
@@ -431,12 +436,24 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			COUNT(lease.lease_id)::integer,
 			COALESCE(SUM(lease.cpu_millicores) FILTER (
 				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+					AND NOT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations migration
+						JOIN manager.sandbox_lifecycle_txns lifecycle ON lifecycle.txn_id=migration.operation_id
+						WHERE migration.target_slot_id=workload_slot.slot_id
+						AND lifecycle.phase IN ('preparing','barriered','publishing','committing'))
 			), 0)::bigint,
 			COALESCE(SUM(lease.memory_bytes) FILTER (
 				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+					AND NOT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations migration
+						JOIN manager.sandbox_lifecycle_txns lifecycle ON lifecycle.txn_id=migration.operation_id
+						WHERE migration.target_slot_id=workload_slot.slot_id
+						AND lifecycle.phase IN ('preparing','barriered','publishing','committing'))
 			), 0)::bigint,
 			COUNT(lease.lease_id) FILTER (
 				WHERE workload_slot.state IN ('claiming', 'starting', 'active')
+					AND NOT EXISTS (SELECT 1 FROM manager.sandbox_runtime_migrations migration
+						JOIN manager.sandbox_lifecycle_txns lifecycle ON lifecycle.txn_id=migration.operation_id
+						WHERE migration.target_slot_id=workload_slot.slot_id
+						AND lifecycle.phase IN ('preparing','barriered','publishing','committing'))
 			)::integer,
 			(
 				SELECT COUNT(*)::integer
@@ -1585,7 +1602,7 @@ func scanRuntimeNodePoolNodeUsage(row runtimeSlotScanner) (RuntimeNodePoolNodeUs
 		&node.AllocationCIDR, &node.State, &node.CPUMillicores, &node.MemoryBytes,
 		&node.UsedCPUMillicores, &node.UsedMemoryBytes, &node.ActiveLeases,
 		&node.ReadySlots, &node.NonterminalSlots, &node.CapacityLive, &node.ProviderReady,
-		&admittedAt, &drainStartedAt,
+		&admittedAt, &drainStartedAt, &node.DrainReason,
 	); err != nil {
 		return RuntimeNodePoolNodeUsage{}, err
 	}

@@ -127,7 +127,8 @@ live, unfenced node can fit a request that is within the configured fresh-worker
 budget, a placement-progress floor requests one worker beyond the ready elastic
 set. An already-enrolling worker covers that floor, so the same fragmented
 request cannot repeatedly purchase workers while enrollment is in progress.
-This is bounded progress, not optimal bin-packing or live workload migration.
+This is bounded progress, not optimal bin-packing. Optional fixed-node
+consolidation is described below.
 
 The controller uses leased workload CPU/memory and slots, unsatisfied claim
 pressure, and explicit `headroom_*`; it does not use guest CPU utilization as
@@ -153,10 +154,29 @@ cover the provider's current desired count. Historical enrollment records cannot
 block an otherwise fully ready pool forever; their identity and cleanup
 obligations are retained independently. A live in-progress drain blocks another
 scale-in pass.
-Running sandboxes are not migrated to make an aggregate packing calculation
-come true: busy elastic nodes remain protected even after an operator lowers
-the purchase ceiling. Retained historical leases never authorize purchases above
-that ceiling. The lifecycle transaction remains the final authority
+
+With `consolidation_enabled: true`, sustained low demand can fence one lightly
+occupied elastic worker, then use system migration to move each eligible sandbox
+to the fixed worker. The preflight requires every active lease to be a live,
+migratable sandbox and requires matching ready carriers, physical CPU/memory,
+admission budget, and configured headroom on the fixed worker. The migration
+reservation rechecks capacity. Source leases and physical cleanup remain the
+authority for scale-in; ESS desired capacity decreases only after the source
+has no active leases. Other elastic workers are protected while ESS selects the
+drained worker, and a mismatched lifecycle selection is rolled back. A stalled
+drain with live leases reopens after `consolidation_timeout` only when no
+migration or cleanup still owns it. The default is disabled because process
+migration remains experimental and requires compatible node runtimes.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `consolidation_enabled` | `false` | Allow low-demand elastic-to-fixed migration before scale-in |
+| `consolidation_max_sandboxes` | `4` | Bound the number of live sandboxes moved from one source node |
+| `consolidation_timeout` | `30m` | Reopen a stalled, still-busy source after migration custody clears |
+
+Busy elastic nodes remain protected when consolidation is disabled or no fixed
+destination fits, including after an operator lowers the purchase ceiling.
+Retained historical leases never authorize purchases above that ceiling. The lifecycle transaction remains the final authority
 against claim/drain races. A default minimum of zero is cost-oriented, not a
 guarantee of instant capacity for bursts or fixed-node failures. Compute quota
 rejections are distinct from node shortage and must not trigger purchases.

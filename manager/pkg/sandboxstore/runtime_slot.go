@@ -619,13 +619,13 @@ func selectRuntimeSlotResourceLeaseOutsideNode(
 	ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
 	excludedNodeID, excludedNodeUID string,
 ) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
-	return selectRuntimeSlotResourceLeaseExcludingNodes(ctx, tx, request, excludedNodeID, excludedNodeUID, []string{})
+	return selectRuntimeSlotResourceLeaseExcludingNodes(ctx, tx, request, excludedNodeID, excludedNodeUID, []string{}, false)
 }
 
 // Additional migration node exclusions preserve normal claim admission. They
 // prevent automatic moves from queuing onto an occupied exclusive staging pool.
 func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
-	excludedNodeID, excludedNodeUID string, excludedNodes []string) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
+	excludedNodeID, excludedNodeUID string, excludedNodes []string, requireFixedDestination bool) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -637,7 +637,13 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 					AND slot_id <> ALL($6::text[])
 					AND ($7 = '' OR node_id <> $7)
 					AND ($8 = '' OR node_uid <> $8)
-                    AND node_uid <> ALL($9::text[])
+					AND node_uid <> ALL($9::text[])
+					AND (NOT $10::boolean OR NOT EXISTS (
+						SELECT 1 FROM manager.runtime_node_instances elastic
+						WHERE elastic.cluster_id=runtime_slots.cluster_id
+						AND elastic.nomad_node_id=runtime_slots.node_id
+						AND elastic.node_uid=runtime_slots.node_uid
+						AND elastic.pool_kind='elastic' AND elastic.state<>'revoked'))
 					AND NOT EXISTS (SELECT 1 FROM manager.runtime_resource_leases reserved
 						WHERE reserved.slot_id = runtime_slots.slot_id)
 					AND NOT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes AS resize
@@ -684,7 +690,7 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
-			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes))
+			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}

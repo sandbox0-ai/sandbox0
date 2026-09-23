@@ -125,8 +125,9 @@ func (s *PGSandboxStore) reserveNomadSandboxMigration(ctx context.Context, assig
 		return nil, fmt.Errorf("%w: source assignment, resources or writer binding changed", ErrNomadSandboxMigrationConflict)
 	}
 	excludedNodes := []string{}
+	requireFixedDestination := false
 	if evacuation {
-		excludedNodes, err = lockNomadMigrationEvacuation(ctx, tx, source, assignment)
+		excludedNodes, requireFixedDestination, err = lockNomadMigrationEvacuation(ctx, tx, source, assignment)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +144,7 @@ func (s *PGSandboxStore) reserveNomadSandboxMigration(ctx context.Context, assig
 		CompatibilityDigest: source.CompatibilityDigest, ClusterID: source.ClusterID,
 		RuntimeAssignmentRevision: targetRevision, NetworkPolicyDigest: source.ClaimNetworkPolicyDigest,
 		ClaimTTL: DefaultRuntimeSlotClaimTTL, Resources: resources}
-	target, lease, leaseDigest, err := selectRuntimeSlotResourceLeaseExcludingNodes(ctx, tx, request, source.NodeID, source.NodeUID, excludedNodes)
+	target, lease, leaseDigest, err := selectRuntimeSlotResourceLeaseExcludingNodes(ctx, tx, request, source.NodeID, source.NodeUID, excludedNodes, requireFixedDestination)
 	if err != nil {
 		return nil, err
 	}

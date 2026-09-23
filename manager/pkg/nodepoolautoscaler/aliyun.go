@@ -15,6 +15,7 @@ import (
 type essDesiredCapacityClient interface {
 	DescribeScalingGroups(*ess.DescribeScalingGroupsRequest) (*ess.DescribeScalingGroupsResponse, error)
 	ModifyScalingGroup(*ess.ModifyScalingGroupRequest) (*ess.ModifyScalingGroupResponse, error)
+	SetInstancesProtection(*ess.SetInstancesProtectionRequest) (*ess.SetInstancesProtectionResponse, error)
 }
 
 // AliyunESS implements Cloud for one exact ESS scaling group. The SDK default
@@ -85,4 +86,22 @@ func (a *AliyunESS) SetDesiredCapacity(ctx context.Context, desired int) error {
 	request.DisableDesiredCapacity = requests.NewBoolean(false)
 	_, err := a.client.ModifyScalingGroup(request)
 	return err
+}
+
+func (a *AliyunESS) SetInstancesProtection(ctx context.Context, instanceIDs []string, protected bool) error {
+	for start := 0; start < len(instanceIDs); start += 20 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := min(start+20, len(instanceIDs))
+		chunk := append([]string(nil), instanceIDs[start:end]...)
+		request := ess.CreateSetInstancesProtectionRequest()
+		request.ScalingGroupId = a.scalingGroupID
+		request.InstanceId = &chunk
+		request.ProtectedFromScaleIn = requests.NewBoolean(protected)
+		if _, err := a.client.SetInstancesProtection(request); err != nil {
+			return err
+		}
+	}
+	return nil
 }

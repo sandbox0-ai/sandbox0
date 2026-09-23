@@ -109,7 +109,7 @@ func newMigrationHTTPFixtureWithWebhook(t *testing.T, supervisor *session.Superv
 		contextManager = ctxpkg.NewManagerWithSupervisor(supervisor)
 	}
 	controller := runtimecontroller.New(contextManager, supervisor, nil, dispatcher, 49983, zap.NewNop())
-	source := runtimecontrol.Assignment{SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard", Webhook: config}
+	source := runtimecontrol.Assignment{SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "privileged", Webhook: config}
 	if err := controller.Activate(context.Background(), source); err != nil {
 		t.Fatal(err)
 	}

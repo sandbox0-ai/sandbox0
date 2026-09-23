@@ -54,7 +54,7 @@ spec:
 | `image` | Yes | Normalized public or team-scoped private OCI reference pinned as `@sha256:<64 lowercase hex>`. Mutable tags and shorthand names are rejected. |
 | `resources.memory` | Yes | Default sandbox memory, such as `2Gi` or `512Mi`. It must be within the platform limits. |
 | `resources.ephemeralStorage` | No | Immutable RootFS block-device size. The default is `8Gi`; values must be exact bytes, between `300Mi` and `1Ti`, and 4096-byte aligned. |
-| `securityClass` | No | New templates use `privileged` by default; new `standard` templates are rejected. Existing `standard` sandboxes keep their original class across pause and resume. `privileged` grants guest-kernel capabilities inside gVisor but never bypasses runsc or exposes host devices. |
+| `securityClass` | No | The only supported value is `privileged`, which is also the default. Capabilities apply inside the gVisor guest and do not bypass runsc or expose host devices. |
 | `env` | No | Base environment entries with `name` and `value`. |
 
 CPU is platform-derived from memory and is intentionally absent from the

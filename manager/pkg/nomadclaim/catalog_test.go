@@ -30,7 +30,7 @@ func TestLoadRuntimeClassCatalogResolvesWithoutResourceShape(t *testing.T) {
       "command": "/procd",
       "procd_port": 49983,
       "runtime_mode": "static",
-      "security_class": "standard"
+	  "security_class": "privileged"
     }
   }]
 }`
@@ -41,7 +41,7 @@ func TestLoadRuntimeClassCatalogResolvesWithoutResourceShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	class, err := catalog.Resolve("cluster-1", "standard")
+	class, err := catalog.Resolve("cluster-1", "privileged")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,10 +49,10 @@ func TestLoadRuntimeClassCatalogResolvesWithoutResourceShape(t *testing.T) {
 		class.ArtifactPlatform.OS != "linux" || class.ArtifactPlatform.Architecture != "amd64" ||
 		class.Compatibility.Version != protocol.RuntimeCompatibilityVersion ||
 		class.Compatibility.RuntimeMode != runtimecontrol.ControlModeStatic ||
-		class.Compatibility.SecurityClass != "standard" || class.CompatibilityDigest == "" {
+		class.Compatibility.SecurityClass != "privileged" || class.CompatibilityDigest == "" {
 		t.Fatalf("runtime class = %+v", class)
 	}
-	if _, err := catalog.Resolve("cluster-2", "standard"); !errors.Is(err, ErrRuntimeClassUnavailable) {
+	if _, err := catalog.Resolve("cluster-2", "privileged"); !errors.Is(err, ErrRuntimeClassUnavailable) {
 		t.Fatalf("missing cluster error = %v", err)
 	}
 }
@@ -97,10 +97,10 @@ func TestRuntimeClassCatalogRejectsAmbiguousOrLooseInput(t *testing.T) {
 
 func TestRuntimeClassCatalogRejectsImplicitAmbiguousSelection(t *testing.T) {
 	catalog := &RuntimeClassCatalog{classes: []RuntimeClass{
-		{Name: "standard-a", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
-		{Name: "standard-b", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
+		{Name: "privileged-a", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "privileged"}},
+		{Name: "privileged-b", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "privileged"}},
 	}}
-	if _, err := catalog.Resolve("cluster-1", "standard"); !errors.Is(err, ErrRuntimeClassAmbiguous) {
+	if _, err := catalog.Resolve("cluster-1", "privileged"); !errors.Is(err, ErrRuntimeClassAmbiguous) {
 		t.Fatalf("ambiguous class error = %v", err)
 	}
 }
@@ -110,9 +110,8 @@ func TestRuntimeClassCatalogResolvesSecurityClassesIndependently(t *testing.T) {
 		{Name: "standard", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "standard"}},
 		{Name: "privileged", ClusterID: "cluster-1", Compatibility: protocol.RuntimeCompatibility{SecurityClass: "privileged"}},
 	}}
-	standard, err := catalog.Resolve("cluster-1", "standard")
-	if err != nil || standard.Name != "standard" {
-		t.Fatalf("standard = %+v, %v", standard, err)
+	if _, err := catalog.Resolve("cluster-1", "standard"); !errors.Is(err, ErrRuntimeClassUnavailable) {
+		t.Fatalf("retired security class error = %v", err)
 	}
 	privileged, err := catalog.Resolve("cluster-1", "privileged")
 	if err != nil || privileged.Name != "privileged" {

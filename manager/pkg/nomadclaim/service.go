@@ -1097,23 +1097,6 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, runtimeClass, resourceRequest, now)
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
-		if legacy == nil && errors.Is(err, service.ErrClaimConflict) {
-			// A pre-cutover claim may be retried after its template was upgraded.
-			// The fallback is outside the new-claim hot path and the store still
-			// verifies the exact operation before any physical claim.
-			existing, loadErr := s.store.GetSandbox(ctx, sandboxID)
-			if loadErr != nil {
-				return nil, fmt.Errorf("load legacy sandbox claim: %w", loadErr)
-			}
-			if existing != nil && existing.TeamID == req.TeamID && existing.UserID == req.UserID &&
-				existing.TemplateID == req.Template && existing.RuntimeGeneration == 1 &&
-				existing.DesiredState == sandboxstore.SandboxDesiredStateActive && existing.DeletedAt.IsZero() {
-				class, valid := v1alpha1.EffectiveSandboxSecurityClass(existing.TemplateSpec.MainContainer.SecurityClass)
-				if valid && class == v1alpha1.SandboxSecurityClassStandard {
-					return s.claimSandbox(ctx, request, existing)
-				}
-			}
-		}
 		return nil, err
 	}
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {

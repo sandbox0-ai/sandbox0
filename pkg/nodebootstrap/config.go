@@ -108,9 +108,9 @@ func (c *Config) normalize() error {
 		return errors.New("node bootstrap host reservations are below the safe minimum")
 	}
 	if c.StandardCarriers == 0 && c.PrivilegedCarriers == 0 {
-		c.StandardCarriers, c.PrivilegedCarriers = 6, 2
+		c.PrivilegedCarriers = 2
 	}
-	if c.StandardCarriers < 6 || c.StandardCarriers > 512 ||
+	if c.StandardCarriers < 0 || c.StandardCarriers > 512 ||
 		c.PrivilegedCarriers < 2 || c.PrivilegedCarriers > 256 ||
 		c.StandardCarriers+c.PrivilegedCarriers > 576 {
 		return errors.New("node bootstrap carrier ceilings are invalid")

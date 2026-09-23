@@ -164,7 +164,7 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 	require.ErrorContains(t, changed.ValidateRegional(), "runtime assignment")
 	changed = request
 	changed.Runtime = &runtimecontrol.Assignment{
-		SandboxID: "sandbox-1", RuntimeGeneration: 1, SecurityClass: "standard",
+		SandboxID: "sandbox-1", RuntimeGeneration: 1, SecurityClass: "privileged",
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "another-sandbox"},
 	}
 	require.ErrorContains(t, changed.ValidateRegional(), "sandbox environment")
@@ -323,7 +323,7 @@ func testNodeClaimControlRequest() NodeClaimControlRequest {
 		},
 	}
 	runtime := &runtimecontrol.Assignment{
-		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "standard",
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1, SecurityClass: "privileged",
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
 	}
 	revision, err := runtime.Revision()

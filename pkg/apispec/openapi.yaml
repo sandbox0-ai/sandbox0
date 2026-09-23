@@ -7302,9 +7302,9 @@ components:
           $ref: "#/components/schemas/ResourceQuota"
         securityClass:
           type: string
-          enum: [standard, privileged]
+          enum: [privileged]
           default: privileged
-          description: New templates and sandboxes use privileged. Standard remains valid for existing sandbox records and resume. Privileged capabilities remain confined by runsc and do not expose host devices.
+          description: Sandboxes use privileged capabilities inside the gVisor guest. This does not bypass runsc or expose host devices.
       required: [image, resources]
 
     EphemeralMountSpec:

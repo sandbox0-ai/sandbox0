@@ -42,6 +42,19 @@ func baseline(name string) bool {
 	return err == nil && ((class == "standard" && index < 6) || (class == "privileged" && index < 2))
 }
 
+func enrollmentAnchorCount(groups []string) int {
+	anchors := map[string]bool{}
+	for _, group := range groups {
+		anchors[group] = true
+	}
+	for i := 0; i < 6; i++ {
+		if !anchors["warm-"+strconv.Itoa(i)] {
+			return 2
+		}
+	}
+	return 8
+}
+
 // Plan preserves every busy group, even a high ordinal, without retaining all
 // lower ordinals. Baseline carriers remain available for enrollment/recovery.
 // Only spare carriers are bounded by currently unleased CPU and memory.
@@ -75,7 +88,8 @@ func planDemand(catalog, busy []string, spare, maximum int, freeCPU, freeMemory 
 			selected[g] = true
 		}
 	}
-	if len(selected) != 8 {
+	anchors := enrollmentAnchorCount(catalog)
+	if len(selected) != anchors {
 		return nil, fmt.Errorf("carrier enrollment anchors missing")
 	}
 	for _, g := range busy {
@@ -96,9 +110,13 @@ func planDemand(catalog, busy []string, spare, maximum int, freeCPU, freeMemory 
 	}
 	// Legacy standard sandboxes keep a small compatible reserve. All new
 	// claims use privileged, so the main ready buffer belongs to that class.
-	standardSpare := max(min(2, spare), demand["standard"])
-	privilegedSpare := max(max(0, spare-2), demand["privileged"])
-	target := min(maximum, max(8, len(occupied)+standardSpare+privilegedSpare))
+	standardSpare := 0
+	privilegedSpare := max(spare, demand["privileged"])
+	if anchors == 8 {
+		standardSpare = max(min(2, spare), demand["standard"])
+		privilegedSpare = max(max(0, spare-2), demand["privileged"])
+	}
+	target := min(maximum, max(anchors, len(occupied)+standardSpare+privilegedSpare))
 	counts := map[string]int{}
 	wanted := map[string]int{}
 	for g := range selected {

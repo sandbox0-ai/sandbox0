@@ -438,16 +438,10 @@ enrolled runtime profile.
 
 ## NBD And Local Disk
 
-The canonical warm job has configurable `standard_slots` and `privileged_slots`
-bounds, defaulting to 6 and 2. Additional groups are eligible only on nodes with
-matching `sandbox0_standard_carriers` or `sandbox0_privileged_carriers` Nomad
-metadata. Expanding the job leaves unconfigured nodes at their original width.
-Keep the node profile, usable private IPs, and RootFS devices consistent; drain
-affected carriers before reducing either bound.
-When moving new claims to a different security class, keep enough carriers of
-the previous class for existing sandboxes to resume. Reduce that class only
-after its active and paused sandboxes have exited; a template update does not
-change the class of an existing sandbox.
+The canonical warm job provisions privileged carriers. Additional groups are
+eligible only on nodes with matching `sandbox0_privileged_carriers` Nomad
+metadata. Keep the node profile, usable private IPs, and RootFS devices
+consistent; drain affected carriers before reducing the bound.
 
 `nomad_runtime.nbd_devices` is the actual concurrent RootFS attachment bound.
 The kernel's `nbds_max` alone does not make devices available to ctld. Keep the

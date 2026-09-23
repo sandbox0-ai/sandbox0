@@ -55,6 +55,39 @@ func TestFixedAdmissionBudgetIsNotReplacedByElasticWorkerShape(t *testing.T) {
 	require.Empty(t, cloud.sets)
 }
 
+func TestPendingDemandUsesPhysicalCapacityBeyondFixedAdmissionBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		workloadCPU int64
+		demandCPU   int64
+		workloadMem int64
+		demandMem   int64
+		wantElastic int
+	}{
+		{name: "CPU burst", workloadCPU: 12000, demandCPU: 27800, wantElastic: 2},
+		{name: "memory burst", workloadMem: 20 << 30, demandMem: 100 << 30, wantElastic: 2},
+		{name: "admitted workload without new demand", workloadCPU: 20000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cloud := &fakeStore{}, &fakeCloud{}
+			w := testWorker(t, store, cloud)
+			w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots = 0, 0, 0
+			w.config.ElasticSlotsPerNode = 256
+			store.snapshot.ClusterFixedUsableSlots = 32
+			store.snapshot.ClusterFixedCPU, store.snapshot.ClusterFixedMemory = 28000, 128<<30
+			store.snapshot.ClusterFixedPhysicalCPU, store.snapshot.ClusterFixedPhysicalMemory = 14000, 56<<30
+			store.snapshot.ClusterWorkloadCPU, store.snapshot.ClusterWorkloadMemory = tc.workloadCPU, tc.workloadMem
+			store.snapshot.DemandCPUMillicores, store.snapshot.DemandMemoryBytes = tc.demandCPU, tc.demandMem
+			if tc.demandCPU > 0 || tc.demandMem > 0 {
+				store.snapshot.DemandSlots = 1
+			}
+			d, err := w.Reconcile(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantElastic, d.TargetElastic)
+		})
+	}
+}
+
 func TestPlacementProgressFloorRequiresAnUnplaceableRequest(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{}
 	w := testWorker(t, store, cloud)

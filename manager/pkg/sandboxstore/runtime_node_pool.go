@@ -88,27 +88,29 @@ type RuntimeNodePoolNodeUsage struct {
 }
 
 type RuntimeNodePoolSnapshot struct {
-	State                     RuntimeNodePoolState
-	Nodes                     []RuntimeNodePoolNodeUsage
-	LiveCPUMillicores         int64
-	LiveMemoryBytes           int64
-	UsedCPUMillicores         int64
-	UsedMemoryBytes           int64
-	ActiveLeases              int
-	ReadySlots                int
-	DemandCPUMillicores       int64
-	DemandMemoryBytes         int64
-	DemandSlots               int
-	ClusterUsedCPU            int64
-	ClusterUsedMemory         int64
-	ClusterActiveLeases       int
-	ClusterReadySlots         int
-	ClusterFixedUsableSlots   int
-	ClusterFixedAdaptiveSlots int
-	ClusterFixedCPU           int64
-	ClusterFixedMemory        int64
-	PlacementNodes            []RuntimeNodePlacementCapacity
-	DemandShapes              []RuntimeNodePoolDemandShape
+	State                      RuntimeNodePoolState
+	Nodes                      []RuntimeNodePoolNodeUsage
+	LiveCPUMillicores          int64
+	LiveMemoryBytes            int64
+	UsedCPUMillicores          int64
+	UsedMemoryBytes            int64
+	ActiveLeases               int
+	ReadySlots                 int
+	DemandCPUMillicores        int64
+	DemandMemoryBytes          int64
+	DemandSlots                int
+	ClusterUsedCPU             int64
+	ClusterUsedMemory          int64
+	ClusterActiveLeases        int
+	ClusterReadySlots          int
+	ClusterFixedUsableSlots    int
+	ClusterFixedAdaptiveSlots  int
+	ClusterFixedCPU            int64
+	ClusterFixedMemory         int64
+	ClusterFixedPhysicalCPU    int64
+	ClusterFixedPhysicalMemory int64
+	PlacementNodes             []RuntimeNodePlacementCapacity
+	DemandShapes               []RuntimeNodePoolDemandShape
 	// Workload demand excludes retiring slots. Their resource leases remain
 	// fully accounted above and continue to prevent physical node removal.
 	ClusterWorkloadCPU    int64

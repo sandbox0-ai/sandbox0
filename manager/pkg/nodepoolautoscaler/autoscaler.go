@@ -229,6 +229,10 @@ func (w *Worker) confirmScaleOutSnapshot(
 func sameScaleOutInputs(a, b *sandboxstore.RuntimeNodePoolSnapshot) bool {
 	if a.ClusterFixedUsableSlots != b.ClusterFixedUsableSlots ||
 		a.ClusterFixedAdaptiveSlots != b.ClusterFixedAdaptiveSlots ||
+		a.ClusterFixedCPU != b.ClusterFixedCPU ||
+		a.ClusterFixedMemory != b.ClusterFixedMemory ||
+		a.ClusterFixedPhysicalCPU != b.ClusterFixedPhysicalCPU ||
+		a.ClusterFixedPhysicalMemory != b.ClusterFixedPhysicalMemory ||
 		a.ClusterWorkloadCPU != b.ClusterWorkloadCPU ||
 		a.ClusterWorkloadMemory != b.ClusterWorkloadMemory ||
 		a.ClusterWorkloadSlots != b.ClusterWorkloadSlots ||
@@ -485,6 +489,26 @@ func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, in
 		ceilDiv(int64(requiredSlots)-int64(fixedUsableSlots), int64(w.config.ElasticSlotsPerNode)),
 		w.config.FixedNodes-liveFixedNodes,
 	)
+	// Admission budgets may intentionally exceed physical capacity. While new
+	// work is pending, provision enough real capacity for existing leases plus
+	// that work; an overcommitted fixed node must not hide the shortage. Keep
+	// the admission target for steady-state leases without pending demand.
+	if snapshot.DemandCPUMillicores > 0 || snapshot.DemandMemoryBytes > 0 || snapshot.DemandSlots > 0 {
+		physicalFixedCPU, physicalFixedMemory := snapshot.ClusterFixedPhysicalCPU, snapshot.ClusterFixedPhysicalMemory
+		if liveFixedNodes == 0 {
+			physicalFixedCPU, physicalFixedMemory = 0, 0
+		} else {
+			if physicalFixedCPU <= 0 {
+				physicalFixedCPU = fixedCPU
+			}
+			if physicalFixedMemory <= 0 {
+				physicalFixedMemory = fixedMemory
+			}
+		}
+		elastic = max(elastic,
+			ceilDiv(requiredCPU-physicalFixedCPU, w.config.NodeCPUMillicores),
+			ceilDiv(requiredMemory-physicalFixedMemory, w.config.NodeMemoryBytes))
+	}
 	// Live sandboxes cannot be consolidated by pretending their leases can move
 	// to the fixed worker. Lifecycle hooks remain the final race-safe authority.
 	busyElastic, readyElastic := 0, 0

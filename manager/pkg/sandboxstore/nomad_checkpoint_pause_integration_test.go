@@ -58,7 +58,7 @@ func TestNomadMemoryPauseAdmissionRequiresRetainedMemoryForPausedIdempotencyInte
 		f := newNomadPauseStoreFixture(t, "admission-disk-only")
 		terminalizeNomadPauseFixture(t, f)
 		_, err := f.store.RequestNomadSandboxMemoryPause(f.ctx, f.sandboxID)
-		require.ErrorIs(t, err, ErrNomadCheckpointConflict)
+		require.ErrorIs(t, err, ErrNomadCheckpointNotRetained)
 	})
 	t.Run("pending-cleanup", func(t *testing.T) {
 		f, cleanup := checkpointFinalizationStoreFixture(t, "admission-pending")

@@ -22,6 +22,9 @@ type MigrationImagePrepareRequest struct {
 }
 
 func (r MigrationImagePrepareRequest) Validate() error {
+	if r.Publication.CheckpointSource != nil && r.Checkpoint == nil {
+		return fmt.Errorf("checkpoint images require independent restore authorization")
+	}
 	if err := r.Target.validate(true); err != nil {
 		return err
 	}
@@ -40,9 +43,6 @@ func (r MigrationImagePrepareRequest) Validate() error {
 	}
 	if r.Checkpoint != nil {
 		return r.Checkpoint.ValidateFor(r.Publication, r.Receipt)
-	}
-	if r.Publication.CheckpointSource != nil {
-		return fmt.Errorf("checkpoint images require independent restore authorization")
 	}
 	if r.Target.NodeID == source.NodeID || r.Target.NodeUID == source.NodeUID {
 		return fmt.Errorf("migration requires a destination on a different node")

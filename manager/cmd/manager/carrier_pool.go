@@ -31,10 +31,6 @@ func configureCarrierPool(cfg *config.ManagerConfig, store carrierpool.Store) (*
 	if err != nil {
 		return nil, err
 	}
-	standard, err := classes.Resolve(cfg.DefaultClusterId, "standard")
-	if err != nil {
-		return nil, err
-	}
 	privileged, err := classes.Resolve(cfg.DefaultClusterId, "privileged")
 	if err != nil {
 		return nil, err
@@ -43,7 +39,10 @@ func configureCarrierPool(cfg *config.ManagerConfig, store carrierpool.Store) (*
 	for _, v := range c.PrewarmWindows {
 		class := v.SecurityClass
 		if class == "" {
-			class = "standard"
+			class = "privileged"
+		}
+		if class != "privileged" {
+			return nil, fmt.Errorf("prewarm security class must be privileged")
 		}
 		windows = append(windows, carrierpool.PrewarmWindow{Name: v.Name, Start: v.Start, End: v.End, Cron: v.Cron, Duration: v.Duration.Duration, Slots: v.Slots, CPUMillicores: v.CPUMillicores, MemoryBytes: v.MemoryBytes, SecurityClass: class})
 	}
@@ -51,6 +50,6 @@ func configureCarrierPool(cfg *config.ManagerConfig, store carrierpool.Store) (*
 		return nil, fmt.Errorf("planned prewarm requires an enabled node pool autoscaler")
 	}
 	return carrierpool.New(store, nomad, carrierpool.Config{ClusterID: cfg.DefaultClusterId, PoolID: cfg.NodePoolAutoscaler.PoolID, PrewarmWindows: windows, Maximum: c.Maximum,
-		StandardDigest: standard.CompatibilityDigest, PrivilegedDigest: privileged.CompatibilityDigest,
-		LowWatermark: c.LowWatermark, Spare: c.Spare, ShrinkAfter: c.ShrinkAfter.Duration, Interval: c.Interval.Duration})
+		PrivilegedDigest: privileged.CompatibilityDigest,
+		LowWatermark:     c.LowWatermark, Spare: c.Spare, ShrinkAfter: c.ShrinkAfter.Duration, Interval: c.Interval.Duration})
 }

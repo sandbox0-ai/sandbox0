@@ -135,7 +135,7 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 			if n.Pending != pending {
 				continue
 			}
-			if n.Pending && (n.StaleIdentity || (n.Retiring && len(n.Groups) > 8)) {
+			if n.Pending && (n.StaleIdentity || (n.Retiring && len(n.Groups) > enrollmentAnchorCount(n.Groups))) {
 				// Revocation proves node lifecycle cleanup. Replace an interrupted
 				// refill with retirement, or rebind to an admitted successor boot
 				// only after the store proves all predecessor custody is gone.
@@ -174,8 +174,10 @@ func (w *Worker) Reconcile(ctx context.Context) (changed int, resultErr error) {
 				// A runtime rollout can change compatibility while retaining the
 				// exact same group membership. Old capacity keys must not suppress
 				// prepare forever: refresh through the normal durable resize proof.
-				refreshCompatibility := w.config.StandardDigest != "" && w.config.PrivilegedDigest != "" &&
-					(n.CompatibilityCapacity[w.config.StandardDigest] == 0 || n.CompatibilityCapacity[w.config.PrivilegedDigest] == 0)
+				refreshCompatibility := w.config.PrivilegedDigest != "" && n.CompatibilityCapacity[w.config.PrivilegedDigest] == 0
+				if w.config.StandardDigest != "" {
+					refreshCompatibility = refreshCompatibility || n.CompatibilityCapacity[w.config.StandardDigest] == 0
+				}
 				shrink := n.Ready > idleTarget && n.SurplusSince != nil && time.Since(*n.SurplusSince) >= w.config.ShrinkAfter
 				if !grow && !shrink && !refreshCompatibility && n.Revision != 0 && !n.Retiring && !n.StaleIdentity {
 					continue
@@ -276,7 +278,7 @@ func (w *Worker) reconcileNode(ctx context.Context, n sandboxstore.RuntimeCarrie
 	if err := w.nomad.ApplyCarrierPlan(ctx, n.NodeID, n.Revision, n.Groups); err != nil {
 		return err
 	}
-	if n.Retiring && len(n.Groups) == 8 {
+	if n.Retiring && len(n.Groups) == enrollmentAnchorCount(n.Groups) {
 		// The durable revocation fence already owns physical cleanup proof; the
 		// Nomad node may have been purged, so do not require its inventory API.
 		return w.store.CompleteRuntimeCarrierResize(ctx, n, nil)

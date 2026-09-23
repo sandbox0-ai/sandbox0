@@ -81,3 +81,21 @@ func TestPlanRefillsBothSecurityClassesWithoutExceedingCombinedCeiling(t *testin
 	require.NoError(t, err)
 	require.Len(t, groups, 18)
 }
+
+func TestPlanPrivilegedOnlyCatalogRetainsBusyAndRefillsSpare(t *testing.T) {
+	catalog := []string{"warm-6", "warm-7"}
+	for i := 2; i < 32; i++ {
+		catalog = append(catalog, fmt.Sprintf("privileged-%d", i))
+	}
+	groups, err := Plan(catalog, []string{"privileged-20"}, 16, 32, 14000, 56<<30)
+	require.NoError(t, err)
+	require.Len(t, groups, 17)
+	require.Contains(t, groups, "warm-6")
+	require.Contains(t, groups, "warm-7")
+	require.Contains(t, groups, "privileged-20")
+	for _, group := range groups {
+		class, _, err := GroupIndex(group)
+		require.NoError(t, err)
+		require.Equal(t, "privileged", class)
+	}
+}

@@ -260,7 +260,7 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 		return fmt.Errorf("invalid carrier resize identity")
 	}
 	catalogNode := node
-	anchorsOnly := len(groups) == 8
+	anchorsOnly := len(groups) == 2 || len(groups) == 8
 	for _, g := range groups {
 		class, index, err := carrierpool.GroupIndex(g)
 		if err != nil {
@@ -291,7 +291,11 @@ func (n *NomadClient) ApplyCarrierPlan(ctx context.Context, node string, revisio
 	if len(allowed) != len(groups) || len(groups) > 576 {
 		return fmt.Errorf("invalid carrier plan inventory")
 	}
-	for i := 0; i < 8; i++ {
+	firstAnchor := 0
+	if !known["warm-0"] {
+		firstAnchor = 6
+	}
+	for i := firstAnchor; i < 8; i++ {
 		if !allowed[fmt.Sprintf("warm-%d", i)] {
 			return fmt.Errorf("carrier plan lost enrollment anchors")
 		}

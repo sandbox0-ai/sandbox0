@@ -16,6 +16,8 @@ package driver
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -163,10 +165,11 @@ func (r *fakeRunsc) Version(context.Context) (string, error) {
 }
 
 type fakeMounter struct {
-	mu       sync.Mutex
-	binds    [][2]string
-	unmounts []string
-	bindErr  error
+	mu         sync.Mutex
+	binds      [][2]string
+	unmounts   []string
+	bindErr    error
+	unmountErr error
 }
 
 type fakeRootFSRuntime struct {
@@ -379,7 +382,7 @@ func (m *fakeMounter) Unmount(target string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.unmounts = append(m.unmounts, target)
-	return nil
+	return m.unmountErr
 }
 
 func (m *fakeMounter) snapshot() (binds [][2]string, unmounts []string) {
@@ -462,5 +465,127 @@ func TestStopSignalsSupervisorBeforeChildrenAndKeepsForceCleanup(t *testing.T) {
 				t.Fatalf("graceful shutdown signaled session children: %v", calls)
 			}
 		})
+	}
+}
+
+func TestCloseRetainsMountedBundleUntilRunscDeletionSucceeds(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	root := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := newFakeRunsc()
+	runner.deleteErr = errors.New("injected runsc delete failure")
+	mounter := &fakeMounter{}
+	h := newTaskHandle(taskHandleOptions{
+		runner: runner, mounter: mounter, containerID: "guest",
+		bundleDir: bundle, rootMount: root,
+	})
+	h.phase = phaseActive
+	h.rootMounted = true
+	if err := h.Close(true); err == nil {
+		t.Fatal("runsc deletion failure must keep cleanup pending")
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Fatalf("mounted bundle was removed before container absence: %v", err)
+	}
+	_, unmounts := mounter.snapshot()
+	if len(unmounts) != 0 || !h.rootMounted || h.closed {
+		t.Fatalf("failed deletion lost mount custody: unmounts=%v mounted=%t closed=%t", unmounts, h.rootMounted, h.closed)
+	}
+
+	runner.mu.Lock()
+	runner.deleteErr = nil
+	runner.mu.Unlock()
+	if err := h.Close(true); err != nil {
+		t.Fatalf("retry cleanup after runsc deletion succeeds: %v", err)
+	}
+	_, unmounts = mounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != root || h.rootMounted || !h.closed {
+		t.Fatalf("completed deletion did not release exact mount: unmounts=%v mounted=%t closed=%t", unmounts, h.rootMounted, h.closed)
+	}
+}
+
+func TestFailedLaunchKeepsTaskMountUntilRunscDeletionSucceeds(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	root := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := newFakeRunsc()
+	runner.deleteErr = errors.New("injected runsc delete failure")
+	mounter := &fakeMounter{}
+	h := newTaskHandle(taskHandleOptions{
+		runner: runner, mounter: mounter, containerID: "guest",
+		bundleDir: bundle, rootMount: root,
+	})
+	h.rootMounted = true
+	if err := h.poisonClaimLaunch(errors.New("injected launch failure"), true); err == nil {
+		t.Fatal("failed launch must report its cleanup error")
+	}
+	_, unmounts := mounter.snapshot()
+	if len(unmounts) != 0 || !h.rootMounted || h.phase != phasePoisoned {
+		t.Fatalf("failed runsc deletion lost mount custody: unmounts=%v mounted=%t phase=%s", unmounts, h.rootMounted, h.phase)
+	}
+	runner.mu.Lock()
+	runner.deleteErr = nil
+	runner.mu.Unlock()
+	if err := h.Close(true); err != nil {
+		t.Fatalf("retry failed launch cleanup: %v", err)
+	}
+	_, unmounts = mounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != root {
+		t.Fatalf("retry did not release task mount: %v", unmounts)
+	}
+}
+
+func TestCloseRetainsBundleWhenTaskRootIsBusy(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	root := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mounter := &fakeMounter{unmountErr: errors.New("task root is busy")}
+	h := newTaskHandle(taskHandleOptions{
+		runner: newFakeRunsc(), mounter: mounter, containerID: "guest",
+		bundleDir: bundle, rootMount: root,
+	})
+	h.phase = phaseActive
+	h.rootMounted = true
+	if err := h.Close(true); err == nil {
+		t.Fatal("busy mount must keep cleanup pending")
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Fatalf("busy mounted bundle was removed: %v", err)
+	}
+	if !h.rootMounted || h.closed {
+		t.Fatalf("busy mount lost cleanup state: mounted=%t closed=%t", h.rootMounted, h.closed)
+	}
+	mounter.mu.Lock()
+	mounter.unmountErr = nil
+	mounter.mu.Unlock()
+	if err := h.Close(true); err != nil {
+		t.Fatalf("retry after mount consumer exits: %v", err)
+	}
+}
+
+func TestRollbackDoesNotReturnBusyTaskRootToWarmPool(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	root := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mounter := &fakeMounter{unmountErr: errors.New("task root is busy")}
+	h := newTaskHandle(taskHandleOptions{
+		mounter: mounter, bundleDir: bundle, rootMount: root,
+	})
+	h.phase = phaseClaiming
+	h.rootMounted = true
+	h.claim = &claimMetadata{SandboxID: "sandbox"}
+	if err := h.rollbackClaim(); err == nil {
+		t.Fatal("busy task root rollback must fail")
+	}
+	if h.phase != phasePoisoned || !h.rootMounted || h.claim == nil {
+		t.Fatalf("busy task root was returned to warm pool: phase=%s mounted=%t claim=%v", h.phase, h.rootMounted, h.claim)
 	}
 }

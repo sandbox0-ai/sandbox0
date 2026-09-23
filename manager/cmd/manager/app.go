@@ -233,8 +233,23 @@ func (a *managerApp) startNodeAuthority() bool {
 	}
 	if a.nodeAuthority.TerminalEnabled() {
 		go func() {
+			var lastHeartbeat time.Time
 			err := a.nodeAuthority.RunTerminal(a.ctx, func(report runtimeslotreconciler.WorkerReport) {
 				logManagerRuntimeSlotTerminalPass(a.logger, report)
+				// A quiet pass can still matter when durable quiescing slots remain.
+				// Keep one bounded summary per minute so zero-candidate scans and
+				// unexpectedly silent cleanup attempts are distinguishable.
+				now := time.Now()
+				if lastHeartbeat.IsZero() || now.Sub(lastHeartbeat) >= time.Minute {
+					a.logger.Info("Runtime slot terminal reconcile heartbeat",
+						zap.Int("candidates", report.Result.Candidates),
+						zap.Int("completed", report.Result.Completed),
+						zap.Int("skipped", report.Result.Skipped),
+						zap.Int("failed", report.Result.Failed),
+						zap.Duration("duration", report.Duration),
+						zap.Bool("has_error", report.Error != nil))
+					lastHeartbeat = now
+				}
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				a.logger.Error("Runtime slot terminal worker stopped", zap.Error(err))

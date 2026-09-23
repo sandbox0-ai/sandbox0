@@ -11,11 +11,15 @@ import (
 )
 
 type fakeStore struct {
-	state         sandboxstore.RuntimeNodePoolState
-	snapshot      sandboxstore.RuntimeNodePoolSnapshot
-	nextSnapshots []*sandboxstore.RuntimeNodePoolSnapshot
-	leader        bool
-	updates       []sandboxstore.RuntimeNodePoolState
+	state                  sandboxstore.RuntimeNodePoolState
+	snapshot               sandboxstore.RuntimeNodePoolSnapshot
+	nextSnapshots          []*sandboxstore.RuntimeNodePoolSnapshot
+	leader                 bool
+	updates                []sandboxstore.RuntimeNodePoolState
+	consolidationReady     bool
+	consolidationCalls     []string
+	consolidationCancelled bool
+	cancellationCalls      []string
 }
 
 func (f *fakeStore) EnsureRuntimeNodePoolState(context.Context, string, string) (*sandboxstore.RuntimeNodePoolState, error) {
@@ -46,12 +50,21 @@ func (f *fakeStore) UpdateRuntimeNodePoolScaleState(_ context.Context, _ string,
 	f.updates = append(f.updates, f.state)
 	return &f.state, nil
 }
+func (f *fakeStore) BeginRuntimeNodeConsolidation(_ context.Context, _ string, id string, _ int, _, _ int64, _ int) (bool, error) {
+	f.consolidationCalls = append(f.consolidationCalls, id)
+	return f.consolidationReady, nil
+}
+func (f *fakeStore) CancelRuntimeNodeConsolidation(_ context.Context, _ string, id string, _ time.Duration) (bool, error) {
+	f.cancellationCalls = append(f.cancellationCalls, id)
+	return f.consolidationCancelled, nil
+}
 
 type fakeCloud struct {
 	desired     int
 	nextDesired *int
 	reads       int
 	sets        []int
+	protection  []string
 }
 
 func (f *fakeCloud) DesiredCapacity(context.Context) (int, error) {
@@ -65,6 +78,12 @@ func (f *fakeCloud) DesiredCapacity(context.Context) (int, error) {
 func (f *fakeCloud) SetDesiredCapacity(_ context.Context, desired int) error {
 	f.desired = desired
 	f.sets = append(f.sets, desired)
+	return nil
+}
+func (f *fakeCloud) SetInstancesProtection(_ context.Context, ids []string, protected bool) error {
+	for _, id := range ids {
+		f.protection = append(f.protection, fmt.Sprintf("%s=%t", id, protected))
+	}
 	return nil
 }
 

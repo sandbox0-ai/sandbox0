@@ -23,6 +23,9 @@ func (f *fakeESSClient) ModifyScalingGroup(request *ess.ModifyScalingGroupReques
 	f.modified = request
 	return ess.CreateModifyScalingGroupResponse(), nil
 }
+func (f *fakeESSClient) SetInstancesProtection(*ess.SetInstancesProtectionRequest) (*ess.SetInstancesProtectionResponse, error) {
+	return ess.CreateSetInstancesProtectionResponse(), nil
+}
 
 func TestAliyunESSRejectsDriftedProviderBounds(t *testing.T) {
 	client := &fakeESSClient{group: ess.ScalingGroup{

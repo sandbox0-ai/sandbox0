@@ -496,15 +496,27 @@ func (w *Worker) reconcileProtection(ctx context.Context) error {
 		return err
 	}
 	var busy, idle []string
+	consolidationTarget := ""
+	for _, node := range snapshot.Nodes {
+		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
+			node.State == sandboxstore.RuntimeNodeInstanceDraining &&
+			node.DrainReason == sandboxstore.RuntimeNodeConsolidationReason &&
+			node.ActiveLeases == 0 {
+			consolidationTarget = node.ProviderInstanceID
+			break
+		}
+	}
 	for _, node := range snapshot.Nodes {
 		if node.PoolKind != sandboxstore.RuntimeNodePoolKindElastic ||
 			node.State == sandboxstore.RuntimeNodeInstanceRevoked {
 			continue
 		}
 		if node.State == sandboxstore.RuntimeNodeInstanceEnrolling ||
-			!node.ProviderReady || node.ActiveLeases > 0 {
+			!node.ProviderReady || node.ActiveLeases > 0 ||
+			(consolidationTarget != "" && node.ProviderInstanceID != consolidationTarget) {
 			busy = append(busy, node.ProviderInstanceID)
-		} else if node.State == sandboxstore.RuntimeNodeInstanceActive {
+		} else if node.State == sandboxstore.RuntimeNodeInstanceActive ||
+			node.ProviderInstanceID == consolidationTarget {
 			idle = append(idle, node.ProviderInstanceID)
 		}
 	}
@@ -728,6 +740,28 @@ func (w *Worker) abandonScaleOut(
 }
 
 func (w *Worker) reconcileScaleIn(ctx context.Context, action Action) (bool, bool, error) {
+	snapshot, err := w.store.GetRuntimeNodePoolSnapshot(ctx, w.config.PoolID)
+	if err != nil {
+		return false, false, err
+	}
+	for _, node := range snapshot.Nodes {
+		if node.State != sandboxstore.RuntimeNodeInstanceDraining ||
+			node.DrainReason != sandboxstore.RuntimeNodeConsolidationReason {
+			continue
+		}
+		if len(action.InstanceIDs) != 1 || action.InstanceIDs[0] != node.ProviderInstanceID ||
+			node.ActiveLeases > 0 {
+			if err := w.cloud.CompleteLifecycleAction(ctx, action, LifecycleRollback); err != nil {
+				return false, false, err
+			}
+			if err := w.store.CompleteRuntimeNodeLifecycleActionWithProof(ctx, action.Token, "abandoned",
+				convergenceProof(action, nil, "consolidation_target_mismatch")); err != nil {
+				return false, false, err
+			}
+			return true, true, nil
+		}
+		break
+	}
 	statuses := make(map[string]*sandboxstore.RuntimeNodeDrainStatus, len(action.InstanceIDs))
 	for _, instanceID := range action.InstanceIDs {
 		status, err := w.store.GetRuntimeNodeDrainStatus(ctx, w.config.PoolID, instanceID)

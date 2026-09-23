@@ -138,6 +138,9 @@ type NodePoolAutoscalerConfig struct {
 	MaxScaleOutStep           int                  `yaml:"max_scale_out_step" json:"-"`
 	MaxScaleInStep            int                  `yaml:"max_scale_in_step" json:"-"`
 	MaxPendingNodes           int                  `yaml:"max_pending_nodes" json:"-"`
+	ConsolidationEnabled      bool                 `yaml:"consolidation_enabled" json:"-"`
+	ConsolidationMaxSandboxes int                  `yaml:"consolidation_max_sandboxes" json:"-"`
+	ConsolidationTimeout      Duration             `yaml:"consolidation_timeout" json:"-"`
 	LifecycleInterval         Duration             `yaml:"lifecycle_interval" json:"-"`
 	LifecycleHeartbeat        Duration             `yaml:"lifecycle_heartbeat" json:"-"`
 	ScaleOutEnrollmentTimeout Duration             `yaml:"scale_out_enrollment_timeout" json:"-"`

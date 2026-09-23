@@ -100,57 +100,57 @@ func (s *PGSandboxStore) ReserveNomadMigrationEvacuation(ctx context.Context, sa
 // Cluster-local admission serializes automatic source/destination pairing.
 // It is a transaction lock, not a second lifecycle or a persistent leader.
 // Try-locking avoids waiting while holding a source sandbox/writer lock.
-func lockNomadMigrationEvacuation(ctx context.Context, tx pgx.Tx, source *RuntimeSlot, a runtimecontrol.MigrationAssignment) ([]string, error) {
+func lockNomadMigrationEvacuation(ctx context.Context, tx pgx.Tx, source *RuntimeSlot, a runtimecontrol.MigrationAssignment) ([]string, bool, error) {
 	var acquired bool
 	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, "sandbox0-migration-evacuation/"+source.ClusterID).Scan(&acquired); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !acquired {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
 	var state, reason string
 	err := tx.QueryRow(ctx, `SELECT state,reason FROM manager.runtime_node_fences WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 FOR SHARE`, source.ClusterID, source.NodeID, source.NodeUID).Scan(&state, &reason)
 	// Audited runtime upgrades own an explicit filesystem pause inventory.
 	// Starting a competing migration would change its retained generation.
 	if err == pgx.ErrNoRows || err == nil && (state != "draining" || strings.HasPrefix(reason, "audited-runtime-rollout:")) {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var payload, policy *string
 	if err := tx.QueryRow(ctx, `SELECT claim_runtime_assignment,claim_network_policy FROM manager.runtime_slots WHERE slot_id=$1`, source.ID).Scan(&payload, &policy); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if payload == nil || policy == nil {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
 	var assignment runtimecontrol.Assignment
 	if json.Unmarshal([]byte(*payload), &assignment) != nil {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
 	revision, err := assignment.Revision()
 	if err != nil || revision != a.SourceRevision || assignment.RuntimeGeneration != a.SourceGeneration || validateMigrationSourcePolicy(a, *policy) != nil {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
 	rows, err := tx.Query(ctx, `SELECT node_uid FROM (`+nomadMigrationOccupiedNodesSQL+`) occupied WHERE cluster_id=$1`, source.ClusterID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	excluded := []string{}
 	for rows.Next() {
 		var uid string
 		if err := rows.Scan(&uid); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		excluded = append(excluded, uid)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if slices.Contains(excluded, source.NodeUID) {
-		return nil, ErrNomadSandboxMigrationConflict
+		return nil, false, ErrNomadSandboxMigrationConflict
 	}
-	return excluded, nil
+	return excluded, reason == RuntimeNodeConsolidationReason, nil
 }

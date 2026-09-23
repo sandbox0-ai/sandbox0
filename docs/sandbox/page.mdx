@@ -48,6 +48,9 @@ Pause and resume use internal lifecycle transactions, but `pausing` and `resumin
 Experimental system migration can move an eligible running sandbox to another
 compatible node during planned maintenance. The system selects the destination;
 there is no user migration API, SDK option, CLI command, or template setting.
+When enabled by the operator, the same mechanism can consolidate lightly loaded
+elastic workers onto a compatible fixed worker before a safe scale-in. A worker
+is removed only after its sandbox leases and runtime slots have been cleared.
 
 A successful migration keeps the sandbox ID and preserves supported process
 state, memory, guest PIDs, open files, and runtime tmpfs data. The physical

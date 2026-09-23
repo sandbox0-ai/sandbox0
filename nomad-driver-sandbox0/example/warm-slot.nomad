@@ -4,16 +4,6 @@ variable "datacenter" {
   default     = "dc1"
 }
 
-variable "standard_slots" {
-  type        = number
-  description = "Retired carrier class; keep zero for production deployments"
-  default     = 0
-  validation {
-    condition     = var.standard_slots >= 0 && var.standard_slots <= 512 && floor(var.standard_slots) == var.standard_slots
-    error_message = "Standard slots must be an integer from 0 through 512."
-  }
-}
-
 variable "privileged_slots" {
   type        = number
   description = "Single-use guest-confined privileged carriers per admitted node"
@@ -69,20 +59,20 @@ job "sandbox0-warm-slots" {
   # shard has at most 32 groups. Keep a carrier's shard independent of the
   # requested pool size. Scale only after validating memory, NBD and IP capacity.
   dynamic "group" {
-    for_each = merge(
-      { for index in range(var.standard_slots) : format("warm-%d", index < 6 ? index : index + 2) => { security_class = "standard", index = index } if floor((index < 6 ? index : index + 2) / 32) == var.warm_shard },
-      { for index in range(var.privileged_slots) : (index < 2 ? format("warm-%d", index + 6) : format("privileged-%d", index)) => { security_class = "privileged", index = index } if floor((index < 2 ? index + 6 : 512 + index) / 32) == var.warm_shard }
-    )
+    for_each = {
+      for index in range(var.privileged_slots) : (index < 2 ? format("warm-%d", index + 6) : format("privileged-%d", index)) => index
+      if floor((index < 2 ? index + 6 : 512 + index) / 32) == var.warm_shard
+    }
     labels = [group.key]
     content {
       # Additional carriers require an explicit per-node density profile.
       # Expanding the job leaves existing nodes capped by their metadata.
       dynamic "constraint" {
-        for_each = group.value.index >= (group.value.security_class == "standard" ? 6 : 2) ? [1] : []
+        for_each = group.value >= 2 ? [1] : []
         content {
-          attribute = group.value.security_class == "standard" ? "${meta.sandbox0_standard_carriers}" : "${meta.sandbox0_privileged_carriers}"
+          attribute = "${meta.sandbox0_privileged_carriers}"
           operator  = ">="
-          value     = format("%d", group.value.index + 1)
+          value     = format("%d", group.value + 1)
         }
       }
 
@@ -90,7 +80,7 @@ job "sandbox0-warm-slots" {
       # grants membership. Per-node density metadata remains an independent
       # NBD/IP/host ceiling. Changes use Nomad's JobModifyIndex CAS.
       dynamic "constraint" {
-        for_each = var.adaptive_carriers && group.value.index >= (group.value.security_class == "standard" ? 6 : 2) ? [1] : []
+        for_each = var.adaptive_carriers && group.value >= 2 ? [1] : []
         content {
           attribute = "${node.unique.id}"
           operator  = "set_contains_any"
@@ -123,7 +113,7 @@ job "sandbox0-warm-slots" {
         config {
           command        = "/procd"
           args           = []
-          security_class = group.value.security_class
+          security_class = "privileged"
         }
 
         resources {

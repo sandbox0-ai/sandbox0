@@ -126,7 +126,7 @@ func migrationHandleFixture(t *testing.T) (*taskHandle, protocol.MigrationCaptur
 	handle := newTaskHandle(taskHandleOptions{
 		taskConfig: &drivers.TaskConfig{ID: "slot-1", AllocID: "alloc-1", NodeID: "node-1", Namespace: "default", Name: "warm-slot",
 			AllocDir: bundle, NetworkIsolation: &drivers.NetworkIsolationSpec{Mode: drivers.NetIsolationModeGroup, Path: filepath.Join(bundle, "network.ns")}},
-		driverConfig: TaskConfig{Command: "/procd", SecurityClass: "standard"},
+		driverConfig: TaskConfig{Command: "/procd", SecurityClass: "privileged"},
 		bundleDir:    bundle, rootMount: filepath.Join(bundle, "rootfs"), containerID: "fake",
 		socketPath: filepath.Join(bundle, "control.sock"), runner: runner, rootfs: custodian, mounter: &fakeMounter{},
 	})

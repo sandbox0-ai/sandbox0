@@ -86,7 +86,7 @@ func recoveryTestHandle(t *testing.T, fixture *runtimeSlotPluginFixture) (*drive
 	handle.Config = fixture.task
 	bundle := filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
 	state := PersistedState{
-		TaskConfig: fixture.task.Copy(), DriverConfig: &TaskConfig{Command: "/procd", SecurityClass: "standard"},
+		TaskConfig: fixture.task.Copy(), DriverConfig: &TaskConfig{Command: "/procd", SecurityClass: "privileged"},
 		ContainerID: safeContainerID(fixture.task.ID), BundleDir: bundle,
 		RootMount: filepath.Join(bundle, "rootfs"), StartedAt: time.Now(), Phase: phaseWarm,
 	}
@@ -227,7 +227,7 @@ func TestRecoverTaskUsesNewerMatchingLocalState(t *testing.T) {
 		t.Fatal("matching local state was not recovered")
 	}
 	t.Cleanup(func() { recovered.stopExitWatch(); fixture.plugin.stopTaskControl(recovered) })
-	if got := recovered.PersistedState(); got.Phase != phaseActive || !got.RootMounted || got.DriverConfig.SecurityClass != "standard" {
+	if got := recovered.PersistedState(); got.Phase != phaseActive || !got.RootMounted || got.DriverConfig.SecurityClass != "privileged" {
 		t.Fatal("newer local lifecycle state or normalized driver config was lost")
 	}
 }
@@ -345,7 +345,7 @@ func TestRecoverTaskRejectsCorruptOpaqueState(t *testing.T) {
 
 func TestPersistedDriverConfigurationIsAnIndependentSnapshot(t *testing.T) {
 	handle := newTaskHandle(taskHandleOptions{driverConfig: TaskConfig{
-		Command: "/procd", SecurityClass: "standard", Args: []string{"snapshot-only"},
+		Command: "/procd", SecurityClass: "privileged", Args: []string{"snapshot-only"},
 	}})
 	first := handle.PersistedState()
 	first.DriverConfig.Command = "/changed"

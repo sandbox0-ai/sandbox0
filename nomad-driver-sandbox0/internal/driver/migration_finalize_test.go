@@ -53,7 +53,7 @@ func configuredMigrationFinalizationHandleFixture(t *testing.T, configure func(*
 	rd, err := resources.Digest()
 	require.NoError(t, err)
 	capture.ResourceLeaseDigest = strings.TrimPrefix(rd, "sha256:")
-	source := runtimecontrol.Assignment{SandboxID: capture.SandboxID, TeamID: "team", RuntimeGeneration: 1, SecurityClass: "standard"}
+	source := runtimecontrol.Assignment{SandboxID: capture.SandboxID, TeamID: "team", RuntimeGeneration: 1, SecurityClass: "privileged"}
 	capture.AssignmentRevision, err = source.Revision()
 	require.NoError(t, err)
 	h.claim.ResourceLeaseDigest = capture.ResourceLeaseDigest

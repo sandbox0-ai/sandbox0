@@ -40,8 +40,8 @@ func TestClaimBundlePinsHostProcdAcrossRuntimeUpgrades(t *testing.T) {
 		// Model a pre-existing RootFS with an obsolete executable and user data.
 		require.NoError(t, os.MkdirAll(filepath.Join(bundle, "rootfs"), 0755))
 		require.NoError(t, os.WriteFile(filepath.Join(bundle, "rootfs/procd"), []byte("obsolete embedded daemon"), 0555))
-		h := newTaskHandle(taskHandleOptions{taskConfig: &drivers.TaskConfig{ID: "slot-1", NodeID: "node-1", AllocID: "alloc-1"}, driverConfig: TaskConfig{Command: "/procd", SecurityClass: "standard"}, bundleDir: bundle, resourceCgroupRoot: "/sys/fs/cgroup/sandbox0", procdPort: protocol.NomadProcdPort, procdArtifactDir: cache})
-		assignment := &runtimecontrol.Assignment{SandboxID: "sandbox-1", RuntimeGeneration: int64(i + 1), SecurityClass: "standard", Procd: &artifact}
+		h := newTaskHandle(taskHandleOptions{taskConfig: &drivers.TaskConfig{ID: "slot-1", NodeID: "node-1", AllocID: "alloc-1"}, driverConfig: TaskConfig{Command: "/procd", SecurityClass: "privileged"}, bundleDir: bundle, resourceCgroupRoot: "/sys/fs/cgroup/sandbox0", procdPort: protocol.NomadProcdPort, procdArtifactDir: cache})
+		assignment := &runtimecontrol.Assignment{SandboxID: "sandbox-1", RuntimeGeneration: int64(i + 1), SecurityClass: "privileged", Procd: &artifact}
 		require.NoError(t, h.writeClaimBundle(assignment, lease))
 		raw, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 		require.NoError(t, err)

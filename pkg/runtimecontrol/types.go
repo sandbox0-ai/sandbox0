@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
 const (
@@ -79,8 +78,10 @@ func (a Assignment) Validate() error {
 	if a.RuntimeGeneration <= 0 {
 		return errors.New("runtime generation must be positive")
 	}
-	securityClass, ok := sandboxspec.EffectiveSandboxSecurityClass(sandboxspec.SandboxSecurityClass(a.SecurityClass))
-	if !ok || string(securityClass) != a.SecurityClass {
+	// Historical assignments must remain readable until their physical runtime
+	// journals and cleanup receipts have been retired. New task admission is
+	// restricted by sandboxspec and the Nomad driver.
+	if a.SecurityClass != "standard" && a.SecurityClass != "privileged" {
 		return errors.New("security class must be canonical")
 	}
 	for index, mount := range a.EphemeralMounts {

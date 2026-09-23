@@ -64,7 +64,7 @@ func TestPrivilegedProcdFilesystemResume(t *testing.T) {
 		id := fmt.Sprintf("resume-%d", generation)
 		bundle := filepath.Join(root, id)
 		require.NoError(t, os.Mkdir(bundle, 0700))
-		assignment, _ := json.Marshal(runtimecontrol.Assignment{SandboxID: "issue795", TeamID: "test-team", RuntimeGeneration: int64(generation), SecurityClass: "standard", EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "issue795"}})
+		assignment, _ := json.Marshal(runtimecontrol.Assignment{SandboxID: "issue795", TeamID: "test-team", RuntimeGeneration: int64(generation), SecurityClass: "privileged", EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "issue795"}})
 		spec := oci.Spec{Version: oci.Version, Root: &oci.Root{Path: rootfs}, Process: &oci.Process{Cwd: "/workspace", Args: []string{"/payload", "-test.run=^TestFilesystemResumeGuest$"}, Env: []string{"PATH=/", "GOMAXPROCS=2", "ISSUE795_GUEST=1", "ISSUE795_GENERATION=" + strconv.Itoa(generation), runtimecontrol.EnvControlMode + "=" + runtimecontrol.ControlModeStatic, runtimecontrol.EnvStaticAssignment + "=" + string(assignment)}}, Mounts: []oci.Mount{{Destination: "/proc", Type: "proc", Source: "proc"}, {Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}}, {Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=1777", "size=32m"}}}, Linux: &oci.Linux{Namespaces: []oci.LinuxNamespace{{Type: oci.PIDNamespace}, {Type: oci.MountNamespace}, {Type: oci.NetworkNamespace}, {Type: oci.IPCNamespace}, {Type: oci.UTSNamespace}}}}
 		data, _ := json.Marshal(spec)
 		require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0600))

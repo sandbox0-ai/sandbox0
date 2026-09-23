@@ -63,7 +63,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
         WITH live AS (SELECT DISTINCT ON (c.node_id) c.* FROM manager.runtime_node_capacities c
             LEFT JOIN manager.runtime_carrier_resizes r USING(cluster_id,node_id)
             WHERE c.cluster_id=$1 AND (c.heartbeat_expires_at>NOW() OR r.pending OR
-                (cardinality(r.allowed_groups)>8 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
+                (cardinality(r.allowed_groups)>2 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
                     WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked')))
             ORDER BY c.node_id,(c.heartbeat_expires_at>NOW()) DESC,c.updated_at DESC)
         SELECT c.cluster_id,c.node_id,c.node_uid,c.node_boot_id,c.cpu_millicores,c.memory_bytes,
@@ -90,7 +90,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
                     AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=s.slot_id)
                     AND s.heartbeat_expires_at>NOW() GROUP BY compatibility_digest) ready),'{}'::jsonb)
         FROM live c LEFT JOIN manager.runtime_carrier_resizes r USING(cluster_id,node_id)
-        WHERE r.pending OR (cardinality(r.allowed_groups)>8 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
+        WHERE r.pending OR (cardinality(r.allowed_groups)>2 AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f
             WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid AND f.state='revoked'))
         OR (c.heartbeat_expires_at>NOW() AND NOT EXISTS (SELECT 1 FROM manager.runtime_node_fences f
             WHERE f.cluster_id=c.cluster_id AND f.node_id=c.node_id AND f.node_uid=c.node_uid
@@ -115,7 +115,7 @@ func (s *PGSandboxStore) ListRuntimeCarrierNodes(ctx context.Context, cluster st
 // BeginRuntimeCarrierResize serializes with claim resource allocation. Once it
 // commits, a new claim cannot race the controller's subsequent busy-slot read.
 func (s *PGSandboxStore) BeginRuntimeCarrierResize(ctx context.Context, n RuntimeCarrierNode, maximum int, groups, retained []string) (int64, error) {
-	if maximum < 8 || maximum > 576 || len(groups) < 8 || len(groups) > maximum || len(retained) > 8192 {
+	if maximum < 2 || maximum > 576 || len(groups) < 2 || len(groups) > maximum || len(retained) > 8192 {
 		return 0, ErrRuntimeSlotInvalid
 	}
 	if n.ClusterID == "" || n.NodeID == "" || n.NodeUID == "" || n.NodeBootID == "" || len(n.CompatibilityCapacity) > 2 {
@@ -128,10 +128,19 @@ func (s *PGSandboxStore) BeginRuntimeCarrierResize(ctx context.Context, n Runtim
 		}
 		seen[group] = true
 	}
-	for i := 0; i < 8; i++ {
-		if !seen[fmt.Sprintf("warm-%d", i)] {
-			return 0, ErrRuntimeSlotInvalid
+	// The privileged-only family has two enrollment anchors. Historical
+	// in-flight resizes may still carry all six retired standard anchors.
+	if !seen["warm-6"] || !seen["warm-7"] {
+		return 0, ErrRuntimeSlotInvalid
+	}
+	legacyAnchors := 0
+	for i := 0; i < 6; i++ {
+		if seen[fmt.Sprintf("warm-%d", i)] {
+			legacyAnchors++
 		}
+	}
+	if legacyAnchors != 0 && legacyAnchors != 6 {
+		return 0, ErrRuntimeSlotInvalid
 	}
 	for digest, count := range n.CompatibilityCapacity {
 		canonical, err := normalizeRuntimeSlotDigest("compatibility_digest", digest)
@@ -181,7 +190,7 @@ func (s *PGSandboxStore) BeginRuntimeCarrierResize(ctx context.Context, n Runtim
 				AND manager.runtime_carrier_resizes.node_boot_id<>EXCLUDED.node_boot_id
 				AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases l WHERE l.cluster_id=$1 AND l.node_uid=$3
 					AND l.node_boot_id=manager.runtime_carrier_resizes.node_boot_id AND l.lease_state='active'))
-			OR (cardinality(EXCLUDED.allowed_groups)=8 AND cardinality(EXCLUDED.retained_allocations)=0
+            OR (cardinality(EXCLUDED.allowed_groups) IN (2,8) AND cardinality(EXCLUDED.retained_allocations)=0
 				AND EXISTS(SELECT 1 FROM manager.runtime_node_fences f WHERE f.cluster_id=$1 AND f.node_id=$2
 					AND f.node_uid=$3 AND f.state='revoked')))
         RETURNING revision`, n.ClusterID, n.NodeID, n.NodeUID, n.NodeBootID, maximum, n.Revision, groups, retained, n.CompatibilityCapacity).Scan(&revision)

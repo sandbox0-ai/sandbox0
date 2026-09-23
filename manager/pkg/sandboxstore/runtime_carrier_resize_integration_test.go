@@ -40,6 +40,37 @@ func carrierBaseline() []string {
 	return g
 }
 
+func TestPrivilegedOnlyCarrierResizeRetiresToTwoAnchorsIntegration(t *testing.T) {
+	s, _, n := carrierResizeFixture(t)
+	privileged := []string{"warm-6", "warm-7", "privileged-2"}
+	revision, err := s.BeginRuntimeCarrierResize(t.Context(), n, 128, privileged,
+		[]string{"carrier-allocation-a", "carrier-allocation-b"})
+	require.NoError(t, err)
+	n.Revision = revision
+	require.NoError(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil))
+
+	_, err = s.pool.Exec(t.Context(), `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason)
+		VALUES($1,$2,$3,'revoked','test privileged cleanup')`, n.ClusterID, n.NodeID, n.NodeUID)
+	require.NoError(t, err)
+	nodes, err := s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1, "a revoked node with a privileged surplus still needs reconciliation")
+	require.True(t, nodes[0].Retiring)
+	revision, err = s.BeginRuntimeCarrierResize(t.Context(), nodes[0], 128,
+		[]string{"warm-6", "warm-7"}, nil)
+	require.NoError(t, err)
+	require.Greater(t, revision, n.Revision)
+	n.Revision = revision
+	require.NoError(t, s.CompleteRuntimeCarrierResize(t.Context(), n, nil))
+	nodes, err = s.ListRuntimeCarrierNodes(t.Context(), n.ClusterID)
+	require.NoError(t, err)
+	require.Empty(t, nodes)
+
+	_, err = s.BeginRuntimeCarrierResize(t.Context(), n, 128,
+		[]string{"warm-0", "warm-6", "warm-7"}, nil)
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid, "partial historical anchors cannot be published")
+}
+
 func TestCarrierResizeKeepsRetainedCarrierClaimableIntegration(t *testing.T) {
 	s, request, n := carrierResizeFixture(t)
 	revision, err := s.BeginRuntimeCarrierResize(t.Context(), n, 128, carrierBaseline(), []string{"carrier-allocation-b"})

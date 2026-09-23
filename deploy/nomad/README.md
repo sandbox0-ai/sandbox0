@@ -31,9 +31,8 @@ Pin one build of every service, `nomad-driver-sandbox0`, `procd`, and stock
 
 Runtime-class catalog version `3` contains immutable carrier compatibility only.
 CPU, memory, PIDs, quota/weight, and cpuset do not belong in the catalog. Each
-cluster may publish one `standard` and one `privileged` class; template
-`mainContainer.securityClass` selects between them. Zero or multiple matches
-for the same cluster and security class fail closed.
+cluster publishes one `privileged` class. Templates default to that class;
+zero or multiple matches for the same cluster and class fail closed.
 
 Nomad schedules dedicated Sandbox0 nodes and resource-neutral warm carriers. Node recovery and lifecycle inventory use
 bounded, paginated allocation summaries with exact node checks. Avoid the
@@ -179,10 +178,9 @@ family's per-node membership. It separates two time scales:
 2. A regional compute reserve, bounded by net new workload demand during the
    much longer ECS/bootstrap/admission interval. In-flight nodes count once.
 
-The initial policy uses a combined ceiling of 256 carriers (240 standard, 16
-privileged), an idle target of 16, standard low watermark 8, and a privileged
-ready reserve of 2. Surplus above 32 must persist for two minutes before shrink.
-The eight enrollment anchors and every busy or cleanup-owned group are retained,
+The current policy uses a ceiling of 256 privileged carriers, an idle target
+of 16, a low watermark of 8, and two enrollment anchors. Surplus above 32
+must persist for two minutes before shrink. Every busy or cleanup-owned group is retained,
 including high ordinals without retaining their unused lower-ordinal prefix.
 No extra idle buffer is added when CPU is fully leased or less than 64 MiB is
 free. These inventory hints never increase the guest admission budget.
@@ -282,8 +280,7 @@ carrier shrink stabilization apply. No benchmark account or schedule is built
 into the controller. Record actual command-ready capacity before starting a
 scheduled batch; a desired count or successful Nomad job update is insufficient.
 
-Compatibility-specific demand and ready inventory prevent spare standard
-carriers from hiding a privileged shortage. This is bounded placement progress,
+Privileged demand and ready inventory guide bounded placement progress,
 not an optimal packing algorithm or live workload migration. Node metadata
 defines a physical ceiling and is not lowered to perform live shrink.
 
@@ -411,9 +408,9 @@ mutually authenticated.
    Elastic nodes execute the signed enrollment flow automatically.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad` with
    `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. The
-   default eight carriers fit in shard zero. Larger pools require every
-   nonempty `warm_shard` from 0 through 17 with identical standard/privileged
-   counts; each job is bounded to 32 groups. Migrate an existing unsharded pool
+   default two enrollment carriers fit in shard zero. Larger pools require every
+   nonempty `warm_shard` from 0 through 23 with the same privileged count;
+   each job is bounded to 32 groups. Migrate an existing unsharded pool
    only after fencing claims and draining every affected node. Keep
    `restart { attempts = 0 }`: a consumed slot gets a fresh allocation and
    network namespace, never a task restart in the same allocation. Keep the

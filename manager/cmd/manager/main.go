@@ -69,6 +69,7 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	startTerminalStackDiagnostic(ctx, logger)
 
 	obsProvider, err := observability.New(observability.ConfigFromEnv("manager", logger))
 	if err != nil {

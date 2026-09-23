@@ -47,6 +47,9 @@ func (c *MigrationDestinationCustody) validateAdoption() error {
 // pendingCustody includes unacknowledged historical receipts in the existing
 // bounded migration admission budget, even after image bytes have been removed.
 func (c *MigrationDestinationCustody) pendingCustody() bool {
+	if c.ImageCanceled() {
+		return false
+	}
 	if c.FailureFinalized() {
 		return c.Failure.Cleanup.Finalization.AllocationGC == nil
 	}

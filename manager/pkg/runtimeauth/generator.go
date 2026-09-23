@@ -35,3 +35,16 @@ func (g *InternalTokenGenerator) GenerateMigrationToken(request procdapi.Runtime
 		SandboxID: request.Assignment.Target.SandboxID, Permissions: []string{permission},
 	})
 }
+
+// GenerateCheckpointToken binds capture or restore to its exact command. Fork
+// handover acts on the child's identity even while procd retains source memory.
+func (g *InternalTokenGenerator) GenerateCheckpointToken(request procdapi.RuntimeCheckpointRequest) (string, error) {
+	permission, err := request.Permission()
+	if err != nil {
+		return "", err
+	}
+	team, sandbox := request.ActingSandbox()
+	return g.generator.Generate("procd", team, "", internalauth.GenerateOptions{
+		SandboxID: sandbox, Permissions: []string{permission},
+	})
+}

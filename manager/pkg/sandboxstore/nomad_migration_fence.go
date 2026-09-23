@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
+	"github.com/jackc/pgx/v5"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -131,39 +132,8 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationSourceFence(ctx context.Cont
 	if reservation.Lifecycle.Phase != SandboxLifecyclePhasePublishing || reservation.Lifecycle.PreparedGenerationID != request.PublicationRequest.Capture.RootFS.Generation.GenerationID {
 		return ErrNomadSandboxMigrationConflict
 	}
-	filesystem, initial, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, reservation.Lifecycle.SandboxID)
-	if err != nil {
+	if err := commitNomadExecutionSourceFence(ctx, tx, reservation.Lifecycle, reservation.SourceWriterGrantID, reservation.SourceBindingDigest, proof); err != nil {
 		return err
-	}
-	grant, err := getRootFSWriterGrantForUpdate(ctx, tx, reservation.SourceWriterGrantID)
-	if err != nil {
-		return err
-	}
-	if grant.State != RootFSWriterGrantStateRetiring || grant.RetireKind != RootFSWriterRetireKindMigration || grant.RetireOperationID != reservation.Lifecycle.ID ||
-		len(grant.RetireProofDigest) != 0 || !bytes.Equal(grant.BindingDigest, reservation.SourceBindingDigest) || grant.GateParent != proof.RootFS.Session.Parent ||
-		grant.WriterEpoch != proof.RootFS.Session.WriterEpoch || filesystem.WriterEpoch != grant.WriterEpoch || filesystem.ID != grant.FilesystemID ||
-		initial.ID != reservation.Lifecycle.ExpectedGenerationID || grant.InitialGenerationID != initial.ID {
-		return ErrNomadSandboxMigrationConflict
-	}
-	proofDigest, err := hex.DecodeString(proof.Digest)
-	if err != nil {
-		return err
-	}
-	tag, err := tx.Exec(ctx, `UPDATE manager.rootfs_filesystems SET head_generation_id=$2,updated_at=NOW()
-		WHERE filesystem_id=$1 AND head_generation_id=$3 AND writer_epoch=$4`, filesystem.ID, reservation.Lifecycle.PreparedGenerationID, initial.ID, grant.WriterEpoch)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return ErrNomadSandboxMigrationConflict
-	}
-	tag, err = tx.Exec(ctx, `UPDATE manager.rootfs_writer_grants SET state='retired',retire_proof_digest=$2,retired_at=NOW(),lease_expires_at=NULL,updated_at=NOW()
-		WHERE grant_id=$1 AND state='retiring' AND retire_kind=$3 AND retire_operation_id=$4`, grant.ID, proofDigest, RootFSWriterRetireKindMigration, reservation.Lifecycle.ID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return ErrNomadSandboxMigrationConflict
 	}
 	if err := (sandboxStoreTx{tx: tx}).UpdateLifecycleTxnPhase(ctx, reservation.Lifecycle.ID, SandboxLifecyclePhaseCommitting); err != nil {
 		return err
@@ -176,4 +146,45 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationSourceFence(ctx context.Cont
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// commitNomadExecutionSourceFence shares the physical writer retirement and
+// immutable RootFS head CAS between migration and retained memory pause.
+// Callers must first lock and validate their exact authorized fence command.
+func commitNomadExecutionSourceFence(ctx context.Context, tx pgx.Tx, lifecycle *SandboxLifecycleTxn, grantID string, binding []byte, proof protocol.MigrationSourceFenceProof) error {
+	filesystem, initial, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, lifecycle.SandboxID)
+	if err != nil {
+		return err
+	}
+	grant, err := getRootFSWriterGrantForUpdate(ctx, tx, grantID)
+	if err != nil {
+		return err
+	}
+	if grant.State != RootFSWriterGrantStateRetiring || grant.RetireKind != RootFSWriterRetireKindMigration || grant.RetireOperationID != lifecycle.ID ||
+		len(grant.RetireProofDigest) != 0 || !bytes.Equal(grant.BindingDigest, binding) || grant.GateParent != proof.RootFS.Session.Parent ||
+		grant.WriterEpoch != proof.RootFS.Session.WriterEpoch || filesystem.WriterEpoch != grant.WriterEpoch || filesystem.ID != grant.FilesystemID ||
+		initial.ID != lifecycle.ExpectedGenerationID || grant.InitialGenerationID != initial.ID {
+		return ErrNomadSandboxMigrationConflict
+	}
+	proofDigest, err := hex.DecodeString(proof.Digest)
+	if err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE manager.rootfs_filesystems SET head_generation_id=$2,updated_at=NOW()
+		WHERE filesystem_id=$1 AND head_generation_id=$3 AND writer_epoch=$4`, filesystem.ID, lifecycle.PreparedGenerationID, initial.ID, grant.WriterEpoch)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNomadSandboxMigrationConflict
+	}
+	tag, err = tx.Exec(ctx, `UPDATE manager.rootfs_writer_grants SET state='retired',retire_proof_digest=$2,retired_at=NOW(),lease_expires_at=NULL,updated_at=NOW()
+		WHERE grant_id=$1 AND state='retiring' AND retire_kind=$3 AND retire_operation_id=$4`, grant.ID, proofDigest, RootFSWriterRetireKindMigration, lifecycle.ID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNomadSandboxMigrationConflict
+	}
+	return nil
 }

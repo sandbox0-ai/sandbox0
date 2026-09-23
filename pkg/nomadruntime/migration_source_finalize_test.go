@@ -121,6 +121,11 @@ func (r *migrationSourceFinalizeTestRuntime) ForgetFinalizedMigrationRootFS(root
 func migrationSourceFinalizeNodeFixture(t *testing.T, beforeCapture ...func(*nodeRuntime, protocol.MigrationCaptureRequest)) (*nodeRuntime, protocol.MigrationSourceFinalizeRequest, *migrationSourceFinalizeTestRuntime, *fakeRuntimeResourceCgroup) {
 	t.Helper()
 	d, fence, runtime, _ := migrationFenceNodeFixture(t, beforeCapture...)
+	return migrationFinalizeFenceFixture(t, d, fence, runtime)
+}
+
+func migrationFinalizeFenceFixture(t *testing.T, d *nodeRuntime, fence protocol.MigrationSourceFenceRequest, runtime *migrationFenceTestRuntime) (*nodeRuntime, protocol.MigrationSourceFinalizeRequest, *migrationSourceFinalizeTestRuntime, *fakeRuntimeResourceCgroup) {
+	t.Helper()
 	proof, err := d.FenceMigrationSource(t.Context(), fence)
 	require.NoError(t, err)
 	capture := fence.PublicationRequest.Capture.Request
@@ -136,12 +141,18 @@ func migrationSourceFinalizeNodeFixture(t *testing.T, beforeCapture ...func(*nod
 	cleanup.WriterAuthorityDigest = proof.Digest
 	cleanup.Resources = migrationSourceTestResources(t, stage, capture.Target)
 	cleanup.ResourceLeaseDigest = capture.ResourceLeaseDigest
-	adoption := protocol.MigrationAdoptionRequest{Target: protocol.NodeChannelTarget{SlotID: "target-slot", ClusterID: capture.Target.ClusterID, NodeID: "target-node", NodeUID: "target-uid", NodeBootID: "target-boot", AllocationID: "target-allocation", ControlEndpoint: "unix:///target/control.sock"},
-		OperationID: capture.OperationID, ClaimID: "target-claim", SandboxID: capture.SandboxID, RuntimeGeneration: fence.PublicationRequest.Assignment.Target.RuntimeGeneration,
-		ProcdInstanceID: capture.ProcdInstanceID, RestoreDigest: strings.Repeat("a", 64), CommandReadyDigest: strings.Repeat("b", 64)}
-	digest, err := adoption.Digest()
-	require.NoError(t, err)
-	request := protocol.MigrationSourceFinalizeRequest{Fence: fence, SourceProof: *proof, Cleanup: cleanup, Adoption: protocol.MigrationAdoptionReceipt{Request: adoption, Proof: protocol.MigrationAdoptionProof{RequestDigest: digest, ImageAbsent: true}}}
+	request := protocol.MigrationSourceFinalizeRequest{Fence: fence, SourceProof: *proof, Cleanup: cleanup}
+	if fence.PublicationRequest.CheckpointSource != nil {
+		request.Checkpoint = &protocol.CheckpointRetained{CheckpointID: "checkpoint-1",
+			PublicationRequestDigest: fence.Publication.RequestDigest, Reference: fence.Publication.Reference}
+	} else {
+		adoption := protocol.MigrationAdoptionRequest{Target: protocol.NodeChannelTarget{SlotID: "target-slot", ClusterID: capture.Target.ClusterID, NodeID: "target-node", NodeUID: "target-uid", NodeBootID: "target-boot", AllocationID: "target-allocation", ControlEndpoint: "unix:///target/control.sock"},
+			OperationID: capture.OperationID, ClaimID: "target-claim", SandboxID: capture.SandboxID, RuntimeGeneration: fence.PublicationRequest.Assignment.Target.RuntimeGeneration,
+			ProcdInstanceID: capture.ProcdInstanceID, RestoreDigest: strings.Repeat("a", 64), CommandReadyDigest: strings.Repeat("b", 64)}
+		digest, err := adoption.Digest()
+		require.NoError(t, err)
+		request.Adoption = protocol.MigrationAdoptionReceipt{Request: adoption, Proof: protocol.MigrationAdoptionProof{RequestDigest: digest, ImageAbsent: true}}
+	}
 	require.NoError(t, request.Validate())
 	finalizer := &migrationSourceFinalizeTestRuntime{migrationFenceTestRuntime: runtime}
 	d.runtime = finalizer

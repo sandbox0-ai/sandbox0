@@ -157,8 +157,10 @@ func (d *nodeRuntime) publishMigration(ctx context.Context, request protocol.Mig
 	if err := d.stopMigrationSource(ctx, *session, false); err != nil {
 		return nil, err
 	}
-	source := request.Assignment.Target
-	source.RuntimeGeneration = request.Assignment.SourceGeneration
+	source, err := request.SourceAssignment()
+	if err != nil {
+		return nil, err
+	}
 	binding, err := runtimecheckpoint.Bind(capture.OperationID, session.Stage, source,
 		request.CompatibilityDigest, request.CPUFeaturesDigest, custody.Capture.RootFS.Generation)
 	if err != nil {
@@ -246,7 +248,7 @@ func (d *nodeRuntime) publishMigration(ctx context.Context, request protocol.Mig
 	}
 	journalElapsed = time.Since(stepStarted)
 	published = true
-	d.logMigrationTiming(request.Assignment.OperationID, "image-publication", publicationStarted, "manifest_version", manifestVersion,
+	d.logMigrationTiming(capture.OperationID, "image-publication", publicationStarted, "manifest_version", manifestVersion,
 		"upload_open_us", openElapsed.Microseconds(), "plan_us", planElapsed.Microseconds(),
 		"objects_publish_us", publishElapsed.Microseconds(), "source_check_us", sourceCheckElapsed.Microseconds(), "journal_us", journalElapsed.Microseconds())
 	return result, nil
@@ -275,6 +277,13 @@ func (j *runtimeSlotJournal) recordMigrationPublication(request protocol.Migrati
 			return err
 		}
 		custody := current.Migration
+		if request.CheckpointSource != nil && (current.MigrationStaging == nil || !current.MigrationStaging.Request.CaptureOnly ||
+			current.MigrationStaging.Request.Source != request.Capture.Request || !current.MigrationStaging.Ready || current.MigrationStaging.Released) {
+			return fmt.Errorf("checkpoint publication requires retained source-only staging: %w", errdefs.ErrFailedPrecondition)
+		}
+		if request.CheckpointSource == nil && current.MigrationStaging != nil && current.MigrationStaging.Request.CaptureOnly {
+			return fmt.Errorf("checkpoint staging cannot become migration authority: %w", errdefs.ErrFailedPrecondition)
+		}
 		if custody == nil || custody.ExecutionInvalidated || custody.Capture.State != protocol.MigrationCaptureComplete ||
 			custody.Capture.Request != request.Capture.Request || custody.Capture.RootFS == nil ||
 			custody.Capture.RootFS.Digest != request.Capture.RootFS.Digest {

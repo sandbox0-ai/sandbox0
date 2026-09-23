@@ -1392,6 +1392,9 @@ type ForkSandboxConfig struct {
 // before the paused child sandbox is created.
 type ForkSandboxRequest struct {
 	Config *ForkSandboxConfig `json:"config,omitempty"`
+
+	// Memory Preserve process execution state together with RootFS. Requires Idempotency-Key. A paused source must have a retained memory image; a running source is captured and resumed before completion. Unsupported or unavailable memory never falls back to filesystem-only.
+	Memory *bool `json:"memory,omitempty"`
 }
 
 // ForkSandboxResponse defines model for ForkSandboxResponse.
@@ -2077,6 +2080,12 @@ type SandboxConfig struct {
 
 	// Webhook Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Sandbox0 persists delivery state outside the workspace, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
+}
+
+// SandboxExecutionStateRequest defines model for SandboxExecutionStateRequest.
+type SandboxExecutionStateRequest struct {
+	// Memory Explicitly preserve or restore process memory and execution state. Omitted or false retains the existing filesystem-only behavior. Memory failures are reported without a cold fallback.
+	Memory *bool `json:"memory,omitempty"`
 }
 
 // SandboxFunction Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
@@ -3511,7 +3520,7 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 
 // PostApiV1SandboxesIdForkParams defines parameters for PostApiV1SandboxesIdFork.
 type PostApiV1SandboxesIdForkParams struct {
-	// IdempotencyKey Optional key for retrying the fork without creating a duplicate child sandbox.
+	// IdempotencyKey Key for retrying the fork without creating a duplicate child sandbox. Required when memory=true; reuse it across pending responses and transport failures.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
@@ -3690,6 +3699,9 @@ type PostApiV1SandboxesIdForkJSONRequestBody = ForkSandboxRequest
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy
 
+// PostApiV1SandboxesIdPauseJSONRequestBody defines body for PostApiV1SandboxesIdPause for application/json ContentType.
+type PostApiV1SandboxesIdPauseJSONRequestBody = SandboxExecutionStateRequest
+
 // PostApiV1SandboxesIdPreviewsJSONRequestBody defines body for PostApiV1SandboxesIdPreviews for application/json ContentType.
 type PostApiV1SandboxesIdPreviewsJSONRequestBody = SandboxPreviewCreateRequest
 
@@ -3698,6 +3710,9 @@ type PutApiV1SandboxesIdPreviewsPreviewIdJSONRequestBody = SandboxPreviewRenewRe
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
+
+// PostApiV1SandboxesIdResumeJSONRequestBody defines body for PostApiV1SandboxesIdResume for application/json ContentType.
+type PostApiV1SandboxesIdResumeJSONRequestBody = SandboxExecutionStateRequest
 
 // PutApiV1SandboxesIdRootfsRebaseJSONRequestBody defines body for PutApiV1SandboxesIdRootfsRebase for application/json ContentType.
 type PutApiV1SandboxesIdRootfsRebaseJSONRequestBody = RebaseSandboxRootFSRequest

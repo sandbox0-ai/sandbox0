@@ -93,6 +93,30 @@ func TestMigrationCPUPreflightUsesDurableSourceWithoutChangingExecution(t *testi
 	require.Equal(t, 3, runner.calls)
 }
 
+func TestCheckpointCPUPreflightUsesSameRecordedSourceWithoutDestination(t *testing.T) {
+	handle, request, runner := migrationCPUPreflightHandle(t)
+	request.CaptureOnly = true
+	request.Destination = protocol.NodeChannelTarget{}
+	request.DestinationResources = protocol.RuntimeResourceLease{}
+	before, err := readPersistedState(handle.statePath())
+	require.NoError(t, err)
+	result, err := handle.PreflightMigrationCPU(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateFor(request))
+	require.Equal(t, *before.Claim.MigrationCPULaunch, result.Launch)
+	after, err := readPersistedState(handle.statePath())
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	require.Equal(t, 3, runner.calls)
+	require.NotContains(t, runner.recorder.callsSnapshot(), "checkpoint")
+	require.Equal(t, 1, countMigrationCall(runner.recorder.callsSnapshot(), "start"))
+	request.Source.ResourceLeaseDigest = strings.Repeat("a", 64)
+	result, err = handle.PreflightMigrationCPU(t.Context(), request)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, 3, runner.calls, "changed source lease fails before probing")
+}
+
 func TestMigrationCPUPreflightCannotInventHistoryOrRaceAdmissionFence(t *testing.T) {
 	for _, mode := range []string{"missing-history", "busy", "fenced-during-observation", "history-changed-during-observation"} {
 		t.Run(mode, func(t *testing.T) {

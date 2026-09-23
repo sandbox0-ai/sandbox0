@@ -85,6 +85,7 @@ type HostRuntime interface {
 	MountOverlay(xfsRoot, mergedRoot string) error
 	UnmountOverlay(mergedRoot string, requireSync bool) error
 	UnmountXFS(xfsRoot string, requireSync bool) error
+	WaitFilesystemRelease(ctx context.Context, devicePath string) error
 }
 
 // CrashFenceHostObservation is a fail-closed host inspection of the exact
@@ -2179,6 +2180,15 @@ func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) err
 	if releaseErr == nil {
 		if err := m.runtime.UnmountXFS(current.XFSRoot, requireFilesystemSync); err != nil {
 			releaseErr = errors.Join(releaseErr, fmt.Errorf("unmount XFS: %w", err))
+		}
+	}
+	if releaseErr == nil && current.DevicePath != "" {
+		// A detached bind mount in runsc's mount namespace can keep XFS and
+		// its NBD opener alive after the host paths disappear. Disconnecting
+		// then shuts down XFS and can strand the NBD PID. Keep the backend
+		// attached until the kernel releases the filesystem.
+		if err := m.runtime.WaitFilesystemRelease(ctx, current.DevicePath); err != nil {
+			releaseErr = fmt.Errorf("wait for XFS release before NBD disconnect: %w", err)
 		}
 	}
 	var sealedDescriptor []byte

@@ -52,6 +52,11 @@ func (r *migrationFenceTestRunsc) Delete(ctx context.Context, id string, force b
 func migrationFenceNodeFixture(t *testing.T, beforeCapture ...func(*nodeRuntime, protocol.MigrationCaptureRequest)) (*nodeRuntime, protocol.MigrationSourceFenceRequest, *migrationFenceTestRuntime, *migrationFenceTestRunsc) {
 	t.Helper()
 	daemon, publication, runtime := migrationImageNodeFixture(t, beforeCapture...)
+	return migrationFencePublicationFixture(t, daemon, publication, runtime)
+}
+
+func migrationFencePublicationFixture(t *testing.T, daemon *nodeRuntime, publication protocol.MigrationPublicationRequest, runtime *migrationImageTestRuntime) (*nodeRuntime, protocol.MigrationSourceFenceRequest, *migrationFenceTestRuntime, *migrationFenceTestRunsc) {
+	t.Helper()
 	receipt, err := daemon.PublishMigration(t.Context(), publication)
 	require.NoError(t, err)
 	fencer := &migrationFenceTestRuntime{migrationImageTestRuntime: runtime}

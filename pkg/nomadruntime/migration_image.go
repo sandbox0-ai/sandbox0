@@ -34,6 +34,7 @@ func (r *rootfsRuntime) PrepareMigrationImageFiles(ctx context.Context, binding 
 // MigrationDestinationCustody is kept in the existing exclusive slot journal.
 // ImageDirectory is derived locally and never appears on the regional channel.
 type MigrationDestinationCustody struct {
+	Cancellation   *CheckpointImageCancellation          `json:"cancellation,omitempty"`
 	Failure        *MigrationFailureStopCustody          `json:"failure,omitempty"`
 	Adoption       *MigrationAdoptionCustody             `json:"adoption,omitempty"`
 	Restore        *protocol.MigrationRestoreObservation `json:"restore,omitempty"`
@@ -44,6 +45,7 @@ type MigrationDestinationCustody struct {
 }
 
 type migrationImagePrepareWorker struct {
+	cancel context.CancelFunc
 	digest string
 	done   chan struct{}
 	result *protocol.MigrationImagePrepared
@@ -90,12 +92,12 @@ func (d *nodeRuntime) PrepareMigrationImage(ctx context.Context, request protoco
 		return nil, errdefs.ErrAlreadyExists
 	}
 	if worker == nil {
-		worker = &migrationImagePrepareWorker{digest: want, done: make(chan struct{})}
+		workerCtx, cancel := context.WithTimeout(parent, 5*time.Minute)
+		worker = &migrationImagePrepareWorker{digest: want, done: make(chan struct{}), cancel: cancel}
 		d.migrationImagePreparations[key] = worker
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
-			workerCtx, cancel := context.WithTimeout(parent, 5*time.Minute)
 			defer cancel()
 			worker.result, worker.err = d.prepareMigrationImage(workerCtx, owned)
 			d.mu.Lock()
@@ -240,7 +242,7 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	if err := d.journal.recordMigrationDestination(request, &result); err != nil {
 		return nil, err
 	}
-	d.logMigrationTiming(request.Publication.Assignment.OperationID, "image-preparation", transferStarted,
+	d.logMigrationTiming(request.OperationID(), "image-preparation", transferStarted,
 		"transport", transport, "image_bytes", result.TotalBytes)
 	return &result, nil
 }
@@ -271,7 +273,7 @@ func (j *runtimeSlotJournal) recordMigrationDestination(request protocol.Migrati
 			return errdefs.ErrFailedPrecondition
 		}
 		if prior := current.MigrationDestination; prior != nil {
-			if prior.Adoption != nil {
+			if prior.Adoption != nil || prior.Cancellation != nil {
 				return errdefs.ErrFailedPrecondition
 			}
 			if prior.RequestDigest != want {
@@ -339,6 +341,9 @@ func (r runtimeSlotJournalRecord) validateMigrationDestination() error {
 		return err
 	}
 	if err := c.validateFailure(); err != nil {
+		return err
+	}
+	if err := c.validateCancellation(); err != nil {
 		return err
 	}
 	if c.Failure != nil && c.Failure.Cleanup != nil && c.Failure.Cleanup.Finalization != nil &&

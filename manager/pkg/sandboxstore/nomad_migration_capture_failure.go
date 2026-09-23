@@ -12,6 +12,7 @@ import (
 )
 
 type nomadCaptureFailure struct {
+	checkpoint    *NomadSandboxCheckpoint
 	life          *SandboxLifecycleTxn
 	capture       protocol.MigrationCaptureRequest
 	request       *protocol.MigrationCaptureFailureRequest
@@ -40,6 +41,9 @@ func lockNomadCaptureFailure(ctx context.Context, tx pgx.Tx, id string) (*nomadC
 	life, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+` WHERE txn_id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return nil, err
+	}
+	if life != nil && life.Kind == SandboxLifecycleKindPause && life.Source == SandboxLifecycleSourceManual {
+		return lockNomadCheckpointCaptureFailure(ctx, tx, life)
 	}
 	if life == nil || life.Kind != SandboxLifecycleKindMigrate || life.Source != SandboxLifecycleSourceAuto || life.Cancelable {
 		return nil, ErrNomadSandboxMigrationConflict
@@ -139,25 +143,30 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationCaptureFailure(ctx contex
 	if err != nil {
 		return nil, err
 	}
-	target, err := lockRuntimeSlotByID(ctx, tx, w.targetSlot)
-	if err != nil {
-		return nil, err
-	}
 	t := w.capture.Target
 	if source.State != RuntimeSlotStateActive && source.State != RuntimeSlotStateQuiescing && source.State != RuntimeSlotStateOrphaned ||
 		source.ResourceLeaseState != RuntimeResourceLeaseActive || source.SandboxID != w.life.SandboxID || source.WriterGrantID != w.sourceWriter ||
 		source.AllocationID != t.AllocationID || source.ClusterID != t.ClusterID || source.NodeID != t.NodeID || source.NodeUID != t.NodeUID || source.NodeBootID != t.NodeBootID ||
 		source.ControlEndpoint != t.ControlEndpoint || source.ProcdInstanceID != w.capture.ProcdInstanceID || source.ClaimRuntimeAssignmentRevision != w.capture.AssignmentRevision ||
-		hex.EncodeToString(source.ResourceLeaseDigest) != w.capture.ResourceLeaseDigest || !bytes.Equal(source.RootFSBindingDigest, w.sourceBinding) ||
-		target.ClaimID != "" || target.ClaimOperationID != "" || !target.ResourceLease.IsZero() || target.SandboxID != "" || target.WriterGrantID != "" {
+		hex.EncodeToString(source.ResourceLeaseDigest) != w.capture.ResourceLeaseDigest || !bytes.Equal(source.RootFSBindingDigest, w.sourceBinding) {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
-	lease, _, state, err := loadMigrationResourceLease(ctx, tx, w.targetLease)
-	if err != nil {
-		return nil, err
-	}
-	if state != RuntimeResourceLeaseActive || lease.SlotID != target.ID || lease.OperationID != w.life.ID {
-		return nil, ErrNomadSandboxMigrationConflict
+	var target *RuntimeSlot
+	if w.checkpoint == nil {
+		target, err = lockRuntimeSlotByID(ctx, tx, w.targetSlot)
+		if err != nil {
+			return nil, err
+		}
+		if target.ClaimID != "" || target.ClaimOperationID != "" || !target.ResourceLease.IsZero() || target.SandboxID != "" || target.WriterGrantID != "" {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+		lease, _, state, err := loadMigrationResourceLease(ctx, tx, w.targetLease)
+		if err != nil {
+			return nil, err
+		}
+		if state != RuntimeResourceLeaseActive || lease.SlotID != target.ID || lease.OperationID != w.life.ID {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
 	}
 	g, err := w.lockSourceGrant(ctx, tx)
 	if err != nil {
@@ -188,13 +197,15 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationCaptureFailure(ctx contex
         carrier_retired=true,quiescing_at=COALESCE(quiescing_at,clock_timestamp()),revision=revision+1,updated_at=clock_timestamp() WHERE slot_id=$1`, source.ID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.runtime_resource_leases SET lease_state='released',released_at=clock_timestamp(),updated_at=clock_timestamp() WHERE lease_id=$1`, w.targetLease); err != nil {
-		return nil, err
+	if w.checkpoint == nil {
+		if _, err := tx.Exec(ctx, `UPDATE manager.runtime_resource_leases SET lease_state='released',released_at=clock_timestamp(),updated_at=clock_timestamp() WHERE lease_id=$1`, w.targetLease); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE manager.runtime_slots SET carrier_retired=true,revision=revision+1,updated_at=clock_timestamp() WHERE slot_id=$1`, target.ID); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.runtime_slots SET carrier_retired=true,revision=revision+1,updated_at=clock_timestamp() WHERE slot_id=$1`, target.ID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_request=$2,capture_failure_digest=$3 WHERE operation_id=$1`, w.life.ID, payload, want); err != nil {
+	if err := w.saveCaptureFailureEvidence(ctx, tx, "capture_failure", payload, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_request=$2,capture_failure_digest=$3 WHERE operation_id=$1`, want); err != nil {
 		return nil, err
 	}
 	return request, tx.Commit(ctx)
@@ -237,7 +248,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationCaptureFailureCleanup(ctx co
 		return err
 	}
 	payload, _ := json.Marshal(proof)
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_cleanup_receipt=$2 WHERE operation_id=$1`, w.life.ID, payload); err != nil {
+	if err := w.saveCaptureFailureEvidence(ctx, tx, "capture_failure_cleanup", payload, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_cleanup_receipt=$2 WHERE operation_id=$1`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -309,7 +320,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationCaptureFailureFinalization(c
 		return tx.Commit(ctx)
 	}
 	payload, _ := json.Marshal(proof)
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_finalization_receipt=$2 WHERE operation_id=$1`, w.life.ID, payload); err != nil {
+	if err := w.saveCaptureFailureEvidence(ctx, tx, "capture_failure_finalized", payload, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_finalization_receipt=$2 WHERE operation_id=$1`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

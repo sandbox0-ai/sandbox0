@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 const MigrationCPULaunchVersion = 1
@@ -66,7 +67,7 @@ func (l MigrationCPULaunch) Validate() error {
 		return err
 	}
 	if l.Restored != nil {
-		if l.RuntimeGeneration < 2 {
+		if l.RuntimeGeneration < 2 && l.Restored.CheckpointKind != runtimecontrol.CheckpointFork {
 			return fmt.Errorf("restored CPU history requires an advanced generation")
 		}
 		if err := l.Restored.Validate(); err != nil {

@@ -184,7 +184,11 @@ func validateNomadMigrationCPULineage(ctx context.Context, tx pgx.Tx, source *Ru
 	var operation, phase string
 	err := tx.QueryRow(ctx, `SELECT m.restore_request,m.operation_id,l.phase
 		FROM manager.sandbox_runtime_migrations m JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=m.operation_id
-		WHERE m.target_slot_id=$1`, source.ID).Scan(&payload, &operation, &phase)
+		WHERE m.target_slot_id=$1
+		UNION ALL
+		SELECT r.evidence->'restore',r.operation_id,l.phase
+		FROM manager.sandbox_runtime_checkpoint_restores r JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=r.operation_id
+		WHERE r.operation_id=$2 AND r.evidence->'image'->'target'->>'slot_id'=$1`, source.ID, source.ClaimOperationID).Scan(&payload, &operation, &phase)
 	if err == pgx.ErrNoRows {
 		if launch.Restored != nil {
 			return ErrNomadSandboxMigrationConflict

@@ -41,12 +41,30 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	require.NoError(t, manager.Release(t.Context(), request.Identity))
 	require.NoError(t, manager.Release(t.Context(), request.Identity))
 	require.Equal(t, []string{
-		"attach", "mount-xfs", "mount-overlay", "unmount-overlay", "unmount-xfs", "close-device",
+		"attach", "mount-xfs", "mount-overlay", "unmount-overlay", "unmount-xfs", "wait-xfs-release", "close-device",
 	}, runtime.callsSnapshot())
 	require.Equal(t, []bool{false, false}, runtime.unmountSyncSnapshot(), "crash cleanup must not claim a filesystem barrier")
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerKeepsNBDBackendUntilXFSIsFullyReleased(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "xfs-release-barrier")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-xfs-release-barrier"))
+	runtime.failAt = "wait-xfs-release"
+	err = manager.Release(t.Context(), request.Identity)
+	require.ErrorContains(t, err, "injected XFS release delay")
+	require.NotContains(t, runtime.callsSnapshot(), "close-device")
+	manager.mu.Lock()
+	_, live := manager.live[request.Parent]
+	manager.mu.Unlock()
+	require.True(t, live, "retry must retain the NBD server for a detached XFS mount")
+	runtime.failAt = ""
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	require.Contains(t, runtime.callsSnapshot(), "close-device")
 }
 
 func TestManagerExactRecoverySessionUsesDurableBindingAcrossRelease(t *testing.T) {
@@ -773,7 +791,7 @@ func TestManagerRestartDisconnectsExactOrphanBeforeTombstone(t *testing.T) {
 	require.NoError(t, second.ReconcileReleases(t.Context()))
 	require.NoError(t, second.ReleaseParent(t.Context(), request.Parent, request.Identity))
 	require.Equal(t, 1, secondRuntime.orphanRecoveries)
-	require.Equal(t, []string{"unmount-overlay", "unmount-xfs", "recover-orphan-device"}, secondRuntime.callsSnapshot())
+	require.Equal(t, []string{"unmount-overlay", "unmount-xfs", "wait-xfs-release", "recover-orphan-device"}, secondRuntime.callsSnapshot())
 	stored, err := second.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, stateTombstoned, stored.State)
@@ -1894,6 +1912,14 @@ func (r *fakeHostRuntime) UnmountXFS(_ string, requireSync bool) error {
 	r.recordUnmountSync(requireSync)
 	if r.failAt == "unmount-xfs" {
 		return fmt.Errorf("injected XFS unmount failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) WaitFilesystemRelease(_ context.Context, _ string) error {
+	r.record("wait-xfs-release")
+	if r.failAt == "wait-xfs-release" {
+		return fmt.Errorf("injected XFS release delay")
 	}
 	return nil
 }

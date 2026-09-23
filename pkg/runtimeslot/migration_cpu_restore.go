@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 // MigrationCPURestoreLineage retains the guest exposure across migrations.
@@ -13,12 +14,22 @@ import (
 // recursively with the number of moves. The regional restore command retains
 // that predecessor and is the authority used to verify this link.
 type MigrationCPURestoreLineage struct {
-	SourceLaunchDigest   string              `json:"source_launch_digest"`
-	RestoreRequestDigest string              `json:"restore_request_digest"`
-	GuestProfile         MigrationCPUProfile `json:"guest_profile"`
+	SourceLaunchDigest      string                               `json:"source_launch_digest"`
+	RestoreRequestDigest    string                               `json:"restore_request_digest"`
+	GuestProfile            MigrationCPUProfile                  `json:"guest_profile"`
+	CheckpointKind          runtimecontrol.CheckpointRestoreKind `json:"checkpoint_kind,omitempty"`
+	CheckpointRestoreDigest string                               `json:"checkpoint_restore_digest,omitempty"`
 }
 
 func (l MigrationCPURestoreLineage) Validate() error {
+	if l.CheckpointKind != "" || l.CheckpointRestoreDigest != "" {
+		if l.CheckpointKind != runtimecontrol.CheckpointResume && l.CheckpointKind != runtimecontrol.CheckpointFork {
+			return fmt.Errorf("CPU lineage changed checkpoint restore kind")
+		}
+		if _, err := DecodeProof("checkpoint_restore_digest", l.CheckpointRestoreDigest); err != nil {
+			return err
+		}
+	}
 	if err := digest.Digest(l.SourceLaunchDigest).Validate(); err != nil || !strings.HasPrefix(l.SourceLaunchDigest, "sha256:") {
 		return fmt.Errorf("restored CPU history lacks its source launch digest")
 	}
@@ -85,7 +96,7 @@ func BindMigrationCPURestore(request MigrationRestoreRequest, before, after Migr
 	sourceDigest, _ := source.Digest()
 	binding, _ := request.Stage.BindingDigest()
 	lease, _ := resources.Digest()
-	assignment := request.Image.Publication.Assignment.Target
+	assignment := request.Image.RuntimeAssignment()
 	revision, _ := assignment.Revision()
 	after.Profile.Features = append([]string(nil), after.Profile.Features...)
 	launch := &MigrationCPULaunch{Version: MigrationCPULaunchVersion, ExecutableDigest: source.ExecutableDigest,
@@ -93,6 +104,10 @@ func BindMigrationCPURestore(request MigrationRestoreRequest, before, after Migr
 		LaunchAttempt: request.Stage.Identity.LaunchAttempt, BindingDigest: hex.EncodeToString(binding[:]),
 		ResourceLeaseDigest: strings.TrimPrefix(lease, "sha256:"), Resources: resources, AssignmentRevision: revision,
 		Observation: after, Restored: &MigrationCPURestoreLineage{SourceLaunchDigest: sourceDigest, RestoreRequestDigest: restoreDigest, GuestProfile: guest}}
+	if checkpoint := request.Image.Checkpoint; checkpoint != nil {
+		launch.Restored.CheckpointKind = checkpoint.Assignment.Kind
+		launch.Restored.CheckpointRestoreDigest, _ = checkpoint.Assignment.Digest()
+	}
 	return launch, launch.Validate()
 }
 

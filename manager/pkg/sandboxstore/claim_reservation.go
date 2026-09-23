@@ -642,6 +642,27 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 		return fmt.Errorf("lock sandbox lifecycle before claim cleanup: %w", err)
 	}
 	if lifecycle != nil {
+		if lifecycle.Kind == SandboxLifecycleKindPause && lifecycle.Source == SandboxLifecycleSourceManual {
+			var checkpoint bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoints WHERE operation_id=$1)`, lifecycle.ID).Scan(&checkpoint); err != nil {
+				return err
+			}
+			if checkpoint {
+				// Preserve preparation cancellation and one-shot capture custody.
+				// Deletion commits intent below; checkpoint recovery owns the source
+				// until cancellation or exact physical completion releases it.
+				return nil
+			}
+		}
+		if lifecycle.Kind == SandboxLifecycleKindResume {
+			var memory bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_restores WHERE operation_id=$1)`, lifecycle.ID).Scan(&memory); err != nil {
+				return err
+			}
+			if memory {
+				return nil
+			} // Memory target recovery must fence the exact restore before deletion.
+		}
 		if lifecycle.Kind == SandboxLifecycleKindMigrate {
 			var targetSlot, targetLease string
 			var authorized bool
@@ -805,14 +826,17 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 	var migrating bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (
         SELECT 1 FROM manager.sandbox_lifecycle_txns
-        WHERE sandbox_id=$1 AND kind='migrate' AND phase IN ('preparing','barriered','publishing','committing')
+		WHERE sandbox_id=$1 AND phase IN ('preparing','barriered','publishing','committing')
+			AND (kind='migrate' OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoints c
+				WHERE c.operation_id=sandbox_lifecycle_txns.txn_id) OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_restores r
+                WHERE r.operation_id=sandbox_lifecycle_txns.txn_id))
     )`, record.ID).Scan(&migrating); err != nil {
 		return nil, fmt.Errorf("check migration claim cleanup fence: %w", err)
 	}
 	if migrating {
 		// The public runtime may still name the predecessor while execution
-		// custody already includes a destination. Migration recovery owns both
-		// until cancellation or completion; selecting one slot here loses that
+		// custody already includes a destination. Checkpoint/migration recovery
+		// owns execution until cancellation or completion; fencing here loses that
 		// boundary and can kill the procd needed to acknowledge cancellation.
 		return nil, nil
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 const NodeMigrationCPUPreflightControlPath = "/migration/cpu-preflight"
@@ -18,12 +20,16 @@ const MigrationCPUPreflightTimeout = 2 * time.Minute
 // destination accepts the source result carried over the authenticated region.
 // A successful result never reserves resources, freezes or starts a workload.
 type MigrationCPUPreflightRequest struct {
-	Target               NodeChannelTarget       `json:"target"`
-	Source               MigrationCaptureRequest `json:"source"`
-	SourceResources      RuntimeResourceLease    `json:"source_resources"`
-	Destination          NodeChannelTarget       `json:"destination"`
-	DestinationResources RuntimeResourceLease    `json:"destination_resources"`
-	Launch               *MigrationCPULaunch     `json:"launch,omitempty"`
+	// CaptureOnly observes a source without reserving a future destination.
+	// Resume/fork must independently verify the eventual target before restore.
+	CaptureOnly          bool                                        `json:"capture_only,omitempty"`
+	Checkpoint           *runtimecontrol.CheckpointRestoreAssignment `json:"checkpoint,omitempty"`
+	Target               NodeChannelTarget                           `json:"target"`
+	Source               MigrationCaptureRequest                     `json:"source"`
+	SourceResources      RuntimeResourceLease                        `json:"source_resources"`
+	Destination          NodeChannelTarget                           `json:"destination"`
+	DestinationResources RuntimeResourceLease                        `json:"destination_resources"`
+	Launch               *MigrationCPULaunch                         `json:"launch,omitempty"`
 }
 
 func (r MigrationCPUPreflightRequest) IsSource() bool { return r.Target == r.Source.Target }
@@ -32,20 +38,45 @@ func (r MigrationCPUPreflightRequest) Validate() error {
 	if err := r.Source.Validate(); err != nil {
 		return err
 	}
-	if err := r.Destination.validate(true); err != nil {
-		return err
-	}
-	if r.Destination.ClusterID != r.Source.Target.ClusterID || r.Destination.NodeID == r.Source.Target.NodeID ||
-		r.Destination.NodeUID == r.Source.Target.NodeUID || r.Destination.SlotID == r.Source.Target.SlotID ||
-		r.Destination.AllocationID == r.Source.Target.AllocationID {
-		return fmt.Errorf("CPU preflight requires distinct nodes in one cluster")
-	}
-	for _, pair := range []struct {
+	placements := []struct {
 		target    NodeChannelTarget
 		resources RuntimeResourceLease
 	}{
-		{r.Source.Target, r.SourceResources}, {r.Destination, r.DestinationResources},
-	} {
+		{r.Source.Target, r.SourceResources},
+	}
+	if r.CaptureOnly {
+		if !r.IsSource() || r.Destination != (NodeChannelTarget{}) || !r.DestinationResources.IsZero() || r.Launch != nil || r.Checkpoint != nil {
+			return fmt.Errorf("capture-only CPU preflight requires only the source and its recorded launch")
+		}
+	} else {
+		if err := r.Destination.validate(true); err != nil {
+			return err
+		}
+		if r.Destination.ClusterID != r.Source.Target.ClusterID || r.Destination.SlotID == r.Source.Target.SlotID ||
+			r.Destination.AllocationID == r.Source.Target.AllocationID {
+			return fmt.Errorf("CPU preflight requires distinct carriers in one cluster")
+		}
+		operation := r.Source.OperationID
+		if r.Checkpoint != nil {
+			a := r.Checkpoint
+			if a.Validate() != nil || r.IsSource() || a.Capture.OperationID != r.Source.OperationID ||
+				a.Capture.SandboxID != r.Source.SandboxID || a.Capture.RuntimeGeneration != r.Source.SourceGeneration ||
+				a.Capture.Revision != r.Source.AssignmentRevision || a.OperationID == operation {
+				return fmt.Errorf("CPU preflight changed checkpoint restore authority")
+			}
+			operation = a.OperationID
+		} else if r.Destination.NodeID == r.Source.Target.NodeID || r.Destination.NodeUID == r.Source.Target.NodeUID {
+			return fmt.Errorf("migration CPU preflight requires distinct nodes")
+		}
+		placements = append(placements, struct {
+			target    NodeChannelTarget
+			resources RuntimeResourceLease
+		}{r.Destination, r.DestinationResources})
+		if r.DestinationResources.OperationID != operation {
+			return fmt.Errorf("CPU preflight changed destination reservation")
+		}
+	}
+	for _, pair := range placements {
 		if err := pair.resources.Validate(); err != nil {
 			return err
 		}
@@ -55,8 +86,8 @@ func (r MigrationCPUPreflightRequest) Validate() error {
 		}
 	}
 	sourceDigest, _ := r.SourceResources.Digest()
-	if strings.TrimPrefix(sourceDigest, "sha256:") != r.Source.ResourceLeaseDigest || r.DestinationResources.OperationID != r.Source.OperationID {
-		return fmt.Errorf("CPU preflight changed source lease or destination reservation")
+	if strings.TrimPrefix(sourceDigest, "sha256:") != r.Source.ResourceLeaseDigest {
+		return fmt.Errorf("CPU preflight changed source lease")
 	}
 	if r.IsSource() {
 		if r.Launch != nil {

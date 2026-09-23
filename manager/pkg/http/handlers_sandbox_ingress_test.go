@@ -177,7 +177,7 @@ func TestForkSandboxUsesRuntimeBackendAndSignedOperation(t *testing.T) {
 	ginContext, _ := gin.CreateTestContext(recorder)
 	ginContext.Params = gin.Params{{Key: "id", Value: "sandbox-source"}}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-source/fork?operation_id=spoofed",
-		strings.NewReader(`{"operation_id":"spoofed","config":{"ttl":30}}`))
+		strings.NewReader(`{"config":{"ttl":30}}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
 		TeamID: "team-1", UserID: "user-1",

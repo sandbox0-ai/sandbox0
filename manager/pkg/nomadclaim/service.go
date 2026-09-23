@@ -395,7 +395,8 @@ func (s *Service) RequestRootFSWriterPressurePause(
 	candidate, err := store.RequestNomadSandboxPressurePause(ctx, request)
 	if err != nil {
 		switch {
-		case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
+		case errors.Is(err, sandboxstore.ErrNomadCheckpointConflict),
+			errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
 			errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
 			errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 			errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
@@ -513,6 +514,21 @@ func (s *Service) resumeNomadSandbox(
 	ctx context.Context,
 	sandboxID string,
 ) (*sandboxstore.SandboxRecord, *runtimeslotclaim.Result, error) {
+	return s.resumeNomadSandboxMode(ctx, sandboxID, false)
+}
+
+func (s *Service) resumeNomadSandboxMode(ctx context.Context, sandboxID string, memory bool) (*sandboxstore.SandboxRecord, *runtimeslotclaim.Result, error) {
+	return s.resumeNomadSandboxOperation(ctx, sandboxID, memory, "")
+}
+
+// expectedOperation restricts background recovery to an already-admitted
+// lifecycle. A stale queue item cannot create a replacement resume.
+func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID string, memory bool, expectedOperation string) (*sandboxstore.SandboxRecord, *runtimeslotclaim.Result, error) {
+	if memory {
+		if _, ok := s.planner.(checkpointPlanner); !ok {
+			return nil, nil, fmt.Errorf("%w: memory resume planner is unavailable", service.ErrSandboxLifecycleUnavailable)
+		}
+	}
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" || len(sandboxID) > 512 {
 		return nil, nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
@@ -534,10 +550,13 @@ func (s *Service) resumeNomadSandbox(
 		return nil, nil, err
 	}
 	candidate, found, err := s.store.RetryNomadSandboxResume(ctx, &sandboxstore.RetryNomadSandboxResumeRequest{
-		SandboxID: sandboxID, ExpectedTeamID: record.TeamID,
+		SandboxID: sandboxID, ExpectedTeamID: record.TeamID, Memory: memory,
 	})
 	if err != nil {
 		return nil, nil, mapNomadResumeError("retry Nomad sandbox resume", sandboxID, err)
+	}
+	if expectedOperation != "" && (!found || candidate == nil || candidate.OperationID != expectedOperation) {
+		return nil, nil, nil
 	}
 	if !found {
 		limit, limitErr := s.activeSandboxLimit(ctx, record.TeamID)
@@ -545,7 +564,7 @@ func (s *Service) resumeNomadSandbox(
 			return nil, nil, limitErr
 		}
 		candidate, err = s.store.RequestNomadSandboxResume(ctx, &sandboxstore.RequestNomadSandboxResumeRequest{
-			SandboxID: sandboxID, ExpectedTeamID: record.TeamID, ActiveSandboxLimit: limit,
+			SandboxID: sandboxID, ExpectedTeamID: record.TeamID, Memory: memory, ActiveSandboxLimit: limit,
 		})
 		if err != nil {
 			return nil, nil, mapNomadResumeError("request Nomad sandbox resume", sandboxID, err)
@@ -557,33 +576,52 @@ func (s *Service) resumeNomadSandbox(
 	if candidate.AlreadyActive {
 		return candidate.Record, nil, nil
 	}
+	if !memory && candidate.Checkpoint != nil {
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume cannot change to filesystem-only on retry"))
+	}
 
-	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
-	plan.assignment, err = s.runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
-	if err != nil {
-		resumeErr := apierror.NewConflict("sandbox", sandboxID,
-			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
-		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
+	if memory {
+		if err := bindCheckpointResumePlan(candidate, &plan); err != nil {
+			return nil, nil, apierror.NewConflict("sandbox", sandboxID, err)
+		}
+	} else {
+		plan.request.RuntimeGeneration = candidate.RuntimeGeneration
+		plan.assignment, err = s.runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
+		if err != nil {
+			resumeErr := apierror.NewConflict("sandbox", sandboxID,
+				fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+			return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
+		}
+		// A never-run fork or a restored cross-filesystem head contains another
+		// sandbox's procd session identity. Clear it on activation; a later pause
+		// publishes a same-filesystem generation and consumes the durable signal.
+		plan.assignment.ResetCopiedSessionState = candidate.ResetCopiedSessionState ||
+			candidate.Record.RuntimeGeneration == 0
+		if err := plan.assignment.Validate(); err != nil {
+			resumeErr := apierror.NewConflict("sandbox", sandboxID,
+				fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+			return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
+		}
 	}
-	// A never-run fork or a restored cross-filesystem head contains another
-	// sandbox's procd session identity. Clear it on activation; a later pause
-	// publishes a same-filesystem generation and consumes the durable signal.
-	plan.assignment.ResetCopiedSessionState = candidate.ResetCopiedSessionState ||
-		candidate.Record.RuntimeGeneration == 0
-	if err := plan.assignment.Validate(); err != nil {
-		resumeErr := apierror.NewConflict("sandbox", sandboxID,
-			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
-		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
-	}
-	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
+	plannerRequest := runtimeslotclaim.Request{
 		OperationID: candidate.OperationID, SandboxID: candidate.SandboxID,
 		TeamID: candidate.Record.TeamID, UserID: candidate.Record.UserID,
 		CompatibilityDigest: plan.runtimeClass.CompatibilityDigest, ClusterID: plan.runtimeClass.ClusterID,
 		Resources:     plan.resources,
 		NetworkPolicy: plan.policy, Runtime: plan.assignment, StartedAt: startedAt,
-	})
+	}
+	var result *runtimeslotclaim.Result
+	if memory {
+		result, err = s.planner.(checkpointPlanner).ClaimCheckpoint(ctx, plannerRequest, *candidate.Checkpoint)
+	} else {
+		result, err = s.planner.Claim(ctx, plannerRequest)
+	}
 	if err != nil {
-		err = s.abortFailedNomadResume(ctx, candidate, err)
+		// A lost restore or handover reply may hide a running guest. Preserve
+		// memory custody for exact retry or physical failure resolution.
+		if !memory {
+			err = s.abortFailedNomadResume(ctx, candidate, err)
+		}
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
 			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
 		}
@@ -593,7 +631,14 @@ func (s *Service) resumeNomadSandbox(
 		result.Slot.AllocationID == "" || result.Slot.AllocationNamespace == "" {
 		resumeErr := fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
 			service.ErrSandboxLifecycleUnavailable)
+		if memory {
+			return nil, nil, resumeErr
+		}
 		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
+	}
+	if memory && (result.CommandProof.Validate() != nil || result.CommandProof.OperationID != candidate.OperationID ||
+		result.CommandProof.SlotID != result.Slot.ID || result.ProcdInstanceID != result.CommandProof.ProcdInstanceID) {
+		return nil, nil, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume requires exact command-ready proof"))
 	}
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
@@ -611,6 +656,10 @@ func (s *Service) resumeNomadSandbox(
 		completed.RuntimeNamespace != result.Slot.AllocationNamespace {
 		return nil, nil, apierror.NewConflict("sandbox", sandboxID,
 			fmt.Errorf("committed Nomad resume binding does not match the command-ready slot"))
+	}
+	if memory {
+		result.Duration = max(result.Duration, s.now().UTC().Sub(startedAt))
+		result.WithinSLO = false
 	}
 	s.logger.Info("Resumed Nomad sandbox",
 		zap.String("sandboxID", sandboxID), zap.String("operationID", candidate.OperationID),
@@ -804,6 +853,8 @@ func mapNomadResumeError(operation, sandboxID string, err error) error {
 	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
 		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxResumeConflict),
+		errors.Is(err, sandboxstore.ErrNomadCheckpointConflict),
+		errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained),
 		errors.Is(err, sandboxstore.ErrNomadSandboxResumeNotReady),
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
@@ -924,7 +975,10 @@ func mapNomadSandboxPauseError(sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
 		return apierror.NewNotFound("sandbox", sandboxID)
-	case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
+	case errors.Is(err, sandboxstore.ErrNomadCheckpointConflict),
+		errors.Is(err, sandboxstore.ErrNomadSandboxForkNotReady),
+		errors.Is(err, sandboxstore.ErrNomadSandboxResumeNotReady),
+		errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
 		errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),

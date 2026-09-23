@@ -71,6 +71,29 @@ func TestMigrationRestoredCPULineagePreservesGuestOnWiderHost(t *testing.T) {
 	require.Equal(t, 1, strings.Count(string(payload), "source_launch_digest"), "only one predecessor link is carried")
 }
 
+func TestCheckpointPreflightImportsCompletedRestoreAdoption(t *testing.T) {
+	h, claim, runner, custodian, fixture := migrationRestoreHandleFixture(t)
+	require.NoError(t, h.Claim(claim))
+	adoption := installBackgroundAdoption(t, claim, custodian, fixture)
+	metadata := h.PersistedState().Claim
+	require.Nil(t, metadata.MigrationAdoption)
+	source := protocol.MigrationCaptureRequest{
+		Target: adoption.Target, OperationID: "checkpoint-after-restore", LifecycleEpoch: 4,
+		SandboxID: metadata.SandboxID, SourceGeneration: claim.Runtime.RuntimeGeneration,
+		AssignmentRevision: metadata.RuntimeRevision, BindingDigest: metadata.RootFSBindingDigest,
+		ResourceLeaseDigest: metadata.ResourceLeaseDigest, ProcdInstanceID: adoption.ProcdInstanceID,
+	}
+	request := protocol.MigrationCPUPreflightRequest{CaptureOnly: true, Target: adoption.Target,
+		Source: source, SourceResources: claim.Resources}
+	require.NoError(t, request.Validate())
+	result, err := h.PreflightMigrationCPU(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, result.ValidateFor(request))
+	require.NotNil(t, h.PersistedState().Claim.MigrationAdoption)
+	require.Equal(t, 1, countMigrationCall(runner.callsSnapshot(), "restore"))
+	require.NotContains(t, runner.callsSnapshot(), "checkpoint")
+}
+
 func TestMigrationRestoreRejectsCompatibleHostChangesDuringExecution(t *testing.T) {
 	h, claim, runner, c, _ := migrationRestoreHandleFixture(t)
 	runner.beforeRestore = func() {

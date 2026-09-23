@@ -62,19 +62,30 @@ func migrationImageDestinationFixture(t *testing.T, beforePublish ...func(*nodeR
 	}
 	receipt, err := source.PublishMigration(t.Context(), publication)
 	require.NoError(t, err)
+	return migrationImageDestinationForPublication(t, publication, *receipt, images, nil)
+}
+
+func migrationImageDestinationForPublication(t *testing.T, publication protocol.MigrationPublicationRequest, receipt protocol.MigrationPublication, images *migrationImageTestRuntime, checkpoint *protocol.CheckpointRestoreAuthority) (*nodeRuntime, protocol.MigrationImagePrepareRequest, *migrationImageDownloadTestRuntime) {
+	t.Helper()
 	registration := testRuntimeSlotJournalRegistration(t, "target-slot")
 	registration.NodeID, registration.NodeBootID, registration.AllocationID = "target-node", "target-boot", "target-allocation"
 	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "target.db"), time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	operation, uid := publication.Assignment.OperationID, "target-uid"
+	if checkpoint != nil {
+		operation = checkpoint.Assignment.OperationID
+		registration.NodeID, registration.NodeBootID = publication.Capture.Request.Target.NodeID, publication.Capture.Request.Target.NodeBootID
+		uid = publication.Capture.Request.Target.NodeUID
+	}
 	require.NoError(t, journal.Register(registration))
-	resources, err := protocol.NewRuntimeResourceLease(publication.Assignment.OperationID, "target-claim", registration.SlotID,
-		registration.ClusterID, registration.NodeID, "target-uid", registration.NodeBootID,
+	resources, err := protocol.NewRuntimeResourceLease(operation, "target-claim", registration.SlotID,
+		registration.ClusterID, registration.NodeID, uid, registration.NodeBootID,
 		protocol.RuntimeResourceRequest{Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: 1000, MemoryBytes: 128 << 20, PIDsLimit: 1024}, "0", "0")
 	require.NoError(t, err)
 	request := protocol.MigrationImagePrepareRequest{Target: protocol.NodeChannelTarget{SlotID: registration.SlotID, ClusterID: registration.ClusterID,
 		NodeID: registration.NodeID, NodeUID: resources.NodeUID, NodeBootID: registration.NodeBootID, AllocationID: registration.AllocationID,
-		ControlEndpoint: "unix:///private/target.sock"}, Publication: publication, Receipt: *receipt, Resources: resources}
+		ControlEndpoint: "unix:///private/target.sock"}, Publication: publication, Receipt: receipt, Resources: resources, Checkpoint: checkpoint}
 	require.NoError(t, request.Validate())
 	runtime := &migrationImageDownloadTestRuntime{fakeRootFSRuntime: &fakeRootFSRuntime{}, store: images.store}
 	runner := &migrationSourceTestRunsc{fakeRunsc: newFakeRunsc()}

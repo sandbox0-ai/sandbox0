@@ -547,6 +547,13 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 		return fmt.Errorf("persist command readiness: %w", err)
 	}
 	if claim.MigrationRestore != nil {
+		if claim.MigrationRestore.Image.Checkpoint != nil && observation.MigrationAdoption == nil {
+			// Memory resume publishes routing in a separate regional commit.
+			// Acknowledge its exact ready proof first so that commit can run;
+			// keep image custody and ordinary controls fenced until the region
+			// authorizes adoption through the existing retry/delivery channel.
+			return nil
+		}
 		return h.adoptMigrationAfterReady(observation.MigrationAdoption, *claim.MigrationRestore, digest)
 	}
 	if observation.MigrationAdoption != nil {

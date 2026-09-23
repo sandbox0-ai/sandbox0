@@ -112,3 +112,22 @@ func usesSecurityScheme(requirements openapi3.SecurityRequirements, scheme strin
 	}
 	return false
 }
+
+// Memory must remain opt-in in the contract consumed by every generated SDK.
+func TestExecutionStatePreservationKeepsFilesystemDefaults(t *testing.T) {
+	document := loadOpenAPIDocument(t)
+	for _, action := range []string{"pause", "resume", "fork"} {
+		operation := document.Paths.Value("/api/v1/sandboxes/{id}/" + action).Post
+		if operation.RequestBody == nil || operation.RequestBody.Value.Required {
+			t.Fatalf("%s must accept existing bodyless requests", action)
+		}
+		schema := operation.RequestBody.Value.Content["application/json"].Schema.Value
+		memory := schema.Properties["memory"].Value
+		if memory.Default != false || memory.Nullable || slices.Contains(schema.Required, "memory") {
+			t.Fatalf("%s memory selector must be optional, boolean and default false", action)
+		}
+		if !memory.Type.Is("boolean") || operation.Responses.Status(400) == nil || operation.Responses.Status(503) == nil {
+			t.Fatalf("%s must describe explicit selection and rejected requests", action)
+		}
+	}
+}

@@ -11,14 +11,15 @@ import (
 // the restored generation. It releases destination image custody, not the live
 // writer or resource lease. RestoreDigest binds every prior physical fence.
 type MigrationAdoptionRequest struct {
-	Target             NodeChannelTarget `json:"target"`
-	OperationID        string            `json:"operation_id"`
-	ClaimID            string            `json:"claim_id"`
-	SandboxID          string            `json:"sandbox_id"`
-	RuntimeGeneration  int64             `json:"runtime_generation"`
-	ProcdInstanceID    string            `json:"procd_instance_id"`
-	RestoreDigest      string            `json:"restore_digest"`
-	CommandReadyDigest string            `json:"command_ready_digest"`
+	Target                  NodeChannelTarget `json:"target"`
+	OperationID             string            `json:"operation_id"`
+	ClaimID                 string            `json:"claim_id"`
+	SandboxID               string            `json:"sandbox_id"`
+	RuntimeGeneration       int64             `json:"runtime_generation"`
+	ProcdInstanceID         string            `json:"procd_instance_id"`
+	RestoreDigest           string            `json:"restore_digest"`
+	CommandReadyDigest      string            `json:"command_ready_digest"`
+	CheckpointRestoreDigest string            `json:"checkpoint_restore_digest,omitempty"`
 }
 
 func (r MigrationAdoptionRequest) Validate() error {
@@ -30,8 +31,13 @@ func (r MigrationAdoptionRequest) Validate() error {
 			return err
 		}
 	}
-	if r.RuntimeGeneration <= 1 {
+	if r.RuntimeGeneration <= 0 || r.RuntimeGeneration == 1 && r.CheckpointRestoreDigest == "" {
 		return fmt.Errorf("adoption requires a restored generation")
+	}
+	if r.CheckpointRestoreDigest != "" {
+		if _, err := DecodeProof("checkpoint_restore_digest", r.CheckpointRestoreDigest); err != nil {
+			return err
+		}
 	}
 	for name, value := range map[string]string{"restore_digest": r.RestoreDigest, "command_ready_digest": r.CommandReadyDigest} {
 		if _, err := DecodeProof(name, value); err != nil {
@@ -49,9 +55,14 @@ func (r MigrationAdoptionRequest) ValidateFor(restored MigrationRestoreObservati
 		return err
 	}
 	image := restored.Request.Image
+	checkpointDigest := ""
+	if image.Checkpoint != nil {
+		checkpointDigest, _ = image.Checkpoint.Assignment.Digest()
+	}
 	if restored.State != MigrationRestoreComplete || r.RestoreDigest != restored.RequestDigest ||
-		r.Target != image.Target || r.OperationID != image.Publication.Assignment.OperationID || r.ClaimID != image.Resources.ClaimID ||
-		r.SandboxID != image.Publication.Assignment.Target.SandboxID || r.RuntimeGeneration != image.Publication.Assignment.Target.RuntimeGeneration ||
+		r.CheckpointRestoreDigest != checkpointDigest ||
+		r.Target != image.Target || r.OperationID != image.OperationID() || r.ClaimID != image.Resources.ClaimID ||
+		r.SandboxID != image.RuntimeAssignment().SandboxID || r.RuntimeGeneration != image.RuntimeAssignment().RuntimeGeneration ||
 		r.ProcdInstanceID != image.Publication.Capture.Request.ProcdInstanceID {
 		return fmt.Errorf("adoption changed restored execution authority")
 	}

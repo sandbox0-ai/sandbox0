@@ -17,7 +17,7 @@ import (
 var ErrNomadSandboxMigrationNotReady = fmt.Errorf("%w: target disposition is pending", ErrNomadSandboxMigrationConflict)
 
 // GetNomadSandboxMigrationSourceFinalizationForSlot uses the immutable source
-// marker, never the sandbox's current allocation or a historical reservation.
+// binding for migration or memory pause, never the owner's current allocation.
 // It remains readable after terminal release without renewing any authority.
 func (s *PGSandboxStore) GetNomadSandboxMigrationSourceFinalizationForSlot(ctx context.Context, slot string) (*protocol.MigrationSourceFinalizationReceipt, error) {
 	if protocol.ValidateSlotID(slot) != nil {
@@ -32,7 +32,7 @@ func (s *PGSandboxStore) GetNomadSandboxMigrationSourceFinalizationForSlot(ctx c
 		return nil, err
 	}
 	if operation == nil {
-		return nil, nil
+		return s.getNomadCheckpointFinalizationForSlot(ctx, slot)
 	}
 	receipt, err := s.GetNomadSandboxMigrationSourceFinalization(ctx, *operation)
 	if err != nil {

@@ -163,9 +163,11 @@ type Config struct {
 	// MigrationObserver receives restore-planning phases separately from the
 	// ordinary claim SLO, which requires a fresh authenticated command probe.
 	MigrationObserver func(Observation)
-	DemandRecorder    CapacityDemandRecorder
-	DemandPoolID      string
-	DemandTTL         time.Duration
+	// CheckpointObserver measures memory restore separately from cold claims.
+	CheckpointObserver func(Observation)
+	DemandRecorder     CapacityDemandRecorder
+	DemandPoolID       string
+	DemandTTL          time.Duration
 	// WriterTokenKey must remain stable for the lifetime of every retryable
 	// operation, including during rolling upgrades.
 	WriterTokenKey []byte
@@ -191,8 +193,9 @@ type Request struct {
 	StartedAt time.Time
 }
 
-// Result is returned only after the regional slot has accepted command-ready
-// proof for the exact procd process.
+// Result from Claim includes command-ready proof for the exact procd process.
+// RestoreCheckpoint instead returns MigrationRestore and leaves readiness to
+// the separately authorized handover; an execution receipt is not routing.
 type Result struct {
 	Slot             *sandboxstore.RuntimeSlot
 	Grant            *sandboxstore.RootFSWriterGrant
@@ -209,22 +212,23 @@ type Result struct {
 
 // Planner executes one region-authoritative Nomad warm-slot claim.
 type Planner struct {
-	capacityQueue     *capacityQueue
-	capacityWake      func()
-	store             Store
-	network           NetworkPreparer
-	node              NodeExecutor
-	prober            CommandProber
-	tokenGenerator    TokenGenerator
-	observer          Observer
-	migrationObserver func(Observation)
-	demandRecorder    CapacityDemandRecorder
-	demandPoolID      string
-	demandTTL         time.Duration
-	writerTokenKey    []byte
-	claimTTL          time.Duration
-	slo               time.Duration
-	now               func() time.Time
+	capacityQueue      *capacityQueue
+	capacityWake       func()
+	store              Store
+	network            NetworkPreparer
+	node               NodeExecutor
+	prober             CommandProber
+	tokenGenerator     TokenGenerator
+	observer           Observer
+	migrationObserver  func(Observation)
+	checkpointObserver func(Observation)
+	demandRecorder     CapacityDemandRecorder
+	demandPoolID       string
+	demandTTL          time.Duration
+	writerTokenKey     []byte
+	claimTTL           time.Duration
+	slo                time.Duration
+	now                func() time.Time
 }
 
 // New validates immutable claim policy and constructs a Planner.
@@ -285,8 +289,8 @@ func New(config Config) (*Planner, error) {
 		store: config.Store, network: config.Network, node: config.Node,
 		prober: config.Prober, tokenGenerator: config.TokenGenerator,
 		observer: config.Observer, writerTokenKey: append([]byte(nil), config.WriterTokenKey...),
-		migrationObserver: config.MigrationObserver,
-		demandRecorder:    config.DemandRecorder, demandPoolID: demandPoolID,
+		migrationObserver: config.MigrationObserver, checkpointObserver: config.CheckpointObserver,
+		demandRecorder: config.DemandRecorder, demandPoolID: demandPoolID,
 		demandTTL: demandTTL,
 		claimTTL:  claimTTL, slo: slo, now: now,
 	}, nil
@@ -296,13 +300,14 @@ func New(config Config) (*Planner, error) {
 // claim -> authenticated procd command -> node command-ready. Every durable
 // mutation and node call is exactly retryable from the same OperationID.
 func (p *Planner) Claim(ctx context.Context, request Request) (*Result, error) {
-	return p.claim(ctx, request, nil)
+	return p.claim(ctx, request, nil, nil)
 }
 
 // claim shares storage, network, writer derivation and exact node delivery.
-// A migration stops at restore evidence; procd handover and regional readiness
+// A memory restore stops at execution evidence; procd handover and readiness
 // are separate authorized phases and cannot use the ordinary startup probe.
-func (p *Planner) claim(ctx context.Context, request Request, migration *protocol.MigrationImagePrepareRequest) (result *Result, resultErr error) {
+func (p *Planner) claim(ctx context.Context, request Request, migration *protocol.MigrationImagePrepareRequest, checkpoint *protocol.CheckpointRestoreAuthority) (result *Result, resultErr error) {
+	isRestore := migration != nil || checkpoint != nil
 	wallCallStarted := time.Now()
 	callStarted := p.now().UTC()
 	startedAt := request.StartedAt.UTC()
@@ -333,20 +338,22 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 		if duration < 0 {
 			duration = 0
 		}
-		withinSLO := migration == nil && resultErr == nil && !ingressClockSkewed && duration <= p.slo
+		withinSLO := !isRestore && resultErr == nil && !ingressClockSkewed && duration <= p.slo
 		if result != nil {
 			result.Duration = duration
 			result.WithinSLO = withinSLO
 			result.Phases = append([]PhaseObservation(nil), phases...)
 		}
-		if (p.observer != nil && migration == nil) || (p.migrationObserver != nil && migration != nil) {
+		if (p.observer != nil && !isRestore) || (p.migrationObserver != nil && checkpoint == nil && migration != nil) || (p.checkpointObserver != nil && checkpoint != nil) {
 			observation := Observation{
 				OperationID: request.OperationID, SandboxID: request.SandboxID, SlotID: observedSlotID,
 				StartedAt: startedAt, CompletedAt: completedAt, Duration: duration,
 				Succeeded: resultErr == nil, WithinSLO: withinSLO,
 				Phases: append([]PhaseObservation(nil), phases...),
 			}
-			if migration != nil {
+			if checkpoint != nil {
+				p.checkpointObserver(observation)
+			} else if migration != nil {
 				p.migrationObserver(observation)
 			} else {
 				p.observer.ObserveRuntimeSlotClaim(observation)
@@ -383,6 +390,11 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 		ids.claimID = "migration-" + assignmentDigest
 		ids.issueOperationID = normalized.OperationID
 		claimTTL = sandboxstore.DefaultRuntimeSlotClaimTTL
+	}
+
+	if checkpoint != nil {
+		ids.issueOperationID = normalized.OperationID
+		claimTTL = sandboxstore.MemoryRuntimeSlotClaimTTL
 	}
 
 	runtimeRevision := normalized.RuntimeAssignmentRevision
@@ -448,8 +460,9 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 			CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
 			RuntimeAssignmentRevision: runtimeRevision, NetworkPolicyDigest: policyDigest,
 			RuntimeAssignmentPayload: normalized.RuntimeAssignmentPayload, NetworkPolicy: normalized.NetworkPolicy,
-			ClaimTTL:  claimTTL,
-			Resources: normalized.Resources,
+			ClaimTTL:      claimTTL,
+			MemoryRestore: checkpoint != nil,
+			Resources:     normalized.Resources,
 		})
 	}
 	if err != nil {
@@ -481,6 +494,15 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 		return nil, errors.New("runtime slot claim is bound to an unknown writer grant")
 	}
 	recordPhase(PhaseSlotAcquire, phaseStarted, true)
+
+	if checkpoint != nil {
+		phaseStarted = time.Now()
+		migration, err = p.prepareCheckpoint(ctx, *checkpoint, slot)
+		recordPhase(PhaseCheckpointPrepare, phaseStarted, err == nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	target := nodeTarget(slot)
 	phaseStarted = time.Now()
@@ -565,7 +587,7 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 		ConsumeExpiresAt: slot.ClaimLeaseExpiresAt,
 	}
 	var issueAndBind *sandboxstore.IssueAndBindRuntimeSlotWriterGrantResult
-	if migration != nil {
+	if migration != nil && checkpoint == nil {
 		issueAndBind, err = migrationAuthority.IssueNomadSandboxMigrationTargetWriter(ctx, migration.Publication.Assignment, writerRequest)
 	} else {
 		issueAndBind, err = p.store.IssueAndBindRuntimeSlotWriterGrant(ctx, writerRequest, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
@@ -607,7 +629,13 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 		Resources: slot.ResourceLease,
 	}
 	if migration != nil {
-		restore, err := migrationAuthority.AuthorizeNomadSandboxMigrationRestore(ctx, migration.Publication.Assignment, stage.WithoutWriterGrantToken())
+		var restore *protocol.MigrationRestoreRequest
+		var err error
+		if checkpoint != nil {
+			restore, err = p.store.(checkpointStore).AuthorizeNomadCheckpointRestore(ctx, *checkpoint, slot.ID, stage.WithoutWriterGrantToken())
+		} else {
+			restore, err = migrationAuthority.AuthorizeNomadSandboxMigrationRestore(ctx, migration.Publication.Assignment, stage.WithoutWriterGrantToken())
+		}
 		if err != nil {
 			return nil, fmt.Errorf("authorize migration restore: %w", err)
 		}

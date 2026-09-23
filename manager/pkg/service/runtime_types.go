@@ -86,6 +86,18 @@ type SandboxResumer interface {
 	ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
 }
 
+// Memory lifecycle interfaces are explicit capabilities. Unsupported backends
+// must reject requests rather than silently execute filesystem-only behavior.
+type SandboxMemoryPauser interface {
+	PauseMemorySandboxAndWait(context.Context, string) (*PauseSandboxResponse, error)
+}
+type SandboxMemoryResumer interface {
+	ResumeMemorySandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
+}
+type SandboxMemoryForker interface {
+	ForkMemorySandbox(context.Context, string, string, string, *ForkSandboxRequest) (*ForkSandboxResponse, error)
+}
+
 type SandboxForker interface {
 	ForkSandbox(context.Context, string, string, string, *ForkSandboxRequest) (*ForkSandboxResponse, error)
 }

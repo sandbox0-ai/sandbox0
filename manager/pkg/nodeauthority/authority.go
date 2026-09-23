@@ -3,6 +3,7 @@ package nodeauthority
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -49,6 +50,7 @@ type Store interface {
 	nomadmigration.StagingStore
 	nomadmigration.PreparationCancellationStore
 	nomadmigration.SourceExecutionStore
+	nomadmigration.CheckpointPauseStore
 	nomadmigration.EvacuationStore
 	nomadmigration.FailureStore
 	nomadmigration.FailureStopStore
@@ -81,18 +83,19 @@ type Config struct {
 // ClaimPlannerConfig provides the non-listener dependencies needed by the
 // request path. Node and network delivery are always the component's own hub.
 type ClaimPlannerConfig struct {
-	CapacityWait      runtimeslotclaim.CapacityWaitConfig
-	CapacityWake      func()
-	Prober            runtimeslotclaim.CommandProber
-	TokenGenerator    runtimeslotclaim.TokenGenerator
-	Observer          runtimeslotclaim.Observer
-	MigrationObserver func(runtimeslotclaim.Observation)
-	DemandPoolID      string
-	DemandTTL         time.Duration
-	WriterTokenKey    []byte
-	ClaimTTL          time.Duration
-	SLO               time.Duration
-	Now               func() time.Time
+	CapacityWait       runtimeslotclaim.CapacityWaitConfig
+	CapacityWake       func()
+	Prober             runtimeslotclaim.CommandProber
+	TokenGenerator     runtimeslotclaim.TokenGenerator
+	Observer           runtimeslotclaim.Observer
+	MigrationObserver  func(runtimeslotclaim.Observation)
+	CheckpointObserver func(runtimeslotclaim.Observation)
+	DemandPoolID       string
+	DemandTTL          time.Duration
+	WriterTokenKey     []byte
+	ClaimTTL           time.Duration
+	SLO                time.Duration
+	Now                func() time.Time
 }
 
 // Component owns one listener-local node channel registry. Every replica may
@@ -116,12 +119,48 @@ type Component struct {
 	handovers            *nomadmigration.Coordinator
 	cancellations        *nomadmigration.Coordinator
 	sourceExecution      *nomadmigration.Coordinator
+	checkpointPauses     *nomadmigration.Coordinator
 	evacuation           *nomadmigration.Coordinator
 	failures             *nomadmigration.Coordinator
 	failureStops         *nomadmigration.Coordinator
 	failureCleanups      *nomadmigration.Coordinator
 	failureFinalizations *nomadmigration.Coordinator
 	captureFailures      *nomadmigration.Coordinator
+}
+
+type checkpointSourceObserver struct {
+	allocation *runtimeslotnomad.Controller
+}
+
+func (o checkpointSourceObserver) ObserveCheckpointSource(ctx context.Context, source protocol.NodeChannelTarget, namespace string) (bool, []byte, error) {
+	if o.allocation == nil {
+		return false, nil, fmt.Errorf("nomad allocation observer is unavailable")
+	}
+	target := runtimeslotreconciler.AllocationTarget{
+		ClusterID: source.ClusterID, AllocationID: source.AllocationID,
+		AllocationNamespace: namespace, NodeID: source.NodeID,
+	}
+	observation, err := o.allocation.Observe(ctx, target)
+	if err != nil {
+		return false, nil, err
+	}
+	if observation.Target != target || len(observation.ProofDigest) != sha256.Size {
+		return false, nil, fmt.Errorf("nomad allocation absence observation changed source")
+	}
+	return !observation.PhysicalPresent, observation.ProofDigest, nil
+}
+
+func (o checkpointSourceObserver) RetireTerminalCheckpointSource(ctx context.Context, operation string, source protocol.NodeChannelTarget, namespace string) error {
+	if o.allocation == nil {
+		return fmt.Errorf("nomad allocation observer is unavailable")
+	}
+	target := runtimeslotreconciler.AllocationTarget{
+		ClusterID: source.ClusterID, AllocationID: source.AllocationID,
+		AllocationNamespace: namespace, NodeID: source.NodeID,
+	}
+	return o.allocation.PurgeTerminal(ctx, runtimeslotreconciler.AllocationPurgeRequest{
+		OperationID: operation + "-cancel-terminal", Target: target,
+	})
 }
 
 var _ runtimeslotclaim.NetworkPreparer = (*Component)(nil)
@@ -484,8 +523,8 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 		Store: c.store, Network: c.hub, Node: c.hub,
 		Prober: config.Prober, TokenGenerator: config.TokenGenerator,
 		Observer: config.Observer, WriterTokenKey: config.WriterTokenKey,
-		MigrationObserver: config.MigrationObserver,
-		DemandRecorder:    c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
+		MigrationObserver: config.MigrationObserver, CheckpointObserver: config.CheckpointObserver,
+		DemandRecorder: c.store, DemandPoolID: config.DemandPoolID, DemandTTL: config.DemandTTL,
 		ClaimTTL: config.ClaimTTL, SLO: config.SLO, Now: config.Now,
 	})
 	if err != nil {
@@ -515,9 +554,22 @@ func (c *Component) NewClaimPlanner(config ClaimPlannerConfig) (*runtimeslotclai
 	if err != nil {
 		return nil, err
 	}
+	checkpointProcd, ok := config.Prober.(nomadmigration.CheckpointProcd)
+	if !ok {
+		return nil, fmt.Errorf("memory pause requires the procd checkpoint client")
+	}
+	checkpointTokens, ok := config.TokenGenerator.(nomadmigration.CheckpointTokens)
+	if !ok {
+		return nil, fmt.Errorf("memory pause requires scoped checkpoint tokens")
+	}
+	checkpointPauses, err := nomadmigration.NewCheckpointPause(c.store, c.hub, checkpointSourceObserver{c.allocation}, checkpointProcd, checkpointTokens)
+	if err != nil {
+		return nil, err
+	}
 	c.migrationMu.Lock()
+	c.checkpointPauses = checkpointPauses
 	c.sourceExecution = sourceExecution
-	for _, lane := range []*nomadmigration.Coordinator{sourceExecution, handover, cancellation, destination} {
+	for _, lane := range []*nomadmigration.Coordinator{checkpointPauses, sourceExecution, handover, cancellation, destination} {
 		lane.SetProgress(&c.migrationProgress)
 	}
 	c.handovers = handover
@@ -747,8 +799,33 @@ func (c *Component) RunMigrationSourceExecution(ctx context.Context, report func
 	return worker.Run(ctx, report)
 }
 
+// RunCheckpointPauses advances source-only captures through the shared node channel.
+func (c *Component) RunCheckpointPauses(ctx context.Context, report func(nomadmigration.Report)) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("node authority is not initialized")
+	}
+	c.migrationMu.RLock()
+	worker := c.checkpointPauses
+	c.migrationMu.RUnlock()
+	if worker == nil {
+		return fmt.Errorf("memory pause is not configured")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.server.Ready():
+	}
+	return worker.Run(ctx, report)
+}
+
 // Adapt the existing regional planner target at the composition boundary.
 type migrationReadyNode struct{ hub *runtimeslotnode.ChannelHub }
+
+// CancelCheckpointImage fences a speculative restore on the authenticated
+// destination incarnation before its carrier enters generic reclamation.
+func (c *Component) CancelCheckpointImage(ctx context.Context, request protocol.CheckpointImageCancelRequest) (*protocol.CheckpointImageCancelProof, error) {
+	return c.hub.CancelCheckpointImage(ctx, request)
+}
 
 func (n migrationReadyNode) CommandReady(ctx context.Context, t protocol.NodeChannelTarget, request protocol.CommandReadyControlRequest) (protocol.NodeControlResponse, error) {
 	return n.hub.CommandReady(ctx, runtimeslotclaim.NodeTarget{SlotID: t.SlotID, ClusterID: t.ClusterID, AllocationID: t.AllocationID,

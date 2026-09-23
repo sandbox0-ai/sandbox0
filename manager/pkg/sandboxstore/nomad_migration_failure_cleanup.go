@@ -12,8 +12,8 @@ import (
 )
 
 func (s *PGSandboxStore) ListNomadMigrationFailureCleanups(ctx context.Context, after string, limit int) ([]string, error) {
-	return s.listNomadMigrationWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
-        AND l.phase='committing' AND m.failure_stop_receipt IS NOT NULL AND m.failure_cleanup_receipt IS NULL`)
+	return s.listNomadExecutionFailureWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
+        AND l.phase='committing' AND m.failure_stop_receipt IS NOT NULL AND m.failure_cleanup_receipt IS NULL`, `r.evidence ? 'failure_stopped' AND NOT r.evidence ? 'failure_cleaned'`)
 }
 
 // AuthorizeNomadSandboxMigrationFailureCleanup atomically records the exact
@@ -32,7 +32,7 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationFailureCleanup(ctx contex
 	if prior {
 		return request, tx.Commit(ctx)
 	}
-	if life.Phase != SandboxLifecyclePhaseCommitting {
+	if !executionFailurePending(life) {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
 	restore := request.Failure.Request.Restore
@@ -101,7 +101,7 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationFailureCleanup(ctx contex
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET failure_cleanup_request=$2,failure_cleanup_digest=$3 WHERE operation_id=$1`, id, payload, want); err != nil {
+	if err := saveNomadExecutionFailureEvidence(ctx, tx, life, "failure_cleanup", payload, `UPDATE manager.sandbox_runtime_migrations SET failure_cleanup_request=$2,failure_cleanup_digest=$3 WHERE operation_id=$1`, want); err != nil {
 		return nil, err
 	}
 	return request, tx.Commit(ctx)
@@ -123,6 +123,9 @@ func lockNomadMigrationFailureCleanup(ctx context.Context, tx pgx.Tx, id string)
 	life, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+` WHERE txn_id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return nil, nil, false, err
+	}
+	if life != nil && life.Kind == SandboxLifecycleKindResume {
+		return lockNomadCheckpointRestoreFailureCleanup(ctx, tx, life)
 	}
 	if life == nil || life.Kind != SandboxLifecycleKindMigrate || life.Source != SandboxLifecycleSourceAuto || life.Cancelable {
 		return nil, nil, false, ErrNomadSandboxMigrationConflict
@@ -170,7 +173,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureCleanup(ctx context.C
 		return err
 	}
 	defer tx.Rollback(ctx)
-	id := request.Failure.Request.Restore.Image.Publication.Assignment.OperationID
+	id := request.Failure.Request.Restore.Image.OperationID()
 	stored, life, authorized, err := lockNomadMigrationFailureCleanup(ctx, tx, id)
 	if err != nil {
 		return err
@@ -178,8 +181,8 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureCleanup(ctx context.C
 	if !authorized || proof.ValidateFor(*stored) != nil {
 		return ErrNomadSandboxMigrationConflict
 	}
-	var prior []byte
-	if err := tx.QueryRow(ctx, `SELECT failure_cleanup_receipt FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&prior); err != nil {
+	prior, err := readNomadExecutionFailureEvidence(ctx, tx, id, "failure_cleaned")
+	if err != nil {
 		return err
 	}
 	if len(prior) != 0 {
@@ -189,7 +192,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureCleanup(ctx context.C
 		}
 		return tx.Commit(ctx)
 	}
-	if life.Phase != SandboxLifecyclePhaseCommitting {
+	if !executionFailurePending(life) {
 		return ErrNomadSandboxMigrationConflict
 	}
 	grant, err := getRootFSWriterGrantForUpdate(ctx, tx, request.Cleanup.WriterGrantID)
@@ -222,7 +225,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureCleanup(ctx context.C
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET failure_cleanup_receipt=$2 WHERE operation_id=$1`, id, payload); err != nil {
+	if err := saveNomadExecutionFailureEvidence(ctx, tx, life, "failure_cleaned", payload, `UPDATE manager.sandbox_runtime_migrations SET failure_cleanup_receipt=$2 WHERE operation_id=$1`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

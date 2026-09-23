@@ -267,7 +267,7 @@ func canReplaceMigrationStaging(prior MigrationStagingCustody, next protocol.Mig
 // own image space after their exact image-absence proof has been persisted.
 func (r runtimeSlotJournalRecord) hasMigrationImageCustody() bool {
 	return r.hasMigrationCapturePeerCache() || r.hasMigrationPrefetch() || r.Migration != nil && !r.Migration.CaptureFailureFinalized() && (r.Migration.Finalization == nil || !r.Migration.Finalization.ImageAbsent) ||
-		r.MigrationDestination != nil && !r.MigrationDestination.Adopted() && !r.MigrationDestination.FailureFinalized()
+		r.MigrationDestination != nil && !r.MigrationDestination.Adopted() && !r.MigrationDestination.FailureFinalized() && !r.MigrationDestination.ImageCanceled()
 }
 
 func (r runtimeSlotJournalRecord) retainsMigrationCountAdmission() bool {
@@ -331,6 +331,9 @@ func (r runtimeSlotJournalRecord) validateMigrationStaging() error {
 	if r.Migration != nil {
 		if !c.Ready || !c.Request.IsSource() || c.Request.Source != r.Migration.Capture.Request {
 			return errdefs.ErrFailedPrecondition
+		}
+		if p := r.Migration.PublicationRequest; p != nil && (p.CheckpointSource != nil) != c.Request.CaptureOnly {
+			return fmt.Errorf("image publication changed staging mode: %w", errdefs.ErrFailedPrecondition)
 		}
 	}
 	if r.MigrationDestination != nil && !r.MigrationDestination.Adopted() && !r.MigrationDestination.FailureFinalized() {

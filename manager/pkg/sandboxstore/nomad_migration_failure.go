@@ -18,18 +18,37 @@ const nomadMigrationFailurePredicate = `l.kind='migrate' AND l.source='auto' AND
     AND m.adoption_request IS NULL AND ` + nomadMigrationFailureDue
 
 func (s *PGSandboxStore) ListNomadMigrationFailures(ctx context.Context, after string, limit int) ([]string, error) {
-	return s.listNomadMigrationWork(ctx, after, limit, nomadMigrationFailurePredicate)
+	return s.listNomadExecutionFailureWork(ctx, after, limit, nomadMigrationFailurePredicate,
+		`r.evidence ? 'restore' AND NOT r.evidence ?| ARRAY['failure','adoption'] AND `+checkpointRestoreFailureDue)
 }
 
 func (s *PGSandboxStore) ListNomadMigrationFailureStops(ctx context.Context, after string, limit int) ([]string, error) {
-	return s.listNomadMigrationWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
-        AND l.phase='committing' AND m.failure_request IS NOT NULL AND m.failure_stop_receipt IS NULL`)
+	return s.listNomadExecutionFailureWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
+        AND l.phase='committing' AND m.failure_request IS NOT NULL AND m.failure_stop_receipt IS NULL`, `r.evidence ? 'failure' AND NOT r.evidence ? 'failure_stopped'`)
 }
 
 func (s *PGSandboxStore) GetNomadMigrationFailure(ctx context.Context, id string) (*protocol.MigrationFailureRequest, error) {
+	var checkpoint []byte
+	err := s.pool.QueryRow(ctx, `SELECT evidence->'failure' FROM manager.sandbox_runtime_checkpoint_restores WHERE operation_id=$1`, id).Scan(&checkpoint)
+	if err == nil {
+		if len(checkpoint) == 0 {
+			return nil, nil
+		}
+		var request protocol.MigrationFailureRequest
+		if json.Unmarshal(checkpoint, &request) != nil || request.Restore.Image.Checkpoint == nil || request.Restore.Image.OperationID() != id {
+			return nil, ErrNomadCheckpointConflict
+		}
+		if _, err := request.Digest(); err != nil {
+			return nil, err
+		}
+		return &request, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, err
+	}
 	var payload []byte
 	var digest *string
-	err := s.pool.QueryRow(ctx, `SELECT failure_request,failure_digest FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&payload, &digest)
+	err = s.pool.QueryRow(ctx, `SELECT failure_request,failure_digest FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&payload, &digest)
 	if err == pgx.ErrNoRows || err == nil && len(payload) == 0 {
 		return nil, nil
 	}
@@ -54,7 +73,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureStop(ctx context.Cont
 	if err := proof.ValidateFor(request); err != nil {
 		return err
 	}
-	id := request.Restore.Image.Publication.Assignment.OperationID
+	id := request.Restore.Image.OperationID()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -63,35 +82,42 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureStop(ctx context.Cont
 	if err := lockRuntimeSlotClaimOperation(ctx, tx, id); err != nil {
 		return err
 	}
-	if _, err := lockNomadSandboxClaimRecord(ctx, tx, request.Restore.Image.Publication.Assignment.Target.SandboxID); err != nil {
+	if _, err := lockNomadSandboxClaimRecord(ctx, tx, request.Restore.Image.RuntimeAssignment().SandboxID); err != nil {
 		return err
 	}
-	var payload, prior []byte
-	var digest *string
-	if err := tx.QueryRow(ctx, `SELECT failure_request,failure_digest,failure_stop_receipt
-        FROM manager.sandbox_runtime_migrations WHERE operation_id=$1 FOR UPDATE`, id).Scan(&payload, &digest, &prior); err != nil {
+	life, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+` WHERE txn_id=$1 FOR UPDATE`, id))
+	if err != nil {
 		return err
+	}
+	if life == nil {
+		return ErrNomadSandboxMigrationConflict
 	}
 	var stored protocol.MigrationFailureRequest
-	if digest == nil || *digest != proof.RequestDigest || json.Unmarshal(payload, &stored) != nil {
+	if err := decodeNomadExecutionFailureEvidence(ctx, tx, id, "failure", &stored); err != nil {
+		return err
+	}
+	if proof.ValidateFor(stored) != nil {
 		return ErrNomadSandboxMigrationConflict
 	}
-	want, err := stored.Digest()
-	if err != nil || want != *digest {
-		return ErrNomadSandboxMigrationConflict
+	prior, err := readNomadExecutionFailureEvidence(ctx, tx, id, "failure_stopped")
+	if err != nil {
+		return err
 	}
 	if len(prior) != 0 {
-		var existing protocol.MigrationFailureStopProof
-		if json.Unmarshal(prior, &existing) != nil || existing != proof {
+		var old protocol.MigrationFailureStopProof
+		if json.Unmarshal(prior, &old) != nil || old != proof {
 			return ErrNomadSandboxMigrationConflict
 		}
 		return tx.Commit(ctx)
 	}
-	payload, err = json.Marshal(proof)
+	if !executionFailurePending(life) {
+		return ErrNomadSandboxMigrationConflict
+	}
+	payload, err := json.Marshal(proof)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET failure_stop_receipt=$2 WHERE operation_id=$1`, id, payload); err != nil {
+	if err := saveNomadExecutionFailureEvidence(ctx, tx, life, "failure_stopped", payload, `UPDATE manager.sandbox_runtime_migrations SET failure_stop_receipt=$2 WHERE operation_id=$1`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -122,6 +148,13 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationFailure(ctx context.Conte
 	life, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+` WHERE txn_id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return nil, err
+	}
+	if life != nil && life.Kind == SandboxLifecycleKindResume {
+		request, err := authorizeNomadCheckpointRestoreFailure(ctx, tx, record, life)
+		if err != nil {
+			return nil, err
+		}
+		return request, tx.Commit(ctx)
 	}
 	if life == nil || life.Kind != SandboxLifecycleKindMigrate || life.Source != SandboxLifecycleSourceAuto || life.Cancelable || life.Phase != SandboxLifecyclePhaseCommitting {
 		return nil, ErrNomadSandboxMigrationConflict

@@ -192,6 +192,9 @@ func newNodeRuntimeChannelAgent(
 	if _, ok := cleaner.(protocol.NodeChannelMigrationFailureCleanupExecutor); ok {
 		agentConfig.MigrationFailureCleanupExecutor = executor
 	}
+	if _, ok := cleaner.(protocol.NodeChannelCheckpointImageCancelExecutor); ok {
+		agentConfig.CheckpointImageCancelExecutor = executor
+	}
 	if _, ok := cleaner.(protocol.NodeChannelMigrationFailureFinalizeExecutor); ok {
 		agentConfig.MigrationFailureFinalizeExecutor = executor
 	}
@@ -637,4 +640,15 @@ func (e *nodeRuntimeChannelExecutor) PrepareMigrationCapturePeer(ctx context.Con
 		return nil, errdefs.ErrUnavailable
 	}
 	return prefetcher.PrepareMigrationCapturePeer(ctx, request)
+}
+
+func (e *nodeRuntimeChannelExecutor) CancelCheckpointImage(ctx context.Context, request protocol.CheckpointImageCancelRequest) (*protocol.CheckpointImageCancelProof, error) {
+	if err := e.validateTarget(request.Image.Target); err != nil {
+		return nil, err
+	}
+	cleaner, ok := e.cleaner.(protocol.NodeChannelCheckpointImageCancelExecutor)
+	if !ok {
+		return nil, errdefs.ErrUnavailable
+	}
+	return cleaner.CancelCheckpointImage(ctx, request)
 }

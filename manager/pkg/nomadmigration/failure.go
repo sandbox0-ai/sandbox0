@@ -29,7 +29,7 @@ func NewFailureStop(store FailureStopStore, node protocol.NodeChannelMigrationFa
 		if err != nil || request == nil {
 			return false, err
 		}
-		if _, err := request.Digest(); err != nil || request.Restore.Image.Publication.Assignment.OperationID != id {
+		if _, err := request.Digest(); err != nil || request.Restore.Image.OperationID() != id {
 			return false, errors.New("failure stop changed migration authority")
 		}
 		proof, err := node.StopFailedMigrationDestination(ctx, *request)
@@ -56,7 +56,7 @@ func NewFailure(store FailureStore) (*Coordinator, error) {
 		if err != nil || request == nil {
 			return false, err
 		}
-		if _, err := request.Digest(); err != nil || request.Restore.Image.Publication.Assignment.OperationID != id {
+		if _, err := request.Digest(); err != nil || request.Restore.Image.OperationID() != id {
 			return false, errors.New("failure decision changed migration authority")
 		}
 		return true, nil

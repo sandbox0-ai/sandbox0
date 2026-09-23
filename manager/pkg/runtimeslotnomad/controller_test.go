@@ -161,6 +161,29 @@ func TestControllerObservesTerminalClientAllocationAsPhysicallyAbsent(t *testing
 	}
 }
 
+func TestControllerPurgesCheckpointSourceOnlyAfterTerminalClientStatus(t *testing.T) {
+	target := testTarget()
+	api := &fakeAPI{allocation: testAllocation(), client: true}
+	controller, err := New(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := runtimeslotreconciler.AllocationPurgeRequest{OperationID: "checkpoint-cancel-terminal", Target: target}
+	if err := controller.PurgeTerminal(t.Context(), request); !errors.Is(err, errdefs.ErrFailedPrecondition) {
+		t.Fatalf("running source purge = %v", err)
+	}
+	if len(api.stopCalls) != 0 || api.gcCalls != 0 {
+		t.Fatal("running source was modified")
+	}
+	api.allocation.ClientStatus = "failed"
+	if err := controller.PurgeTerminal(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.stopCalls) != 0 || !reflect.DeepEqual(api.evaluateCalls, []string{request.OperationID}) || api.gcCalls != 1 {
+		t.Fatalf("terminal source stop = %v, evaluation = %v, gc = %d", api.stopCalls, api.evaluateCalls, api.gcCalls)
+	}
+}
+
 func TestControllerRetainsNonterminalServerOwnership(t *testing.T) {
 	target := testTarget()
 	for _, status := range []string{"pending", "running", "unknown"} {

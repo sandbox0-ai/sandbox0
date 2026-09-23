@@ -116,6 +116,23 @@ func (c *Controller) Purge(
 	return nil
 }
 
+// PurgeTerminal is used when a prepared checkpoint lost its procd endpoint.
+// It may remove the exact client directory only after the Nomad server has
+// recorded a terminal client state; an RPC timeout must not kill a live source.
+func (c *Controller) PurgeTerminal(ctx context.Context, request runtimeslotreconciler.AllocationPurgeRequest) error {
+	if err := validateTarget(request.Target); err != nil {
+		return err
+	}
+	allocation, err := c.api.ServerAllocation(ctx, request.Target)
+	if err != nil {
+		return err
+	}
+	if allocation == nil || validateAllocation(*allocation, request.Target) != nil || !allocationClientTerminal(allocation.ClientStatus) {
+		return fmt.Errorf("checkpoint source allocation is not terminal: %w", errdefs.ErrFailedPrecondition)
+	}
+	return c.Purge(ctx, request)
+}
+
 // Stop requests exact-allocation retirement without forcing client GC. The
 // acknowledgement records stop intent, not terminal or replacement proof.
 // Planned pause uses this boundary so the task driver can publish

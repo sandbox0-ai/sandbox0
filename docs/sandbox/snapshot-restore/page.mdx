@@ -12,7 +12,7 @@ Use this page when you need to:
 - understand how rootfs snapshots differ from pause/resume
 
 <Callout variant="warning">
-Creating snapshots and forking accept a running or paused source sandbox. Running sources are briefly barriered and checkpointed, then remain running. Restore still requires a paused target sandbox because it replaces that sandbox's rootfs head. Claiming with `snapshot_id` creates a new running sandbox from an existing snapshot and does not require a paused target sandbox.
+Creating snapshots and forking accept a running or paused source sandbox. With the default filesystem-only fork, running sources are briefly barriered and checkpointed, then remain running. Restore still requires a paused target sandbox because it replaces that sandbox's rootfs head. Claiming with `snapshot_id` creates a new running sandbox from an existing snapshot and does not require a paused target sandbox.
 </Callout>
 
 ## How It Differs From Pause And Resume
@@ -42,7 +42,7 @@ Use sandbox rootfs snapshots when the default writable filesystem is the state y
 
 ### Rootfs Path Semantics
 
-Snapshots, snapshot claims, restore, and fork use the same block-COW
+Snapshots, snapshot claims, restore, and filesystem-only fork use the same block-COW
 persistence boundary as pause and resume. Ordinary writable RootFS paths such
 as `/var/tmp` and workspace directories are captured. `/tmp`, virtual runtime
 mounts such as `/proc`, `/dev`, and `/sys`, and template-defined
@@ -55,7 +55,8 @@ count toward memory usage, but can be reclaimed under memory pressure. The
 capacity itself reserves no memory. A template can set an explicit `/tmp`
 capacity using `ephemeralMounts`. `/dev/shm` and other ephemeral mounts remain
 memory-backed. Temporary files are discarded when the runtime ends, including
-pause/resume, and never enter a RootFS checkpoint.
+filesystem-only pause/resume, and never enter a RootFS checkpoint. Explicit memory
+checkpoints can retain supported runtime tmpfs state separately from RootFS.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
@@ -486,6 +487,66 @@ s0 sandbox resume sb_forked123`
     }
   ]}
 />
+
+## Explicit Memory Fork
+
+Fork defaults to filesystem-only state. Experimental memory fork uses the same
+endpoint with `memory: true` and requires a stable `Idempotency-Key` header.
+The key and request body must stay unchanged on retries.
+
+```http
+POST /api/v1/sandboxes/sb_source/fork
+Content-Type: application/json
+Idempotency-Key: branch-task-001
+
+{
+    "memory": true,
+    "config": {
+        "ttl": 300,
+        "hard_ttl": 3600
+    }
+}
+```
+
+For a paused source, memory fork requires a retained memory checkpoint matching
+its RootFS head. For a running source, the current implementation captures and
+retires the source runtime, commits the paused child and resumes the parent into
+a new carrier. It does not keep the original parent runtime executing during
+capture. The parent's runtime ID and generation change; its original soft TTL
+is retained, and deletion or expiry cannot be undone by fork completion.
+
+The operation returns `503 unavailable` while capture or parent resume is still
+pending. Retry with the same key and body. A `201` response identifies the paused
+child; it does not start the child. Resume that child with `memory: true` to
+continue its captured processes. The parent and child use independent writable
+RootFS branches and resource leases; immutable checkpoint image data is shared.
+
+```python
+from sandbox0.apispec.models.fork_sandbox_request import ForkSandboxRequest
+
+forked = client.sandboxes.fork(
+    sandbox.id,
+    ForkSandboxRequest(memory=True),
+    idempotency_key="branch-task-001",
+)
+client.sandboxes.resume_and_wait(forked.sandbox.id, memory=True)
+```
+
+The SDK call above performs one request. If it reports a pending operation,
+retry it with the same key and body before attempting child resume. In TypeScript,
+use `client.sandboxes.fork(id, { memory: true }, { idempotencyKey: key })`.
+In Go, use `ForkSandboxWithOptions` with `ForkSandboxRequest.Memory` and
+`ForkSandboxOptions.IdempotencyKey`.
+
+Fork rebinds the captured runtime and session identity to the child without
+restarting guest processes. Previously queued parent webhook events are retained
+as inherited records and are not sent as child events. New child events carry
+the child's identity. External connections are not guaranteed to survive.
+
+Memory fork has the compatibility and transfer costs described in
+[Pause And Resume](/docs/sandbox/pause-resume#explicit-memory-pause-and-resume).
+Named snapshots, snapshot claims, restore and rebase remain RootFS operations;
+they do not create or restore process memory.
 
 ## Rebase A Paused Sandbox
 

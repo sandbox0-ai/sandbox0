@@ -181,6 +181,13 @@ func (h *retirementReserveHost) ReleaseDeviceReservation(path, _ string) {
 func (h *retirementReserveHost) MountXFS(_, _ string) error     { return nil }
 func (h *retirementReserveHost) MountOverlay(_, _ string) error { return nil }
 
+func (h *retirementReserveHost) WaitFilesystemRelease(_ context.Context, path string) error {
+	device, ok := h.devices[path]
+	require.True(h.t, ok)
+	require.False(h.t, device.closed)
+	return nil
+}
+
 func (h *retirementReserveHost) InspectCrashFence(path, _, _ string) (rootfssession.CrashFenceHostObservation, error) {
 	if h.inspectErr != nil {
 		return rootfssession.CrashFenceHostObservation{}, h.inspectErr

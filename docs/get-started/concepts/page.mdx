@@ -25,7 +25,7 @@ The key idea is separation of concerns:
 
 A common confusion is mixing compute state and durable state.
 
-- Process state lives in the sandbox runtime and disappears when the runtime is paused or replaced. A supervised session can preserve its identity, specification, and journal, then start a new attempt; it does not preserve process memory or sockets.
+- Process state lives in the sandbox runtime and disappears on default filesystem-only pause or replacement. Explicit experimental memory pause/resume can retain supported process state. A supervised session can preserve its identity, specification, and journal, then start a new attempt; it does not preserve process memory or sockets.
 - Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files survive pause/resume for the same sandbox identity.
 - A named rootfs snapshot can initialize a new sandbox, restore a paused sandbox, or serve as the source for a fork.
 - Current rootfs state is deleted with the sandbox identity. Create a named snapshot before deletion when you need a reusable restore point; use an external system for data that must be shared independently of sandbox identity.

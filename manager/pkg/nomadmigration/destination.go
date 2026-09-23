@@ -21,11 +21,17 @@ type Destination struct {
 // ValidateSourcePolicy bounds and binds the captured payload before it can
 // authorize a destination network; exact byte identity is checked separately.
 func ValidateSourcePolicy(assignment runtimecontrol.MigrationAssignment, policy string) error {
+	return ValidateAssignmentPolicy(assignment.Target, policy)
+}
+
+// ValidateAssignmentPolicy also applies to source-only memory checkpoints;
+// policy validation does not require inventing a future runtime assignment.
+func ValidateAssignmentPolicy(assignment runtimecontrol.Assignment, policy string) error {
 	if len(policy) == 0 || len(policy) > protocol.MaxNetworkPolicyBytes {
 		return errors.New("migration source policy exceeds bounds")
 	}
 	spec, err := v1alpha1.ParseNetworkPolicyFromAnnotationStrict(policy)
-	if err != nil || spec == nil || spec.Version != "v1" || spec.SandboxID != assignment.Target.SandboxID || spec.TeamID != assignment.Target.TeamID ||
+	if err != nil || spec == nil || spec.Version != "v1" || spec.SandboxID != assignment.SandboxID || spec.TeamID != assignment.TeamID ||
 		(spec.Mode != v1alpha1.NetworkModeAllowAll && spec.Mode != v1alpha1.NetworkModeBlockAll) {
 		return errors.New("migration source policy changed sandbox identity")
 	}

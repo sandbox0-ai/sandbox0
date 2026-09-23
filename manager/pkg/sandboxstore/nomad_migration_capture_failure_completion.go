@@ -18,7 +18,10 @@ func (s *PGSandboxStore) GetNomadMigrationCaptureFailureForSlot(ctx context.Cont
 	var id string
 	var request, cleanup, final []byte
 	err := s.pool.QueryRow(ctx, `SELECT operation_id,capture_failure_request,capture_failure_cleanup_receipt,capture_failure_finalization_receipt
-        FROM manager.sandbox_runtime_migrations WHERE source_slot_id=$1 AND capture_failure_request IS NOT NULL`, slot).Scan(&id, &request, &cleanup, &final)
+        FROM manager.sandbox_runtime_migrations WHERE source_slot_id=$1 AND capture_failure_request IS NOT NULL
+        UNION ALL SELECT operation_id,evidence->'capture_failure',evidence->'capture_failure_cleanup',
+            CASE WHEN evidence ? 'capture_failure_staging_released' THEN evidence->'capture_failure_finalized' ELSE NULL END
+        FROM manager.sandbox_runtime_checkpoints WHERE source_slot_id=$1 AND evidence ? 'capture_failure'`, slot).Scan(&id, &request, &cleanup, &final)
 	if err == pgx.ErrNoRows {
 		return false, nil, nil
 	}
@@ -60,32 +63,47 @@ func (s *PGSandboxStore) CompleteNomadSandboxMigrationCaptureFailure(ctx context
 	if err != nil {
 		return nil, err
 	}
-	target, err := lockRuntimeSlotByID(ctx, tx, w.targetSlot)
-	if err != nil {
-		return nil, err
-	}
 	c := w.request.Cleanup
 	if source.SandboxID != w.life.SandboxID || source.AllocationID != c.AllocationID || source.AllocationNamespace != w.life.FromRuntimeNamespace ||
 		source.ClusterID != c.ClusterID || source.NodeID != c.NodeID || source.NodeUID != c.NodeUID || source.NodeBootID != c.NodeBootID ||
 		source.NetNSIdentity != c.NetNSIdentity || source.RunscContainerID != c.RunscContainerID || source.WriterGrantID != c.WriterGrantID ||
 		source.ResourceLease != c.Resources || hex.EncodeToString(source.ResourceLeaseDigest) != c.ResourceLeaseDigest ||
-		len(source.OrphanObservationDigest) != sha256.Size || hex.EncodeToString(source.OrphanObservationDigest) != gc.AllocationAbsenceDigest ||
-		target.State != RuntimeSlotStateTerminal || len(target.TerminalProofDigest) != sha256.Size || target.ClaimID != "" || target.ClaimOperationID != "" ||
-		target.WriterGrantID != "" || !target.ResourceLease.IsZero() || target.SandboxID != "" {
+		len(source.OrphanObservationDigest) != sha256.Size || hex.EncodeToString(source.OrphanObservationDigest) != gc.AllocationAbsenceDigest {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
-	lease, _, state, err := loadMigrationResourceLease(ctx, tx, w.targetLease)
-	if err != nil {
-		return nil, err
-	}
-	if state != RuntimeResourceLeaseReleased || lease.SlotID != target.ID || lease.OperationID != id {
-		return nil, ErrNomadSandboxMigrationConflict
+	if w.checkpoint == nil {
+		target, err := lockRuntimeSlotByID(ctx, tx, w.targetSlot)
+		if err != nil {
+			return nil, err
+		}
+		if target.State != RuntimeSlotStateTerminal || len(target.TerminalProofDigest) != sha256.Size || target.ClaimID != "" || target.ClaimOperationID != "" ||
+			target.WriterGrantID != "" || !target.ResourceLease.IsZero() || target.SandboxID != "" {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+		lease, _, state, err := loadMigrationResourceLease(ctx, tx, w.targetLease)
+		if err != nil {
+			return nil, err
+		}
+		if state != RuntimeResourceLeaseReleased || lease.SlotID != target.ID || lease.OperationID != id {
+			return nil, ErrNomadSandboxMigrationConflict
+		}
+	} else if w.checkpoint.Evidence.CaptureFailureStagingReleased == nil {
+		return nil, ErrNomadCheckpointConflict
 	}
 	var completed *time.Time
 	var priorGC, priorAck []byte
-	if err := tx.QueryRow(ctx, `SELECT capture_failure_completed_at,capture_failure_allocation_gc_request,capture_failure_allocation_gc_receipt
+	if w.checkpoint != nil {
+		e := w.checkpoint.Evidence
+		if e.CaptureFailureGCAck != nil {
+			completed = &w.life.AbortedAt
+			priorGC, _ = json.Marshal(e.CaptureFailureGC)
+			priorAck, _ = json.Marshal(e.CaptureFailureGCAck)
+		}
+	} else {
+		if err := tx.QueryRow(ctx, `SELECT capture_failure_completed_at,capture_failure_allocation_gc_request,capture_failure_allocation_gc_receipt
         FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&completed, &priorGC, &priorAck); err != nil {
-		return nil, err
+			return nil, err
+		}
 	}
 	if completed != nil {
 		var old protocol.MigrationSourceGCRequest
@@ -122,8 +140,14 @@ func (s *PGSandboxStore) CompleteNomadSandboxMigrationCaptureFailure(ctx context
 	}
 	gcJSON, _ := json.Marshal(gc)
 	ackJSON, _ := json.Marshal(ack)
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_allocation_gc_request=$2,capture_failure_allocation_gc_receipt=$3,capture_failure_completed_at=clock_timestamp() WHERE operation_id=$1`, id, gcJSON, ackJSON); err != nil {
-		return nil, err
+	if w.checkpoint != nil {
+		if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_checkpoints SET evidence=evidence || jsonb_build_object('capture_failure_gc',$2::jsonb,'capture_failure_gc_ack',$3::jsonb) WHERE operation_id=$1`, id, gcJSON, ackJSON); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET capture_failure_allocation_gc_request=$2,capture_failure_allocation_gc_receipt=$3,capture_failure_completed_at=clock_timestamp() WHERE operation_id=$1`, id, gcJSON, ackJSON); err != nil {
+			return nil, err
+		}
 	}
 	if err := completeFailedMigrationLifecycle(ctx, tx, w.life, source.AuthorityObservedAt, "migration capture failed; execution cannot be replayed"); err != nil {
 		return nil, err
@@ -145,8 +169,12 @@ func completeFailedMigrationLifecycle(ctx context.Context, tx pgx.Tx, life *Sand
 	if record.RuntimeGeneration != life.FromGeneration || record.RuntimeID != life.FromRuntimeID || record.RuntimeNamespace != life.FromRuntimeNamespace || !record.DeletedAt.IsZero() {
 		return ErrNomadSandboxMigrationConflict
 	}
+	generation := life.ToGeneration
+	if life.Kind == SandboxLifecycleKindPause {
+		generation = life.FromGeneration
+	}
 	if record.DesiredState == SandboxDesiredStateActive && (record.HardExpiresAt.IsZero() || record.HardExpiresAt.After(now)) {
-		if err := (sandboxStoreTx{tx: tx}).MarkRuntimePaused(ctx, life.SandboxID, life.ToGeneration, now); err != nil {
+		if err := (sandboxStoreTx{tx: tx}).MarkRuntimePaused(ctx, life.SandboxID, generation, now); err != nil {
 			return err
 		}
 	} else {
@@ -156,7 +184,7 @@ func completeFailedMigrationLifecycle(ctx context.Context, tx pgx.Tx, life *Sand
 		if err := (sandboxStoreTx{tx: tx}).MarkRuntimeTerminating(ctx, life.SandboxID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE manager.sandboxes SET runtime_id='',runtime_namespace='',runtime_generation=$2 WHERE sandbox_id=$1`, life.SandboxID, life.ToGeneration); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE manager.sandboxes SET runtime_id='',runtime_namespace='',runtime_generation=$2 WHERE sandbox_id=$1`, life.SandboxID, generation); err != nil {
 			return err
 		}
 	}

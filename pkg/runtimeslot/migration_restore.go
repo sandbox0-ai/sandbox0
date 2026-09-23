@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 // MigrationRestoreRequest joins immutable execution state, source physical
@@ -79,6 +80,11 @@ func (r MigrationRestoreRequest) Validate() error {
 	}
 	target, lease, identity := r.Image.Target, r.Image.Resources, r.Stage.Identity
 	cut := r.Image.Publication.Capture.RootFS.Generation
+	// Paused forks share the exact immutable generation while attaching it
+	// through the child's independently fenced filesystem and writer.
+	if r.Image.Checkpoint != nil && r.Image.Checkpoint.Assignment.Kind == runtimecontrol.CheckpointFork {
+		cut.FilesystemID = r.Image.RuntimeAssignment().SandboxID
+	}
 	actual, err := json.Marshal(r.Stage.Generation)
 	if err != nil {
 		return err
@@ -87,16 +93,23 @@ func (r MigrationRestoreRequest) Validate() error {
 	if err != nil {
 		return err
 	}
+	validWriterEpoch := cut.WriterEpoch != math.MaxInt64 && identity.WriterEpoch == cut.WriterEpoch+1
+	if r.Image.Checkpoint != nil {
+		// Failed restore attempts can consume and fence writer epochs without
+		// changing the retained image. The region binds the exact current grant;
+		// the portable image contract only requires advancement beyond its cut.
+		validWriterEpoch = identity.WriterEpoch > cut.WriterEpoch
+	}
 	if !bytes.Equal(actual, expected) || r.Stage.InitialGeneration != cut.GenerationID ||
 		identity.RootFSID != cut.FilesystemID || identity.SourceOCIDigest != cut.SourceOCIDigest ||
-		cut.WriterEpoch == math.MaxInt64 || identity.WriterEpoch != cut.WriterEpoch+1 ||
+		!validWriterEpoch ||
 		identity.NodeUID != target.NodeUID || identity.BootID != target.NodeBootID || identity.AllocationID != target.AllocationID ||
 		identity.SlotNonce != target.SlotID || identity.ClaimID != lease.ClaimID || identity.TaskName != NomadTaskName ||
 		identity.RuntimeClass != "sandbox0-gvisor" || identity.RootFSDriver != "nomad-driver" ||
-		identity.RuntimeGeneration != strconv.FormatInt(r.Image.Publication.Assignment.Target.RuntimeGeneration, 10) {
+		identity.RuntimeGeneration != strconv.FormatInt(r.Image.RuntimeAssignment().RuntimeGeneration, 10) {
 		return fmt.Errorf("restore changed destination or the captured filesystem cut")
 	}
-	revision, _ := r.Image.Publication.Assignment.Target.Revision()
+	revision, _ := r.Image.RuntimeAssignment().Revision()
 	resourceDigest, _ := lease.Digest()
 	if r.Stage.Labels[RuntimeAssignmentRevisionLabel] != revision || r.Stage.Labels[RuntimeResourceLeaseDigestLabel] != resourceDigest {
 		return fmt.Errorf("restore changed assignment or resource lease")
@@ -122,7 +135,7 @@ func (r MigrationRestoreRequest) ValidateClaim(claim NodeClaimControlRequest) er
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	if claim.Stage == nil || claim.Runtime == nil || claim.OperationID != r.Image.Publication.Assignment.OperationID ||
+	if claim.Stage == nil || claim.Runtime == nil || claim.OperationID != r.Image.OperationID() ||
 		claim.Resources != r.Image.Resources {
 		return fmt.Errorf("restore claim changed its migration authority")
 	}
@@ -138,7 +151,7 @@ func (r MigrationRestoreRequest) ValidateClaim(claim NodeClaimControlRequest) er
 	if err != nil {
 		return err
 	}
-	want, _ := r.Image.Publication.Assignment.Target.Revision()
+	want, _ := r.Image.RuntimeAssignment().Revision()
 	if revision != want {
 		return fmt.Errorf("restore claim changed its target assignment")
 	}

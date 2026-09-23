@@ -21,6 +21,11 @@ import (
 
 func migrationCaptureFailureFixture(t *testing.T, invalidated bool) (*nodeRuntime, protocol.MigrationCaptureFailureRequest, *cleanupRootFSRuntime) {
 	t.Helper()
+	return captureFailureFixture(t, invalidated, false)
+}
+
+func captureFailureFixture(t *testing.T, invalidated, captureOnly bool) (*nodeRuntime, protocol.MigrationCaptureFailureRequest, *cleanupRootFSRuntime) {
+	t.Helper()
 	d, capture, runtime, runner := migrationRootFSNodeFixture(t)
 	record, err := d.journal.Get(capture.Request.Target.SlotID)
 	require.NoError(t, err)
@@ -45,9 +50,15 @@ func migrationCaptureFailureFixture(t *testing.T, invalidated bool) (*nodeRuntim
 	t.Cleanup(func() { require.NoError(t, journal.Close()) })
 	d.journal = journal
 	require.NoError(t, journal.Register(r))
-	_, err = d.ReserveMigrationStaging(t.Context(), protocol.MigrationStagingRequest{Target: capture.Request.Target, Source: capture.Request,
+	staging := protocol.MigrationStagingRequest{Target: capture.Request.Target, Source: capture.Request,
 		Destination:                    protocol.NodeChannelTarget{ClusterID: r.ClusterID, NodeID: "target-node", NodeUID: "target-uid", NodeBootID: "target-boot", SlotID: "target-slot", AllocationID: "target-alloc", ControlEndpoint: "unix:///target.sock"},
-		DestinationResourceLeaseDigest: strings.Repeat("b", 64), Bytes: 8 << 20, Inodes: 64})
+		DestinationResourceLeaseDigest: strings.Repeat("b", 64), Bytes: 8 << 20, Inodes: 64}
+	if captureOnly {
+		staging.CaptureOnly = true
+		staging.Destination = protocol.NodeChannelTarget{}
+		staging.DestinationResourceLeaseDigest = ""
+	}
+	_, err = d.ReserveMigrationStaging(t.Context(), staging)
 	require.NoError(t, err)
 	require.NoError(t, d.RecordMigrationCapture(t.Context(), capture))
 	capture.State = protocol.MigrationCaptureUncertain
@@ -88,99 +99,107 @@ func migrationCaptureFailureFixture(t *testing.T, invalidated bool) (*nodeRuntim
 }
 
 func TestMigrationCaptureFailureRetainsInvalidationThroughCleanupAndGC(t *testing.T) {
-	for _, invalidated := range []bool{false, true} {
-		t.Run(map[bool]string{false: "uncertain-call", true: "invalidated-completed-call"}[invalidated], func(t *testing.T) {
-			d, request, runtime := migrationCaptureFailureFixture(t, invalidated)
-			_, err := d.CleanupRuntimeSlot(t.Context(), request.Cleanup)
-			require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
-			_, err = d.CleanupFailedMigrationCapture(t.Context(), request)
-			require.ErrorContains(t, err, "resource cgroup remains present")
-			record, err := d.journal.Get(request.Cleanup.SlotID)
-			require.NoError(t, err)
-			require.NotNil(t, record.Migration.Failure)
-			require.True(t, record.Migration.ExecutionInvalidated)
-			require.Nil(t, record.Proof)
-			require.True(t, runtime.recovery[0].ExternalCrash)
-			require.Zero(t, runtime.reclaimCalls)
-			require.FileExists(t, filepath.Join(record.Migration.ImageDirectory, "checkpoint.img"))
-			require.ErrorIs(t, d.ReleaseMigrationStaging(t.Context(), record.MigrationStaging.Request), errdefs.ErrFailedPrecondition)
-			d.resourceCgroups.(*fakeRuntimeResourceCgroup).removeOK = true
-			proof, err := d.CleanupFailedMigrationCapture(t.Context(), request)
-			require.NoError(t, err)
-			require.NoError(t, proof.ValidateFor(request))
-			path := d.journal.db.Path()
-			require.NoError(t, d.journal.Close())
-			reopened, err := newRuntimeSlotJournal(path, time.Hour)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, reopened.Close()) })
-			d.journal = reopened
-			replayed, err := d.CleanupFailedMigrationCapture(t.Context(), request)
-			require.NoError(t, err)
-			require.Equal(t, proof, replayed)
-			finalizer := &failedTargetFinalizeTestRuntime{cleanupRootFSRuntime: runtime, err: errdefs.ErrPermissionDenied}
-			d.runtime = finalizer
-			final := protocol.MigrationCaptureFailureFinalizeRequest{Request: request, Proof: *proof}
-			_, err = d.FinalizeFailedMigrationCapture(t.Context(), final)
-			require.ErrorIs(t, err, errdefs.ErrPermissionDenied)
-			require.FileExists(t, filepath.Join(record.Migration.ImageDirectory, "checkpoint.img"))
-			pruned, err := d.journal.Prune(time.Now().Add(48 * time.Hour))
-			require.NoError(t, err)
-			require.Zero(t, pruned)
-			finalizer.err = nil
-			finalProof, err := d.FinalizeFailedMigrationCapture(t.Context(), final)
-			require.NoError(t, err)
-			require.NoError(t, finalProof.ValidateFor(final))
-			require.NoDirExists(t, record.Migration.ImageDirectory)
-			require.NoError(t, d.ReleaseMigrationStaging(t.Context(), record.MigrationStaging.Request))
-			pruned, err = d.journal.Prune(time.Now().Add(48 * time.Hour))
-			require.NoError(t, err)
-			require.Zero(t, pruned, "allocation absence has not been acknowledged")
-			require.NoError(t, reopened.Close())
-			reopened, err = newRuntimeSlotJournal(path, time.Hour)
-			require.NoError(t, err)
-			d.journal = reopened
-			finalizer.err = errdefs.ErrUnavailable
-			finalRetry, err := d.FinalizeFailedMigrationCapture(t.Context(), final)
-			require.NoError(t, err)
-			require.Equal(t, finalProof, finalRetry)
-			require.Equal(t, 2, finalizer.calls)
-			custody, err := d.GetMigrationCapture(t.Context(), request.Cleanup.SlotID)
-			require.NoError(t, err)
-			require.True(t, custody.ExecutionInvalidated)
-			require.True(t, custody.CaptureFailureFinalized())
-			require.Equal(t, protocol.MigrationCaptureUncertain, custody.Capture.State)
-			require.ErrorIs(t, d.RecordMigrationCapture(t.Context(), request.Capture), errdefs.ErrFailedPrecondition)
-			_, err = d.SealMigrationRootFS(t.Context(), request.Capture.Request)
-			require.Error(t, err)
-			gc := protocol.MigrationSourceGCRequest{Target: request.Capture.Request.Target, FinalizationDigest: finalProof.RequestDigest,
-				CleanupProofDigest: proof.Cleanup.ProofDigest, AllocationAbsenceDigest: strings.Repeat("9", 64)}
-			changed := gc
-			changed.Target.NodeBootID = "successor-boot"
-			_, err = d.AcknowledgeMigrationSourceGC(t.Context(), changed)
-			require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
-			ack, err := d.AcknowledgeMigrationSourceGC(t.Context(), gc)
-			require.NoError(t, err)
-			require.NoError(t, ack.ValidateFor(gc))
-			changed = gc
-			changed.AllocationAbsenceDigest = strings.Repeat("8", 64)
-			_, err = d.AcknowledgeMigrationSourceGC(t.Context(), changed)
-			require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
-			record, err = d.journal.Get(request.Cleanup.SlotID)
-			require.NoError(t, err)
-			require.Equal(t, runtimeSlotCaptureFailureJournalVersion, record.Version)
-			for version := 1; version < runtimeSlotCaptureFailureJournalVersion; version++ {
-				record.Version = version
-				payload, err := json.Marshal(record)
-				require.NoError(t, err)
-				_, err = decodeRuntimeSlotJournalRecord(payload)
-				require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	for _, captureOnly := range []bool{false, true} {
+		t.Run(map[bool]string{false: "migration", true: "checkpoint"}[captureOnly], func(t *testing.T) {
+			for _, invalidated := range []bool{false, true} {
+				t.Run(map[bool]string{false: "uncertain-call", true: "invalidated-completed-call"}[invalidated], func(t *testing.T) {
+					d, request, runtime := captureFailureFixture(t, invalidated, captureOnly)
+					_, err := d.CleanupRuntimeSlot(t.Context(), request.Cleanup)
+					require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+					_, err = d.CleanupFailedMigrationCapture(t.Context(), request)
+					require.ErrorContains(t, err, "resource cgroup remains present")
+					record, err := d.journal.Get(request.Cleanup.SlotID)
+					require.NoError(t, err)
+					require.NotNil(t, record.Migration.Failure)
+					require.True(t, record.Migration.ExecutionInvalidated)
+					require.Nil(t, record.Proof)
+					require.True(t, runtime.recovery[0].ExternalCrash)
+					require.Zero(t, runtime.reclaimCalls)
+					require.FileExists(t, filepath.Join(record.Migration.ImageDirectory, "checkpoint.img"))
+					require.ErrorIs(t, d.ReleaseMigrationStaging(t.Context(), record.MigrationStaging.Request), errdefs.ErrFailedPrecondition)
+					d.resourceCgroups.(*fakeRuntimeResourceCgroup).removeOK = true
+					proof, err := d.CleanupFailedMigrationCapture(t.Context(), request)
+					require.NoError(t, err)
+					require.NoError(t, proof.ValidateFor(request))
+					path := d.journal.db.Path()
+					require.NoError(t, d.journal.Close())
+					reopened, err := newRuntimeSlotJournal(path, time.Hour)
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+					d.journal = reopened
+					replayed, err := d.CleanupFailedMigrationCapture(t.Context(), request)
+					require.NoError(t, err)
+					require.Equal(t, proof, replayed)
+					finalizer := &failedTargetFinalizeTestRuntime{cleanupRootFSRuntime: runtime, err: errdefs.ErrPermissionDenied}
+					d.runtime = finalizer
+					final := protocol.MigrationCaptureFailureFinalizeRequest{Request: request, Proof: *proof}
+					_, err = d.FinalizeFailedMigrationCapture(t.Context(), final)
+					require.ErrorIs(t, err, errdefs.ErrPermissionDenied)
+					require.FileExists(t, filepath.Join(record.Migration.ImageDirectory, "checkpoint.img"))
+					pruned, err := d.journal.Prune(time.Now().Add(48 * time.Hour))
+					require.NoError(t, err)
+					require.Zero(t, pruned)
+					finalizer.err = nil
+					finalProof, err := d.FinalizeFailedMigrationCapture(t.Context(), final)
+					require.NoError(t, err)
+					require.NoError(t, finalProof.ValidateFor(final))
+					require.NoDirExists(t, record.Migration.ImageDirectory)
+					require.NoError(t, d.ReleaseMigrationStaging(t.Context(), record.MigrationStaging.Request))
+					pruned, err = d.journal.Prune(time.Now().Add(48 * time.Hour))
+					require.NoError(t, err)
+					require.Zero(t, pruned, "allocation absence has not been acknowledged")
+					require.NoError(t, reopened.Close())
+					reopened, err = newRuntimeSlotJournal(path, time.Hour)
+					require.NoError(t, err)
+					d.journal = reopened
+					finalizer.err = errdefs.ErrUnavailable
+					finalRetry, err := d.FinalizeFailedMigrationCapture(t.Context(), final)
+					require.NoError(t, err)
+					require.Equal(t, finalProof, finalRetry)
+					require.Equal(t, 2, finalizer.calls)
+					custody, err := d.GetMigrationCapture(t.Context(), request.Cleanup.SlotID)
+					require.NoError(t, err)
+					require.True(t, custody.ExecutionInvalidated)
+					require.True(t, custody.CaptureFailureFinalized())
+					require.Equal(t, protocol.MigrationCaptureUncertain, custody.Capture.State)
+					require.ErrorIs(t, d.RecordMigrationCapture(t.Context(), request.Capture), errdefs.ErrFailedPrecondition)
+					_, err = d.SealMigrationRootFS(t.Context(), request.Capture.Request)
+					require.Error(t, err)
+					gc := protocol.MigrationSourceGCRequest{Target: request.Capture.Request.Target, FinalizationDigest: finalProof.RequestDigest,
+						CleanupProofDigest: proof.Cleanup.ProofDigest, AllocationAbsenceDigest: strings.Repeat("9", 64)}
+					changed := gc
+					changed.Target.NodeBootID = "successor-boot"
+					_, err = d.AcknowledgeMigrationSourceGC(t.Context(), changed)
+					require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+					ack, err := d.AcknowledgeMigrationSourceGC(t.Context(), gc)
+					require.NoError(t, err)
+					require.NoError(t, ack.ValidateFor(gc))
+					changed = gc
+					changed.AllocationAbsenceDigest = strings.Repeat("8", 64)
+					_, err = d.AcknowledgeMigrationSourceGC(t.Context(), changed)
+					require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+					record, err = d.journal.Get(request.Cleanup.SlotID)
+					require.NoError(t, err)
+					expectedVersion := runtimeSlotCaptureFailureJournalVersion
+					if captureOnly {
+						expectedVersion = runtimeSlotCheckpointStagingJournalVersion
+					}
+					require.Equal(t, expectedVersion, record.Version)
+					for version := 1; version < expectedVersion; version++ {
+						record.Version = version
+						payload, err := json.Marshal(record)
+						require.NoError(t, err)
+						_, err = decodeRuntimeSlotJournalRecord(payload)
+						require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+					}
+					pruned, err = d.journal.Prune(time.Now().Add(48 * time.Hour))
+					require.NoError(t, err)
+					require.Equal(t, 1, pruned)
+					ack, err = d.AcknowledgeMigrationSourceGC(t.Context(), gc)
+					require.NoError(t, err)
+					require.NoError(t, ack.ValidateFor(gc))
+				})
 			}
-			pruned, err = d.journal.Prune(time.Now().Add(48 * time.Hour))
-			require.NoError(t, err)
-			require.Equal(t, 1, pruned)
-			ack, err = d.AcknowledgeMigrationSourceGC(t.Context(), gc)
-			require.NoError(t, err)
-			require.NoError(t, ack.ValidateFor(gc))
 		})
 	}
 }

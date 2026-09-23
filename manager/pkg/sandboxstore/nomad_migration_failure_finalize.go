@@ -10,8 +10,8 @@ import (
 )
 
 func (s *PGSandboxStore) ListNomadMigrationFailureFinalizations(ctx context.Context, after string, limit int) ([]string, error) {
-	return s.listNomadMigrationWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
-        AND l.phase='committing' AND m.failure_cleanup_receipt IS NOT NULL AND m.failure_finalization_receipt IS NULL`)
+	return s.listNomadExecutionFailureWork(ctx, after, limit, `l.kind='migrate' AND l.source='auto' AND NOT l.cancelable
+        AND l.phase='committing' AND m.failure_cleanup_receipt IS NOT NULL AND m.failure_finalization_receipt IS NULL`, `r.evidence ? 'failure_cleaned' AND NOT r.evidence ? 'failure_finalized'`)
 }
 
 // The immutable cleanup receipt was committed atomically with writer retirement
@@ -35,11 +35,11 @@ func lockNomadMigrationFailureFinalization(ctx context.Context, tx pgx.Tx, id st
 	if err != nil {
 		return nil, err
 	}
-	if !authorized || life.Phase != SandboxLifecyclePhaseCommitting {
+	if !authorized || !executionFailurePending(life) && life.Phase != SandboxLifecyclePhaseAborted {
 		return nil, ErrNomadSandboxMigrationConflict
 	}
-	var payload []byte
-	if err := tx.QueryRow(ctx, `SELECT failure_cleanup_receipt FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&payload); err != nil {
+	payload, err := readNomadExecutionFailureEvidence(ctx, tx, id, "failure_cleaned")
+	if err != nil {
 		return nil, err
 	}
 	request := &protocol.MigrationFailureFinalizeRequest{Request: *cleanup}
@@ -76,7 +76,7 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureFinalization(ctx cont
 		return err
 	}
 	defer tx.Rollback(ctx)
-	id := request.Request.Failure.Request.Restore.Image.Publication.Assignment.OperationID
+	id := request.Request.Failure.Request.Restore.Image.OperationID()
 	stored, err := lockNomadMigrationFailureFinalization(ctx, tx, id)
 	if err != nil {
 		return err
@@ -84,8 +84,8 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureFinalization(ctx cont
 	if proof.ValidateFor(*stored) != nil {
 		return ErrNomadSandboxMigrationConflict
 	}
-	var payload []byte
-	if err := tx.QueryRow(ctx, `SELECT failure_finalization_receipt FROM manager.sandbox_runtime_migrations WHERE operation_id=$1`, id).Scan(&payload); err != nil {
+	payload, err := readNomadExecutionFailureEvidence(ctx, tx, id, "failure_finalized")
+	if err != nil {
 		return err
 	}
 	if len(payload) != 0 {
@@ -99,7 +99,11 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationFailureFinalization(ctx cont
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_migrations SET failure_finalization_receipt=$2 WHERE operation_id=$1`, id, payload); err != nil {
+	life, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+` WHERE txn_id=$1`, id))
+	if err != nil {
+		return err
+	}
+	if err := saveNomadExecutionFailureEvidence(ctx, tx, life, "failure_finalized", payload, `UPDATE manager.sandbox_runtime_migrations SET failure_finalization_receipt=$2 WHERE operation_id=$1`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

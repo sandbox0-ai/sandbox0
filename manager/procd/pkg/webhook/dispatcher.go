@@ -87,6 +87,15 @@ type Dispatcher struct {
 	enqueueMu  sync.Mutex
 	closed     bool
 	workerDone chan struct{}
+
+	// deliveryMu protects the outbound request plus its durable acknowledgement.
+	// Capture waits for that whole unit, not merely for the HTTP response.
+	deliveryMu      sync.Mutex
+	deliveryPaused  bool
+	awaitingOwner   bool
+	ownerFenceError error
+	deliveryDone    chan struct{}
+	isolateOwner    bool // guarded by mu; inherited signed records are never relabeled
 }
 
 var (
@@ -131,6 +140,7 @@ func NewDispatcher(options Options, logger *zap.Logger) *Dispatcher {
 		workerDone: make(chan struct{}),
 	}
 
+	d.loadCheckpointOwner()
 	go d.worker()
 	return d
 }
@@ -146,15 +156,35 @@ func (d *Dispatcher) SetConfig(url, secret string) {
 }
 
 // SetIdentity sets the sandbox and team identifiers.
-func (d *Dispatcher) SetIdentity(sandboxID, teamID string) {
+func (d *Dispatcher) SetIdentity(sandboxID, teamID string) error {
+	d.deliveryMu.Lock()
+	defer d.deliveryMu.Unlock()
+	d.enqueueMu.Lock()
+	defer d.enqueueMu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.ownerFenceError != nil {
+		return d.ownerFenceError
+	}
+	if d.isolateOwner && d.options.OutboxDir != "" {
+		if err := d.writeCheckpointOwner(sandboxID, teamID); err != nil {
+			return err
+		}
+	}
 	d.sandbox = sandboxID
 	d.teamID = teamID
+	if d.awaitingOwner {
+		d.awaitingOwner = false
+		d.deliveryPaused = false
+		d.wakeWorker()
+	}
+	return nil
 }
 
 // Enqueue sends an event to the dispatcher queue and returns its event ID.
 func (d *Dispatcher) Enqueue(event Event) (string, error) {
+	d.enqueueMu.Lock()
+	defer d.enqueueMu.Unlock()
 	if event.EventID == "" {
 		event.EventID = "evt_" + uuid.NewString()
 	}
@@ -167,8 +197,9 @@ func (d *Dispatcher) Enqueue(event Event) (string, error) {
 		return event.EventID, nil
 	}
 
-	d.enqueueMu.Lock()
-	defer d.enqueueMu.Unlock()
+	if !d.matchesDeliveryOwner(event) {
+		return event.EventID, ErrEventOwnerChanged
+	}
 	if d.closed {
 		return event.EventID, ErrDispatcherClosed
 	}
@@ -331,7 +362,7 @@ func (d *Dispatcher) writeRecord(record deliveryRecord) error {
 		return fmt.Errorf("stat webhook outbox record: %w", err)
 	}
 
-	data, err := json.MarshalIndent(record, "", "  ")
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
@@ -369,6 +400,12 @@ func (d *Dispatcher) writeRecord(record deliveryRecord) error {
 }
 
 func (d *Dispatcher) drainOutbox() error {
+	d.deliveryMu.Lock()
+	paused := d.deliveryPaused
+	d.deliveryMu.Unlock()
+	if paused {
+		return nil
+	}
 	if d.options.OutboxDir == "" {
 		return nil
 	}
@@ -379,42 +416,59 @@ func (d *Dispatcher) drainOutbox() error {
 	sort.Strings(entries)
 	now := time.Now().UTC()
 	for _, path := range entries {
-		record, err := readRecord(path)
+		if !d.beginDelivery() {
+			return nil
+		}
+		err := func() error {
+			defer d.endDelivery()
+			return d.deliverOutboxRecord(path, now)
+		}()
 		if err != nil {
-			d.moveBadRecord(path, err)
-			continue
+			return err
 		}
-		if !record.NextAttemptAt.IsZero() && record.NextAttemptAt.After(now) {
-			continue
-		}
-		status, err := d.sendRecord(record)
-		if err == nil && status >= 200 && status < 300 {
-			if removeErr := os.Remove(path); removeErr != nil && d.logger != nil {
-				d.logger.Warn("Failed to remove delivered webhook outbox record",
-					zap.String("path", path),
-					zap.Error(removeErr),
-				)
-			}
-			continue
-		}
-		if !shouldRetry(status, err) {
-			d.moveFailedRecord(path, record, status, err)
-			continue
-		}
-		record.Attempts++
-		record.UpdatedAt = now
-		record.NextAttemptAt = now.Add(d.backoffForAttempt(record.Attempts))
-		if err != nil {
-			record.LastError = err.Error()
-		} else {
-			record.LastError = fmt.Sprintf("http status %d", status)
-		}
-		if saveErr := writeRecordFile(path, record); saveErr != nil && d.logger != nil {
-			d.logger.Warn("Failed to update webhook outbox retry state",
-				zap.String("event_id", record.Event.EventID),
-				zap.Error(saveErr),
+	}
+	return nil
+}
+
+func (d *Dispatcher) deliverOutboxRecord(path string, now time.Time) error {
+	record, err := readRecord(path)
+	if err != nil {
+		d.moveBadRecord(path, err)
+		return nil
+	}
+	if !d.matchesDeliveryOwner(record.Event) {
+		return d.quarantineInheritedRecord(path)
+	}
+	if !record.NextAttemptAt.IsZero() && record.NextAttemptAt.After(now) {
+		return nil
+	}
+	status, err := d.sendRecord(record)
+	if err == nil && status >= 200 && status < 300 {
+		if removeErr := os.Remove(path); removeErr != nil && d.logger != nil {
+			d.logger.Warn("Failed to remove delivered webhook outbox record",
+				zap.String("path", path),
+				zap.Error(removeErr),
 			)
 		}
+		return nil
+	}
+	if !shouldRetry(status, err) {
+		d.moveFailedRecord(path, record, status, err)
+		return nil
+	}
+	record.Attempts++
+	record.UpdatedAt = now
+	record.NextAttemptAt = now.Add(d.backoffForAttempt(record.Attempts))
+	if err != nil {
+		record.LastError = err.Error()
+	} else {
+		record.LastError = fmt.Sprintf("http status %d", status)
+	}
+	if saveErr := writeRecordFile(path, record); saveErr != nil && d.logger != nil {
+		d.logger.Warn("Failed to update webhook outbox retry state",
+			zap.String("event_id", record.Event.EventID),
+			zap.Error(saveErr),
+		)
 	}
 	return nil
 }
@@ -431,11 +485,19 @@ func readRecord(path string) (deliveryRecord, error) {
 	if record.TargetURL == "" || len(record.Body) == 0 || record.Event.EventID == "" {
 		return deliveryRecord{}, fmt.Errorf("invalid webhook outbox record")
 	}
+	// Signatures are computed from json.Marshal(event). Older outboxes used
+	// MarshalIndent(record), which reformatted the embedded RawMessage. Restore
+	// its original compact bytes without changing values, key order or escapes.
+	var body bytes.Buffer
+	if err := json.Compact(&body, record.Body); err != nil {
+		return deliveryRecord{}, err
+	}
+	record.Body = append(json.RawMessage(nil), body.Bytes()...)
 	return record, nil
 }
 
 func writeRecordFile(path string, record deliveryRecord) error {
-	data, err := json.MarshalIndent(record, "", "  ")
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}

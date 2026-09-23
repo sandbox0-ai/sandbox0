@@ -24,11 +24,16 @@ func migrationFenceStoreFixture(t *testing.T, suffix string) (*nomadPauseStoreFi
 	require.NoError(t, f.store.CommitNomadSandboxMigrationImagePreparation(f.ctx, *preparation, protocol.MigrationImagePrepared{
 		RequestDigest: preparationDigest, ManifestDigest: receipt.Reference.ManifestDigest, TotalBytes: 1024}))
 	request := protocol.MigrationSourceFenceRequest{PublicationRequest: publication, Publication: receipt}
+	return f, reservation, request, migrationSourceFenceStoreProof(t, f, request)
+}
+
+func migrationSourceFenceStoreProof(t *testing.T, f *nomadPauseStoreFixture, request protocol.MigrationSourceFenceRequest) protocol.MigrationSourceFenceProof {
+	t.Helper()
 	detach, err := request.RootFSRequest()
 	require.NoError(t, err)
 	rootfs, err := rootfshandoff.NewMigrationRootFSDetachProof(detach, rootfshandoff.CrashFenceSessionObservation{
-		Parent: f.issue.GateParent, RootFSID: f.filesystem.ID, WriterEpoch: f.writerEpoch, OperationID: publication.Assignment.OperationID,
-		BindingDigest: publication.Capture.Request.BindingDigest, SessionState: rootfshandoff.StateTombstoned, BranchPath: "/private/captured.wal",
+		Parent: f.issue.GateParent, RootFSID: f.filesystem.ID, WriterEpoch: f.writerEpoch, OperationID: request.PublicationRequest.Capture.Request.OperationID,
+		BindingDigest: request.PublicationRequest.Capture.Request.BindingDigest, SessionState: rootfshandoff.StateTombstoned, BranchPath: "/private/captured.wal",
 		DeviceBound: true, DevicePath: "/dev/nbd0", LiveSessionAbsent: true, MergedMountAbsent: true, XFSMountAbsent: true, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	require.NoError(t, err)
 	d, err := request.Digest()
@@ -37,7 +42,7 @@ func migrationFenceStoreFixture(t *testing.T, suffix string) (*nomadPauseStoreFi
 	proof.Digest, err = proof.ProofDigest()
 	require.NoError(t, err)
 	require.NoError(t, proof.ValidateFor(request))
-	return f, reservation, request, proof
+	return proof
 }
 
 func TestNomadMigrationSourceFenceRequiresCommittedImageAndPhysicalProofIntegration(t *testing.T) {

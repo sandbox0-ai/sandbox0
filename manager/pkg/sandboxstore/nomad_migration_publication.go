@@ -181,11 +181,24 @@ func (s *PGSandboxStore) CommitNomadSandboxMigrationPublication(ctx context.Cont
 // not execution authority, but must still match the unadvanced writer/head.
 // Retirement, crash abandonment or another writer invalidates new publication.
 func validateNomadMigrationPublicationSource(ctx context.Context, tx pgx.Tx, reservation *NomadSandboxMigrationReservation, request protocol.MigrationPublicationRequest) error {
-	filesystem, initial, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, request.Assignment.Target.SandboxID)
+	return validateNomadExecutionPublicationSource(ctx, tx, reservation.Lifecycle, reservation.SourceSlot,
+		reservation.SourceWriterGrantID, reservation.SourceBindingDigest, request)
+}
+
+// The image publication boundary is shared by migration and memory pause.
+// Validate the captured writer and immutable disk format without requiring a
+// destination or treating an expired heartbeat as permission to publish newer disk.
+func validateNomadExecutionPublicationSource(ctx context.Context, tx pgx.Tx, lifecycle *SandboxLifecycleTxn,
+	slot *RuntimeSlot, writerID string, binding []byte, request protocol.MigrationPublicationRequest) error {
+	source, err := request.SourceAssignment()
 	if err != nil {
 		return err
 	}
-	grantRecord, err := getRootFSWriterGrantForUpdate(ctx, tx, reservation.SourceWriterGrantID)
+	filesystem, initial, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, source.SandboxID)
+	if err != nil {
+		return err
+	}
+	grantRecord, err := getRootFSWriterGrantForUpdate(ctx, tx, writerID)
 	if err != nil {
 		return err
 	}
@@ -193,13 +206,13 @@ func validateNomadMigrationPublicationSource(ctx context.Context, tx pgx.Tx, res
 	capture, generation := request.Capture.Request, request.Capture.RootFS.Generation
 	if grant.State != RootFSWriterGrantStateConsumed || grant.SlotID != capture.Target.SlotID ||
 		grant.NodeUID != capture.Target.NodeUID || grant.NodeBootID != capture.Target.NodeBootID ||
-		!bytes.Equal(grant.BindingDigest, reservation.SourceBindingDigest) || hex.EncodeToString(grant.BindingDigest) != capture.BindingDigest ||
-		filesystem.WriterEpoch != grant.WriterEpoch || filesystem.ID != grant.FilesystemID || filesystem.TeamID != request.Assignment.Target.TeamID ||
-		initial.ID != reservation.Lifecycle.ExpectedGenerationID || initial.ID != grant.InitialGenerationID || initial.LocatorVersion == math.MaxInt64 ||
+		!bytes.Equal(grant.BindingDigest, binding) || hex.EncodeToString(grant.BindingDigest) != capture.BindingDigest ||
+		filesystem.WriterEpoch != grant.WriterEpoch || filesystem.ID != grant.FilesystemID || filesystem.TeamID != source.TeamID ||
+		initial.ID != lifecycle.ExpectedGenerationID || initial.ID != grant.InitialGenerationID || initial.LocatorVersion == math.MaxInt64 ||
 		generation.FilesystemID != filesystem.ID || generation.WriterEpoch != grant.WriterEpoch ||
 		generation.SourceOCIDigest != initial.SourceOCIDigest || generation.BaseArtifactDigest != initial.BaseArtifactDigest ||
 		generation.BaseBlockRoot != initial.BaseBlockRoot || generation.FormatGeneration != initial.FormatGeneration ||
-		generation.LocatorVersion != initial.LocatorVersion+1 || request.CompatibilityDigest != reservation.SourceSlot.CompatibilityDigest {
+		generation.LocatorVersion != initial.LocatorVersion+1 || request.CompatibilityDigest != slot.CompatibilityDigest {
 		return ErrNomadSandboxMigrationConflict
 	}
 	oldDescriptor, err := rootfsblock.DecodeDescriptor(initial.Descriptor)

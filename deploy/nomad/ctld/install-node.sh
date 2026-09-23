@@ -131,6 +131,11 @@ if [ "$start" -eq 1 ]; then
     echo "nbd is already loaded with nbds_max=$configured_nbd_devices; drain and reboot the node to apply nbds_max=$required_nbd_devices" >&2
     exit 1
   }
+  configured_nbd_max_part=$(cat /sys/module/nbd/parameters/max_part)
+  [ "$configured_nbd_max_part" = 0 ] || {
+    echo "nbd is already loaded with max_part=$configured_nbd_max_part; drain and reboot the node to apply max_part=0" >&2
+    exit 1
+  }
   systemd-tmpfiles --create /etc/tmpfiles.d/sandbox0-ctld.conf
   sysctl --load=/etc/sysctl.d/90-sandbox0-ctld.conf
   if command -v udevadm >/dev/null 2>&1; then

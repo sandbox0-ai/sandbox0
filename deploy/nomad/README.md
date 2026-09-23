@@ -408,8 +408,8 @@ mutually authenticated.
    Elastic nodes execute the signed enrollment flow automatically.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad` with
    `-var='datacenter=<region-id-with-hyphens-replaced-by-underscores>'`. The
-   default two enrollment carriers fit in shard zero. Larger pools require every
-   nonempty `warm_shard` from 0 through 23 with the same privileged count;
+   two enrollment carriers fit in shard zero. For the default 256 carriers,
+   register every nonempty `warm_shard` from 0 through 23 with the same count;
    each job is bounded to 32 groups. Migrate an existing unsharded pool
    only after fencing claims and draining every affected node. Keep
    `restart { attempts = 0 }`: a consumed slot gets a fresh allocation and

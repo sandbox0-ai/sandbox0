@@ -33,6 +33,51 @@ func TestNomadAllocationTerminalUsesClientExecutionTruth(t *testing.T) {
 	}
 }
 
+func TestNomadPurgeRequiresConfirmedAbsenceAfterServerError(t *testing.T) {
+	for _, test := range []struct {
+		name, purgeStatus string
+		lookupStatus      int
+		wantErr           bool
+		wantLookup        bool
+	}{
+		{name: "already absent", purgeStatus: "missing", lookupStatus: http.StatusNotFound, wantLookup: true},
+		{name: "still present", purgeStatus: "missing", lookupStatus: http.StatusOK, wantErr: true, wantLookup: true},
+		{name: "lookup failed", purgeStatus: "missing", lookupStatus: http.StatusInternalServerError, wantErr: true, wantLookup: true},
+		{name: "purged", purgeStatus: "ok"},
+		{name: "unauthorized", purgeStatus: "forbidden", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lookups := 0
+			client := newInventoryTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Nomad-Token") != "test-token" || r.Header.Get("X-Nomad-Region") != "test" {
+					t.Error("missing authenticated region identity")
+				}
+				switch {
+				case r.Method == http.MethodPut && r.URL.Path == "/v1/node/node/purge":
+					switch test.purgeStatus {
+					case "missing":
+						w.WriteHeader(http.StatusInternalServerError)
+					case "forbidden":
+						w.WriteHeader(http.StatusForbidden)
+					default:
+						w.WriteHeader(http.StatusOK)
+					}
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/node/node":
+					lookups++
+					w.WriteHeader(test.lookupStatus)
+				default:
+					t.Errorf("unexpected endpoint: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			err := client.PurgeNode(context.Background(), "node")
+			if (err != nil) != test.wantErr || (lookups > 0) != test.wantLookup {
+				t.Fatalf("err=%v lookups=%d, wantErr=%v wantLookup=%v", err, lookups, test.wantErr, test.wantLookup)
+			}
+		})
+	}
+}
+
 func newInventoryTestClient(t testing.TB, handler http.HandlerFunc) *NomadClient {
 	t.Helper()
 	server := httptest.NewTLSServer(handler)

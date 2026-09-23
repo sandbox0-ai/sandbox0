@@ -140,7 +140,28 @@ func (n *NomadClient) NodeHasNonWarmNonterminalAllocations(ctx context.Context, 
 }
 
 func (n *NomadClient) PurgeNode(ctx context.Context, nodeID string) error {
-	return n.request(ctx, http.MethodPut, "/v1/node/"+url.PathEscape(nodeID)+"/purge", nil, nil)
+	nodePath := "/v1/node/" + url.PathEscape(nodeID)
+	err := n.request(ctx, http.MethodPut, nodePath+"/purge", nil, nil)
+	if err == nil {
+		return nil
+	}
+	// Nomad returns HTTP 500 for purging a node that is already absent. Only
+	// accept that failure after a separate read confirms the node is gone.
+	var statusErr *nomadHTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.code != http.StatusInternalServerError {
+		return err
+	}
+	probeErr := n.request(ctx, http.MethodGet, nodePath, nil, nil)
+	if errors.As(probeErr, &statusErr) && statusErr.code == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+type nomadHTTPStatusError struct{ code int }
+
+func (e *nomadHTTPStatusError) Error() string {
+	return fmt.Sprintf("nomad returned HTTP %d", e.code)
 }
 
 type nomadAllocation nomadinventory.Allocation
@@ -206,7 +227,7 @@ func (n *NomadClient) request(
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, (2<<20)+1)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("nomad returned HTTP %d", response.StatusCode)
+		return &nomadHTTPStatusError{code: response.StatusCode}
 	}
 	if response.Header.Get("X-Nomad-NextToken") != "" ||
 		(response.Header.Get("X-Nomad-Results-Filtered-By-ACLs") != "" && response.Header.Get("X-Nomad-Results-Filtered-By-ACLs") != "false") {

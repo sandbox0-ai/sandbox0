@@ -964,7 +964,12 @@ func TestRuntimeSlotClaimRejectsUnsupportedSecurityClassBeforeConsumingWriter(t 
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
 	assignment := runtimeSlotAssignment()
 	assignment.SecurityClass = "standard"
-	err := handle.Claim(ClaimRequest{
+	revision, err := assignment.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage.Labels[protocol.RuntimeAssignmentRevisionLabel] = revision
+	err = handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1",
 		Stage: &stage, NetworkPolicy: networkPolicy, Runtime: assignment,
 		Resources: runtimeSlotResourceLease(t, fixture, stage),

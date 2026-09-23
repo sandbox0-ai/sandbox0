@@ -7,6 +7,7 @@
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.257",
     "@earendil-works/pi-coding-agent": "0.84.4",
+    "@moonshot-ai/kimi-code": "^2.1.0",
     "@openai/codex": "0.152.0",
     "@playwright/cli": "0.1.19",
     "opencode-ai": "1.18.25",

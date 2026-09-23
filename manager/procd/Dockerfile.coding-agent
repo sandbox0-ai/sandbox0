@@ -1,3 +1,22 @@
+# Build ZCode from a reviewed upstream commit because its CLI package is
+# private and has no published npm artifact.
+FROM node:24.14.0-bookworm AS zcode-build
+ARG ZCODE_COMMIT=328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/zcode
+RUN git clone --filter=blob:none https://github.com/zai-org/ZCode.git . \
+  && git checkout --detach "$ZCODE_COMMIT" \
+  && test "$(git rev-parse HEAD)" = "$ZCODE_COMMIT" \
+  && corepack enable \
+  && corepack prepare pnpm@10.33.2 --activate
+RUN pnpm install --frozen-lockfile \
+  && pnpm --filter @zcode/cli... build
+# The monorepo has patches for desktop-only packages. Deployment includes only
+# CLI dependencies, so permit those unrelated patches to be unused here.
+RUN printf '\nallowUnusedPatches: true\n' >> pnpm-workspace.yaml \
+  && pnpm deploy --legacy --filter @zcode/cli --prod /opt/zcode
+
 # Sandbox0 coding-agent template.
 # This image intentionally does NOT define an ENTRYPOINT/CMD. The platform
 # injects and starts procd, then Session Supervisor owns each coding agent.
@@ -29,13 +48,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_MCP_SANDBOX=false \
     SANDPI_BROWSER_USER=sandbox-browser
 
-# Claude Code and Pi require Node.js 22. Pi currently requires Node.js 22.19+
-# specifically, so fail the build if the repository ever resolves an older 22.x.
+# ZCode requires Node.js 24.14+. Keep the other pinned agents on the same
+# supported runtime and fail if the distribution resolves an older release.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server \
-  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
-  && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' \
+  && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 14)) process.exit(1)' \
   && useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash "$SANDPI_BROWSER_USER" \
   && rm -rf /var/lib/apt/lists/*
 
@@ -55,15 +74,19 @@ WORKDIR /opt/coding-agents
 
 COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/package-lock.json ./
 COPY manager/procd/coding-agents/THIRD_PARTY.md ./
+COPY --from=zcode-build /opt/zcode /opt/zcode
 
 RUN npm ci --omit=dev \
-  && for agent in codex claude opencode pi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
+  && for agent in codex claude opencode pi kimi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
+  && ln -sf /opt/zcode/dist/zcode.cjs /usr/local/bin/zcode \
   && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0 ./node_modules/.bin/playwright install chromium --with-deps --no-shell \
   && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/skills/playwright-cli/SKILL.md \
   && codex --version \
   && claude --version \
   && opencode --version \
   && pi --version \
+  && kimi --version \
+  && zcode --version \
   && playwright-cli --version \
   && npm cache clean --force
 

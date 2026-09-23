@@ -84,7 +84,7 @@ func recoveryTestHandle(t *testing.T, fixture *runtimeSlotPluginFixture) (*drive
 	t.Helper()
 	handle := drivers.NewTaskHandle(taskHandleVersion)
 	handle.Config = fixture.task
-	bundle := filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
+	bundle := driverBundleDir(fixture.task)
 	state := PersistedState{
 		TaskConfig: fixture.task.Copy(), DriverConfig: &TaskConfig{Command: "/procd", SecurityClass: "privileged"},
 		ContainerID: safeContainerID(fixture.task.ID), BundleDir: bundle,
@@ -94,6 +94,21 @@ func recoveryTestHandle(t *testing.T, fixture *runtimeSlotPluginFixture) (*drive
 		t.Fatal(err)
 	}
 	return roundTripNomadTaskHandle(t, handle), state
+}
+
+func TestRecoveredDriverStateAcceptsVersionTwoAllocationBundle(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	t.Cleanup(fixture.plugin.cancel)
+	handle, state := recoveryTestHandle(t, fixture)
+	handle.Version = 2
+	state.BundleDir = filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
+	state.RootMount = filepath.Join(state.BundleDir, "rootfs")
+	if err := handle.SetDriverState(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoveredDriverState(fixture.config, handle); err != nil {
+		t.Fatalf("recover version-two task: %v", err)
+	}
 }
 
 func TestRecoverTaskRejectsInvalidPersistedConfigurationAndIdentity(t *testing.T) {

@@ -28,7 +28,7 @@ import (
 // here would make recovery depend on whether the handle crossed a client restart.
 func recoveredDriverState(config *PluginConfig, handle *drivers.TaskHandle) (PersistedState, error) {
 	var state PersistedState
-	if handle.Version != taskHandleVersion {
+	if handle.Version != 2 && handle.Version != taskHandleVersion {
 		return state, fmt.Errorf("unsupported persisted driver handle version %d", handle.Version)
 	}
 	if err := handle.GetDriverState(&state); err != nil {
@@ -45,7 +45,10 @@ func recoveredDriverState(config *PluginConfig, handle *drivers.TaskHandle) (Per
 	if !sameRecoveryTaskIdentity(state.TaskConfig, handle.Config) {
 		return state, errors.New("persisted task identity does not match the Nomad task handle")
 	}
-	bundle := filepath.Join(handle.Config.TaskDir().Dir, "gvisor-bundle")
+	bundle := driverBundleDir(handle.Config)
+	if handle.Version == 2 {
+		bundle = filepath.Join(handle.Config.TaskDir().Dir, "gvisor-bundle")
+	}
 	if !filepath.IsAbs(bundle) || state.BundleDir != bundle ||
 		state.RootMount != filepath.Join(bundle, "rootfs") || state.ContainerID != safeContainerID(handle.Config.ID) {
 		return state, errors.New("persisted runtime paths do not match the Nomad task handle")

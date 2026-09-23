@@ -126,7 +126,7 @@ func TestMigrationFinalizationRecoversWarmNomadHandleAfterBundleDeletion(t *test
 	t.Cleanup(fixture.plugin.cancel)
 	h, c, runner := configuredMigrationFinalizationHandleFixture(t, func(h *taskHandle, capture *protocol.MigrationCaptureRequest) {
 		h.taskConfig = fixture.task
-		h.bundleDir = filepath.Join(fixture.task.TaskDir().Dir, "gvisor-bundle")
+		h.bundleDir = driverBundleDir(fixture.task)
 		h.rootMount = filepath.Join(h.bundleDir, "rootfs")
 		h.socketPath = controlSocketPath(fixture.config.ControlDir, fixture.task.ID)
 		capture.Target.AllocationID = fixture.task.AllocID

@@ -150,7 +150,8 @@ size-bounded guest tmpfs mounts and are intentionally absent from every
 durable RootFS generation. Starting with driver version `0.2.0`, `/tmp` uses
 stock runsc's file-backed tmpfs mount hint; `/dev/shm` and other ephemeral
 mounts continue to use memory. Its backing file lives in the private OCI bundle
-on the Nomad allocation filesystem, outside the persistent RootFS. Keep that
+beside the Nomad allocation root, outside the persistent RootFS and outside
+Nomad's allocation garbage collection. Keep that
 filesystem on disk and provision space for the aggregate `/tmp` limits of
 admitted sandboxes alongside other node storage. The default limit remains half
 the committed memory lease; a template may override it. File cache is charged to

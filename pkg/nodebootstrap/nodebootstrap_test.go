@@ -32,11 +32,13 @@ func TestConfigNormalizesClosedWorkerContract(t *testing.T) {
 	require.Equal(t, "/opt/sandbox0", config.RuntimeRoot)
 	require.Equal(t, "/var/lib/sandbox0", config.DataMount)
 	require.Equal(t, 12*60*60, config.RenewBeforeSeconds)
-	require.Equal(t, 6, config.StandardCarriers)
+	require.Equal(t, 0, config.StandardCarriers)
 	require.Equal(t, 2, config.PrivilegedCarriers)
 
 	config = validTestConfig()
 	config.StandardCarriers, config.PrivilegedCarriers = 16, 240
+	require.NoError(t, config.normalize())
+	config.StandardCarriers, config.PrivilegedCarriers = 0, 256
 	require.NoError(t, config.normalize())
 	config.PrivilegedCarriers = 257
 	require.ErrorContains(t, config.normalize(), "carrier ceilings")
@@ -54,7 +56,7 @@ func TestRenderNomadClientKeepsNodeFencedUntilAdmission(t *testing.T) {
 	require.Contains(t, text, `node_pool        = "sandbox0"`)
 	require.Contains(t, text, `servers          = ["10.0.0.10:4647"]`)
 	require.Contains(t, text, `sandbox0_admitted  = "false"`)
-	require.Contains(t, text, `sandbox0_standard_carriers   = "6"`)
+	require.Contains(t, text, `sandbox0_standard_carriers   = "0"`)
 	require.Contains(t, text, `sandbox0_privileged_carriers = "2"`)
 	require.NotContains(t, text, "172.27.")
 
@@ -66,6 +68,11 @@ func TestRenderNomadClientKeepsNodeFencedUntilAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(payload), `sandbox0_standard_carriers   = "16"`)
 	require.Contains(t, string(payload), `sandbox0_privileged_carriers = "240"`)
+	config.StandardCarriers, config.PrivilegedCarriers = 0, 256
+	payload, err = renderNomadClientConfig(config, "s0-i-123", "10.0.1.9", true)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `sandbox0_standard_carriers   = "0"`)
+	require.Contains(t, string(payload), `sandbox0_privileged_carriers = "256"`)
 }
 
 func TestRuntimeConfigArchiveBindsExactNodeIdentity(t *testing.T) {

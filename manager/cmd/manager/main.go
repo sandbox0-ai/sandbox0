@@ -145,10 +145,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure adaptive carrier pool", zap.Error(err))
 	}
-	nodePoolAutoscaler, err := configureNodePoolAutoscaler(cfg, sandboxStore)
-	if err != nil {
-		logger.Fatal("Failed to configure sandbox node pool autoscaler", zap.Error(err))
-	}
 	nodePoolLifecycle, err := configureNodePoolLifecycle(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox node pool lifecycle", zap.Error(err))
@@ -160,6 +156,10 @@ func main() {
 	managerNodeAuthority, err := buildManagerNodeAuthority(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Failed to configure manager node authority", zap.Error(err))
+	}
+	nodePoolAutoscaler, err := configureNodePoolAutoscaler(cfg, sandboxStore, managerNodeAuthority)
+	if err != nil {
+		logger.Fatal("Failed to configure sandbox node pool autoscaler", zap.Error(err))
 	}
 
 	sandboxDeletionWebhookDispatcher := deletionwebhook.NewSandboxDeletionWebhookDispatcher(

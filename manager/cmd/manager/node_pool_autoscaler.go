@@ -12,6 +12,7 @@ import (
 func configureNodePoolAutoscaler(
 	cfg *config.ManagerConfig,
 	store nodepoolautoscaler.Store,
+	node nodepoolautoscaler.CPUPreflightNode,
 ) (*nodepoolautoscaler.Worker, error) {
 	if cfg == nil || !cfg.NodePoolAutoscaler.Enabled {
 		return nil, nil
@@ -30,6 +31,16 @@ func configureNodePoolAutoscaler(
 	ownerID, err := os.Hostname()
 	if err != nil || strings.TrimSpace(ownerID) == "" {
 		return nil, fmt.Errorf("resolve node pool autoscaler owner identity: %w", err)
+	}
+	var cpu nodepoolautoscaler.CPUChecker
+	if nodePool.ConsolidationEnabled {
+		if !cfg.NodeAuthority.Enabled {
+			return nil, fmt.Errorf("node consolidation requires node authority")
+		}
+		cpu, err = nodepoolautoscaler.NewCPUChecker(node)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return nodepoolautoscaler.New(store, cloud, nodepoolautoscaler.Config{
 		PoolID: nodePool.PoolID, ClusterID: cfg.DefaultClusterId, OwnerID: ownerID,
@@ -52,5 +63,6 @@ func configureNodePoolAutoscaler(
 		MaxPendingNodes:          nodePool.MaxPendingNodes,
 		ConsolidationEnabled:     nodePool.ConsolidationEnabled,
 		ConsolidationTimeout:     nodePool.ConsolidationTimeout.Duration,
+		ConsolidationCPU:         cpu,
 	})
 }

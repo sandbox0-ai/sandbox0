@@ -25,7 +25,8 @@ type Store interface {
 	AcquireRuntimeNodePoolControllerLease(context.Context, string, string, time.Duration) (bool, error)
 	GetRuntimeNodePoolSnapshot(context.Context, string) (*sandboxstore.RuntimeNodePoolSnapshot, error)
 	UpdateRuntimeNodePoolScaleState(context.Context, string, int, time.Time, string) (*sandboxstore.RuntimeNodePoolState, error)
-	BeginRuntimeNodeConsolidation(context.Context, string, string, int64, int64, int) (bool, error)
+	GetRuntimeNodeConsolidationCPUPlan(context.Context, string, string) (*sandboxstore.RuntimeNodeConsolidationCPUPlan, error)
+	BeginRuntimeNodeConsolidation(context.Context, string, string, int64, int64, int, *sandboxstore.RuntimeNodeConsolidationCPUPlan) (bool, error)
 	CancelRuntimeNodeConsolidation(context.Context, string, string, time.Duration) (bool, error)
 }
 
@@ -70,6 +71,7 @@ type Config struct {
 	MaxPendingNodes          int
 	ConsolidationEnabled     bool
 	ConsolidationTimeout     time.Duration
+	ConsolidationCPU         CPUChecker
 	Now                      func() time.Time
 }
 
@@ -150,6 +152,9 @@ func New(store Store, cloud Cloud, config Config) (*Worker, error) {
 	}
 	if config.ConsolidationTimeout < 5*time.Minute || config.ConsolidationTimeout > 24*time.Hour {
 		return nil, errors.New("invalid node consolidation policy")
+	}
+	if config.ConsolidationEnabled && config.ConsolidationCPU == nil {
+		return nil, errors.New("node consolidation requires CPU planning preflight")
 	}
 	if config.ScaleInCooldown == 0 {
 		config.ScaleInCooldown = time.Minute
@@ -603,10 +608,42 @@ func (w *Worker) reconcileConsolidation(ctx context.Context, snapshot *sandboxst
 		}
 		return a.ProviderInstanceID < b.ProviderInstanceID
 	})
+	// CPU observation is best effort and must finish well before this
+	// controller's lease expires. The next pass can retry a slow node.
+	planningCtx, cancelPlanning := context.WithTimeout(ctx, w.config.ControllerLeaseTTL/2)
+	defer cancelPlanning()
 	for _, candidate := range candidates {
-		started, err := w.store.BeginRuntimeNodeConsolidation(ctx, w.config.PoolID,
+		if planningCtx.Err() != nil {
+			decision.Action = "consolidation_cpu_preflight_rejected"
+			break
+		}
+		plan, err := w.store.GetRuntimeNodeConsolidationCPUPlan(planningCtx, w.config.PoolID, candidate.ProviderInstanceID)
+		if err != nil {
+			if planningCtx.Err() != nil && ctx.Err() == nil {
+				decision.Action = "consolidation_cpu_preflight_rejected"
+				break
+			}
+			return true, decision, fmt.Errorf("plan node consolidation CPU: %w", err)
+		}
+		if plan == nil {
+			continue
+		}
+		compatible, err := w.config.ConsolidationCPU.Compatible(planningCtx, plan)
+		if err != nil {
+			decision.Action = "consolidation_cpu_preflight_rejected"
+			continue
+		}
+		if !compatible {
+			decision.Action = "consolidation_cpu_incompatible"
+			continue
+		}
+		if planningCtx.Err() != nil {
+			decision.Action = "consolidation_cpu_preflight_rejected"
+			break
+		}
+		started, err := w.store.BeginRuntimeNodeConsolidation(planningCtx, w.config.PoolID,
 			candidate.ProviderInstanceID,
-			w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots)
+			w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots, plan)
 		if err != nil {
 			return true, decision, fmt.Errorf("begin node consolidation: %w", err)
 		}
@@ -615,7 +652,9 @@ func (w *Worker) reconcileConsolidation(ctx context.Context, snapshot *sandboxst
 			return true, decision, nil
 		}
 	}
-	decision.Action = "consolidation_no_fixed_capacity"
+	if decision.Action != "consolidation_cpu_incompatible" && decision.Action != "consolidation_cpu_preflight_rejected" {
+		decision.Action = "consolidation_no_fixed_capacity"
+	}
 	return true, decision, nil
 }
 

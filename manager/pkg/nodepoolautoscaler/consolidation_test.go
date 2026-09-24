@@ -2,6 +2,7 @@ package nodepoolautoscaler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,6 +36,46 @@ func TestConsolidationWaitsForQuietWindowThenFencesLightestElasticNode(t *testin
 	require.NoError(t, err)
 	require.Equal(t, "consolidation_started", decision.Action)
 	require.Equal(t, []string{"light"}, store.consolidationCalls)
+	require.Empty(t, cloud.sets)
+}
+
+func TestConsolidationSkipsCPUIncompatibleSourceBeforeDrain(t *testing.T) {
+	store := &fakeStore{consolidationReady: true}
+	cloud := &fakeCloud{desired: 1}
+	store.snapshot.ClusterFixedUsableSlots = 8
+	store.snapshot.ClusterWorkloadCPU = 1_000
+	store.snapshot.ClusterWorkloadMemory = 1 << 30
+	store.snapshot.ClusterWorkloadSlots = 1
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{{ProviderInstanceID: "incompatible",
+		PoolKind: "elastic", State: "active", ProviderReady: true, CapacityLive: true, ActiveLeases: 1}}
+	w := testWorker(t, store, cloud)
+	w.config.ConsolidationEnabled = true
+	w.config.ConsolidationCPU = fakeCPUChecker{compatible: false}
+	store.state.LowPressureSince = testNow.Add(-11 * time.Minute)
+	decision, err := w.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "consolidation_cpu_incompatible", decision.Action)
+	require.Empty(t, store.consolidationCalls)
+	require.Empty(t, cloud.sets)
+}
+
+func TestConsolidationSkipsFailedCPUProbeBeforeDrain(t *testing.T) {
+	store := &fakeStore{consolidationReady: true}
+	cloud := &fakeCloud{desired: 1}
+	store.snapshot.ClusterFixedUsableSlots = 8
+	store.snapshot.ClusterWorkloadCPU = 1_000
+	store.snapshot.ClusterWorkloadMemory = 1 << 30
+	store.snapshot.ClusterWorkloadSlots = 1
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{{ProviderInstanceID: "probe-failed",
+		PoolKind: "elastic", State: "active", ProviderReady: true, CapacityLive: true, ActiveLeases: 1}}
+	w := testWorker(t, store, cloud)
+	w.config.ConsolidationEnabled = true
+	w.config.ConsolidationCPU = fakeCPUChecker{err: errors.New("CPU probe unavailable")}
+	store.state.LowPressureSince = testNow.Add(-11 * time.Minute)
+	decision, err := w.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "consolidation_cpu_preflight_rejected", decision.Action)
+	require.Empty(t, store.consolidationCalls)
 	require.Empty(t, cloud.sets)
 }
 

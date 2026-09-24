@@ -328,6 +328,16 @@ func (s *PGSandboxStore) CountActiveSandboxes(ctx context.Context, teamID string
 }
 
 func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
+	return s.listActiveLifecycleTxns(ctx, kind, limit, false)
+}
+
+// ListActiveFilesystemPauseTxns excludes checkpoint pauses owned by the
+// dedicated capture worker. Ordinary retirement must never take their writer.
+func (s *PGSandboxStore) ListActiveFilesystemPauseTxns(ctx context.Context, limit int) ([]*SandboxLifecycleTxn, error) {
+	return s.listActiveLifecycleTxns(ctx, SandboxLifecycleKindPause, limit, true)
+}
+
+func (s *PGSandboxStore) listActiveLifecycleTxns(ctx context.Context, kind string, limit int, excludeCheckpoints bool) ([]*SandboxLifecycleTxn, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
 	}
@@ -337,9 +347,13 @@ func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind strin
 	rows, err := s.pool.Query(ctx, lifecycleTxnSelectSQL()+`
 		WHERE kind = $1
 			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND (NOT $3 OR NOT EXISTS (
+				SELECT 1 FROM manager.sandbox_runtime_checkpoints checkpoint
+				WHERE checkpoint.operation_id = manager.sandbox_lifecycle_txns.txn_id
+			))
 		ORDER BY updated_at ASC
 		LIMIT $2
-	`, strings.TrimSpace(kind), limit)
+	`, strings.TrimSpace(kind), limit, excludeCheckpoints)
 	if err != nil {
 		return nil, fmt.Errorf("list active lifecycle txns: %w", err)
 	}

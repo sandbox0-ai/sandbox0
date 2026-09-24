@@ -132,14 +132,16 @@ func TestNomadCheckpointUncertainCaptureUsesSharedPhysicalFailureRecoveryIntegra
 			require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT runtime_generation,desired_state,runtime_id FROM manager.sandboxes WHERE sandbox_id=$1`, f.sandboxID).Scan(&generation, &state, &runtime))
 			require.Equal(t, source.SourceGeneration, generation, "source-only failure cannot invent or regress a generation")
 			require.Empty(t, runtime)
-			if disposition == "active" {
+			switch disposition {
+			case "active":
 				require.Equal(t, string(SandboxDesiredStatePaused), state)
-			} else {
+			default:
 				require.Equal(t, string(SandboxDesiredStateTerminating), state)
 			}
 			_, err = f.store.RequestNomadSandboxMemoryPause(f.ctx, f.sandboxID)
 			require.Error(t, err, "failed capture must never masquerade as retained memory")
-			if disposition == "active" {
+			switch disposition {
+			case "active":
 				owner, err := f.store.GetSandbox(f.ctx, f.sandboxID)
 				require.NoError(t, err)
 				failed, err := f.store.NomadCheckpointFailed(f.ctx, owner.ID, owner.RuntimeGeneration, owner.LifecycleEpoch)
@@ -165,7 +167,7 @@ func TestNomadCheckpointUncertainCaptureUsesSharedPhysicalFailureRecoveryIntegra
 				failed, err = f.store.NomadCheckpointFailed(f.ctx, owner.ID, owner.RuntimeGeneration, current.Epoch)
 				require.NoError(t, err)
 				require.False(t, failed, "historical failure must not hide a new recovery")
-			} else if disposition == "terminating" {
+			case "terminating":
 				require.NoError(t, f.store.MarkSandboxDeleted(f.ctx, f.sandboxID, time.Now().UTC()))
 				var released bool
 				require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT source_writer_grant_ref IS NULL AND storage_released_at IS NOT NULL

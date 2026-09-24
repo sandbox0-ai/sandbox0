@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
@@ -12,6 +13,33 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMarkSandboxDeletedReleasesRetainedMemoryGenerationIntegration(t *testing.T) {
+	f := completedCheckpointStoreFixture(t, "checkpoint-delete-retained-generation")
+	var checkpointID string
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT checkpoint_id FROM manager.sandbox_runtime_checkpoint_refs WHERE sandbox_id=$1`, f.sandboxID).Scan(&checkpointID))
+	_, err := f.pool.Exec(f.ctx, `UPDATE manager.sandbox_runtime_checkpoints
+		SET source_writer_grant_ref=NULL,storage_released_at=clock_timestamp() WHERE operation_id=$1`, checkpointID)
+	require.Error(t, err, "checkpoint storage must remain pinned while its sandbox owns the image")
+	require.NoError(t, f.store.MarkSandboxDeleted(f.ctx, f.sandboxID, time.Now().UTC()))
+	var refs, generations, filesystems int
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM manager.sandbox_runtime_checkpoint_refs WHERE sandbox_id=$1`, f.sandboxID).Scan(&refs))
+	require.Zero(t, refs)
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM manager.rootfs_generations WHERE filesystem_id=$1`, f.filesystem.ID).Scan(&generations))
+	require.Zero(t, generations)
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM manager.rootfs_filesystems WHERE filesystem_id=$1`, f.filesystem.ID).Scan(&filesystems))
+	require.Zero(t, filesystems)
+	var history int
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM manager.sandbox_runtime_checkpoints WHERE operation_id=$1`, checkpointID).Scan(&history))
+	require.Equal(t, 1, history, "image GC retains the checkpoint record until physical object cleanup")
+	var writerIdentity string
+	var writerDetached bool
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT source_writer_grant_id,
+		source_writer_grant_ref IS NULL AND storage_released_at IS NOT NULL
+		FROM manager.sandbox_runtime_checkpoints WHERE operation_id=$1`, checkpointID).Scan(&writerIdentity, &writerDetached))
+	require.NotEmpty(t, writerIdentity)
+	require.True(t, writerDetached, "historical identity survives without pinning deleted storage")
+}
 
 func TestNomadCheckpointImageGCWaitsForLastForkAndCollectsExactObjectsIntegration(t *testing.T) {
 	f := completedCheckpointStoreFixture(t, "checkpoint-image-gc")

@@ -749,6 +749,17 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID); err != nil {
 		return fmt.Errorf("delete completed running fork target metadata: %w", err)
 	}
+	// A deleted sandbox cannot resume its retained memory image. Drop only its
+	// reference; other forks keep their own image and generation custody.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM manager.sandbox_runtime_checkpoint_refs
+		WHERE sandbox_id = $1
+	`, sandboxID); err != nil {
+		return fmt.Errorf("release deleted sandbox runtime checkpoint: %w", err)
+	}
+	if err := releaseDeletedSandboxCheckpointStorage(ctx, tx, sandboxID); err != nil {
+		return err
+	}
 	filesystemRows, err := tx.Query(ctx, `
 		SELECT binding.filesystem_id
 		FROM manager.sandbox_rootfs_bindings AS binding
@@ -815,6 +826,13 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				SELECT 1
 				FROM manager.rootfs_filesystems child
 				WHERE child.source_filesystem_id = f.filesystem_id
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.sandbox_runtime_checkpoint_refs checkpoint_ref
+				JOIN manager.rootfs_generations generation
+					ON generation.generation_id = checkpoint_ref.generation_id
+				WHERE generation.filesystem_id = f.filesystem_id
 			)
 			FOR UPDATE OF f
 			`, filesystemIDs)

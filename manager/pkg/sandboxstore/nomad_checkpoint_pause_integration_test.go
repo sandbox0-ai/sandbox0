@@ -34,6 +34,34 @@ func TestNomadMemoryPauseAdmissionUsesLaunchInputsAndReusesConcurrentIntentInteg
 	require.ErrorIs(t, err, ErrNomadSandboxPauseConflict)
 }
 
+func TestFilesystemPauseScanLeavesCheckpointPauseToItsWorkerIntegration(t *testing.T) {
+	memory, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "checkpoint-scan", "")
+	_, err := memory.store.RequestNomadSandboxMemoryPause(memory.ctx, memory.sandboxID)
+	require.NoError(t, err)
+	all, err := memory.store.ListActiveLifecycleTxns(memory.ctx, SandboxLifecycleKindPause, 500)
+	require.NoError(t, err)
+	require.True(t, hasLifecycleForSandbox(all, memory.sandboxID))
+	ordinary, err := memory.store.ListActiveFilesystemPauseTxns(memory.ctx, 500)
+	require.NoError(t, err)
+	require.False(t, hasLifecycleForSandbox(ordinary, memory.sandboxID))
+
+	filesystem := newNomadPauseStoreFixture(t, "filesystem-scan")
+	_, err = filesystem.store.RequestNomadSandboxPause(filesystem.ctx, filesystem.sandboxID, SandboxLifecycleSourceManual)
+	require.NoError(t, err)
+	ordinary, err = filesystem.store.ListActiveFilesystemPauseTxns(filesystem.ctx, 500)
+	require.NoError(t, err)
+	require.True(t, hasLifecycleForSandbox(ordinary, filesystem.sandboxID))
+}
+
+func hasLifecycleForSandbox(txns []*SandboxLifecycleTxn, sandboxID string) bool {
+	for _, txn := range txns {
+		if txn != nil && txn.SandboxID == sandboxID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNomadMemoryPauseAdmissionDoesNotReconstructMissingLaunchInputsIntegration(t *testing.T) {
 	f, _, _, _ := checkpointStoreFixture(t, "admission-legacy")
 	_, err := f.store.RequestNomadSandboxMemoryPause(f.ctx, f.sandboxID)

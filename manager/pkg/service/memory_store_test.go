@@ -127,6 +127,10 @@ func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time
 	return nil, nil
 }
 
+func (s *memorySandboxStore) ListActiveFilesystemPauseTxns(ctx context.Context, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
+	return s.ListActiveLifecycleTxns(ctx, sandboxstore.SandboxLifecycleKindPause, limit)
+}
+
 func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
 	if s == nil {
 		return nil, nil

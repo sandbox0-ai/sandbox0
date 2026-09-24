@@ -22,7 +22,7 @@ type staticPauseLifecycleStore struct {
 	lastRetryDelay  time.Duration
 }
 
-func (s staticPauseLifecycleStore) ListActiveLifecycleTxns(context.Context, string, int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
+func (s staticPauseLifecycleStore) ListActiveFilesystemPauseTxns(context.Context, int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
 	return s.txns, nil
 }
 

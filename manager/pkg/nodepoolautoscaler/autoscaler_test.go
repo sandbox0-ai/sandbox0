@@ -50,9 +50,21 @@ func (f *fakeStore) UpdateRuntimeNodePoolScaleState(_ context.Context, _ string,
 	f.updates = append(f.updates, f.state)
 	return &f.state, nil
 }
-func (f *fakeStore) BeginRuntimeNodeConsolidation(_ context.Context, _ string, id string, _, _ int64, _ int) (bool, error) {
+func (f *fakeStore) GetRuntimeNodeConsolidationCPUPlan(_ context.Context, _, _ string) (*sandboxstore.RuntimeNodeConsolidationCPUPlan, error) {
+	return &sandboxstore.RuntimeNodeConsolidationCPUPlan{Sources: []sandboxstore.RuntimeNodeConsolidationCPUProbe{{}}}, nil
+}
+func (f *fakeStore) BeginRuntimeNodeConsolidation(_ context.Context, _ string, id string, _, _ int64, _ int, _ *sandboxstore.RuntimeNodeConsolidationCPUPlan) (bool, error) {
 	f.consolidationCalls = append(f.consolidationCalls, id)
 	return f.consolidationReady, nil
+}
+
+type fakeCPUChecker struct {
+	compatible bool
+	err        error
+}
+
+func (f fakeCPUChecker) Compatible(context.Context, *sandboxstore.RuntimeNodeConsolidationCPUPlan) (bool, error) {
+	return f.compatible, f.err
 }
 func (f *fakeStore) CancelRuntimeNodeConsolidation(_ context.Context, _ string, id string, _ time.Duration) (bool, error) {
 	f.cancellationCalls = append(f.cancellationCalls, id)
@@ -98,7 +110,8 @@ func testWorker(t *testing.T, store *fakeStore, cloud *fakeCloud) *Worker {
 		FixedNodes: 1, MinElasticNodes: 0, MaxElasticNodes: 299,
 		NodeCPUMillicores: 14000, NodeMemoryBytes: 56 << 30, WarmSlotsPerNode: 8,
 		HeadroomCPUMillicores: 1000, HeadroomMemoryBytes: 1 << 30, HeadroomSlots: 1,
-		Interval: time.Second, ControllerLeaseTTL: 3 * time.Second,
+		ConsolidationCPU: fakeCPUChecker{compatible: true},
+		Interval:         time.Second, ControllerLeaseTTL: 3 * time.Second,
 		ScaleInStabilization: 10 * time.Minute, Now: func() time.Time { return testNow },
 		MaxScaleOutStep: 299, MaxScaleInStep: 299, MaxPendingNodes: 299,
 	})

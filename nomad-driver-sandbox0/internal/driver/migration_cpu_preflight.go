@@ -62,6 +62,8 @@ func (h *taskHandle) PreflightMigrationCPU(ctx context.Context, request protocol
 	var current *protocol.MigrationCPUObservation
 	if request.IsSource() {
 		current, err = gvisorcli.CheckMigrationSourceCPU(ctx, observer, launch, request.Source, launch.LaunchAttempt, request.SourceResources)
+	} else if request.Planning {
+		current, err = gvisorcli.CheckMigrationPlanningTargetCPU(ctx, observer, launch, request.PlanningCPUSet)
 	} else {
 		current, err = gvisorcli.CheckMigrationTargetCPU(ctx, observer, launch, request.DestinationResources)
 	}

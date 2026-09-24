@@ -1,11 +1,23 @@
 package sandboxstore
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func beginConsolidationForTest(ctx context.Context, store *PGSandboxStore, poolID, instanceID string, cpu, memory int64, slots int) (bool, error) {
+	plan, err := store.GetRuntimeNodeConsolidationCPUPlan(ctx, poolID, instanceID)
+	if err != nil {
+		return false, err
+	}
+	if plan == nil {
+		return false, nil
+	}
+	return store.BeginRuntimeNodeConsolidation(ctx, poolID, instanceID, cpu, memory, slots, plan)
+}
 
 func registerConsolidationElastic(t *testing.T, f *nomadPauseStoreFixture, instanceID, nodeID, nodeUID, privateIP, allocationCIDR string) {
 	t.Helper()
@@ -32,7 +44,7 @@ func TestNodeConsolidationFencesOnlyWhenFixedDestinationFitsIntegration(t *testi
 		SET heartbeat_expires_at=NOW()-INTERVAL '1 minute'
 		WHERE cluster_id='cluster-a' AND node_uid='node-a'`)
 	require.NoError(t, err)
-	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err := beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.False(t, started, "an expired source cannot be reopened through a consolidation drain")
 	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_capacities
@@ -40,12 +52,12 @@ func TestNodeConsolidationFencesOnlyWhenFixedDestinationFitsIntegration(t *testi
 		WHERE cluster_id='cluster-a' AND node_uid='node-a'`)
 	require.NoError(t, err)
 
-	started, err = f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source",
+	started, err = beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source",
 		8_000, 0, 0)
 	require.NoError(t, err)
 	require.False(t, started, "fixed worker cannot fit the sandbox and headroom")
 
-	started, err = f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err = beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.True(t, started)
 	status, err := f.store.GetRuntimeNodeDrainStatus(f.ctx, "elastic", "i-source")
@@ -67,6 +79,62 @@ func TestNodeConsolidationFencesOnlyWhenFixedDestinationFitsIntegration(t *testi
 	require.Equal(t, 1, snapshot.ClusterWorkloadSlots)
 }
 
+func TestNodeConsolidationRejectsChangedSourceAfterCPUPlanningIntegration(t *testing.T) {
+	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-stale-cpu", "a")
+	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
+	migrationReadyTarget(t, f, "consolidation-stale-cpu", "b")
+	plan, err := f.store.GetRuntimeNodeConsolidationCPUPlan(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.Len(t, plan.Sources, 1)
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.sandboxes SET lifecycle_epoch=lifecycle_epoch+1 WHERE sandbox_id=$1`, f.sandboxID)
+	require.NoError(t, err)
+	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0, plan)
+	require.NoError(t, err)
+	require.False(t, started)
+	status, err := f.store.GetRuntimeNodeDrainStatus(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.Equal(t, RuntimeNodeInstanceActive, status.Instance.State)
+	require.Empty(t, status.Instance.DrainReason)
+}
+
+func TestNodeConsolidationRejectsChangedFixedCPUSetAfterPlanningIntegration(t *testing.T) {
+	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-stale-fixed-cpu", "a")
+	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
+	migrationReadyTarget(t, f, "consolidation-stale-fixed-cpu", "b")
+	plan, err := f.store.GetRuntimeNodeConsolidationCPUPlan(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_capacities
+		SET cpuset_cpus=CASE WHEN cpuset_cpus='0' THEN '0-1' ELSE '0' END
+		WHERE cluster_id='cluster-a' AND node_uid=$1`, plan.FixedNodeUID)
+	require.NoError(t, err)
+	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0, plan)
+	require.NoError(t, err)
+	require.False(t, started)
+	status, err := f.store.GetRuntimeNodeDrainStatus(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.Equal(t, RuntimeNodeInstanceActive, status.Instance.State)
+}
+
+func TestNodeConsolidationRejectsChangedSourceRuntimeAfterPlanningIntegration(t *testing.T) {
+	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-stale-source-runtime", "a")
+	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
+	migrationReadyTarget(t, f, "consolidation-stale-source-runtime", "b")
+	plan, err := f.store.GetRuntimeNodeConsolidationCPUPlan(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_slots SET procd_instance_id='new-procd-instance'
+		WHERE slot_id=$1`, plan.Sources[0].SourceSlotID)
+	require.NoError(t, err)
+	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0, plan)
+	require.NoError(t, err)
+	require.False(t, started)
+	status, err := f.store.GetRuntimeNodeDrainStatus(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.Equal(t, RuntimeNodeInstanceActive, status.Instance.State)
+}
+
 func TestNodeConsolidationMovesMultipleSandboxesOneAtATimeIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	first, _ := migrationExecutionSource(t, pool, "consolidation-multi-first", "a")
@@ -75,7 +143,7 @@ func TestNodeConsolidationMovesMultipleSandboxesOneAtATimeIntegration(t *testing
 	migrationReadyTarget(t, first, "consolidation-multi-first", "b")
 	migrationReadyTarget(t, second, "consolidation-multi-second", "b")
 
-	started, err := first.store.BeginRuntimeNodeConsolidation(first.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err := beginConsolidationForTest(first.ctx, first.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.True(t, started, "two eligible source leases must not be treated as a concurrency limit")
 
@@ -91,7 +159,7 @@ func TestStalledNodeConsolidationReopensSourceIntegration(t *testing.T) {
 	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-cancel", "a")
 	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
 	migrationReadyTarget(t, f, "consolidation-cancel", "b")
-	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err := beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.True(t, started)
 	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_instances
@@ -122,7 +190,7 @@ func TestStalledNodeConsolidationCancelsAfterSafeAbortIntegration(t *testing.T) 
 	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-abort", "a")
 	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
 	migrationReadyTarget(t, f, "consolidation-abort", "b")
-	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err := beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.True(t, started)
 	reserved, err := f.store.ReserveNomadMigrationEvacuation(f.ctx, f.sandboxID)
@@ -153,7 +221,7 @@ func TestNodeConsolidationTimeoutCountsFromLastCompletedMoveIntegration(t *testi
 	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-progress", "a")
 	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
 	migrationReadyTarget(t, f, "consolidation-progress", "b")
-	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	started, err := beginConsolidationForTest(f.ctx, f.store, "elastic", "i-source", 0, 0, 0)
 	require.NoError(t, err)
 	require.True(t, started)
 	reserved, err := f.store.ReserveNomadMigrationEvacuation(f.ctx, f.sandboxID)

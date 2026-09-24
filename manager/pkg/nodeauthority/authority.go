@@ -128,6 +128,16 @@ type Component struct {
 	captureFailures      *nomadmigration.Coordinator
 }
 
+// PreflightMigrationCPU exposes the existing authenticated node channel for
+// read-only autoscaler planning. The node still validates its exact boot and
+// carrier, while migration execution retains its separate regional authority.
+func (c *Component) PreflightMigrationCPU(ctx context.Context, request protocol.MigrationCPUPreflightRequest) (*protocol.MigrationCPUPreflight, error) {
+	if c == nil || c.hub == nil {
+		return nil, fmt.Errorf("node CPU preflight channel is unavailable")
+	}
+	return c.hub.PreflightMigrationCPU(ctx, request)
+}
+
 type checkpointSourceObserver struct {
 	allocation *runtimeslotnomad.Controller
 }

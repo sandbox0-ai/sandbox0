@@ -84,6 +84,37 @@ func TestCheckpointCPUPreflightDoesNotReserveADestination(t *testing.T) {
 	require.NotContains(t, string(payload), "capture_only", "old migration command digests remain unchanged")
 }
 
+func TestConsolidationPlanningCPUPreflightCannotAuthorizeReservedRestore(t *testing.T) {
+	paired, source := cpuPreflightProtocolFixture(t)
+	planning := paired
+	planning.Planning = true
+	planning.Target = paired.Destination
+	planning.DestinationResources = RuntimeResourceLease{}
+	planning.PlanningCPUSet = "8-11"
+	planning.Launch = &source.Launch
+	digest, err := planning.Digest()
+	require.NoError(t, err)
+	result := MigrationCPUPreflight{RequestDigest: digest, Launch: source.Launch,
+		Observation: MigrationCPUObservation{Profile: source.Observation.Profile, CPUSet: planning.PlanningCPUSet}}
+	require.NoError(t, result.ValidateFor(planning))
+	command, err := NewNodeChannelMigrationCPUPreflightCommand(planning)
+	require.NoError(t, err)
+	require.NoError(t, command.Validate())
+	require.Error(t, result.ValidateFor(paired), "planning evidence cannot satisfy reserved admission")
+	changed := planning
+	changed.PlanningCPUSet = "12-15"
+	require.Error(t, result.ValidateFor(changed))
+	changed = planning
+	changed.DestinationResources = paired.DestinationResources
+	require.Error(t, changed.Validate(), "planning cannot invent a destination lease")
+	changed = planning
+	changed.Destination.NodeUID = paired.Source.Target.NodeUID
+	changed.Target = changed.Destination
+	require.Error(t, changed.Validate(), "planning requires another physical node")
+	result.Observation.Profile.Features = []string{"sse2"}
+	require.Error(t, result.ValidateFor(planning), "a target missing source features is ineligible")
+}
+
 func cpuPreflightProtocolFixture(t *testing.T) (MigrationCPUPreflightRequest, MigrationCPUPreflight) {
 	t.Helper()
 	launch, source, claim := cpuLaunchFixture(t)

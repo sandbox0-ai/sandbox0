@@ -135,6 +135,32 @@ func CheckMigrationTargetCPU(ctx context.Context, observer CPUPreflightRunsc, la
 	return &current, nil
 }
 
+// CheckMigrationPlanningTargetCPU probes the whole eligible target CPU set
+// before a destination lease exists. It cannot authorize restore; the actual
+// reservation performs CheckMigrationTargetCPU again with its exact CPU set.
+func CheckMigrationPlanningTargetCPU(ctx context.Context, observer CPUPreflightRunsc, launch *protocol.MigrationCPULaunch, cpuSet string) (*protocol.MigrationCPUObservation, error) {
+	if ctx == nil || observer == nil || launch == nil {
+		return nil, fmt.Errorf("planning CPU preflight requires a context, observer and source launch")
+	}
+	if err := launch.Validate(); err != nil {
+		return nil, err
+	}
+	if _, err := protocol.ValidateCPUSet(cpuSet); err != nil {
+		return nil, err
+	}
+	current, err := observeMigrationCPU(ctx, observer, launch, cpuSet)
+	if err != nil {
+		return nil, err
+	}
+	if err := current.Covers(cpuSet); err != nil {
+		return nil, err
+	}
+	if err := protocol.CheckMigrationCPUProfiles(launch.GuestCPUProfile(), current.Profile); err != nil {
+		return nil, err
+	}
+	return &current, ctx.Err()
+}
+
 // An unprepared adapter still supports full observation. Once it has retained
 // a snapshot, invalidation or closure must not silently bypass its monitors.
 func (r *Command) hasPreparedCPULaunch() bool {

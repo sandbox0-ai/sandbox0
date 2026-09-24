@@ -124,6 +124,24 @@ func TestTargetCPUPreflightUsesTargetCoverageAndAllowsFeatureSuperset(t *testing
 	require.Error(t, err)
 }
 
+func TestPlanningTargetCPUPreflightRequiresWholeFixedCPUSetAndGuestFeatures(t *testing.T) {
+	launch, _, _ := cpuPreflightFixture(t)
+	observer := &preflightCPUObserver{result: protocol.MigrationCPUObservation{
+		CPUSet: "0-7", Profile: launch.Observation.Profile,
+	}}
+	result, err := CheckMigrationPlanningTargetCPU(t.Context(), observer, launch, "0-7")
+	require.NoError(t, err)
+	require.Equal(t, "0-7", observer.cpus)
+	require.Equal(t, "0-7", result.CPUSet)
+	observer.result.CPUSet = "0-3"
+	_, err = CheckMigrationPlanningTargetCPU(t.Context(), observer, launch, "0-7")
+	require.Error(t, err)
+	observer.result.CPUSet = "0-7"
+	observer.result.Profile.Features = []string{"fp"}
+	_, err = CheckMigrationPlanningTargetCPU(t.Context(), observer, launch, "0-7")
+	require.Error(t, err)
+}
+
 func TestCPUPreflightNeverReturnsPartialOrCanceledEvidence(t *testing.T) {
 	launch, capture, resources := cpuPreflightFixture(t)
 	for _, target := range []bool{false, true} {

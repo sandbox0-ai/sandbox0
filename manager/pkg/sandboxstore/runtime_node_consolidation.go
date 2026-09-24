@@ -2,12 +2,16 @@ package sandboxstore
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 // RuntimeNodeConsolidationReason identifies a cost-driven drain. Migration
@@ -15,9 +19,117 @@ import (
 const RuntimeNodeConsolidationReason = "autoscale-consolidation"
 
 type consolidationLease struct {
-	compatibility string
-	cpu, memory   int64
-	eligible      bool
+	slotID, sandboxID, leaseID                     string
+	generation, epoch                              int64
+	assignmentRevision                             string
+	bindingDigest, resourceDigest, procdInstanceID string
+	compatibility                                  string
+	cpu, memory                                    int64
+	eligible                                       bool
+}
+
+// RuntimeNodeConsolidationCPUPlan holds read-only routing evidence. The
+// authenticated source driver supplies launch history; a warm fixed carrier
+// measures its entire allocatable CPU set before the source is fenced.
+type RuntimeNodeConsolidationCPUPlan struct {
+	ClusterID, SourceNodeUID, FixedNodeUID, FixedBootID string
+	Sources                                             []RuntimeNodeConsolidationCPUProbe
+}
+
+type RuntimeNodeConsolidationCPUProbe struct {
+	SourceSlotID, LeaseID string
+	Generation, Epoch     int64
+	Source                protocol.MigrationCPUPreflightRequest
+	Target                protocol.NodeChannelTarget
+	TargetCPUSet          string
+}
+
+// GetRuntimeNodeConsolidationCPUPlan reads the current source and fixed-node
+// placement. Missing evidence makes the candidate ineligible for this pass.
+func (s *PGSandboxStore) GetRuntimeNodeConsolidationCPUPlan(ctx context.Context, poolID, instanceID string) (*RuntimeNodeConsolidationCPUPlan, error) {
+	var clusterID, nodeID, nodeUID string
+	err := s.pool.QueryRow(ctx, `SELECT cluster_id,nomad_node_id,node_uid FROM manager.runtime_node_instances
+		WHERE pool_id=$1 AND provider_instance_id=$2 AND pool_kind='elastic' AND state='active'
+		AND provider_ready_at IS NOT NULL`, poolID, instanceID).Scan(&clusterID, &nodeID, &nodeUID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	leases, err := consolidationSourceLeases(ctx, s.pool, clusterID, nodeID, nodeUID)
+	if err != nil {
+		return nil, err
+	}
+	if len(leases) == 0 {
+		return nil, nil
+	}
+	var fixedID, fixedUID, fixedBoot, cpuSet string
+	err = s.pool.QueryRow(ctx, `SELECT capacity.node_id,capacity.node_uid,capacity.node_boot_id,capacity.cpuset_cpus
+		FROM manager.runtime_node_capacities capacity
+		WHERE capacity.cluster_id=$1 AND capacity.heartbeat_expires_at>NOW()
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_instances elastic
+			WHERE elastic.cluster_id=capacity.cluster_id AND elastic.nomad_node_id=capacity.node_id
+			AND elastic.node_uid=capacity.node_uid AND elastic.pool_kind='elastic' AND elastic.state<>'revoked')
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_fences fence
+			WHERE fence.cluster_id=capacity.cluster_id AND fence.node_id=capacity.node_id
+			AND fence.node_uid=capacity.node_uid AND fence.state IN ('warming','draining','revoked'))
+		ORDER BY capacity.updated_at DESC LIMIT 1`, clusterID).Scan(&fixedID, &fixedUID, &fixedBoot, &cpuSet)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := protocol.ValidateCPUSet(cpuSet); err != nil {
+		return nil, nil
+	}
+	plan := &RuntimeNodeConsolidationCPUPlan{ClusterID: clusterID, SourceNodeUID: nodeUID, FixedNodeUID: fixedUID, FixedBootID: fixedBoot}
+	for _, lease := range leases {
+		if !lease.eligible || lease.slotID == "" || lease.sandboxID == "" {
+			return nil, nil
+		}
+		slot, err := s.GetRuntimeSlot(ctx, lease.slotID)
+		if err != nil {
+			return nil, err
+		}
+		var targetID string
+		err = s.pool.QueryRow(ctx, `SELECT slot_id FROM manager.runtime_slots slot
+			WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 AND node_boot_id=$4
+			AND state='fastpath_ready' AND heartbeat_expires_at>NOW() AND NOT carrier_retired
+			AND compatibility_digest=$5
+			AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
+			ORDER BY slot_id LIMIT 1`, clusterID, fixedID, fixedUID, fixedBoot, lease.compatibility).Scan(&targetID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		target, err := s.GetRuntimeSlot(ctx, targetID)
+		if err != nil {
+			return nil, err
+		}
+		source := protocol.MigrationCaptureRequest{Target: nomadMigrationSlotTarget(slot),
+			OperationID: "consolidation-probe-" + uuid.NewString(), LifecycleEpoch: max(1, lease.epoch),
+			SandboxID: lease.sandboxID, SourceGeneration: lease.generation,
+			AssignmentRevision:  slot.ClaimRuntimeAssignmentRevision,
+			BindingDigest:       hex.EncodeToString(slot.RootFSBindingDigest),
+			ResourceLeaseDigest: hex.EncodeToString(slot.ResourceLeaseDigest), ProcdInstanceID: slot.ProcdInstanceID}
+		probe := RuntimeNodeConsolidationCPUProbe{SourceSlotID: slot.ID, LeaseID: lease.leaseID,
+			Generation: lease.generation, Epoch: lease.epoch,
+			Source: protocol.MigrationCPUPreflightRequest{CaptureOnly: true, Target: source.Target,
+				Source: source, SourceResources: slot.ResourceLease},
+			Target: nomadMigrationSlotTarget(target), TargetCPUSet: cpuSet}
+		if err := probe.Source.Validate(); err != nil {
+			return nil, nil
+		}
+		plan.Sources = append(plan.Sources, probe)
+	}
+	slices.SortFunc(plan.Sources, func(a, b RuntimeNodeConsolidationCPUProbe) int {
+		return strings.Compare(a.SourceSlotID, b.SourceSlotID)
+	})
+	return plan, nil
 }
 
 // BeginRuntimeNodeConsolidation fences one elastic node only when all of its
@@ -26,9 +138,9 @@ type consolidationLease struct {
 // The final migration reservation still rechecks exact capacity and
 // compatibility under its own transaction; a failed preflight never changes
 // node admission.
-func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, poolID, instanceID string, headroomCPU, headroomMemory int64, headroomSlots int) (bool, error) {
+func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, poolID, instanceID string, headroomCPU, headroomMemory int64, headroomSlots int, plan *RuntimeNodeConsolidationCPUPlan) (bool, error) {
 	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(instanceID) == "" ||
-		headroomCPU < 0 || headroomMemory < 0 || headroomSlots < 0 {
+		headroomCPU < 0 || headroomMemory < 0 || headroomSlots < 0 || plan == nil || len(plan.Sources) == 0 {
 		return false, errors.New("invalid runtime node consolidation request")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -114,12 +226,31 @@ func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, pool
 	if len(leases) == 0 {
 		return false, nil
 	}
+	if plan.ClusterID != clusterID || plan.SourceNodeUID != nodeUID || len(plan.Sources) != len(leases) {
+		return false, nil
+	}
+	slices.SortFunc(leases, func(a, b consolidationLease) int { return strings.Compare(a.slotID, b.slotID) })
+	for i, lease := range leases {
+		probe := plan.Sources[i]
+		if probe.SourceSlotID != lease.slotID || probe.LeaseID != lease.leaseID ||
+			probe.Generation != lease.generation || probe.Epoch != lease.epoch ||
+			probe.Source.Source.AssignmentRevision != lease.assignmentRevision ||
+			probe.Source.Source.BindingDigest != lease.bindingDigest ||
+			probe.Source.Source.ResourceLeaseDigest != lease.resourceDigest ||
+			probe.Source.Source.ProcdInstanceID != lease.procdInstanceID ||
+			probe.Source.Source.Target.NodeUID != nodeUID || probe.Source.Source.Target.SlotID != lease.slotID ||
+			probe.Source.SourceResources.LeaseID != lease.leaseID ||
+			probe.Target.NodeUID != plan.FixedNodeUID || probe.Target.NodeBootID != plan.FixedBootID ||
+			probe.TargetCPUSet != plan.Sources[0].TargetCPUSet {
+			return false, nil
+		}
+	}
 	for _, lease := range leases {
 		if !lease.eligible {
 			return false, nil
 		}
 	}
-	fits, err := consolidationFitsFixed(ctx, tx, clusterID, leases, headroomCPU, headroomMemory, headroomSlots)
+	fits, err := consolidationFitsFixed(ctx, tx, clusterID, leases, headroomCPU, headroomMemory, headroomSlots, plan.FixedNodeUID, plan.FixedBootID, plan.Sources[0].TargetCPUSet)
 	if err != nil || !fits {
 		return false, err
 	}
@@ -148,8 +279,18 @@ func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, pool
 	return true, nil
 }
 
-func consolidationSourceLeases(ctx context.Context, tx pgx.Tx, clusterID, nodeID, nodeUID string) ([]consolidationLease, error) {
-	rows, err := tx.Query(ctx, `SELECT COALESCE(slot.compatibility_digest,''),lease.cpu_millicores,lease.memory_bytes,
+type consolidationQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func consolidationSourceLeases(ctx context.Context, tx consolidationQuerier, clusterID, nodeID, nodeUID string) ([]consolidationLease, error) {
+	rows, err := tx.Query(ctx, `SELECT COALESCE(slot.slot_id,''),COALESCE(sandbox.sandbox_id,''),lease.lease_id,
+		COALESCE(sandbox.runtime_generation,0),COALESCE(sandbox.lifecycle_epoch,0),
+		COALESCE(slot.claim_runtime_assignment_revision,''),
+		COALESCE(encode(slot.rootfs_binding_digest,'hex'),''),
+		COALESCE(encode(lease.lease_digest,'hex'),''),
+		COALESCE(slot.procd_instance_id,''),
+		COALESCE(slot.compatibility_digest,''),lease.cpu_millicores,lease.memory_bytes,
 		COALESCE(slot.state='active' AND NOT slot.carrier_retired
 			AND slot.heartbeat_expires_at>NOW()
 			AND slot.claim_runtime_assignment IS NOT NULL AND slot.claim_network_policy IS NOT NULL
@@ -172,7 +313,9 @@ func consolidationSourceLeases(ctx context.Context, tx pgx.Tx, clusterID, nodeID
 	var leases []consolidationLease
 	for rows.Next() {
 		var lease consolidationLease
-		if err := rows.Scan(&lease.compatibility, &lease.cpu, &lease.memory, &lease.eligible); err != nil {
+		if err := rows.Scan(&lease.slotID, &lease.sandboxID, &lease.leaseID, &lease.generation, &lease.epoch,
+			&lease.assignmentRevision, &lease.bindingDigest, &lease.resourceDigest, &lease.procdInstanceID,
+			&lease.compatibility, &lease.cpu, &lease.memory, &lease.eligible); err != nil {
 			return nil, err
 		}
 		leases = append(leases, lease)
@@ -180,28 +323,31 @@ func consolidationSourceLeases(ctx context.Context, tx pgx.Tx, clusterID, nodeID
 	return leases, rows.Err()
 }
 
-func consolidationFitsFixed(ctx context.Context, tx pgx.Tx, clusterID string, leases []consolidationLease, headroomCPU, headroomMemory int64, headroomSlots int) (bool, error) {
-	var nodeID, nodeUID, bootID string
+func consolidationFitsFixed(ctx context.Context, tx pgx.Tx, clusterID string, leases []consolidationLease, headroomCPU, headroomMemory int64, headroomSlots int, fixedUID, fixedBoot, plannedCPUSet string) (bool, error) {
+	var nodeID, nodeUID, bootID, cpuSet string
 	var physicalCPU, physicalMemory, admissionCPU, admissionMemory int64
-	err := tx.QueryRow(ctx, `SELECT capacity.node_id,capacity.node_uid,capacity.node_boot_id,
+	err := tx.QueryRow(ctx, `SELECT capacity.node_id,capacity.node_uid,capacity.node_boot_id,capacity.cpuset_cpus,
 		capacity.cpu_millicores,capacity.memory_bytes,
 		COALESCE(NULLIF(capacity.admission_cpu_millicores,0),capacity.cpu_millicores),
 		COALESCE(NULLIF(capacity.admission_memory_bytes,0),capacity.memory_bytes)
 		FROM manager.runtime_node_capacities capacity
-		WHERE capacity.cluster_id=$1 AND capacity.heartbeat_expires_at>NOW()
+		WHERE capacity.cluster_id=$1 AND capacity.node_uid=$2 AND capacity.node_boot_id=$3 AND capacity.heartbeat_expires_at>NOW()
 		AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_instances elastic
 			WHERE elastic.cluster_id=capacity.cluster_id AND elastic.nomad_node_id=capacity.node_id
 			AND elastic.node_uid=capacity.node_uid AND elastic.pool_kind='elastic' AND elastic.state<>'revoked')
 		AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_fences fence
 			WHERE fence.cluster_id=capacity.cluster_id AND fence.node_id=capacity.node_id
 			AND fence.node_uid=capacity.node_uid AND fence.state IN ('warming','draining','revoked'))
-		ORDER BY capacity.updated_at DESC LIMIT 1 FOR UPDATE OF capacity`, clusterID).
-		Scan(&nodeID, &nodeUID, &bootID, &physicalCPU, &physicalMemory, &admissionCPU, &admissionMemory)
+		ORDER BY capacity.updated_at DESC LIMIT 1 FOR UPDATE OF capacity`, clusterID, fixedUID, fixedBoot).
+		Scan(&nodeID, &nodeUID, &bootID, &cpuSet, &physicalCPU, &physicalMemory, &admissionCPU, &admissionMemory)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
+	}
+	if cpuSet != plannedCPUSet {
+		return false, nil
 	}
 	var usedCPU, usedMemory int64
 	var activeLeases int

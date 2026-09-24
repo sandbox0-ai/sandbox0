@@ -8,7 +8,7 @@ import (
 )
 
 func TestConfigureNodePoolAutoscalerDisabled(t *testing.T) {
-	worker, err := configureNodePoolAutoscaler(&config.ManagerConfig{}, nil)
+	worker, err := configureNodePoolAutoscaler(&config.ManagerConfig{}, nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, worker)
 }
@@ -16,7 +16,7 @@ func TestConfigureNodePoolAutoscalerDisabled(t *testing.T) {
 func TestConfigureNodePoolAutoscalerRejectsNonAliyunProviderBeforeCloudAccess(t *testing.T) {
 	worker, err := configureNodePoolAutoscaler(&config.ManagerConfig{
 		NodePoolAutoscaler: config.NodePoolAutoscalerConfig{Enabled: true, Provider: "aws"},
-	}, nil)
+	}, nil, nil)
 	require.Nil(t, worker)
 	require.ErrorContains(t, err, "store is required")
 }

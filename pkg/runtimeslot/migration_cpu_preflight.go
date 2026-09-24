@@ -22,7 +22,12 @@ const MigrationCPUPreflightTimeout = 2 * time.Minute
 type MigrationCPUPreflightRequest struct {
 	// CaptureOnly observes a source without reserving a future destination.
 	// Resume/fork must independently verify the eventual target before restore.
-	CaptureOnly          bool                                        `json:"capture_only,omitempty"`
+	CaptureOnly bool `json:"capture_only,omitempty"`
+	// Planning observes a warm destination before any consolidation fence or
+	// resource reservation. It is only an optimization; execution must repeat
+	// the exact reserved-pair preflight.
+	Planning             bool                                        `json:"planning,omitempty"`
+	PlanningCPUSet       string                                      `json:"planning_cpu_set,omitempty"`
 	Checkpoint           *runtimecontrol.CheckpointRestoreAssignment `json:"checkpoint,omitempty"`
 	Target               NodeChannelTarget                           `json:"target"`
 	Source               MigrationCaptureRequest                     `json:"source"`
@@ -37,6 +42,28 @@ func (r MigrationCPUPreflightRequest) IsSource() bool { return r.Target == r.Sou
 func (r MigrationCPUPreflightRequest) Validate() error {
 	if err := r.Source.Validate(); err != nil {
 		return err
+	}
+	if r.Planning {
+		if r.CaptureOnly || r.IsSource() || r.Checkpoint != nil || !r.DestinationResources.IsZero() ||
+			r.Target != r.Destination || r.Source.Target.ClusterID != r.Destination.ClusterID ||
+			r.Source.Target.NodeUID == r.Destination.NodeUID ||
+			r.Source.Target.SlotID == r.Destination.SlotID ||
+			r.Source.Target.AllocationID == r.Destination.AllocationID || r.Launch == nil {
+			return fmt.Errorf("planning CPU preflight requires a distinct warm destination and source history")
+		}
+		if err := r.Destination.validate(true); err != nil {
+			return err
+		}
+		if _, err := ValidateCPUSet(r.PlanningCPUSet); err != nil {
+			return err
+		}
+		if err := r.SourceResources.Validate(); err != nil {
+			return err
+		}
+		return r.Launch.ValidateCapture(r.Source, r.Launch.LaunchAttempt, r.SourceResources)
+	}
+	if r.PlanningCPUSet != "" {
+		return fmt.Errorf("reserved CPU preflight cannot carry a planning CPU set")
 	}
 	placements := []struct {
 		target    NodeChannelTarget
@@ -140,7 +167,11 @@ func (p MigrationCPUPreflight) ValidateFor(request MigrationCPUPreflightRequest)
 	if err != nil || actual != expected {
 		return fmt.Errorf("destination CPU preflight changed source history")
 	}
-	if err := p.Observation.Covers(request.DestinationResources.CPUSetCPUs); err != nil {
+	coverage := request.DestinationResources.CPUSetCPUs
+	if request.Planning {
+		coverage = request.PlanningCPUSet
+	}
+	if err := p.Observation.Covers(coverage); err != nil {
 		return err
 	}
 	return CheckMigrationCPUProfiles(p.Launch.GuestCPUProfile(), p.Observation.Profile)

@@ -2,6 +2,7 @@ package runtimeslotnode
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -134,6 +135,44 @@ func TestMigrationStagingUsesDistinctAuthenticatedCommands(t *testing.T) {
 			require.Error(t, hub.ReleaseMigrationStaging(ctx, request))
 		})
 	}
+}
+
+func TestMigrationStagingReleaseUsesAuthenticatedSuccessorBoot(t *testing.T) {
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
+	require.NoError(t, err)
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	require.NoError(t, os.WriteFile(files.boot, []byte("boot-2\n"), 0o600))
+	executor := &migrationStagingChannelExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
+		ClientKeyFile: files.clientKey, TokenFile: files.token, PeerURISAN: testNodeChannelServerURI,
+		NodeUID: "node-uid-1", NodeBootIDFile: files.boot, ClusterID: "cluster-1", NodeID: "node-1",
+		Executor: &channelTestExecutor{}, Capacity: channelTestCapacity(), AgentInstanceID: "agent-boot-2",
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond, MigrationStagingExecutor: executor,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-2")
+	source := protocol.MigrationCaptureRequest{Target: protocol.NodeChannelTarget{SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1", ControlEndpoint: "unix:///private/source.sock"},
+		OperationID: "migration-1", LifecycleEpoch: 2, SandboxID: "sandbox-1", SourceGeneration: 1, ProcdInstanceID: "procd-1",
+		AssignmentRevision: strings.Repeat("a", 64), BindingDigest: strings.Repeat("b", 64), ResourceLeaseDigest: strings.Repeat("c", 64)}
+	request := protocol.MigrationStagingRequest{Target: source.Target, Source: source,
+		Destination: protocol.NodeChannelTarget{SlotID: "slot-2", ClusterID: "cluster-1", AllocationID: "allocation-2",
+			NodeID: "node-2", NodeUID: "node-uid-2", NodeBootID: "boot-3", ControlEndpoint: "unix:///private/target.sock"},
+		DestinationResourceLeaseDigest: strings.Repeat("d", 64), Bytes: 8 << 20, Inodes: 64}
+	require.NoError(t, hub.ReleaseMigrationStaging(ctx, request))
+	require.EqualValues(t, 1, executor.releases.Load())
+	attempt, stop := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer stop()
+	_, err = hub.ReserveMigrationStaging(attempt, request)
+	require.Error(t, err, "successor cannot create staging for an old boot")
+	require.Zero(t, executor.reserves.Load())
 }
 
 func channelCapturePeerRequest(t *testing.T, staging protocol.MigrationStagingRequest) protocol.MigrationCapturePeerRequest {

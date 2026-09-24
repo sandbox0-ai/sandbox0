@@ -20,13 +20,15 @@ type consolidationLease struct {
 	eligible      bool
 }
 
-// BeginRuntimeNodeConsolidation fences one lightly occupied elastic node only
-// when all of its live leases can fit on the fixed worker. The final migration
-// reservation still rechecks exact capacity and compatibility under its own
-// transaction; a failed preflight never changes node admission.
-func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, poolID, instanceID string, maxSandboxes int, headroomCPU, headroomMemory int64, headroomSlots int) (bool, error) {
+// BeginRuntimeNodeConsolidation fences one elastic node only when all of its
+// live leases can fit on the fixed worker. Each source and destination can own
+// at most one in-flight migration; this is independent of source occupancy.
+// The final migration reservation still rechecks exact capacity and
+// compatibility under its own transaction; a failed preflight never changes
+// node admission.
+func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, poolID, instanceID string, headroomCPU, headroomMemory int64, headroomSlots int) (bool, error) {
 	if strings.TrimSpace(poolID) == "" || strings.TrimSpace(instanceID) == "" ||
-		maxSandboxes < 1 || maxSandboxes > 16 || headroomCPU < 0 || headroomMemory < 0 || headroomSlots < 0 {
+		headroomCPU < 0 || headroomMemory < 0 || headroomSlots < 0 {
 		return false, errors.New("invalid runtime node consolidation request")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -109,7 +111,7 @@ func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, pool
 	if err != nil {
 		return false, err
 	}
-	if len(leases) == 0 || len(leases) > maxSandboxes {
+	if len(leases) == 0 {
 		return false, nil
 	}
 	for _, lease := range leases {
@@ -265,13 +267,15 @@ func consolidationFitsFixed(ctx context.Context, tx pgx.Tx, clusterID string, le
 		if adaptiveMaximum-activeLeases-len(leases) < headroomSlots {
 			return false, nil
 		}
-		readyRequirement = len(leases)
+		// Adaptive refill replaces each consumed carrier. Keep one compatible
+		// ready carrier per execution class for the next serialized move.
+		readyRequirement = len(needed)
 	}
 	if totalSlots < readyRequirement {
 		return false, nil
 	}
 	for digest, count := range needed {
-		if available[digest] < count {
+		if available[digest] == 0 || (adaptiveMaximum == 0 && available[digest] < count) {
 			return false, nil
 		}
 	}
@@ -345,6 +349,24 @@ func (s *PGSandboxStore) CancelRuntimeNodeConsolidation(ctx context.Context, poo
 		return false, err
 	}
 	if occupied {
+		return false, nil
+	}
+	// A populated source can take longer than one timeout to evacuate when
+	// source and fixed destination each allow one in-flight migration. Cancel
+	// only after a full timeout without a physically completed move.
+	var recentlyCompleted bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM manager.sandbox_runtime_migrations migration
+		JOIN manager.sandbox_lifecycle_txns lifecycle ON lifecycle.txn_id=migration.operation_id
+		JOIN manager.runtime_slots source ON source.slot_id=migration.source_slot_id
+		WHERE source.cluster_id=$1 AND source.node_id=$2 AND source.node_uid=$3
+		AND lifecycle.kind='migrate' AND lifecycle.source='auto'
+		AND lifecycle.phase='committed'
+		AND lifecycle.committed_at>NOW()-($4::double precision * INTERVAL '1 millisecond')
+	)`, clusterID, nodeID, nodeUID, float64(timeout.Milliseconds())).Scan(&recentlyCompleted); err != nil {
+		return false, err
+	}
+	if recentlyCompleted {
 		return false, nil
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM manager.runtime_node_fences

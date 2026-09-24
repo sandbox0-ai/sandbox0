@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
@@ -55,6 +56,18 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 	}
 	if err := migrate.Up(ctx, pool, ".", migrationOptions...); err != nil {
 		t.Fatalf("migrate up: %v", err)
+	}
+	if err := migrate.Down(ctx, pool, ".", migrationOptions...); err != nil {
+		t.Fatalf("migrate billing pause flag down: %v", err)
+	}
+	var pauseColumn *string
+	if err := adminPool.QueryRow(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'team_admission_states'
+		  AND column_name = 'pause_required'
+	`, schema).Scan(&pauseColumn); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("billing pause column remains after rollback: %v, %v", pauseColumn, err)
 	}
 	if err := migrate.Down(ctx, pool, ".", migrationOptions...); err != nil {
 		t.Fatalf("migrate admission decoupling down: %v", err)
@@ -120,6 +133,25 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 	}
 	if record.Version != versions || record.Reason != fmt.Sprintf("version-%d", versions) {
 		t.Fatalf("final admission = %#v", record)
+	}
+	if _, err := repository.Put(ctx, teamID, Update{
+		Version: versions + 1, State: StateRestricted,
+		Source: "integration", Reason: "billing_debt", PauseRequired: true,
+	}); err != nil {
+		t.Fatalf("Put() billing pause: %v", err)
+	}
+	withPause, found, err := repository.Get(ctx, teamID)
+	if err != nil || !found || !withPause.PauseRequired {
+		t.Fatalf("Get() billing pause = %#v, %v", withPause, err)
+	}
+	if _, err := repository.Put(ctx, teamID, Update{
+		Version: versions + 2, State: StateAllowed, Source: "integration",
+	}); err != nil {
+		t.Fatalf("Put() recovered admission: %v", err)
+	}
+	recovered, found, err := repository.Get(ctx, teamID)
+	if err != nil || !found || recovered.PauseRequired {
+		t.Fatalf("Get() recovered admission = %#v, %v", recovered, err)
 	}
 
 	conflictTeamID := uuid.NewString()

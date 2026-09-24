@@ -66,6 +66,7 @@ func (d *nodeRuntime) reconcileMigrationAdoptions(ctx context.Context) (int, err
 		custody := record.MigrationDestination
 		adoption := custody.Adoption
 		target := custody.Request.Target
+		committedCheckpoint := false
 		if target.ClusterID != d.clusterID || target.NodeID != d.nodeID || target.NodeUID != d.nodeUID {
 			failures = append(failures, fmt.Errorf("migration adoption belongs to another node: %w", errdefs.ErrFailedPrecondition))
 			continue
@@ -84,18 +85,38 @@ func (d *nodeRuntime) reconcileMigrationAdoptions(ctx context.Context) (int, err
 			if command == nil {
 				continue
 			}
-			if custody.Restore == nil || command.ValidateFor(*custody.Restore) != nil {
+			if custody.Restore == nil {
+				failures = append(failures, errdefs.ErrFailedPrecondition)
+				continue
+			}
+			restored := *custody.Restore
+			if command.CheckpointRestoreDigest != "" && custody.Request.Checkpoint != nil {
+				restored.State = protocol.MigrationRestoreComplete
+			}
+			if command.ValidateFor(restored) != nil {
 				failures = append(failures, errdefs.ErrFailedPrecondition)
 				continue
 			}
 			adoption = &MigrationAdoptionCustody{Request: *command}
+			committedCheckpoint = command.CheckpointRestoreDigest != "" && custody.Request.Checkpoint != nil
 		}
 		proof := adoption.Proof
 		if proof == nil {
 			// The existing adopter rechecks current custody under its per-slot
 			// gate. First adoption still requires a live writer and process;
 			// a persisted intent may finish after a reboot or driver loss.
-			proof, err = d.AdoptMigrationDestination(ctx, adoption.Request)
+			if committedCheckpoint {
+				// Only the authenticated regional command can complete a
+				// checkpoint adoption after the resumed process has stopped.
+				if !d.beginReconciliation(target.SlotID, nil) {
+					failures = append(failures, errdefs.ErrUnavailable)
+					continue
+				}
+				proof, err = d.adoptMigrationDestination(ctx, adoption.Request, true)
+				d.endReconciliation(target.SlotID)
+			} else {
+				proof, err = d.AdoptMigrationDestination(ctx, adoption.Request)
+			}
 			if err != nil {
 				failures = append(failures, err)
 				continue
@@ -146,7 +167,9 @@ func (j *runtimeSlotJournal) migrationAdoptionCandidates(after string) ([]runtim
 			if err != nil {
 				return err
 			}
-			if c := record.MigrationDestination; c != nil && ((c.Adoption != nil && c.Adoption.RegionalAcknowledgement == nil) || (c.Adoption == nil && c.Restore != nil && c.Restore.State == protocol.MigrationRestoreComplete)) {
+			if c := record.MigrationDestination; c != nil && ((c.Adoption != nil && c.Adoption.RegionalAcknowledgement == nil) ||
+				(c.Adoption == nil && c.Restore != nil && (c.Restore.State == protocol.MigrationRestoreComplete ||
+					c.Request.Checkpoint != nil && c.Restore.State == protocol.MigrationRestoreUncertain))) {
 				rows = append(rows, record)
 				if len(rows) == 16 {
 					break

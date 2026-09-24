@@ -17,6 +17,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	authority "github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
@@ -259,6 +261,60 @@ func TestMigrationAdoptionDeliveryRecoversCommandLostBeforeLocalIntent(t *testin
 	require.Equal(t, 1, s.reads)
 	require.Equal(t, 1, s.calls)
 	require.Equal(t, &s.want, s.committed)
+}
+
+func TestCommittedCheckpointAdoptionRecoversAfterImmediateStop(t *testing.T) {
+	for _, startupRecovery := range []bool{false, true} {
+		t.Run(fmt.Sprintf("startup=%t", startupRecovery), func(t *testing.T) {
+			d, image, runtime := checkpointDestinationFixture(t, runtimecontrol.CheckpointResume)
+			d, restored, runtime, runner := migrationRestoreForImageFixture(t, d, image, runtime)
+			require.NoError(t, d.RecordMigrationRestore(t.Context(), restored))
+			runtime.recoverySessions = []rootfssession.RecoverySession{{Stage: restored.Request.Stage, Live: true}}
+			runner.stateErr = nil
+			runner.setState("created")
+			restored.State = protocol.MigrationRestoreExecuting
+			require.NoError(t, d.RecordMigrationRestore(t.Context(), restored))
+			runner.setState("running")
+			restored.State = protocol.MigrationRestoreComplete
+			require.NoError(t, d.RecordMigrationRestore(t.Context(), restored))
+			checkpointDigest, err := image.Checkpoint.Assignment.Digest()
+			require.NoError(t, err)
+			request := protocol.MigrationAdoptionRequest{Target: image.Target, OperationID: image.OperationID(), ClaimID: image.Resources.ClaimID,
+				SandboxID: image.RuntimeAssignment().SandboxID, RuntimeGeneration: image.RuntimeAssignment().RuntimeGeneration,
+				ProcdInstanceID: image.Publication.Capture.Request.ProcdInstanceID, RestoreDigest: restored.RequestDigest,
+				CommandReadyDigest: strings.Repeat("a", 64), CheckpointRestoreDigest: checkpointDigest}
+			require.NoError(t, request.ValidateFor(restored))
+			s := installAdoptionReporter(t, d, request)
+			// The region has committed routing and command readiness, but the
+			// caller deleted the sandbox before the ten-second delivery pass.
+			runner.setState("stopped")
+			runtime.recoverySessions[0].Live = false
+			uncertain := restored
+			uncertain.State = protocol.MigrationRestoreUncertain
+			require.NoError(t, d.RecordMigrationRestore(t.Context(), uncertain))
+			if !startupRecovery {
+				completed, err := d.reconcileMigrationAdoptions(t.Context())
+				require.NoError(t, err)
+				require.Zero(t, completed, "without a regional command, uncertain custody stays fenced")
+			}
+			s.command = &request
+			if startupRecovery {
+				handled, err := d.fenceMigrationDestination(t.Context(), runtime.recoverySessions[0])
+				require.NoError(t, err)
+				require.False(t, handled)
+			} else {
+				completed, err := d.reconcileMigrationAdoptions(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, 1, completed)
+			}
+			record, err := d.journal.Get(request.Target.SlotID)
+			require.NoError(t, err)
+			require.True(t, record.MigrationDestination.Adopted())
+			require.NoDirExists(t, record.MigrationDestination.ImageDirectory)
+			_, err = d.journal.BeginCleanup(testRuntimeSlotJournalCleanup(record.Registration))
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestMigrationAdoptionDeliveryDoesNotPromoteUncertainOrForeignExecution(t *testing.T) {

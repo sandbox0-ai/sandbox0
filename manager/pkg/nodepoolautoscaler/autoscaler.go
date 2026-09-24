@@ -25,7 +25,7 @@ type Store interface {
 	AcquireRuntimeNodePoolControllerLease(context.Context, string, string, time.Duration) (bool, error)
 	GetRuntimeNodePoolSnapshot(context.Context, string) (*sandboxstore.RuntimeNodePoolSnapshot, error)
 	UpdateRuntimeNodePoolScaleState(context.Context, string, int, time.Time, string) (*sandboxstore.RuntimeNodePoolState, error)
-	BeginRuntimeNodeConsolidation(context.Context, string, string, int, int64, int64, int) (bool, error)
+	BeginRuntimeNodeConsolidation(context.Context, string, string, int64, int64, int) (bool, error)
 	CancelRuntimeNodeConsolidation(context.Context, string, string, time.Duration) (bool, error)
 }
 
@@ -54,24 +54,23 @@ type Config struct {
 	// ElasticSlotsPerNode is the provisioned carrier capacity of a new elastic
 	// worker, not its minimum readiness threshold or a cap on the fixed worker.
 	// Zero preserves the legacy WarmSlotsPerNode capacity for existing configs.
-	ElasticSlotsPerNode       int
-	HeadroomCPUMillicores     int64
-	HeadroomMemoryBytes       int64
-	HeadroomSlots             int
-	Interval                  time.Duration
-	ControllerLeaseTTL        time.Duration
-	ScaleInStabilization      time.Duration
-	ScaleOutCooldown          time.Duration
-	ScaleInCooldown           time.Duration
-	ScaleOutWarmup            time.Duration
-	FixedReplacementDebounce  time.Duration
-	MaxScaleOutStep           int
-	MaxScaleInStep            int
-	MaxPendingNodes           int
-	ConsolidationEnabled      bool
-	ConsolidationMaxSandboxes int
-	ConsolidationTimeout      time.Duration
-	Now                       func() time.Time
+	ElasticSlotsPerNode      int
+	HeadroomCPUMillicores    int64
+	HeadroomMemoryBytes      int64
+	HeadroomSlots            int
+	Interval                 time.Duration
+	ControllerLeaseTTL       time.Duration
+	ScaleInStabilization     time.Duration
+	ScaleOutCooldown         time.Duration
+	ScaleInCooldown          time.Duration
+	ScaleOutWarmup           time.Duration
+	FixedReplacementDebounce time.Duration
+	MaxScaleOutStep          int
+	MaxScaleInStep           int
+	MaxPendingNodes          int
+	ConsolidationEnabled     bool
+	ConsolidationTimeout     time.Duration
+	Now                      func() time.Time
 }
 
 // Decision is one auditable reconcile result.
@@ -146,14 +145,10 @@ func New(store Store, cloud Cloud, config Config) (*Worker, error) {
 	if config.MaxPendingNodes < 1 || config.MaxPendingNodes > 299 {
 		return nil, errors.New("pending node budget must be between 1 and 299")
 	}
-	if config.ConsolidationMaxSandboxes == 0 {
-		config.ConsolidationMaxSandboxes = 4
-	}
 	if config.ConsolidationTimeout == 0 {
 		config.ConsolidationTimeout = 30 * time.Minute
 	}
-	if config.ConsolidationMaxSandboxes < 1 || config.ConsolidationMaxSandboxes > 16 ||
-		config.ConsolidationTimeout < 5*time.Minute || config.ConsolidationTimeout > 24*time.Hour {
+	if config.ConsolidationTimeout < 5*time.Minute || config.ConsolidationTimeout > 24*time.Hour {
 		return nil, errors.New("invalid node consolidation policy")
 	}
 	if config.ScaleInCooldown == 0 {
@@ -515,11 +510,18 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	if err := w.cloud.SetDesiredCapacity(ctx, applied); err != nil {
 		return decision, fmt.Errorf("decrease elastic desired capacity: %w", err)
 	}
-	// A bounded shrink keeps the already-established quiet window; subsequent
-	// steps use a separate cooldown instead of paying another full idle hour.
+	// A bounded shrink keeps the already-established quiet window. When the
+	// remaining busy floor is movable to the fixed worker, the same quiet
+	// period also qualifies the next consolidation after the scale-in cooldown.
 	nextLow := time.Time{}
 	if applied > target {
 		nextLow = lowSince
+	} else if w.config.ConsolidationEnabled &&
+		snapshot.DemandCPUMillicores == 0 && snapshot.DemandMemoryBytes == 0 && snapshot.DemandSlots == 0 {
+		rawTarget, _ := w.targetWithBusyFloor(snapshot, false)
+		if rawTarget < applied {
+			nextLow = lowSince
+		}
 	}
 	if _, err := w.store.UpdateRuntimeNodePoolScaleState(ctx, w.config.PoolID, applied, nextLow, "in"); err != nil {
 		return decision, err
@@ -574,8 +576,7 @@ func (w *Worker) reconcileConsolidation(ctx context.Context, snapshot *sandboxst
 	for _, node := range snapshot.Nodes {
 		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
 			node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady &&
-			node.CapacityLive && node.ActiveLeases > 0 &&
-			node.ActiveLeases <= w.config.ConsolidationMaxSandboxes {
+			node.CapacityLive && node.ActiveLeases > 0 {
 			candidates = append(candidates, node)
 		}
 	}
@@ -594,7 +595,7 @@ func (w *Worker) reconcileConsolidation(ctx context.Context, snapshot *sandboxst
 	})
 	for _, candidate := range candidates {
 		started, err := w.store.BeginRuntimeNodeConsolidation(ctx, w.config.PoolID,
-			candidate.ProviderInstanceID, w.config.ConsolidationMaxSandboxes,
+			candidate.ProviderInstanceID,
 			w.config.HeadroomCPUMillicores, w.config.HeadroomMemoryBytes, w.config.HeadroomSlots)
 		if err != nil {
 			return true, decision, fmt.Errorf("begin node consolidation: %w", err)

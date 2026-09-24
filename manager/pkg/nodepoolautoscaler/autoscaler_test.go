@@ -50,7 +50,7 @@ func (f *fakeStore) UpdateRuntimeNodePoolScaleState(_ context.Context, _ string,
 	f.updates = append(f.updates, f.state)
 	return &f.state, nil
 }
-func (f *fakeStore) BeginRuntimeNodeConsolidation(_ context.Context, _ string, id string, _ int, _, _ int64, _ int) (bool, error) {
+func (f *fakeStore) BeginRuntimeNodeConsolidation(_ context.Context, _ string, id string, _, _ int64, _ int) (bool, error) {
 	f.consolidationCalls = append(f.consolidationCalls, id)
 	return f.consolidationReady, nil
 }

@@ -760,6 +760,12 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if err := releaseDeletedSandboxCheckpointStorage(ctx, tx, sandboxID); err != nil {
 		return err
 	}
+	// Failed capture evidence is checked by a deferred constraint trigger when
+	// checkpoint storage is released. Validate it while the source filesystem
+	// still has its committed head; deletion below may collect that head.
+	if _, err := tx.Exec(ctx, `SET CONSTRAINTS manager.runtime_checkpoint_capture_failed_terminal_check IMMEDIATE`); err != nil {
+		return fmt.Errorf("validate terminal checkpoint capture failure before rootfs deletion: %w", err)
+	}
 	filesystemRows, err := tx.Query(ctx, `
 		SELECT binding.filesystem_id
 		FROM manager.sandbox_rootfs_bindings AS binding

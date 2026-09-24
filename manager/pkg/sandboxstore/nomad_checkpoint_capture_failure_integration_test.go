@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadmigration"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
@@ -164,6 +165,12 @@ func TestNomadCheckpointUncertainCaptureUsesSharedPhysicalFailureRecoveryIntegra
 				failed, err = f.store.NomadCheckpointFailed(f.ctx, owner.ID, owner.RuntimeGeneration, current.Epoch)
 				require.NoError(t, err)
 				require.False(t, failed, "historical failure must not hide a new recovery")
+			} else if disposition == "terminating" {
+				require.NoError(t, f.store.MarkSandboxDeleted(f.ctx, f.sandboxID, time.Now().UTC()))
+				var released bool
+				require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT source_writer_grant_ref IS NULL AND storage_released_at IS NOT NULL
+					FROM manager.sandbox_runtime_checkpoints WHERE operation_id=$1`, id).Scan(&released))
+				require.True(t, released, "failed capture history must release terminal source storage")
 			}
 		})
 	}

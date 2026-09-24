@@ -52,6 +52,39 @@ func (r *recordingSandboxResumer) ResumeSandboxAndWait(_ context.Context, sandbo
 	return &managerapi.ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true}, nil
 }
 
+type recordingAutoResumer struct {
+	recordingSandboxResumer
+	automaticIDs []string
+}
+
+func (r *recordingAutoResumer) ResumeSandboxAutomaticallyAndWait(_ context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
+	r.automaticIDs = append(r.automaticIDs, sandboxID)
+	return &managerapi.ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true}, nil
+}
+
+func TestAutomaticResumeRequiresClusterGatewayAuthority(t *testing.T) {
+	backend := &recordingAutoResumer{}
+	server, ctx, recorder := newSandboxLifecycleHandlerFixture(t, nil, backend, http.MethodPost)
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxes/sandbox-1/auto-resume", nil)
+	ctx.Request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		Caller: "cluster-gateway", TeamID: "team-1",
+	}))
+	server.autoResumeSandbox(ctx)
+	if recorder.Code != http.StatusOK || len(backend.automaticIDs) != 1 || len(backend.sandboxIDs) != 0 {
+		t.Fatalf("status=%d automatic=%v cold=%v body=%s", recorder.Code, backend.automaticIDs, backend.sandboxIDs, recorder.Body.String())
+	}
+
+	server, ctx, recorder = newSandboxLifecycleHandlerFixture(t, nil, backend, http.MethodPost)
+	request = httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxes/sandbox-1/auto-resume", nil)
+	ctx.Request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		Caller: "regional-gateway", TeamID: "team-1",
+	}))
+	server.autoResumeSandbox(ctx)
+	if recorder.Code != http.StatusForbidden || len(backend.automaticIDs) != 1 {
+		t.Fatalf("unauthorized status=%d automatic=%v", recorder.Code, backend.automaticIDs)
+	}
+}
+
 func TestPauseAndResumeUseRuntime(t *testing.T) {
 	pauser := &recordingSandboxPauser{}
 	resumer := &recordingSandboxResumer{}

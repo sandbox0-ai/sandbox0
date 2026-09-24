@@ -288,6 +288,7 @@ func (s *Server) setupRoutes() {
 		{
 			internalSandboxes.GET("/:id", s.getSandboxInternal)
 			internalSandboxes.GET("/:id/template-source", s.getSandboxTemplateSourceInternal)
+			internalSandboxes.POST("/:id/auto-resume", s.autoResumeSandbox)
 		}
 
 		internalEgressAuth := internal.Group("/egress-auth")

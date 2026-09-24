@@ -197,7 +197,7 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 		return fmt.Errorf("generate internal token: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/sandboxes/%s/resume", c.baseURL, sandboxID)
+	url := fmt.Sprintf("%s/internal/v1/sandboxes/%s/auto-resume", c.baseURL, sandboxID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)

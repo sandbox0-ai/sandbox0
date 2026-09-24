@@ -207,7 +207,7 @@ func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
 				sandbox.InternalAddr = "http://127.0.0.1:7777"
 			}
 			_ = spec.WriteSuccess(w, http.StatusOK, sandbox)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-1/auto-resume":
 			resumeCalls++
 			_ = spec.WriteSuccess(w, http.StatusOK, mgr.ResumeSandboxResponse{
 				SandboxID: "sb-1",
@@ -277,7 +277,7 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 				Paused:       true,
 				AutoResume:   true,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-1/auto-resume":
 			resumeCalls++
 			_ = spec.WriteSuccess(w, http.StatusOK, mgr.ResumeSandboxResponse{
 				SandboxID: "sb-1",
@@ -342,7 +342,7 @@ func TestGetProcdURLReportsDefinitiveResumeFailure(t *testing.T) {
 				Paused:     true,
 				AutoResume: true,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-1/auto-resume":
 			resumeCalls++
 			_ = spec.WriteError(w, http.StatusGatewayTimeout, spec.CodeUnavailable, "runtime initialization timed out")
 		default:

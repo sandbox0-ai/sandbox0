@@ -86,6 +86,12 @@ type SandboxResumer interface {
 	ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
 }
 
+// SandboxAutoResumer selects the committed pause mode for inbound access.
+// A retained memory checkpoint must never be replaced by a cold start.
+type SandboxAutoResumer interface {
+	ResumeSandboxAutomaticallyAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
+}
+
 // Memory lifecycle interfaces are explicit capabilities. Unsupported backends
 // must reject requests rather than silently execute filesystem-only behavior.
 type SandboxMemoryPauser interface {

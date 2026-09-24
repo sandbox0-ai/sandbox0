@@ -601,6 +601,37 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, resp)
 }
 
+// autoResumeSandbox is limited to the cluster gateway's authenticated runtime
+// access path. The manager selects the persisted pause mode, not a caller hint.
+func (s *Server) autoResumeSandbox(c *gin.Context) {
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
+		return
+	}
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
+		return
+	}
+	if claims.Caller != "cluster-gateway" {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "automatic resume requires cluster-gateway authority")
+		return
+	}
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, ""); !ok {
+		return
+	}
+	backend, ok := s.sandboxResumer.(service.SandboxAutoResumer)
+	if !ok {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "automatic resume is unavailable")
+		return
+	}
+	resp, err := backend.ResumeSandboxAutomaticallyAndWait(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.writeSandboxLifecycleTransitionError(c, "resume", sandboxID, err)
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, resp)
+}
+
 func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sandboxID string, err error) {
 	s.logger.Error("Failed to change sandbox lifecycle state",
 		zap.String("action", action),

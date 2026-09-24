@@ -146,9 +146,11 @@ If webhooks are configured, capture requires a durable webhook outbox; in-flight
 delivery and its acknowledgement drain before capture. Restored sessions retain
 their captured process identity rather than starting a new recovery attempt.
 
-Automatic wake-up still uses the default filesystem-only mode. Disable
-`auto_resume` when a paused memory checkpoint must only be resumed explicitly,
-and avoid runtime/file access until the memory resume completes.
+With `auto_resume: true`, supported inbound access restores a retained memory
+checkpoint when the paused sandbox has one. If no memory checkpoint is retained,
+automatic wake-up uses filesystem-only resume. A failed or incompatible memory
+restore does not fall back to a cold start. An explicit `POST /resume` without
+`memory: true` retains its filesystem-only default.
 
 ## Filesystem Pause Transaction
 
@@ -280,7 +282,9 @@ callers never receive a mixed old/new runtime binding.
 | `hard_ttl` | Hard sandbox timeout. Expiry durably requests deletion of identity and RootFS state. |
 
 `auto_resume` controls whether supported inbound access may wake a paused
-sandbox. It does not disable platform-initiated crash fencing.
+sandbox. The wake-up mode follows the paused sandbox's committed state: retained
+memory restores its processes, while filesystem-only pause starts a new runtime.
+It does not disable platform-initiated crash fencing.
 
 Common auto-resume entry points include sandbox runtime APIs, SSH, and
 restartable public routes configured with `resume: true`. A public route also

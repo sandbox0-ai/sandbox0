@@ -2,12 +2,13 @@ package nomadclaim
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
@@ -54,6 +55,17 @@ func (s *Service) ResumeMemorySandboxAndWait(ctx context.Context, sandboxID stri
 		return nil, err
 	}
 	return &managerapi.ResumeSandboxResponse{SandboxID: record.ID, Resumed: true}, nil
+}
+
+// ResumeSandboxAutomaticallyAndWait restores retained memory when this paused
+// sandbox owns a checkpoint. Only the proven absence of a checkpoint permits
+// the original filesystem resume path; restore failures never start cold.
+func (s *Service) ResumeSandboxAutomaticallyAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
+	response, err := s.ResumeMemorySandboxAndWait(ctx, sandboxID)
+	if errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained) {
+		return s.ResumeSandboxAndWait(ctx, sandboxID)
+	}
+	return response, err
 }
 
 // bindCheckpointResumePlan rejects configuration drift instead of silently

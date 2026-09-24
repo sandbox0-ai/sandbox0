@@ -49,6 +49,9 @@ func TestResumeSandboxUsesRequestContextInsteadOfClientTimeout(t *testing.T) {
 		TTL:        time.Minute,
 	})
 	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/sandboxes/sandbox-1/auto-resume" {
+			t.Errorf("resume path = %q", r.URL.Path)
+		}
 		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))

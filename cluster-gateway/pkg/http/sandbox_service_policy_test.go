@@ -230,7 +230,7 @@ func TestSandboxServiceRejectsResumeRouteWithoutRestartableRuntime(t *testing.T)
 					},
 				}},
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-demo/auto-resume":
 			resumed.Store(true)
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
 		default:
@@ -886,7 +886,7 @@ func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 				return
 			}
 			_ = spec.WriteSuccess(w, http.StatusOK, &pausedSandbox)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-demo/auto-resume":
 			resumed.Store(true)
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
 		default:
@@ -973,7 +973,7 @@ func newPausedFunctionManager(t *testing.T, activeSandbox *mgr.Sandbox) (string,
 				return
 			}
 			_ = spec.WriteSuccess(w, http.StatusOK, &pausedSandbox)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-demo/auto-resume":
 			resumed.Store(true)
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
 		default:

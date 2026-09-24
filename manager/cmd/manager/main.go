@@ -376,6 +376,16 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure Nomad sandbox TTL controller", zap.Error(err))
 	}
+	billingPauser, ok := sandboxRuntime.(service.BillingPauser)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime lacks billing pause capability")
+	}
+	sandboxBillingPauseController, err := service.NewSandboxBillingPauseController(
+		sandboxStore, billingPauser, naming.ClusterIDOrDefault(&cfg.DefaultClusterId), 10*time.Second, logger,
+	)
+	if err != nil {
+		logger.Fatal("Failed to configure billing pause controller", zap.Error(err))
+	}
 
 	forkReconciler, _ := sandboxRuntime.(service.SandboxForkReconciler)
 	snapshotReconciler, _ := sandboxRuntime.(service.SandboxRootFSSnapshotReconciler)
@@ -487,6 +497,7 @@ func main() {
 		memoryResumeWorker:               memoryResumeWorker,
 		memoryRestoreCancellationWorker:  memoryRestoreCancellationWorker,
 		sandboxTTLController:             sandboxTTLController,
+		sandboxBillingPauseController:    sandboxBillingPauseController,
 		sandboxRootFSController:          sandboxRootFSController,
 		sandboxNetworkMutationController: sandboxNetworkMutationController,
 		templateBuildWorker:              templateBuildWorker,

@@ -91,6 +91,8 @@ type fakeClaimStore struct {
 	cleanupErr               error
 	pauseCandidate           *sandboxstore.NomadSandboxPauseCandidate
 	pauseErr                 error
+	billingPauseVersion      int64
+	billingPauseErr          error
 	pauseSources             []string
 	pauseContinueErr         error
 	pauseContinueCalls       []string
@@ -521,6 +523,13 @@ func (f *fakeClaimStore) RequestNomadSandboxPause(
 	copy := *f.pauseCandidate
 	copy.BindingDigest = append([]byte(nil), f.pauseCandidate.BindingDigest...)
 	return &copy, nil
+}
+
+func (f *fakeClaimStore) RequestNomadSandboxBillingPause(
+	_ context.Context, _ string, version int64,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	f.billingPauseVersion = version
+	return f.pauseCandidate, f.billingPauseErr
 }
 
 func (f *fakeClaimStore) ContinueNomadSandboxPause(
@@ -1181,6 +1190,19 @@ func TestServiceImmediatelyDeletesNeverRunPausedForkTarget(t *testing.T) {
 
 type recordingPauseEnqueuer struct {
 	sandboxIDs []string
+}
+
+func TestServiceBillingPauseUsesVersionedIntent(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{SandboxID: "sandbox-1"}
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+	require.NoError(t, fixture.service.PauseSandboxForBilling(t.Context(), "sandbox-1", 7))
+	require.Equal(t, int64(7), fixture.store.billingPauseVersion)
+	require.Equal(t, []string{"sandbox-1"}, enqueuer.sandboxIDs)
+	fixture.store.billingPauseErr = sandboxstore.ErrNomadSandboxBillingPauseStale
+	require.NoError(t, fixture.service.PauseSandboxForBilling(t.Context(), "sandbox-1", 8))
+	require.Equal(t, []string{"sandbox-1"}, enqueuer.sandboxIDs)
 }
 
 func (r *recordingPauseEnqueuer) EnqueueSandboxPause(sandboxID string) {

@@ -31,6 +31,7 @@ type managerControllerSet struct {
 	memoryRestoreCancellationWorker  *nomadclaim.CheckpointRestoreCancellationWorker
 	sandboxPauseController           *service.SandboxPauseController
 	sandboxTTLController             *service.SandboxTTLController
+	sandboxBillingPauseController    *service.SandboxBillingPauseController
 	sandboxRootFSController          *service.SandboxRootFSController
 	sandboxNetworkMutationController *service.SandboxNetworkMutationController
 	templateBuildWorker              *templatebuild.TemplateBuildWorker
@@ -64,6 +65,11 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	if s.sandboxTTLController != nil {
 		go logControllerErrorExact(ctx, s.logger, "Sandbox TTL controller failed", func() error {
 			return s.sandboxTTLController.Run(ctx)
+		})
+	}
+	if s.sandboxBillingPauseController != nil {
+		go logControllerErrorExact(ctx, s.logger, "Sandbox billing pause controller failed", func() error {
+			return s.sandboxBillingPauseController.Run(ctx)
 		})
 	}
 	go logControllerErrorExact(ctx, s.logger, "Sandbox pause controller failed", func() error {

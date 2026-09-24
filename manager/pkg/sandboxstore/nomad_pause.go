@@ -14,11 +14,12 @@ import (
 )
 
 var (
-	ErrNomadSandboxPauseConflict   = errors.New("nomad sandbox pause conflict")
-	ErrNomadSandboxPauseNotReady   = errors.New("nomad sandbox pause is not ready")
-	ErrNomadSandboxPauseNotPending = errors.New("nomad sandbox pause is not pending")
-	ErrNomadSandboxTTLNotExpired   = errors.New("nomad sandbox TTL is not expired")
-	ErrNomadSandboxHardTTLExpired  = errors.New("nomad sandbox hard TTL is expired")
+	ErrNomadSandboxPauseConflict     = errors.New("nomad sandbox pause conflict")
+	ErrNomadSandboxPauseNotReady     = errors.New("nomad sandbox pause is not ready")
+	ErrNomadSandboxPauseNotPending   = errors.New("nomad sandbox pause is not pending")
+	ErrNomadSandboxTTLNotExpired     = errors.New("nomad sandbox TTL is not expired")
+	ErrNomadSandboxHardTTLExpired    = errors.New("nomad sandbox hard TTL is expired")
+	ErrNomadSandboxBillingPauseStale = errors.New("nomad sandbox billing pause is stale")
 )
 
 // NomadSandboxPauseCandidate is the exact active allocation and writer
@@ -66,7 +67,22 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	sandboxID string,
 	source string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false, false)
+	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false, false, nil)
+}
+
+// RequestNomadSandboxBillingPause commits a planned pause only while the
+// exact regional admission version still requires one. This check shares the
+// transaction with the sandbox lock, so a stale billing scan cannot pause a
+// runtime after a newer allowance has reached the region.
+func (s *PGSandboxStore) RequestNomadSandboxBillingPause(
+	ctx context.Context, sandboxID string, admissionVersion int64,
+) (*NomadSandboxPauseCandidate, error) {
+	if admissionVersion < 0 {
+		return nil, fmt.Errorf("admission version must not be negative")
+	}
+	return s.requestNomadSandboxPause(
+		ctx, sandboxID, SandboxLifecycleSourceAuto, nil, false, false, &admissionVersion,
+	)
 }
 
 // ContinueNomadSandboxPause returns the exact active planned-pause operation
@@ -77,7 +93,7 @@ func (s *PGSandboxStore) ContinueNomadSandboxPause(
 	sandboxID string,
 ) (*NomadSandboxPauseCandidate, error) {
 	return s.requestNomadSandboxPause(
-		ctx, sandboxID, SandboxLifecycleSourceManual, nil, false, true,
+		ctx, sandboxID, SandboxLifecycleSourceManual, nil, false, true, nil,
 	)
 }
 
@@ -88,7 +104,7 @@ func (s *PGSandboxStore) RequestNomadSandboxTTLPause(
 	ctx context.Context,
 	sandboxID string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true, false)
+	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true, false, nil)
 }
 
 // RequestNomadSandboxPressurePause persists the same planned pause while
@@ -105,7 +121,7 @@ func (s *PGSandboxStore) RequestNomadSandboxPressurePause(
 	}
 	copy := *request
 	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
-	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false, false)
+	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false, false, nil)
 }
 
 func (s *PGSandboxStore) requestNomadSandboxPause(
@@ -115,6 +131,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	pressure *RootFSWriterPressurePauseRequest,
 	requireExpiredTTL bool,
 	continueOnly bool,
+	billingAdmissionVersion *int64,
 ) (*NomadSandboxPauseCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
@@ -137,6 +154,24 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	if billingAdmissionVersion != nil {
+		var version int64
+		var state string
+		var pauseRequired bool
+		err := tx.QueryRow(ctx, `
+			SELECT version, state, pause_required
+			FROM shared_gateway.team_admission_states
+			WHERE team_id = $1
+			FOR SHARE
+		`, record.TeamID).Scan(&version, &state, &pauseRequired)
+		if errors.Is(err, pgx.ErrNoRows) ||
+			(err == nil && (version != *billingAdmissionVersion || state != "restricted" || !pauseRequired)) {
+			return nil, ErrNomadSandboxBillingPauseStale
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read billing pause admission state: %w", err)
+		}
 	}
 	var continuedLifecycle *SandboxLifecycleTxn
 	if continueOnly {

@@ -40,6 +40,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*target = value.(State)
 		case *time.Time:
 			*target = value.(time.Time)
+		case *bool:
+			*target = value.(bool)
 		}
 	}
 	return nil
@@ -52,6 +54,7 @@ func admissionRow(version int64, state State, source, reason string) pgx.Row {
 		state,
 		source,
 		reason,
+		false,
 		time.Unix(10, 0).UTC(),
 	}}
 }

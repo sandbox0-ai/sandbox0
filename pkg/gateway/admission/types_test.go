@@ -27,6 +27,7 @@ func TestUpdateValidate(t *testing.T) {
 	}{
 		{name: "negative version", update: Update{Version: -1, State: StateAllowed, Source: "source"}},
 		{name: "invalid state", update: Update{Version: 1, State: "blocked", Source: "source"}},
+		{name: "pause without restriction", update: Update{Version: 1, State: StateAllowed, Source: "source", PauseRequired: true}},
 		{name: "missing source", update: Update{Version: 1, State: StateAllowed}},
 		{name: "source too long", update: Update{Version: 1, State: StateAllowed, Source: strings.Repeat("s", maxSourceLength+1)}},
 		{name: "reason too long", update: Update{Version: 1, State: StateAllowed, Source: "source", Reason: strings.Repeat("r", maxReasonLength+1)}},
@@ -60,5 +61,10 @@ func TestRecordMatches(t *testing.T) {
 	update.Reason = "different"
 	if record.Matches(update) {
 		t.Fatal("Matches() = true, want false")
+	}
+	update.Reason = "reason"
+	update.PauseRequired = true
+	if record.Matches(update) {
+		t.Fatal("Matches() = true for a different pause requirement")
 	}
 }

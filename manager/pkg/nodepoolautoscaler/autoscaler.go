@@ -444,8 +444,8 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	}
 	for _, node := range snapshot.Nodes {
 		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
-			node.State == sandboxstore.RuntimeNodeInstanceDraining && node.CapacityLive &&
-			(node.DrainReason != sandboxstore.RuntimeNodeConsolidationReason || node.ActiveLeases > 0) {
+			node.State == sandboxstore.RuntimeNodeInstanceDraining &&
+			(node.ActiveLeases > 0 || !removableDrainingNode(node)) {
 			decision.Action = "scale_in_waiting_for_drain"
 			return decision, nil
 		}
@@ -478,33 +478,34 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 		return decision, nil
 	}
 	applied := max(target, current-w.config.MaxScaleInStep)
-	consolidationTarget := ""
+	removalTarget := ""
 	for _, node := range snapshot.Nodes {
-		if node.State == sandboxstore.RuntimeNodeInstanceDraining &&
-			node.DrainReason == sandboxstore.RuntimeNodeConsolidationReason {
-			// Keep one provider removal bound to the one drained source. The
-			// lifecycle controller protects every other instance until ESS acts.
+		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
+			node.State == sandboxstore.RuntimeNodeInstanceDraining &&
+			removableDrainingNode(node) {
+			// Keep one provider removal bound to the exact drained source. The
+			// lifecycle controller still proves physical cleanup before revocation.
 			applied = max(applied, current-1)
-			consolidationTarget = node.ProviderInstanceID
+			removalTarget = node.ProviderInstanceID
 			break
 		}
 	}
-	if consolidationTarget != "" {
+	if removalTarget != "" {
 		var protect []string
 		for _, node := range snapshot.Nodes {
 			if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
-				node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady &&
-				node.ProviderInstanceID != consolidationTarget {
+				node.State != sandboxstore.RuntimeNodeInstanceRevoked && node.ProviderReady &&
+				node.ProviderInstanceID != removalTarget {
 				protect = append(protect, node.ProviderInstanceID)
 			}
 		}
 		if len(protect) > 0 {
 			if err := w.cloud.SetInstancesProtection(ctx, protect, true); err != nil {
-				return decision, fmt.Errorf("protect other elastic nodes before consolidation scale-in: %w", err)
+				return decision, fmt.Errorf("protect other elastic nodes before targeted scale-in: %w", err)
 			}
 		}
-		if err := w.cloud.SetInstancesProtection(ctx, []string{consolidationTarget}, false); err != nil {
-			return decision, fmt.Errorf("unprotect consolidation target before scale-in: %w", err)
+		if err := w.cloud.SetInstancesProtection(ctx, []string{removalTarget}, false); err != nil {
+			return decision, fmt.Errorf("unprotect drained target before scale-in: %w", err)
 		}
 	}
 	if err := w.cloud.SetDesiredCapacity(ctx, applied); err != nil {
@@ -528,6 +529,15 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	}
 	decision.Action, decision.AppliedElastic, decision.LowPressureAt = "scale_in", applied, nextLow
 	return decision, nil
+}
+
+// An audited rollout fence can outlive its recovery operation. Once its leases
+// are gone, provider scale-in must be able to retire that exact node through
+// the normal lifecycle hook instead of leaving protected capacity stranded.
+func removableDrainingNode(node sandboxstore.RuntimeNodePoolNodeUsage) bool {
+	return node.ActiveLeases == 0 &&
+		(node.DrainReason == sandboxstore.RuntimeNodeConsolidationReason ||
+			strings.HasPrefix(node.DrainReason, "audited-runtime-rollout:"))
 }
 
 func (w *Worker) target(snapshot *sandboxstore.RuntimeNodePoolSnapshot) (int, int) {

@@ -226,6 +226,38 @@ func TestScaleInWaitsForPreviousLiveDrain(t *testing.T) {
 	require.Empty(t, cloud.sets)
 }
 
+func TestEmptyAuditedDrainRetiresExactProtectedNode(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
+	w := testWorker(t, store, cloud)
+	w.config.MaxScaleInStep = 2
+	store.snapshot.ClusterFixedUsableSlots = 512
+	store.state.LowPressureSince = testNow.Add(-time.Hour)
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
+		{ProviderInstanceID: "audited", PoolKind: "elastic", State: "draining", ProviderReady: true,
+			DrainReason: "audited-runtime-rollout:source:recovery"},
+		{ProviderInstanceID: "other", PoolKind: "elastic", State: "active", ProviderReady: true, CapacityLive: true},
+	}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "scale_in", d.Action)
+	require.Equal(t, []int{1}, cloud.sets, "only the audited source may be removed")
+	require.Equal(t, []string{"other=true", "audited=false"}, cloud.protection)
+}
+
+func TestAuditedDrainWithLeaseStillBlocksScaleIn(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
+	w := testWorker(t, store, cloud)
+	store.snapshot.ClusterFixedUsableSlots = 512
+	store.state.LowPressureSince = testNow.Add(-time.Hour)
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{{ProviderInstanceID: "audited", PoolKind: "elastic",
+		State: "draining", CapacityLive: true, ActiveLeases: 1,
+		DrainReason: "audited-runtime-rollout:source:recovery"}}
+	d, err := w.Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "scale_in_waiting_for_drain", d.Action)
+	require.Empty(t, cloud.sets)
+}
+
 func TestRenewedPressureResetsQuietWindowWhenScaleOutIsBlocked(t *testing.T) {
 	for _, guard := range []string{"cooldown", "pending_budget"} {
 		t.Run(guard, func(t *testing.T) {

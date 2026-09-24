@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,6 +81,49 @@ func TestMigrationRootFSCutNeverPromotesAnUnconfirmedFreeze(t *testing.T) {
 	require.NoError(t, manager.ReconcileFreezes(t.Context()))
 	require.NotContains(t, runtime.callsSnapshot(), "thaw-xfs")
 	require.ErrorIs(t, manager.Release(t.Context(), stage.Identity), errdefs.ErrFailedPrecondition)
+}
+
+func TestMigrationRootFSCutRetriesBusyRetirementBeforeRecordingIntent(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1"}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		MaxNodeDirtyTailBytes:           4 * rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	first := testStageRequestWithBlocks(t, objects, "migration-reserve-owner", 4)
+	second := testStageRequestWithBlocks(t, objects, "migration-reserve-waiter", 4)
+	require.NoError(t, manager.Reserve(first))
+	require.NoError(t, manager.Reserve(second))
+	_, err = manager.Ensure(t.Context(), first)
+	require.NoError(t, err)
+	_, err = manager.Ensure(t.Context(), second)
+	require.NoError(t, err)
+	require.NoError(t, manager.live[first.Parent].branch.BeginRetirement())
+	request := migrationCutRequest(t, second.WithoutWriterGrantToken())
+	_, err = manager.CaptureMigrationRootFS(t.Context(), second.WithoutWriterGrantToken(), request)
+	require.ErrorIs(t, err, syscall.EBUSY)
+	stored, err := manager.load(second.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateReady, stored.State)
+	require.Nil(t, stored.Migration)
+	require.Empty(t, stored.FreezeOperationID)
+	require.Equal(t, 0, runtime.count("freeze-xfs"))
+
+	operation := rootfshandoff.PlannedRetireOperationID(first.Parent, first.Identity.WriterGrantID, first.Identity.WriterEpoch)
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, operation))
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
+	cut, err := manager.CaptureMigrationRootFS(t.Context(), second.WithoutWriterGrantToken(), request)
+	require.NoError(t, err)
+	require.NoError(t, cut.ValidateFor(second.WithoutWriterGrantToken(), request))
+	require.Equal(t, 1, runtime.count("freeze-xfs"))
 }
 
 func TestMigrationRootFSCutRetriesThawWithoutRecapturing(t *testing.T) {

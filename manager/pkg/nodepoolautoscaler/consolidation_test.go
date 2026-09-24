@@ -87,6 +87,39 @@ func TestConsolidationKeepsCloudSizeWhenFixedCapacityIsUnavailable(t *testing.T)
 	require.Empty(t, cloud.sets)
 }
 
+func TestConsolidationKeepsQuietWindowAfterEmptyNodeScaleIn(t *testing.T) {
+	store := &fakeStore{consolidationReady: true}
+	cloud := &fakeCloud{desired: 2}
+	store.snapshot.ClusterFixedUsableSlots = 8
+	store.snapshot.ClusterWorkloadCPU = 1_000
+	store.snapshot.ClusterWorkloadMemory = 1 << 30
+	store.snapshot.ClusterWorkloadSlots = 1
+	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
+		{ProviderInstanceID: "occupied", PoolKind: "elastic", State: "active", ProviderReady: true,
+			CapacityLive: true, ActiveLeases: 5},
+		{ProviderInstanceID: "empty", PoolKind: "elastic", State: "active", ProviderReady: true,
+			CapacityLive: true},
+	}
+	w := testWorker(t, store, cloud)
+	w.config.ConsolidationEnabled = true
+	quietSince := testNow.Add(-11 * time.Minute)
+	store.state.LowPressureSince = quietSince
+
+	decision, err := w.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "scale_in", decision.Action)
+	require.Equal(t, []int{1}, cloud.sets)
+	require.Equal(t, quietSince, store.state.LowPressureSince,
+		"an empty-node removal must not impose another full quiet window")
+
+	w.config.Now = func() time.Time { return testNow.Add(2 * time.Minute) }
+	decision, err = w.Reconcile(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "consolidation_started", decision.Action)
+	require.Equal(t, []string{"occupied"}, store.consolidationCalls,
+		"source occupancy is independent of the one-migration-per-node limit")
+}
+
 func TestDisabledConsolidationStillReopensStalledSource(t *testing.T) {
 	store := &fakeStore{consolidationCancelled: true}
 	cloud := &fakeCloud{desired: 1}

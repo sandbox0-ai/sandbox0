@@ -155,24 +155,27 @@ block an otherwise fully ready pool forever; their identity and cleanup
 obligations are retained independently. A live in-progress drain blocks another
 scale-in pass.
 
-With `consolidation_enabled: true`, sustained low demand can fence one lightly
-occupied elastic worker, then use system migration to move each eligible sandbox
-to the fixed worker. The preflight requires every active lease to be a live,
-migratable sandbox and requires matching ready carriers, physical CPU/memory,
-admission budget, and configured headroom on the fixed worker. The migration
+With `consolidation_enabled: true`, sustained low demand can fence one occupied
+elastic worker, then use system migration to move each eligible sandbox to the
+fixed worker. Each source and destination node has at most one in-flight
+migration; the number of sandboxes on the source is not capped. The preflight
+requires every active lease to be a live, migratable sandbox and requires
+compatible ready carriers, physical CPU/memory, admission budget, and configured
+headroom on the fixed worker. Adaptive carrier refill permits sequential moves
+through one ready carrier per compatibility class. The migration
 reservation rechecks capacity. Source leases and physical cleanup remain the
 authority for scale-in; ESS desired capacity decreases only after the source
 has no active leases. Other elastic workers are protected while ESS selects the
 drained worker, and a mismatched lifecycle selection is rolled back. A stalled
-drain with live leases reopens after `consolidation_timeout` only when no
-migration or cleanup still owns it. The default is disabled because process
+drain with live leases reopens after `consolidation_timeout` without a completed
+move, and only when no migration or cleanup still owns it. The default is
+disabled because process
 migration remains experimental and requires compatible node runtimes.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `consolidation_enabled` | `false` | Allow low-demand elastic-to-fixed migration before scale-in |
-| `consolidation_max_sandboxes` | `4` | Bound the number of live sandboxes moved from one source node |
-| `consolidation_timeout` | `30m` | Reopen a stalled, still-busy source after migration custody clears |
+| `consolidation_timeout` | `30m` | Reopen a stalled, still-busy source after migration custody clears and no move completes within the timeout |
 
 Busy elastic nodes remain protected when consolidation is disabled or no fixed
 destination fits, including after an operator lowers the purchase ceiling.

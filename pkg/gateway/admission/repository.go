@@ -39,7 +39,7 @@ func (r *Repository) Get(ctx context.Context, teamID string) (Record, bool, erro
 	}
 
 	record, err := scanRecord(r.db.QueryRow(ctx, `
-		SELECT team_id::text, version, state, source, reason, updated_at
+		SELECT team_id::text, version, state, source, reason, pause_required, updated_at
 		FROM team_admission_states
 		WHERE team_id = $1
 	`, teamID))
@@ -68,19 +68,21 @@ func (r *Repository) Put(ctx context.Context, teamID string, update Update) (Put
 			version,
 			state,
 			source,
-			reason
+			reason,
+			pause_required
 		)
-		VALUES ($1, $2, $3, $4, $5)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (team_id) DO UPDATE
 		SET
 			version = EXCLUDED.version,
 			state = EXCLUDED.state,
 			source = EXCLUDED.source,
 			reason = EXCLUDED.reason,
+			pause_required = EXCLUDED.pause_required,
 			updated_at = NOW()
 		WHERE team_admission_states.version < EXCLUDED.version
-		RETURNING team_id::text, version, state, source, reason, updated_at
-	`, teamID, normalized.Version, normalized.State, normalized.Source, normalized.Reason))
+		RETURNING team_id::text, version, state, source, reason, pause_required, updated_at
+	`, teamID, normalized.Version, normalized.State, normalized.Source, normalized.Reason, normalized.PauseRequired))
 	if err == nil {
 		return PutResult{Record: record, Applied: true}, nil
 	}
@@ -113,6 +115,7 @@ func scanRecord(row pgx.Row) (Record, error) {
 		&record.State,
 		&record.Source,
 		&record.Reason,
+		&record.PauseRequired,
 		&record.UpdatedAt,
 	)
 	return record, err

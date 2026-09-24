@@ -25,19 +25,21 @@ var (
 )
 
 type Record struct {
-	TeamID    string    `json:"team_id"`
-	Version   int64     `json:"version"`
-	State     State     `json:"state"`
-	Source    string    `json:"source"`
-	Reason    string    `json:"reason"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TeamID        string    `json:"team_id"`
+	Version       int64     `json:"version"`
+	State         State     `json:"state"`
+	Source        string    `json:"source"`
+	Reason        string    `json:"reason"`
+	PauseRequired bool      `json:"pause_required"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Update struct {
-	Version int64  `json:"version"`
-	State   State  `json:"state"`
-	Source  string `json:"source"`
-	Reason  string `json:"reason"`
+	Version       int64  `json:"version"`
+	State         State  `json:"state"`
+	Source        string `json:"source"`
+	Reason        string `json:"reason"`
+	PauseRequired bool   `json:"pause_required"`
 }
 
 type PutResult struct {
@@ -53,6 +55,9 @@ func (u Update) Validate() (Update, error) {
 	}
 	if u.State != StateAllowed && u.State != StateRestricted {
 		return Update{}, fmt.Errorf("%w: state must be %q or %q", ErrInvalidUpdate, StateAllowed, StateRestricted)
+	}
+	if u.PauseRequired && u.State != StateRestricted {
+		return Update{}, fmt.Errorf("%w: pause requires restricted admission", ErrInvalidUpdate)
 	}
 	if u.Source == "" {
 		return Update{}, fmt.Errorf("%w: source is required", ErrInvalidUpdate)
@@ -70,5 +75,6 @@ func (r Record) Matches(update Update) bool {
 	return r.Version == update.Version &&
 		r.State == update.State &&
 		r.Source == update.Source &&
-		r.Reason == update.Reason
+		r.Reason == update.Reason &&
+		r.PauseRequired == update.PauseRequired
 }

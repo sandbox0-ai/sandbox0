@@ -376,6 +376,33 @@ func (s *Service) PauseSandboxByID(ctx context.Context, sandboxID string) error 
 	}
 }
 
+// PauseSandboxForBilling accepts a durable checkpoint pause while the exact
+// regional billing admission version still requires it. Completion is owned
+// by the existing pause controller, including retries after node failures.
+func (s *Service) PauseSandboxForBilling(ctx context.Context, sandboxID string, admissionVersion int64) error {
+	store, ok := s.store.(interface {
+		RequestNomadSandboxBillingPause(context.Context, string, int64) (*sandboxstore.NomadSandboxPauseCandidate, error)
+	})
+	if !ok {
+		return fmt.Errorf("billing pause store is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	candidate, err := store.RequestNomadSandboxBillingPause(ctx, sandboxID, admissionVersion)
+	if errors.Is(err, sandboxstore.ErrNomadSandboxBillingPauseStale) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if candidate == nil || candidate.SandboxID != sandboxID {
+		return fmt.Errorf("billing pause returned mismatched sandbox: %w", errdefs.ErrUnavailable)
+	}
+	if candidate.AlreadyPaused {
+		return nil
+	}
+	s.enqueueNomadSandboxPause(sandboxID)
+	return nil
+}
+
 // RequestRootFSWriterPressurePause persists and enqueues a planned pause for
 // one exact writer without waiting for Nomad Stop. The reporting node must
 // first receive the deterministic operation and persist it locally; its

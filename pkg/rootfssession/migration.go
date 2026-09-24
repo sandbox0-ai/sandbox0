@@ -112,10 +112,27 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 	live := m.live[stage.Parent]
 	m.mu.Unlock()
 	initial := current.Migration == nil
+	m.mu.Lock()
+	if m.captures[stage.Parent] {
+		m.mu.Unlock()
+		return zero, errdefs.ErrUnavailable
+	}
+	m.captures[stage.Parent] = true
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); delete(m.captures, stage.Parent); m.mu.Unlock() }()
 	if initial {
 		if current.State != stateReady || live == nil || current.RetireOperationID != "" || current.RunningForkRequest != nil ||
 			current.DirtyTailPressure != nil || current.FreezeOperationID != "" || current.CrashFence != nil {
 			return zero, fmt.Errorf("migration requires the exact live and unowned RootFS session: %w", errdefs.ErrFailedPrecondition)
+		}
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		// A competing retirement is retryable until the filesystem barrier
+		// begins. Reserve its bounded sync capacity before persisting cut intent;
+		// an intent without a synced sequence must remain fail-closed.
+		if err := live.branch.BeginRetirement(); err != nil {
+			return zero, err
 		}
 		current.Migration = &migrationCutRecord{Request: request}
 		current.State, current.Version = stateMigration, sessionSchemaVersion
@@ -143,14 +160,6 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 			return zero, fmt.Errorf("migration freeze/sync outcome is uncertain; a WAL tail cannot prove a filesystem cut: %w", errdefs.ErrUnavailable)
 		}
 	}
-	m.mu.Lock()
-	if m.captures[stage.Parent] {
-		m.mu.Unlock()
-		return zero, errdefs.ErrUnavailable
-	}
-	m.captures[stage.Parent] = true
-	m.mu.Unlock()
-	defer func() { m.mu.Lock(); delete(m.captures, stage.Parent); m.mu.Unlock() }()
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
@@ -166,8 +175,10 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 		}
 		defer branch.Close()
 	}
-	if err := branch.BeginRetirement(); err != nil {
-		return zero, err
+	if !initial {
+		if err := branch.BeginRetirement(); err != nil {
+			return zero, err
+		}
 	}
 	if initial {
 		if err := m.runtime.FreezeXFS(current.XFSRoot); err != nil {

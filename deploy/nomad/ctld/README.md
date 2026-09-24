@@ -40,6 +40,10 @@ carrier on an elastic node. Drain and fence an unhealthy elastic node through
 the node-pool lifecycle before requesting the resume, then verify the new
 runtime reaches command-ready on the intended node. Nomad scheduling
 eligibility alone does not fence existing ready carriers from manager claims.
+Before an audited recovery resume, check the team's current regional admission
+state. A restricted team that requires billing pause must keep its durable
+RootFS head paused until billing admission is legitimately restored; a
+successful command-ready probe alone does not override that policy.
 
 Build ctld and the driver and obtain the complete pinned official runsc archive.
 For split-runtime releases, keep `gvisor-bin/` beside the supplied `runsc`; the

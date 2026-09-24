@@ -27,7 +27,7 @@ type sandboxPauseItem struct {
 }
 
 type sandboxPauseLifecycleStore interface {
-	ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error)
+	ListActiveFilesystemPauseTxns(ctx context.Context, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error)
 	ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
 	IsRuntimeRecoveryPending(ctx context.Context, sandboxID string) (bool, error)
 	ClaimSandboxRuntimeRecovery(ctx context.Context, sandboxID, workerID string, leaseDuration time.Duration) (*sandboxstore.SandboxRuntimeRecoveryClaim, error)
@@ -157,7 +157,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 	if c == nil || c.store == nil {
 		return
 	}
-	txns, err := c.store.ListActiveLifecycleTxns(ctx, sandboxstore.SandboxLifecycleKindPause, c.scanLimit)
+	txns, err := c.store.ListActiveFilesystemPauseTxns(ctx, c.scanLimit)
 	if err != nil {
 		c.logger.Warn("Failed to list active pause lifecycle transactions", zap.Error(err))
 		return

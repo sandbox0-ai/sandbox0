@@ -85,7 +85,7 @@ func TestContextAutoResumeHonorsAdmission(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/sb-demo":
 			_ = spec.WriteSuccess(w, http.StatusOK, pausedSandbox)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/sandboxes/sb-demo/auto-resume":
 			resumed.Store(true)
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
 		default:

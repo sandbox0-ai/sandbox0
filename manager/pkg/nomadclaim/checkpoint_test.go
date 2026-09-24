@@ -97,6 +97,41 @@ func TestMemoryResumeServiceUsesCapturedAssignmentAndOrdinaryRegionalCommit(t *t
 		})
 	}
 }
+
+func TestAutomaticResumeSelectsCommittedMemoryOrFilesystemMode(t *testing.T) {
+	t.Run("retained-memory", func(t *testing.T) {
+		f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+		response, err := f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
+		require.NoError(t, err)
+		require.True(t, response.Resumed)
+		require.Zero(t, planner.coldCalls)
+		require.Len(t, planner.authorities, 1)
+		require.Len(t, f.store.resumeRequests, 1)
+		require.True(t, f.store.resumeRequests[0].Memory)
+	})
+	t.Run("filesystem-only", func(t *testing.T) {
+		f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+		f.store.memoryResumeErr = sandboxstore.ErrNomadCheckpointNotRetained
+		f.store.resumeCandidate.Checkpoint = nil
+		response, err := f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
+		require.NoError(t, err)
+		require.True(t, response.Resumed)
+		require.Equal(t, 1, planner.coldCalls)
+		require.Empty(t, planner.authorities)
+		require.Len(t, f.store.resumeRequests, 2)
+		require.True(t, f.store.resumeRequests[0].Memory)
+		require.False(t, f.store.resumeRequests[1].Memory)
+	})
+	t.Run("invalid-memory-never-starts-cold", func(t *testing.T) {
+		f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+		f.store.resumeCandidate.Checkpoint.Assignment.Target.EnvVars["MAIN"] = "changed"
+		_, err := f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
+		require.Error(t, err)
+		require.Zero(t, planner.coldCalls)
+		require.Len(t, f.store.resumeRequests, 1)
+		require.True(t, f.store.resumeRequests[0].Memory)
+	})
+}
 func TestMemoryResumeServicePreservesUncertainExecutionForExactRetry(t *testing.T) {
 	for _, failure := range []string{"execution", "commit", "readiness"} {
 		t.Run(failure, func(t *testing.T) {

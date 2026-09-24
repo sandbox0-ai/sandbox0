@@ -101,6 +101,7 @@ type fakeClaimStore struct {
 	pressureRequests         []*sandboxstore.RootFSWriterPressurePauseRequest
 	resumeCandidate          *sandboxstore.NomadSandboxResumeCandidate
 	resumeErr                error
+	memoryResumeErr          error
 	resumeRequested          bool
 	resumeRetryErr           error
 	resumeRetryRequests      []*sandboxstore.RetryNomadSandboxResumeRequest
@@ -428,6 +429,9 @@ func (f *fakeClaimStore) RequestNomadSandboxResume(
 		copyRequest.ActiveSandboxLimit = &limit
 	}
 	f.resumeRequests = append(f.resumeRequests, &copyRequest)
+	if request.Memory && f.memoryResumeErr != nil {
+		return nil, f.memoryResumeErr
+	}
 	if f.resumeErr != nil {
 		return nil, f.resumeErr
 	}

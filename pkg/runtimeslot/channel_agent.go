@@ -503,11 +503,13 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 		if err := decodeNodeChannelMessage(payload, &command); err != nil {
 			return connectedAt, fmt.Errorf("decode node channel command: %w: %w", err, errdefs.ErrUnavailable)
 		}
-		// A successor boot may attest cleanup or acknowledge retention of an older incarnation through
-		// the persistent node journal. Every operation that can create or mutate
-		// a live runtime remains bound to the exact current boot.
+		// A successor boot may recover an already authorized capture and clean
+		// its old incarnation through the persistent node journal. Operations
+		// that can start execution or initiate capture require the exact boot.
 		bootMatches := command.Target.NodeBootID == hello.NodeBootID ||
-			command.Kind == NodeChannelCommandCleanup || command.Kind == NodeChannelCommandMigrationSourceGC
+			command.Kind == NodeChannelCommandCleanup || command.Kind == NodeChannelCommandMigrationSourceGC ||
+			command.Kind == NodeChannelCommandMigrationRecover || command.Kind == NodeChannelCommandMigrationCaptureFailureCleanup ||
+			command.Kind == NodeChannelCommandMigrationCaptureFailureFinalize || command.Kind == NodeChannelCommandMigrationStagingRelease
 		if err := command.Validate(); err != nil || !hello.Supports(command.Kind) ||
 			command.Target.ClusterID != hello.ClusterID || command.Target.NodeID != hello.NodeID ||
 			command.Target.NodeUID != hello.NodeUID || !bootMatches {

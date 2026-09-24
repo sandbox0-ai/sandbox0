@@ -2,6 +2,7 @@ package runtimeslotnode
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -45,6 +46,39 @@ func migrationCaptureFailureChannelRequest(t *testing.T) protocol.MigrationCaptu
 	_, err = r.Digest()
 	require.NoError(t, err)
 	return r
+}
+
+func TestMigrationCaptureFailureCleanupUsesAuthenticatedSuccessorBoot(t *testing.T) {
+	hub, err := NewChannelHub(channelTestVerifier{}, channelTestCapacityStore{})
+	require.NoError(t, err)
+	defer hub.Close()
+	server, files := newNodeChannelTLSServer(t, hub)
+	defer server.Close()
+	require.NoError(t, os.WriteFile(files.boot, []byte("boot-2\n"), 0o600))
+	executor := &migrationCaptureFailureChannelExecutor{}
+	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert, ClientKeyFile: files.clientKey,
+		TokenFile: files.token, PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
+		ClusterID: "cluster-1", NodeID: "node-1", Executor: &channelTestExecutor{}, Capacity: channelTestCapacity(),
+		AgentInstanceID: "agent-boot-2", ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		MigrationCaptureFailureExecutor: executor,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-2")
+	request := migrationCaptureFailureChannelRequest(t)
+	proof, err := hub.CleanupFailedMigrationCapture(ctx, request)
+	require.NoError(t, err)
+	require.NoError(t, proof.ValidateFor(request))
+	final := protocol.MigrationCaptureFailureFinalizeRequest{Request: request, Proof: *proof}
+	finalized, err := hub.FinalizeFailedMigrationCapture(ctx, final)
+	require.NoError(t, err)
+	require.NoError(t, finalized.ValidateFor(final))
+	require.EqualValues(t, 1, executor.calls.Load())
+	require.EqualValues(t, 1, executor.finalizations.Load())
 }
 
 func TestMigrationCaptureFailureRequiresAuthenticatedCapability(t *testing.T) {

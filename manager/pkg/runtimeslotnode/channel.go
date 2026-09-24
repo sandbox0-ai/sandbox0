@@ -723,11 +723,12 @@ func (h *ChannelHub) dispatch(
 }
 
 // connectionForCommand preserves exact-boot routing for every live operation.
-// Cleanup and retention-only migration GC may use one authenticated successor
-// boot after the old boot's
-// stream has disappeared: the persistent node journal still binds the request
-// to the old incarnation, while reboot itself guarantees that its processes
-// and cgroups cannot remain live. More than one successor fails closed.
+// Physical cleanup and recovery of an already authorized capture may use one
+// authenticated successor boot after the old boot's stream has disappeared.
+// The persistent node journal binds each request to the old incarnation, and
+// reboot guarantees its processes and cgroups cannot remain live. Commands
+// that can start execution or initiate capture still require the exact boot.
+// More than one successor fails closed.
 func (h *ChannelHub) connectionForCommand(
 	key nodeChannelKey,
 	kind protocol.NodeChannelCommandKind,
@@ -747,7 +748,9 @@ func (h *ChannelHub) connectionForCommand(
 			return connection, changed, false, nil
 		}
 	}
-	if kind != protocol.NodeChannelCommandCleanup && kind != protocol.NodeChannelCommandMigrationSourceGC {
+	if kind != protocol.NodeChannelCommandCleanup && kind != protocol.NodeChannelCommandMigrationSourceGC &&
+		kind != protocol.NodeChannelCommandMigrationRecover && kind != protocol.NodeChannelCommandMigrationCaptureFailureCleanup &&
+		kind != protocol.NodeChannelCommandMigrationCaptureFailureFinalize && kind != protocol.NodeChannelCommandMigrationStagingRelease {
 		return nil, changed, false, nil
 	}
 	var successor *nodeChannelConnection

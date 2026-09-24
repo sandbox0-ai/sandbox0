@@ -118,6 +118,37 @@ func TestStalledNodeConsolidationReopensSourceIntegration(t *testing.T) {
 	require.Empty(t, status.Instance.DrainReason)
 }
 
+func TestStalledNodeConsolidationCancelsAfterSafeAbortIntegration(t *testing.T) {
+	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-abort", "a")
+	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")
+	migrationReadyTarget(t, f, "consolidation-abort", "b")
+	started, err := f.store.BeginRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 0, 0, 0)
+	require.NoError(t, err)
+	require.True(t, started)
+	reserved, err := f.store.ReserveNomadMigrationEvacuation(f.ctx, f.sandboxID)
+	require.NoError(t, err)
+	require.True(t, reserved)
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_instances
+		SET drain_started_at=NOW()-INTERVAL '31 minutes'
+		WHERE pool_id='elastic' AND provider_instance_id='i-source'`)
+	require.NoError(t, err)
+	cancelled, err := f.store.CancelRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 30*time.Minute)
+	require.NoError(t, err)
+	require.False(t, cancelled, "an in-flight migration still owns the drain fence")
+	var operationID string
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT migration.operation_id
+		FROM manager.sandbox_runtime_migrations migration
+		JOIN manager.sandbox_lifecycle_txns lifecycle ON lifecycle.txn_id=migration.operation_id
+		WHERE lifecycle.sandbox_id=$1`, f.sandboxID).Scan(&operationID))
+	require.NoError(t, f.store.AbortNomadSandboxMigrationReservation(f.ctx, f.sandboxID, operationID, "CPU profiles differ"))
+	cancelled, err = f.store.CancelRuntimeNodeConsolidation(f.ctx, "elastic", "i-source", 30*time.Minute)
+	require.NoError(t, err)
+	require.True(t, cancelled, "a safe abort must not extend a timed-out drain by its retry cooldown")
+	status, err := f.store.GetRuntimeNodeDrainStatus(f.ctx, "elastic", "i-source")
+	require.NoError(t, err)
+	require.Equal(t, RuntimeNodeInstanceActive, status.Instance.State)
+}
+
 func TestNodeConsolidationTimeoutCountsFromLastCompletedMoveIntegration(t *testing.T) {
 	f, _ := migrationExecutionSource(t, newSandboxStoreIntegrationPool(t), "consolidation-progress", "a")
 	registerConsolidationElastic(t, f, "i-source", "nomad-node-a", "node-a", "10.0.0.10", "172.27.0.0/26")

@@ -344,7 +344,7 @@ func (s *PGSandboxStore) CancelRuntimeNodeConsolidation(ctx context.Context, poo
 		return false, nil
 	}
 	var occupied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM (`+nomadMigrationOccupiedNodesSQL+`) occupied
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM (`+nomadMigrationOutstandingNodesSQL+`) occupied
 		WHERE occupied.cluster_id=$1 AND occupied.node_uid=$2)`, clusterID, nodeUID).Scan(&occupied); err != nil {
 		return false, err
 	}

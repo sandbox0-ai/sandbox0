@@ -73,16 +73,47 @@ func (d *nodeRuntime) AdoptMigrationDestination(ctx context.Context, request pro
 		return nil, errdefs.ErrUnavailable
 	}
 	defer d.endReconciliation(request.Target.SlotID)
-	return d.adoptMigrationDestination(ctx, request)
+	return d.adoptMigrationDestination(ctx, request, false)
 }
 
-func (d *nodeRuntime) adoptMigrationDestination(ctx context.Context, request protocol.MigrationAdoptionRequest) (*protocol.MigrationAdoptionProof, error) {
+// A committed checkpoint resume retains an immutable regional image. Once the
+// region publishes its exact command-ready adoption request, a later stop must
+// not strand local image custody before ordinary crash cleanup can run.
+func (d *nodeRuntime) committedCheckpointAdoption(ctx context.Context, custody *MigrationDestinationCustody) (*protocol.MigrationAdoptionRequest, error) {
+	if custody == nil || custody.Restore == nil || custody.Request.Checkpoint == nil ||
+		(custody.Restore.State != protocol.MigrationRestoreComplete && custody.Restore.State != protocol.MigrationRestoreUncertain) {
+		return nil, nil
+	}
+	reader, ok := d.registrationAuthority.(migrationAdoptionCommandReader)
+	if !ok {
+		return nil, errdefs.ErrUnavailable
+	}
+	command, err := reader.GetMigrationAdoptionCommand(ctx, custody.Request.Target.SlotID)
+	if err != nil || command == nil {
+		return command, err
+	}
+	restored := *custody.Restore
+	restored.State = protocol.MigrationRestoreComplete
+	if command.CheckpointRestoreDigest == "" || command.ValidateFor(restored) != nil {
+		return nil, errdefs.ErrFailedPrecondition
+	}
+	return command, nil
+}
+
+func (d *nodeRuntime) adoptMigrationDestination(ctx context.Context, request protocol.MigrationAdoptionRequest, committedCheckpoint bool) (*protocol.MigrationAdoptionProof, error) {
 	record, err := d.journal.Get(request.Target.SlotID)
 	if err != nil {
 		return nil, err
 	}
 	c := record.MigrationDestination
-	if c == nil || c.Restore == nil || c.Failure != nil || request.ValidateFor(*c.Restore) != nil {
+	if c == nil || c.Restore == nil || c.Failure != nil {
+		return nil, errdefs.ErrFailedPrecondition
+	}
+	restored := *c.Restore
+	if committedCheckpoint && request.CheckpointRestoreDigest != "" && c.Request.Checkpoint != nil {
+		restored.State = protocol.MigrationRestoreComplete
+	}
+	if request.ValidateFor(restored) != nil {
 		return nil, errdefs.ErrFailedPrecondition
 	}
 	want, _ := request.Digest()
@@ -94,7 +125,7 @@ func (d *nodeRuntime) adoptMigrationDestination(ctx context.Context, request pro
 			proof := *c.Adoption.Proof
 			return &proof, nil
 		}
-	} else {
+	} else if !committedCheckpoint {
 		// First authorization requires the restored writer and process to be
 		// alive. Once intent is durable, retry must finish even after a crash.
 		sessions, err := d.runtime.RecoverySessions()
@@ -122,6 +153,13 @@ func (d *nodeRuntime) adoptMigrationDestination(ctx context.Context, request pro
 		if err := d.journal.recordMigrationAdoption(request, nil); err != nil {
 			return nil, err
 		}
+	} else {
+		if request.CheckpointRestoreDigest == "" {
+			return nil, errdefs.ErrFailedPrecondition
+		}
+		if err := d.journal.recordCommittedCheckpointAdoption(request); err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -137,6 +175,14 @@ func (d *nodeRuntime) adoptMigrationDestination(ctx context.Context, request pro
 }
 
 func (j *runtimeSlotJournal) recordMigrationAdoption(request protocol.MigrationAdoptionRequest, proof *protocol.MigrationAdoptionProof) error {
+	return j.recordMigrationAdoptionWithCommit(request, proof, false)
+}
+
+func (j *runtimeSlotJournal) recordCommittedCheckpointAdoption(request protocol.MigrationAdoptionRequest) error {
+	return j.recordMigrationAdoptionWithCommit(request, nil, true)
+}
+
+func (j *runtimeSlotJournal) recordMigrationAdoptionWithCommit(request protocol.MigrationAdoptionRequest, proof *protocol.MigrationAdoptionProof, committedCheckpoint bool) error {
 	want, err := request.Digest()
 	if err != nil {
 		return err
@@ -154,12 +200,22 @@ func (j *runtimeSlotJournal) recordMigrationAdoption(request protocol.MigrationA
 			return err
 		}
 		c := record.MigrationDestination
-		if c == nil || c.Restore == nil || request.ValidateFor(*c.Restore) != nil {
+		if c == nil || c.Restore == nil {
+			return errdefs.ErrFailedPrecondition
+		}
+		restored := *c.Restore
+		if committedCheckpoint && request.CheckpointRestoreDigest != "" && c.Request.Checkpoint != nil && c.Adoption == nil {
+			restored.State = protocol.MigrationRestoreComplete
+		}
+		if request.ValidateFor(restored) != nil {
 			return errdefs.ErrFailedPrecondition
 		}
 		if c.Adoption == nil {
 			if proof != nil || record.Cleanup != nil {
 				return errdefs.ErrFailedPrecondition
+			}
+			if committedCheckpoint {
+				c.Restore = &restored
 			}
 			c.Adoption = &MigrationAdoptionCustody{Request: request, RequestDigest: want}
 		} else {

@@ -234,10 +234,21 @@ func (d *nodeRuntime) fenceMigrationDestination(ctx context.Context, session roo
 	}
 	if custody.Adoption != nil {
 		// Finish a durable handoff before ordinary recovery may touch target writes.
-		if _, err := d.adoptMigrationDestination(ctx, custody.Adoption.Request); err != nil {
+		if _, err := d.adoptMigrationDestination(ctx, custody.Adoption.Request, false); err != nil {
 			return true, err
 		}
 		return false, nil
+	}
+	// A committed checkpoint resume has already published command readiness.
+	// Recover that exact regional command before classifying a later stop as an
+	// uncertain restore; its immutable image remains pinned by the region.
+	command, err := d.committedCheckpointAdoption(ctx, custody)
+	if err != nil {
+		return true, err
+	}
+	if command != nil {
+		_, err := d.adoptMigrationDestination(ctx, *command, true)
+		return err != nil, err
 	}
 	observation := *custody.Restore
 	observation.State = protocol.MigrationRestoreUncertain

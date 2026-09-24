@@ -33,6 +33,14 @@ unrecovered until ctld replays its planned retirement from the WAL and the
 manager records a durable RootFS head plus physical cleanup proof. Keep the
 fence if any of those checks fails.
 
+When a sandbox is paused again after recovery, inspect the new durable head
+before resuming it. A previously healthy fixed worker does not guarantee that
+the next claim will land there: the regional manager can select an older ready
+carrier on an elastic node. Drain and fence an unhealthy elastic node through
+the node-pool lifecycle before requesting the resume, then verify the new
+runtime reaches command-ready on the intended node. Nomad scheduling
+eligibility alone does not fence existing ready carriers from manager claims.
+
 Build ctld and the driver and obtain the complete pinned official runsc archive.
 For split-runtime releases, keep `gvisor-bin/` beside the supplied `runsc`; the
 installer validates and copies all five companions. Migration requires the

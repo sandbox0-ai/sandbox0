@@ -301,6 +301,20 @@ children so teardown does not turn recoverable sessions into normal exits.
 Sessions that had already exited or were explicitly stopped remain terminal;
 `runtime_recovery: restart` applies to sessions active at runtime replacement.
 
+## Sandbox0 Cloud Billing Pause
+
+Sandbox0 Cloud restricts new runtime use when prepaid credit is exhausted.
+Running sandboxes are automatically paused once outstanding usage and payment
+debt reach 10% of the team's most recent successful top-up amount. Without a
+successful top-up, any positive debt triggers the pause. Settlement and regional
+delivery are asynchronous, so this is a pause threshold rather than a precise
+limit on final charges.
+
+Billing pause uses the default filesystem-only checkpoint. The sandbox ID and
+committed RootFS remain available; processes and memory do not survive. Once
+billing admission allows runtime use again, the sandbox can be resumed with a
+new runtime generation. `hard_ttl` continues to apply while a sandbox is paused.
+
 ## Typical Pattern
 
 1. claim a sandbox with a soft `ttl`;

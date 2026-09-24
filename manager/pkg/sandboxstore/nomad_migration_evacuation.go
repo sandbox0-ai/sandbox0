@@ -19,15 +19,23 @@ var _ nomadmigration.EvacuationStore = (*PGSandboxStore)(nil)
 // Keep both nodes reserved until execution and staging custody have converged.
 // Recent aborts add a five-minute node-wide retry delay, including operations
 // which failed before a staging receipt. Neither rule changes capacity leases.
-const nomadMigrationOccupiedNodesSQL = `SELECT DISTINCT source.cluster_id, participant.node_uid
+const nomadMigrationNodeParticipantsSQL = `SELECT DISTINCT source.cluster_id, participant.node_uid
  FROM manager.sandbox_runtime_migrations m JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=m.operation_id
  JOIN manager.runtime_slots source ON source.slot_id=m.source_slot_id
  JOIN manager.runtime_slots target ON target.slot_id=m.target_slot_id
  CROSS JOIN LATERAL (VALUES(source.node_uid),(target.node_uid)) participant(node_uid)
- WHERE l.phase IN ('preparing','barriered','publishing','committing')
-  OR (l.phase='aborted' AND COALESCE(l.aborted_at,l.updated_at)+INTERVAL '5 minutes'>clock_timestamp())
+ WHERE `
+
+const nomadMigrationOutstandingNodesPredicateSQL = `l.phase IN ('preparing','barriered','publishing','committing')
   OR (m.staging_request IS NOT NULL AND (m.staging_source_release_receipt IS NULL OR m.staging_destination_release_receipt IS NULL))
   OR (m.capture_request IS NOT NULL AND m.capture_failure_completed_at IS NULL AND (m.source_finalization_receipt IS NULL OR (m.adoption_receipt IS NULL AND m.failure_completed_at IS NULL)))`
+
+const nomadMigrationOccupiedNodesSQL = nomadMigrationNodeParticipantsSQL + `(` + nomadMigrationOutstandingNodesPredicateSQL + `
+  OR (l.phase='aborted' AND COALESCE(l.aborted_at,l.updated_at)+INTERVAL '5 minutes'>clock_timestamp()))`
+
+// An aborted reservation with no remaining physical work delays retry, but it
+// must not keep a timed-out consolidation fence from reopening its source.
+const nomadMigrationOutstandingNodesSQL = nomadMigrationNodeParticipantsSQL + `(` + nomadMigrationOutstandingNodesPredicateSQL + `)`
 
 const nomadMigrationEvacuationSourceSQL = ` FROM manager.sandboxes s JOIN manager.runtime_slots r
  ON r.sandbox_id=s.sandbox_id AND r.cluster_id=s.cluster_id AND r.allocation_id=s.runtime_id AND r.allocation_namespace=s.runtime_namespace

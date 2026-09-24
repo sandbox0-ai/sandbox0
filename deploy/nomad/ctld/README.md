@@ -22,6 +22,17 @@ primary loss recovers from the last committed generation and may lose the dirty
 tail. Both processes run on the same node; durable sandbox truth remains in
 PostgreSQL and S3.
 
+If an interrupted planned pause leaves a claimed slot quiescing with an XFS
+reference to an NBD device after the host mount paths disappear, keep the
+regional node fence and maintenance journal. Do not disconnect the device,
+delete the branch WAL, clear its writer grant, or mark the slot terminal by
+hand. Inspect the exact allocation, guest processes, NBD owner, and branch
+journal before any node restart. A restart loses every live guest on that host;
+coordinate their durable pause first, and treat a still-quiescing sandbox as
+unrecovered until ctld replays its planned retirement from the WAL and the
+manager records a durable RootFS head plus physical cleanup proof. Keep the
+fence if any of those checks fails.
+
 Build ctld and the driver and obtain the complete pinned official runsc archive.
 For split-runtime releases, keep `gvisor-bin/` beside the supplied `runsc`; the
 installer validates and copies all five companions. Migration requires the

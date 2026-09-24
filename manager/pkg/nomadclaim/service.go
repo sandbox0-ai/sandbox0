@@ -609,7 +609,14 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 
 	if memory {
 		if err := bindCheckpointResumePlan(candidate, &plan); err != nil {
-			return nil, nil, apierror.NewConflict("sandbox", sandboxID, err)
+			// No restore command has been issued by this attempt. A mismatch
+			// between immutable capture authority and the current sandbox plan
+			// cannot heal on retry; close the exact lifecycle so it does not
+			// permanently block an explicit filesystem-only resume. The store
+			// still requires node image cancellation if an earlier attempt sent
+			// an image preparation command.
+			resumeErr := apierror.NewConflict("sandbox", sandboxID, err)
+			return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 		}
 	} else {
 		plan.request.RuntimeGeneration = candidate.RuntimeGeneration

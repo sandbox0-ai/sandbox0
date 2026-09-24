@@ -186,6 +186,11 @@ func TestMemoryResumeServiceRejectsMissingImageOrDriftBeforeExecution(t *testing
 			require.Empty(t, p.authorities)
 			require.Zero(t, p.coldCalls)
 			require.Empty(t, f.store.resumeCompleteCalls)
+			if failure == "compatibility" || failure == "config" || failure == "authority" || failure == "missing" {
+				require.Len(t, f.store.resumeAbortCalls, 1, "permanent pre-execution drift must close its lifecycle")
+			} else {
+				require.Empty(t, f.store.resumeAbortCalls)
+			}
 			if failure == "unsupported" {
 				require.ErrorIs(t, err, service.ErrSandboxLifecycleUnavailable)
 				require.Empty(t, f.store.resumeRequests)

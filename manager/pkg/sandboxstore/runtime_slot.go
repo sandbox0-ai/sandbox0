@@ -136,6 +136,9 @@ type HeartbeatRuntimeSlotRequest struct {
 
 type AcquireRuntimeSlotRequest struct {
 	OperationID               string
+	TargetNodeID              string
+	TargetNodeUID             string
+	TargetNodeBootID          string
 	ClaimID                   string
 	SandboxID                 string
 	FilesystemID              string
@@ -637,6 +640,7 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 					AND slot_id <> ALL($6::text[])
 					AND ($7 = '' OR node_id <> $7)
 					AND ($8 = '' OR node_uid <> $8)
+					AND ($11 = '' OR (node_id = $11 AND node_uid = $12 AND node_boot_id = $13))
 					AND node_uid <> ALL($9::text[])
 					AND (NOT $10::boolean OR NOT EXISTS (
 						SELECT 1 FROM manager.runtime_node_instances elastic
@@ -690,7 +694,8 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
-			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination))
+			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination,
+			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}
@@ -1564,6 +1569,15 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 		return nil, fmt.Errorf("acquire runtime slot request is required")
 	}
 	normalized := *request
+	if (normalized.TargetNodeID == "") != (normalized.TargetNodeUID == "") ||
+		(normalized.TargetNodeID == "") != (normalized.TargetNodeBootID == "") {
+		return nil, fmt.Errorf("target node requires ID, UID and boot ID together")
+	}
+	for _, value := range []string{normalized.TargetNodeID, normalized.TargetNodeUID, normalized.TargetNodeBootID} {
+		if len(value) > 512 || strings.TrimSpace(value) != value {
+			return nil, fmt.Errorf("target node identity must be canonical and at most 512 bytes")
+		}
+	}
 	fields := map[string]*string{
 		"operation_id": &normalized.OperationID, "claim_id": &normalized.ClaimID,
 		"sandbox_id": &normalized.SandboxID, "filesystem_id": &normalized.FilesystemID,
@@ -1888,6 +1902,8 @@ func runtimeSlotCallerMatches(slot *RuntimeSlot, allocationID, nodeUID, nodeBoot
 
 func runtimeSlotClaimMatches(slot *RuntimeSlot, request *AcquireRuntimeSlotRequest) bool {
 	return slot != nil &&
+		(request.TargetNodeID == "" || (slot.NodeID == request.TargetNodeID &&
+			slot.NodeUID == request.TargetNodeUID && slot.NodeBootID == request.TargetNodeBootID)) &&
 		slot.ClaimOperationID == request.OperationID &&
 		slot.ClaimID == request.ClaimID &&
 		slot.SandboxID == request.SandboxID &&

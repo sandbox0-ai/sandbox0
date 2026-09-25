@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/cacheprewarm"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/deletionwebhook"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
@@ -307,6 +308,14 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure Nomad sandbox runtime", zap.Error(err))
 	}
+	var cachePrewarm *cacheprewarm.Worker
+	if carrierPool != nil && len(cfg.CarrierPool.PrewarmWindows) > 0 {
+		cachePrewarm, err = cacheprewarm.New(sandboxStore, templateStore, sandboxRuntime, sandboxRuntime,
+			procdClient, internalTokenGenerator, carrierPool, cfg.DefaultClusterId, carrierPool.PrivilegedDigest(), logger)
+		if err != nil {
+			logger.Fatal("Failed to configure node cache prewarm", zap.Error(err))
+		}
+	}
 
 	if meteringRepo != nil {
 		lifecycleProjector, err := managermetering.NewNomadLifecycleProjector(
@@ -516,6 +525,7 @@ func main() {
 		nodeEnrollment:         nodeEnrollment,
 		nodePoolAutoscaler:     nodePoolAutoscaler,
 		carrierPool:            carrierPool,
+		cachePrewarm:           cachePrewarm,
 		nodePoolLifecycle:      nodePoolLifecycle,
 		rootFSMaterializer:     rootFSCompositeMaterializer,
 		rootFSImportDiscovery:  rootFSImportDiscovery,

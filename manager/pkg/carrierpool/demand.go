@@ -62,6 +62,28 @@ func (w PrewarmWindow) activeEnd(now time.Time) (time.Time, bool) {
 	return w.End, !now.Before(w.Start) && now.Before(w.End)
 }
 
+// ActivePrewarmWindows lets the cache warmer follow the exact same schedule
+// that requests spare carriers. The returned slice is a copy.
+func (w *Worker) ActivePrewarmWindows(now time.Time) []PrewarmWindow {
+	if w == nil {
+		return nil
+	}
+	var active []PrewarmWindow
+	for _, window := range w.config.PrewarmWindows {
+		if _, ok := window.activeEnd(now); ok {
+			active = append(active, window)
+		}
+	}
+	return active
+}
+
+func (w *Worker) PrivilegedDigest() string {
+	if w == nil {
+		return ""
+	}
+	return w.config.PrivilegedDigest
+}
+
 func (w *Worker) demand(ctx context.Context, nodes []sandboxstore.RuntimeCarrierNode) (map[string]map[string]int, error) {
 	return w.demandAt(ctx, nodes, time.Now())
 }

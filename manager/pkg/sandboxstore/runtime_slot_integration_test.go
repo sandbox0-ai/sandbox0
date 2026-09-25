@@ -68,6 +68,11 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		ClaimTTL:                  time.Minute,
 		Resources:                 runtimeSlotTestResources(),
 	}
+	wrongNode := *acquire
+	wrongNode.TargetNodeID, wrongNode.TargetNodeUID, wrongNode.TargetNodeBootID = "other", "other", "other"
+	_, err = store.AcquireRuntimeSlot(ctx, &wrongNode)
+	require.ErrorIs(t, err, ErrRuntimeSlotUnavailable, "targeted prewarm must not fall back to the fixed node")
+	acquire.TargetNodeID, acquire.TargetNodeUID, acquire.TargetNodeBootID = registration.NodeID, registration.NodeUID, registration.NodeBootID
 	// A failed attempt is pressure only until this exact operation acquires a
 	// lease. The pressure row may remain for its TTL, including a late recorder.
 	demand := &RuntimeNodePoolDemandRequest{
@@ -99,6 +104,10 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	claimRetry, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
 	require.Equal(t, claimed.ID, claimRetry.ID)
+	changedTarget := *acquire
+	changedTarget.TargetNodeBootID = "other-boot"
+	_, err = store.AcquireRuntimeSlot(ctx, &changedTarget)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict, "retry cannot change the physical boot")
 	require.Equal(t, claimed.ClaimedAt, claimRetry.ClaimedAt)
 	changedClusterFilter := *acquire
 	changedClusterFilter.ClusterID = ""

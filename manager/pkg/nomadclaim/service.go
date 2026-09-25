@@ -1137,9 +1137,15 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 		return nil, err
 	}
 
+	target := &service.ClaimNodeTarget{}
+	if req.TargetNode != nil {
+		*target = *req.TargetNode
+	}
 	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
 		OperationID: req.OperationID, SandboxID: sandboxID,
-		TeamID: req.TeamID, UserID: req.UserID,
+		TargetNodeID: target.NodeID, TargetNodeUID: target.NodeUID,
+		TargetNodeBootID: target.NodeBootID,
+		TeamID:           req.TeamID, UserID: req.UserID,
 		CompatibilityDigest: runtimeClass.CompatibilityDigest, ClusterID: runtimeClass.ClusterID,
 		Resources:     resourceRequest,
 		NetworkPolicy: policy, Runtime: assignment, StartedAt: req.StartedAt,

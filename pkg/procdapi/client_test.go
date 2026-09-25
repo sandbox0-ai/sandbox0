@@ -2,7 +2,6 @@ package procdapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,31 +17,6 @@ func TestNewProcdClientUsesDefaultTimeout(t *testing.T) {
 	}
 	if got := client.httpClient.Timeout; got != 30*time.Second {
 		t.Fatalf("timeout = %s, want 30s", got)
-	}
-}
-
-func TestCreateCommandRunsSynchronousProcdContext(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != ContextsPath || r.Header.Get("X-Internal-Token") != "prewarm-token" {
-			t.Fatalf("unexpected command request: %s %s", r.Method, r.URL.Path)
-		}
-		var request CreateContextRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
-		}
-		if request.Type != ProcessTypeCMD || request.Cmd == nil || len(request.Cmd.Command) != 2 ||
-			request.Cmd.Command[0] != "node" || request.Cmd.Command[1] != "-v" || !request.WaitUntilDone {
-			t.Fatalf("unexpected command body: %+v", request)
-		}
-		zero, stdout := 0, "v22.0.0\n"
-		if err := spec.WriteSuccess(w, http.StatusCreated, ContextResponse{ExitCode: &zero, Stdout: &stdout}); err != nil {
-			t.Fatal(err)
-		}
-	}))
-	defer server.Close()
-	result, err := NewProcdClient(ProcdClientConfig{}).CreateCommand(t.Context(), server.URL, "prewarm-token", []string{"node", "-v"})
-	if err != nil || result == nil || result.Stdout == nil || *result.Stdout != "v22.0.0\n" {
-		t.Fatalf("CreateCommand = %+v, %v", result, err)
 	}
 }
 

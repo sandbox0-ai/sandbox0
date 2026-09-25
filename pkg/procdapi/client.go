@@ -188,48 +188,6 @@ func (c *ProcdClient) ProbeCommandReady(
 	}, nil
 }
 
-// CreateCommand runs an ordinary supervised command in a claimed sandbox.
-// Cache prewarming uses this after the command-ready probe so it exercises
-// the same first-command path as a Compute SDK caller.
-func (c *ProcdClient) CreateCommand(ctx context.Context, procdAddress, internalToken string, command []string) (*ContextResponse, error) {
-	if len(command) == 0 {
-		return nil, fmt.Errorf("command is required")
-	}
-	body, err := json.Marshal(CreateContextRequest{Type: ProcessTypeCMD, Cmd: &CreateCMDContextRequest{Command: command}, WaitUntilDone: true})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, procdAddress+ContextsPath, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", internalToken)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(payload) > 1<<20 {
-		return nil, fmt.Errorf("command response exceeds 1 MiB")
-	}
-	result, apiErr, err := decodeProcdResponse[ContextResponse](payload)
-	if err != nil {
-		return nil, err
-	}
-	if apiErr != nil {
-		return nil, fmt.Errorf("command failed: %s", apiErr.Message)
-	}
-	if resp.StatusCode != http.StatusCreated || result == nil || result.ExitCode == nil || *result.ExitCode != 0 {
-		return nil, fmt.Errorf("command did not complete successfully (status %d)", resp.StatusCode)
-	}
-	return result, nil
-}
-
 func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {
 	return doBoundedProcdRequest[T](ctx, httpClient, method, url, internalToken, action, request, 0)
 }

@@ -311,7 +311,7 @@ func main() {
 	var cachePrewarm *cacheprewarm.Worker
 	if carrierPool != nil && len(cfg.CarrierPool.PrewarmWindows) > 0 {
 		cachePrewarm, err = cacheprewarm.New(sandboxStore, templateStore, sandboxRuntime, sandboxRuntime,
-			procdClient, internalTokenGenerator, carrierPool, cfg.DefaultClusterId, carrierPool.PrivilegedDigest(), logger)
+			cacheprewarm.NewCommandClient(procdHTTPClient), internalTokenGenerator, carrierPool, cfg.DefaultClusterId, carrierPool.PrivilegedDigest(), logger)
 		if err != nil {
 			logger.Fatal("Failed to configure node cache prewarm", zap.Error(err))
 		}

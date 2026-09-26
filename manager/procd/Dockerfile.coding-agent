@@ -74,6 +74,7 @@ WORKDIR /opt/coding-agents
 
 COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/package-lock.json ./
 COPY manager/procd/coding-agents/THIRD_PARTY.md ./
+COPY manager/procd/coding-agents/inventory.mjs ./
 COPY --from=zcode-build /opt/zcode /opt/zcode
 
 RUN npm ci --omit=dev \
@@ -88,6 +89,7 @@ RUN npm ci --omit=dev \
   && kimi --version \
   && zcode --version \
   && playwright-cli --version \
+  && node inventory.mjs > harness-inventory.json \
   && npm cache clean --force
 
 # Keep Chromium's process sandbox for the non-root desktop browser.

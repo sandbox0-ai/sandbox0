@@ -806,6 +806,8 @@ func releaseUnreferencedRootFSMaterializationObject(
 				SELECT 1 FROM manager.rootfs_materialization_batch_objects batch_object
 				WHERE batch_object.object_key = object_record.object_key
 			)
+			AND NOT EXISTS (SELECT 1 FROM manager.rootfs_inventory_object_custody inventory_object WHERE inventory_object.object_key=object_record.object_key)
+			AND NOT EXISTS (SELECT 1 FROM manager.rootfs_node_upload_objects node_object WHERE node_object.object_key=object_record.object_key)
 			AND NOT EXISTS (
 				SELECT 1 FROM manager.rootfs_generation_materialization_objects locator_object
 				WHERE locator_object.object_key = object_record.object_key

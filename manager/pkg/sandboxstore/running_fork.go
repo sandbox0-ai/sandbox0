@@ -279,6 +279,9 @@ func forkRunningRootFSFilesystem(
 	if err := insertPreparedRootFSGeneration(ctx, tx, checkpoint); err != nil {
 		return nil, err
 	}
+	if err := publishRootFSNodeUploads(ctx, tx, req.SourceGrantID, req.OperationID, checkpoint); err != nil {
+		return nil, err
+	}
 	tag, err = tx.Exec(ctx, `
 		UPDATE manager.rootfs_filesystems
 		SET head_generation_id = $2, updated_at = NOW()

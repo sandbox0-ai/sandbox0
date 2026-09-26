@@ -153,8 +153,8 @@ func TestCreateSmallTemplatePersistsPlatformCPUFloor(t *testing.T) {
 	if response.Code != http.StatusCreated || !store.createCalled {
 		t.Fatalf("status = %d, persisted = %t, body = %s", response.Code, store.createCalled, response.Body.String())
 	}
-	if got := store.createdOrUpdatedSpec.MainContainer.Resources.CPU; got != "150m" {
-		t.Fatalf("persisted CPU = %q, want 150m", got)
+	if got := store.createdOrUpdatedSpec.MainContainer.Resources.CPU; got != "500m" {
+		t.Fatalf("persisted CPU = %q, want 500m", got)
 	}
 	if strings.Contains(response.Body.String(), `"cpu"`) {
 		t.Fatal("public template response exposed internal CPU field")

@@ -32,8 +32,8 @@ func TestEffectiveResourcesCarryCPUFloorIntoRuntimeRequest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if request.CPUMillicores != 150 || request.MemoryBytes != 128<<20 {
-				t.Fatalf("runtime request = %#v, want 150m/128Mi", request)
+			if request.CPUMillicores != 500 || request.MemoryBytes != 128<<20 {
+				t.Fatalf("runtime request = %#v, want 500m/128Mi", request)
 			}
 		})
 	}

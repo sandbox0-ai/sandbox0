@@ -118,7 +118,7 @@ func TestSelectClusterForSmallSandboxUsesCPUFloor(t *testing.T) {
 			tpl := routingTemplate("small")
 			tpl.Spec.MainContainer.Resources = sandboxspec.ResourceQuota{CPU: "32m", Memory: "128Mi"}
 			repo := &fakeCapacityRepository{capacities: []*db.ClusterCapacity{
-				capacity("cluster-a", 1, 1, 1, 128<<20, 150),
+				capacity("cluster-a", 1, 1, 1, 128<<20, 500),
 			}}
 			req := &apispec.ClaimRequest{Template: "small"}
 			if override {
@@ -129,8 +129,8 @@ func TestSelectClusterForSmallSandboxUsesCPUFloor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if repo.cpuMillicores != 150 || repo.memoryBytes != 128<<20 {
-				t.Fatalf("capacity query = %dm/%d, want 150m/128Mi", repo.cpuMillicores, repo.memoryBytes)
+			if repo.cpuMillicores != 500 || repo.memoryBytes != 128<<20 {
+				t.Fatalf("capacity query = %dm/%d, want 500m/128Mi", repo.cpuMillicores, repo.memoryBytes)
 			}
 		})
 	}

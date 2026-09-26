@@ -42,3 +42,11 @@ execution and PostgreSQL lock waiting. The `acquired_connections` gauge reaching
 `max_connections` shows pool saturation; PostgreSQL blocking relationships then
 identify whether those connections are occupied by serial quota or node-capacity
 transactions. Increasing the pool limit alone does not remove those locks.
+
+## Sandbox CPU floor
+
+New sandbox resource leases use at least 500 millicores, including claims from
+older stored templates and memory overrides. Larger memory-derived CPU values
+are preserved. Existing active resource leases keep their recorded limits.
+Regional routing, manager admission, metering and node cgroups use the resolved
+CPU value; ready carrier count alone does not establish available CPU capacity.

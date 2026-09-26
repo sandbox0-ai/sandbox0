@@ -114,9 +114,9 @@ func TestCPUForMemory(t *testing.T) {
 		want   string
 	}{
 		{name: "whole cpu", memory: "4Gi", want: "1"},
-		{name: "minimum sandbox memory receives CPU floor", memory: "128Mi", want: "150m"},
-		{name: "below CPU floor", memory: "512Mi", want: "150m"},
-		{name: "above CPU floor rounds up to millicpu", memory: "615Mi", want: "151m"},
+		{name: "minimum sandbox memory receives CPU floor", memory: "128Mi", want: "500m"},
+		{name: "below CPU floor", memory: "512Mi", want: "500m"},
+		{name: "above CPU floor rounds up to millicpu", memory: "2049Mi", want: "501m"},
 		{name: "half cpu", memory: "2Gi", want: "500m"},
 	}
 
@@ -148,7 +148,7 @@ func TestValidateResourceRatio(t *testing.T) {
 		t.Fatalf("expected ratio to pass, got %v", err)
 	}
 
-	spec.MainContainer.Resources.CPU = "150m"
+	spec.MainContainer.Resources.CPU = "500m"
 	spec.MainContainer.Resources.Memory = "129Mi"
 	if err := ValidateResourceRatio(spec, quantity.MustParse("4Gi"), "rounded template"); err != nil {
 		t.Fatalf("expected rounded memory-derived cpu to pass, got %v", err)
@@ -172,9 +172,9 @@ func TestResolveClaimResourcesEnforcesCPUFloorForStoredTemplatesAndOverrides(t *
 		wantCPU                     int64
 		wantMemory                  int64
 	}{
-		{name: "legacy template", cpu: "63m", memory: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
-		{name: "legacy default ratio template", cpu: "32m", memory: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
-		{name: "claim memory override", cpu: "1", memory: "2Gi", override: "128Mi", wantCPU: 150, wantMemory: 128 << 20},
+		{name: "legacy template", cpu: "63m", memory: "128Mi", wantCPU: 500, wantMemory: 128 << 20},
+		{name: "legacy default ratio template", cpu: "32m", memory: "128Mi", wantCPU: 500, wantMemory: 128 << 20},
+		{name: "claim memory override", cpu: "1", memory: "2Gi", override: "128Mi", wantCPU: 500, wantMemory: 128 << 20},
 		{name: "larger stored CPU preserved", cpu: "2", memory: "2Gi", wantCPU: 2000, wantMemory: 2 << 30},
 		{name: "larger override preserves ratio", cpu: "1", memory: "2Gi", override: "16Gi", wantCPU: 8000, wantMemory: 16 << 30},
 	} {

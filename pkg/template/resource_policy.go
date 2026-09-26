@@ -14,7 +14,7 @@ const (
 	DefaultSandboxMinMemory = "128Mi"
 	DefaultSandboxMaxMemory = "16Gi"
 	// Small sandboxes still need enough CPU to start the guest and execute commands.
-	minimumSandboxCPUMillicores int64 = 150
+	minimumSandboxCPUMillicores int64 = 500
 )
 
 // ResourcePolicy defines the platform-wide resource bounds shared by

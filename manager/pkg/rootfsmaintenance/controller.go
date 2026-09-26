@@ -8,6 +8,7 @@ import (
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"go.uber.org/zap"
 )
 
@@ -133,6 +134,19 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		status = "error"
 		runErr = err
 	}
+	if source, ok := c.deleter.(rootfsblock.RangeSource); ok {
+		for range c.cfg.MaxBatchesPerRun {
+			completed, err := c.store.InventoryRootFSGeneration(ctx, source, c.cfg.BatchSize)
+			if err != nil {
+				status = "error"
+				runErr = err
+				break
+			}
+			if !completed {
+				break
+			}
+		}
+	}
 
 	for batch := 0; batch < c.cfg.MaxBatchesPerRun; batch++ {
 		if err := ctx.Err(); err != nil {
@@ -153,7 +167,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 			}
 			break
 		}
-		if result == nil || (len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
+		if result == nil || (len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0 && result.DeletedGenerations == 0) {
 			break
 		}
 	}

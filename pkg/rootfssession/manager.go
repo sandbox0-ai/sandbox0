@@ -133,6 +133,8 @@ type Config struct {
 	ReadDiskCache                   rootfsblock.DiskCacheConfig
 	Source                          rootfsblock.RangeSource
 	Publisher                       rootfsblock.ImmutableObjectPublisher
+	PublisherForOperation           func(rootfshandoff.StageRequest, string) rootfsblock.ImmutableObjectPublisher
+	PublisherForRebase              func(rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher
 	Runtime                         HostRuntime
 	RebaseEngine                    RebaseEngine
 }
@@ -297,30 +299,32 @@ type ConsumerRegistration struct {
 // journal stores the tokenless regional Stage binding together with device and
 // mount side effects so a process-independent reconciler can finish cleanup.
 type Manager struct {
-	db                *bolt.DB
-	branchRoot        string
-	mountRoot         string
-	source            rootfsblock.RangeSource
-	publisher         rootfsblock.ImmutableObjectPublisher
-	readCache         *rootfsblock.ReadCache
-	runtime           HostRuntime
-	maxDirty          int64
-	retirementReserve int64
-	nodeDirty         *rootfsblock.DirtyTailBudget
-	mu                sync.Mutex
-	live              map[string]*liveSession
-	captures          map[string]bool
-	locks             sync.Map
-	lifetime          context.Context
-	cancel            context.CancelFunc
-	rebaseEngine      RebaseEngine
-	rebaseAdmission   chan struct{}
-	rebaseWG          sync.WaitGroup
-	pressureSignal    chan struct{}
-	recoveryMu        sync.RWMutex
-	recoveryParents   map[string]struct{}
-	quietExternal     map[string]time.Time
-	closing           bool
+	db                    *bolt.DB
+	branchRoot            string
+	mountRoot             string
+	source                rootfsblock.RangeSource
+	publisher             rootfsblock.ImmutableObjectPublisher
+	publisherForOperation func(rootfshandoff.StageRequest, string) rootfsblock.ImmutableObjectPublisher
+	publisherForRebase    func(rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher
+	readCache             *rootfsblock.ReadCache
+	runtime               HostRuntime
+	maxDirty              int64
+	retirementReserve     int64
+	nodeDirty             *rootfsblock.DirtyTailBudget
+	mu                    sync.Mutex
+	live                  map[string]*liveSession
+	captures              map[string]bool
+	locks                 sync.Map
+	lifetime              context.Context
+	cancel                context.CancelFunc
+	rebaseEngine          RebaseEngine
+	rebaseAdmission       chan struct{}
+	rebaseWG              sync.WaitGroup
+	pressureSignal        chan struct{}
+	recoveryMu            sync.RWMutex
+	recoveryParents       map[string]struct{}
+	quietExternal         map[string]time.Time
+	closing               bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -408,7 +412,7 @@ func New(config Config) (*Manager, error) {
 	}
 	manager := &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
-		source: config.Source, publisher: config.Publisher, readCache: readCache,
+		source: config.Source, publisher: config.Publisher, publisherForOperation: config.PublisherForOperation, publisherForRebase: config.PublisherForRebase, readCache: readCache,
 		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
 		retirementReserve: config.DirtyTailRetirementReserveBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
@@ -767,7 +771,7 @@ func (m *Manager) CaptureRunningFork(
 			fmt.Errorf("decode running fork base generation: %w", err), clearErr,
 		)
 	}
-	sealed, payload, durability, err := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.publisher)
+	sealed, payload, durability, err := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.operationPublisher(stage, request.OperationID))
 	checkpointSequence := checkpoint.Sequence()
 	err = errors.Join(err, checkpoint.Close())
 	if err != nil {
@@ -2219,7 +2223,11 @@ func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) err
 			if decodeErr != nil {
 				releaseErr = fmt.Errorf("decode retiring base generation: %w", decodeErr)
 			} else {
-				sealed, payload, durability, buildErr := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.publisher)
+				stage := rootfshandoff.StageRequest{}
+				if current.Stage != nil {
+					stage = *current.Stage
+				}
+				sealed, payload, durability, buildErr := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.operationPublisher(stage, current.RetireOperationID))
 				if buildErr != nil {
 					releaseErr = fmt.Errorf("seal durable generation: %w", buildErr)
 				} else {
@@ -2841,4 +2849,18 @@ func privatePath(path string, directory bool) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+func (m *Manager) operationPublisher(stage rootfshandoff.StageRequest, operation string) rootfsblock.ImmutableObjectPublisher {
+	if m.publisherForOperation != nil {
+		return m.publisherForOperation(stage, operation)
+	}
+	return m.publisher
+}
+
+func (m *Manager) rebasePublisher(request rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher {
+	if m.publisherForRebase != nil {
+		return m.publisherForRebase(request)
+	}
+	return m.publisher
 }

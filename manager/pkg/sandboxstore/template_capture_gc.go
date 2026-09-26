@@ -46,7 +46,7 @@ func (s *PGSandboxStore) DeleteReleasedNomadRunningRootFSCaptures(
 		JOIN manager.rootfs_generations generation
 		  ON generation.generation_id = f.head_generation_id
 		 AND generation.filesystem_id = f.filesystem_id
-		WHERE c.state = 'published'
+		WHERE c.state = 'published' AND NOT generation.storage_inventory_required
 		  AND c.cancel_reason <> ''
 		  AND ($1 = '' OR c.team_id = $1)
 		  AND NOT EXISTS (

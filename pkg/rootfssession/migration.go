@@ -211,7 +211,7 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 	}
 	// Execution images must be paired with immutable regional blocks, not an
 	// inline dirty tail whose durability would depend on a later SQL commit.
-	built, err := rootfsblock.BuildIncrementalGenerationFromBlockReader(ctx, m.source, base, checkpoint, m.publisher, rootfsblock.BuildOptions{})
+	built, err := rootfsblock.BuildIncrementalGenerationFromBlockReader(ctx, m.source, base, checkpoint, m.operationPublisher(stage, request.OperationID), rootfsblock.BuildOptions{})
 	err = errors.Join(err, checkpoint.Close())
 	if err != nil {
 		return zero, err

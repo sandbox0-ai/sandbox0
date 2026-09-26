@@ -43,6 +43,14 @@ type ClaimRequest struct {
 	HardExpiresAt     time.Time                   `json:"-"`
 	StartedAt         time.Time                   `json:"-"`
 	OperationID       string                      `json:"-"`
+	// TargetNode is internal-only authority for node-local cache prewarming.
+	TargetNode *ClaimNodeTarget `json:"-"`
+}
+
+type ClaimNodeTarget struct {
+	NodeID     string `json:"node_id"`
+	NodeUID    string `json:"node_uid"`
+	NodeBootID string `json:"node_boot_id"`
 }
 
 type ClaimMetadata struct {

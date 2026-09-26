@@ -180,6 +180,9 @@ type Config struct {
 // launch IDs are derived from OperationID and cannot drift on retries.
 type Request struct {
 	OperationID         string
+	TargetNodeID        string
+	TargetNodeUID       string
+	TargetNodeBootID    string
 	SandboxID           string
 	TeamID              string
 	UserID              string
@@ -456,7 +459,9 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 	} else {
 		slot, err = p.acquireCapacity(ctx, normalized.TeamID, &sandboxstore.AcquireRuntimeSlotRequest{
 			OperationID: normalized.OperationID, ClaimID: ids.claimID, SandboxID: normalized.SandboxID,
-			FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
+			TargetNodeID: normalized.TargetNodeID, TargetNodeUID: normalized.TargetNodeUID,
+			TargetNodeBootID: normalized.TargetNodeBootID,
+			FilesystemID:     filesystem.ID, SourceGenerationID: generation.ID,
 			CompatibilityDigest: normalized.CompatibilityDigest, ClusterID: normalized.ClusterID,
 			RuntimeAssignmentRevision: runtimeRevision, NetworkPolicyDigest: policyDigest,
 			RuntimeAssignmentPayload: normalized.RuntimeAssignmentPayload, NetworkPolicy: normalized.NetworkPolicy,
@@ -467,7 +472,7 @@ func (p *Planner) claim(ctx context.Context, request Request, migration *protoco
 	}
 	if err != nil {
 		recordPhase(PhaseSlotAcquire, phaseStarted, false)
-		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && p.demandRecorder != nil && p.capacityQueue == nil {
+		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) && normalized.TargetNodeID == "" && p.demandRecorder != nil && p.capacityQueue == nil {
 			_ = p.demandRecorder.RecordRuntimeNodePoolDemand(ctx, &sandboxstore.RuntimeNodePoolDemandRequest{
 				PoolID: p.demandPoolID, OperationID: normalized.OperationID,
 				ClusterID: normalized.ClusterID, CPUMillicores: normalized.Resources.CPUMillicores,
@@ -802,6 +807,15 @@ type normalizedRequest struct {
 
 func (p *Planner) validateRequest(request Request, now time.Time) (normalizedRequest, error) {
 	normalized := normalizedRequest{Request: request}
+	if (request.TargetNodeID == "") != (request.TargetNodeUID == "") ||
+		(request.TargetNodeID == "") != (request.TargetNodeBootID == "") {
+		return normalizedRequest{}, errors.New("target node requires ID, UID and boot ID together")
+	}
+	for _, value := range []string{request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID} {
+		if len(value) > 512 || strings.TrimSpace(value) != value {
+			return normalizedRequest{}, errors.New("target node identity must be canonical and at most 512 bytes")
+		}
+	}
 	for name, value := range map[string]string{
 		"operation_id": request.OperationID, "sandbox_id": request.SandboxID,
 		"team_id": request.TeamID, "compatibility_digest": request.CompatibilityDigest,
@@ -928,6 +942,8 @@ func validateClaimedSlot(slot *sandboxstore.RuntimeSlot, request normalizedReque
 		slot.ClaimClusterFilter != request.ClusterID || slot.ClaimTTL != claimTTL ||
 		slot.ClaimRuntimeAssignmentRevision != request.RuntimeAssignmentRevision ||
 		slot.ClaimNetworkPolicyDigest != request.NetworkPolicyDigest ||
+		(request.TargetNodeID != "" && (slot.NodeID != request.TargetNodeID ||
+			slot.NodeUID != request.TargetNodeUID || slot.NodeBootID != request.TargetNodeBootID)) ||
 		slot.ClusterID == "" || (request.ClusterID != "" && slot.ClusterID != request.ClusterID) ||
 		slot.AllocationID == "" || slot.AllocationNamespace == "" || slot.NodeID == "" ||
 		slot.NodeUID == "" || slot.NodeBootID == "" || slot.NetNSIdentity == "" || slot.ControlEndpoint == "" ||

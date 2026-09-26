@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/cacheprewarm"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
@@ -33,6 +34,7 @@ type managerApp struct {
 	nodeEnrollment         *nodeenrollment.Server
 	nodePoolAutoscaler     *nodepoolautoscaler.Worker
 	carrierPool            *carrierpool.Worker
+	cachePrewarm           *cacheprewarm.Worker
 	nodePoolLifecycle      *nodepoollifecycle.Worker
 	rootFSMaterializer     *rootfsmaterializer.Worker
 	rootFSImportDiscovery  *rootfsimportdiscovery.Worker
@@ -101,6 +103,10 @@ func (a *managerApp) Run() {
 			}
 		})
 		a.logger.Info("Adaptive carrier controller started")
+	}
+	if a.cachePrewarm != nil {
+		go a.cachePrewarm.Run(a.ctx)
+		a.logger.Info("Runtime node cache prewarm controller started")
 	}
 	if a.nodePoolLifecycle != nil {
 		go a.nodePoolLifecycle.Run(a.ctx, func(result nodepoollifecycle.Result, err error) {

@@ -184,7 +184,7 @@ func (q *capacityQueue) run() {
 }
 
 func (p *Planner) acquireCapacity(ctx context.Context, team string, request *sandboxstore.AcquireRuntimeSlotRequest) (*sandboxstore.RuntimeSlot, error) {
-	if p.capacityQueue == nil {
+	if p.capacityQueue == nil || request.TargetNodeID != "" {
 		return p.store.AcquireRuntimeSlot(ctx, request)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, p.capacityQueue.config.Timeout)

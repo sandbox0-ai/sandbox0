@@ -28,10 +28,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Test coding-agent dependency updater
-        run: node --test manager/procd/coding-agents/update.test.mjs
+        run: node --test manager/procd/coding-agents/update.test.mjs manager/procd/coding-agents/inventory.test.mjs
 
       - name: Restore infra build cache
         uses: ./.github/actions/restore-infra-build-cache

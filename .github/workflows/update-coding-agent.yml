@@ -37,13 +37,13 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.cadence.outputs.due == 'true'
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Resolve exact harness versions
         id: source
         if: steps.cadence.outputs.due == 'true'
         run: |
           set -euo pipefail
-          node --test manager/procd/coding-agents/update.test.mjs
+          node --test manager/procd/coding-agents/update.test.mjs manager/procd/coding-agents/inventory.test.mjs
           node manager/procd/coding-agents/update.mjs
           git diff --check
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -101,6 +101,16 @@ jobs:
           IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
         run: bash tools/docker-in-sandbox/ci-smoke.sh "$IMAGE"
 
+      - name: Extract the inventory from the built image
+        env:
+          IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+        run: docker run --rm --network none "$IMAGE" cat /opt/coding-agents/harness-inventory.json > harness-inventory.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coding-agent-models-${{ matrix.arch }}
+          path: harness-inventory.json
+          if-no-files-found: error
+
   publish:
     needs: [prepare, build]
     runs-on: ubuntu-latest
@@ -123,6 +133,18 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: coding-agent-models-amd64
+          path: inventory-amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: coding-agent-models-arm64
+          path: inventory-arm64
+      - name: Verify architecture-independent harness inventory
+        run: |
+          cmp inventory-amd64/harness-inventory.json inventory-arm64/harness-inventory.json
+          cp inventory-amd64/harness-inventory.json harness-inventory.json
       - name: Publish verified multi-architecture image and release receipt
         run: |
           set -euo pipefail
@@ -130,11 +152,13 @@ jobs:
           docker buildx imagetools create -t "$source" "${source}-amd64" "${source}-arm64"
           manifest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}')"
           digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+          inventory_sha="$(sha256sum harness-inventory.json | cut -d' ' -f1)"
           jq -n --arg version "$VERSION" --arg source "$source" \
             --arg image "sandbox0ai/otemplates@${digest}" --arg commit "$SOURCE_COMMIT" \
-            '{version: $version, source: $source, image: $image, commit: $commit, dockerInDocker: 1}' > coding-agent-release.json
+            --arg inventorySha256 "$inventory_sha" \
+            '{version: $version, source: $source, image: $image, commit: $commit, dockerInDocker: 1, harnessInventorySha256: $inventorySha256}' > coding-agent-release.json
           # A release is the promotion signal. Partial/failed builds never reach infra.
-          gh release create "$VERSION" coding-agent-release.json \
+          gh release create "$VERSION" coding-agent-release.json harness-inventory.json \
             manager/procd/coding-agents/package.json \
             manager/procd/coding-agents/package-lock.json \
             manager/procd/coding-agents/THIRD_PARTY.md \

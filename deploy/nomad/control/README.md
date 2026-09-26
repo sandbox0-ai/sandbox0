@@ -24,3 +24,21 @@ Use the PostgreSQL writer endpoint. Each manager needs the same writer token
 key, runtime-class catalog, terminal endpoint catalog, node CA, and credential
 encryption key. Node certificates map to exact cluster/node/node-UID/agent-UID
 identities in every replica.
+
+## PostgreSQL pool diagnostics
+
+Manager exports `manager_pg_pool_*` metrics on its metrics listener. The
+connection gauges and acquisition counters come from one in-memory pgx pool
+snapshot; scraping them does not issue SQL. The
+`empty_acquires_total` and `empty_acquire_wait_seconds_total` counters measure
+successful acquisitions that had to wait for a connection to become available
+or be constructed. Compare counter increases over the exact benchmark interval.
+The wait total sums time across concurrent acquisitions, so it is not a single
+request's latency.
+
+Pool acquisition happens before the existing `manager_pgx_query_duration_seconds`
+SQL measurement. Read both to distinguish connection waiting from query
+execution and PostgreSQL lock waiting. The `acquired_connections` gauge reaching
+`max_connections` shows pool saturation; PostgreSQL blocking relationships then
+identify whether those connections are occupied by serial quota or node-capacity
+transactions. Increasing the pool limit alone does not remove those locks.

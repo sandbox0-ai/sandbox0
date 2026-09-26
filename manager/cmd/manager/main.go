@@ -95,6 +95,7 @@ func main() {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
 	defer pool.Close()
+	obsmetrics.RegisterDatabasePool(obsProvider.MetricsRegistryOrNil(), pool)
 
 	if err := runTemplateMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run template migrations", zap.Error(err))

@@ -703,3 +703,20 @@ func retentionS3Usage(t *testing.T, objects objectstore.Store, prefix string) re
 	}
 	return usage
 }
+
+func TestRootFSGenerationInventoryCanaryScopeS3Integration(t *testing.T) {
+	objects, prefix := generationRetentionS3Store(t)
+	store, filesystem, current := newRetentionS3Filesystem(t, objects, prefix, "retention-canary")
+	publishRetentionCheckpoint(t, store, objects, rootfsblock.BuildOptions{ObjectPrefix: prefix, DataRangeBytes: rootfsblock.LogicalBlockSize}, current, filesystem.ID, "canary-checkpoint", []rootfsblock.BlockUpdate{{Sequence: 1, Block: 0, Data: bytes.Repeat([]byte{9}, rootfsblock.LogicalBlockSize)}})
+	_, err := store.InventoryRootFSGenerationForTeam(t.Context(), objects, " ", 1)
+	require.ErrorContains(t, err, "inventory team is required")
+	complete, err := store.InventoryRootFSGenerationForTeam(t.Context(), objects, "other-team", 1)
+	require.NoError(t, err)
+	require.False(t, complete)
+	var attempts int
+	require.NoError(t, store.pool.QueryRow(t.Context(), `SELECT COUNT(*) FROM manager.rootfs_generations WHERE inventory_attempted_at IS NOT NULL`).Scan(&attempts))
+	require.Zero(t, attempts, "a canary must not mutate another team's inventory")
+	complete, err = store.InventoryRootFSGenerationForTeam(t.Context(), objects, "team-1", 1)
+	require.NoError(t, err)
+	require.True(t, complete)
+}

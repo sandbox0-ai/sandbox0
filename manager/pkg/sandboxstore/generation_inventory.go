@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,7 +15,21 @@ import (
 // InventoryRootFSGeneration advances one generation by at most pageLimit
 // authenticated mapping pages. Its durable queue bounds memory and resumes
 // after restarts; ancestry remains protected until the inventory commits.
-func (s *PGSandboxStore) InventoryRootFSGeneration(ctx context.Context, source rootfsblock.RangeSource, pageLimit int) (completed bool, err error) {
+func (s *PGSandboxStore) InventoryRootFSGeneration(ctx context.Context, source rootfsblock.RangeSource, pageLimit int) (bool, error) {
+	return s.inventoryRootFSGeneration(ctx, source, "", pageLimit)
+}
+
+// InventoryRootFSGenerationForTeam advances only the explicit operator cohort.
+// An empty team is rejected so a canary cannot accidentally scan all tenants.
+func (s *PGSandboxStore) InventoryRootFSGenerationForTeam(ctx context.Context, source rootfsblock.RangeSource, teamID string, pageLimit int) (bool, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return false, fmt.Errorf("inventory team is required")
+	}
+	return s.inventoryRootFSGeneration(ctx, source, teamID, pageLimit)
+}
+
+func (s *PGSandboxStore) inventoryRootFSGeneration(ctx context.Context, source rootfsblock.RangeSource, teamID string, pageLimit int) (completed bool, err error) {
 	if source == nil || pageLimit < 1 || pageLimit > 1000 {
 		return false, fmt.Errorf("inventory source and page limit between 1 and 1000 are required")
 	}
@@ -35,11 +50,11 @@ func (s *PGSandboxStore) InventoryRootFSGeneration(ctx context.Context, source r
 	// FK on inventory updates, so the reverse order could deadlock publication.
 	err = tx.QueryRow(ctx, `SELECT generation.generation_id,filesystem.filesystem_id
 		FROM manager.rootfs_filesystems filesystem JOIN manager.rootfs_generations generation USING (filesystem_id)
-		WHERE NOT inventory_complete AND durability_state='s3_materialized'
+		WHERE ($1='' OR filesystem.team_id=$1) AND NOT inventory_complete AND durability_state='s3_materialized'
 		AND (storage_inventory_required OR (`+rootFSGenerationRetainedSQL+`) OR EXISTS (
 			SELECT 1 FROM manager.rootfs_generation_inventory_pages pending WHERE pending.generation_id=generation.generation_id))
 		ORDER BY COALESCE(inventory_attempted_at,generation.created_at),generation.generation_id LIMIT 1
-		FOR KEY SHARE OF filesystem SKIP LOCKED`).Scan(&id, &filesystemID)
+		FOR KEY SHARE OF filesystem SKIP LOCKED`, teamID).Scan(&id, &filesystemID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

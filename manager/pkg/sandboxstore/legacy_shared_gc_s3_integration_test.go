@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,6 +30,12 @@ func TestRootFSLegacySharedObjectGCBeforeInventoryS3Integration(t *testing.T) {
 	var holds int
 	require.NoError(t, store.pool.QueryRow(t.Context(), `SELECT count(*) FROM manager.rootfs_legacy_object_gc_holds`).Scan(&holds))
 	require.Positive(t, holds, "deferred custody must survive the retiring owner")
+	// Also cover a deduplicated reservation with a lost successful PUT ack.
+	// Its payload is real and immutable, but its catalog upload is unconfirmed.
+	descriptor, err := rootfsblock.DecodeDescriptor(legacy.Descriptor)
+	require.NoError(t, err)
+	_, err = store.pool.Exec(t.Context(), `UPDATE manager.rootfs_materialization_objects SET uploaded_at=NULL WHERE object_key=$1`, descriptor.MappingRoot.Object.Key)
+	require.NoError(t, err)
 	// Restart before adoption: custody must persist, then eventually disappear.
 	restarted := NewPGSandboxStore(store.pool)
 	complete := false

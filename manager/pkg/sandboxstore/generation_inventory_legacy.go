@@ -21,7 +21,8 @@ var errRootFSLegacyInventoryPending = errors.New("legacy inventory has more full
 
 func adoptRootFSLegacyInventoryObjects(ctx context.Context, tx pgx.Tx, source rootfsblock.RangeSource, generationID string, references []byte) error {
 	rows, err := tx.Query(ctx, `SELECT DISTINCT reference.key,reference.kind FROM jsonb_to_recordset($1::jsonb) AS reference(key TEXT,kind TEXT)
-  WHERE NOT EXISTS(SELECT 1 FROM manager.rootfs_materialization_objects object WHERE object.object_key=reference.key)
+  LEFT JOIN manager.rootfs_materialization_objects object ON object.object_key=reference.key
+  WHERE object.uploaded_at IS NULL
   ORDER BY reference.key`, references)
 	if err != nil {
 		return err
@@ -93,6 +94,13 @@ func adoptRootFSLegacyInventoryObjects(ctx context.Context, tx pgx.Tx, source ro
 		}
 		if deleting || kind != reference.Kind || size != reference.Size || checksum != reference.Checksum {
 			return fmt.Errorf("%w: legacy object catalog/deletion conflict", ErrRootFSGenerationConflict)
+		}
+		// A deduplicated reservation may have lost its PUT acknowledgement.
+		// Full authentication above proves the exact reserved object exists;
+		// do not leave inventory permanently blocked by uploaded_at=NULL.
+		if _, err = tx.Exec(ctx, `UPDATE manager.rootfs_materialization_objects
+			SET uploaded_at=COALESCE(uploaded_at,clock_timestamp()),updated_at=NOW() WHERE object_key=$1`, object.key); err != nil {
+			return err
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO manager.rootfs_inventory_object_custody(generation_id,object_key) VALUES($1,$2) ON CONFLICT DO NOTHING`, generationID, object.key)
 		if err != nil {

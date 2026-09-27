@@ -508,6 +508,16 @@ For legacy projection discrepancies without a trustworthy historical deletion
 time, retain the audit evidence and converge current observations without
 inventing a historical credit or changing a settled ledger.
 
+Migration 114 preserves the retired ACK import audit rows and removes their
+external object FK only when every session is committed, no build owns a lease,
+and every linked object is a published result of a ready build. Unused pending
+builds with no objects or leases do not retain storage. An unfinished import
+keeps its FK; GC preserves those objects while retiring unrelated history.
+Inspect `legacy_ack_migration.sessions`, build leases and object publication
+states before any later forward retirement of that custody. Do not discard an
+unfinished migration or infer completion from the age of its rows. The old ACK
+import executable has been retired and must not be run after this cutover.
+
 Preserve coordinated PostgreSQL and object-store recovery data before cutover.
 Once the irreversible custody migrations apply, recover with compatible code
 and retained recovery data rather than an older binary. Keep release manifests

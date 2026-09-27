@@ -28,12 +28,13 @@ func NewCommandRunsc(config PluginConfig) Runsc {
 
 func newCommandRunscWithCPUCache(config PluginConfig, cache *gvisorcli.CPULaunchCache) Runsc {
 	return gvisorcli.New(gvisorcli.Config{
-		Path:           config.RunscPath,
-		CPULaunchCache: cache,
-		Root:           config.RunscRoot,
-		Platform:       config.Platform,
-		Overlay2:       config.Overlay2,
-		FileAccess:     config.FileAccess,
-		DirectFS:       config.DirectFS,
+		Path:            config.RunscPath,
+		CPULaunchCache:  cache,
+		Root:            config.RunscRoot,
+		Platform:        config.Platform,
+		Overlay2:        config.Overlay2,
+		FileAccess:      config.FileAccess,
+		DirectFS:        config.DirectFS,
+		RootFSMountRoot: config.RootFSMountRoot,
 	})
 }

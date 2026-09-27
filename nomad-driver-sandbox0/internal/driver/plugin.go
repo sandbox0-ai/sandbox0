@@ -138,6 +138,7 @@ var (
 
 // PluginConfig is the node-wide driver configuration.
 type PluginConfig struct {
+	RootFSMountRoot               string `codec:"-"` // populated from ctld runtime info, never authored HCL
 	ProcdArtifactDir              string `codec:"procd_artifact_dir"`
 	RunscPath                     string `codec:"runsc_path"`
 	RunscRoot                     string `codec:"runsc_root"`
@@ -440,13 +441,15 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		rootfsAllowedRoot = info.MountRoot
 	}
 
+	runnerConfig := *p.config
+	runnerConfig.RootFSMountRoot = rootfsAllowedRoot
 	handle := newTaskHandle(taskHandleOptions{
 		taskConfig:                    config,
 		bundleDir:                     bundleDir,
 		containerID:                   containerID,
 		rootMount:                     rootMount,
 		socketPath:                    socketPath,
-		runner:                        p.newRunner(*p.config),
+		runner:                        p.newRunner(runnerConfig),
 		runscOperationTimeout:         time.Duration(p.config.RunscOperationTimeoutSeconds) * time.Second,
 		mounter:                       systemMounter{},
 		rootfsAllowedRoot:             rootfsAllowedRoot,
@@ -505,7 +508,6 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	}
 	state.TaskConfig = handle.Config
 
-	runner := p.newRunner(*p.config)
 	rootfs, err := p.rootfsRuntime()
 	if err != nil {
 		return err
@@ -518,6 +520,9 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		}
 		rootfsAllowedRoot = info.MountRoot
 	}
+	runnerConfig := *p.config
+	runnerConfig.RootFSMountRoot = rootfsAllowedRoot
+	runner := p.newRunner(runnerConfig)
 	recovered := newTaskHandle(taskHandleOptions{
 		taskConfig:                    state.TaskConfig,
 		driverConfig:                  *state.DriverConfig,

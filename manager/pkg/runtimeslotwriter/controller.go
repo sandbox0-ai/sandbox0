@@ -371,7 +371,7 @@ func terminatingFailedResumeLifecycleMatches(
 	return resume != nil && record != nil && grant != nil && slot != nil &&
 		resume.ID == slot.ClaimOperationID && resume.SandboxID == record.ID &&
 		resume.Kind == sandboxstore.SandboxLifecycleKindResume &&
-		resume.Source == sandboxstore.SandboxLifecycleSourceManual && !resume.Cancelable &&
+		(resume.Source == sandboxstore.SandboxLifecycleSourceManual || resume.Source == sandboxstore.SandboxLifecycleSourceResourceResize) && !resume.Cancelable &&
 		resume.Phase == sandboxstore.SandboxLifecyclePhaseAborted &&
 		resume.CancelRequestedAt.IsZero() && !resume.AbortedAt.IsZero() && resume.Error != "" &&
 		resume.Epoch > 0 &&
@@ -401,7 +401,7 @@ func precommitResumeLifecycleMatches(
 	return active != nil && record != nil && grant != nil && slot != nil &&
 		active.ID == slot.ClaimOperationID && active.SandboxID == record.ID &&
 		active.Kind == sandboxstore.SandboxLifecycleKindResume &&
-		active.Source == sandboxstore.SandboxLifecycleSourceManual && !active.Cancelable &&
+		(active.Source == sandboxstore.SandboxLifecycleSourceManual || active.Source == sandboxstore.SandboxLifecycleSourceResourceResize) && !active.Cancelable &&
 		active.CancelRequestedAt.IsZero() &&
 		(active.Phase == sandboxstore.SandboxLifecyclePhasePreparing ||
 			active.Phase == sandboxstore.SandboxLifecyclePhaseBarriered ||

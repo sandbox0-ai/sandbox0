@@ -34,6 +34,7 @@ type managerControllerSet struct {
 	sandboxBillingPauseController    *service.SandboxBillingPauseController
 	sandboxRootFSController          *service.SandboxRootFSController
 	sandboxNetworkMutationController *service.SandboxNetworkMutationController
+	sandboxResourceResizeController  *service.SandboxResourceResizeController
 	templateBuildWorker              *templatebuild.TemplateBuildWorker
 	sandboxStore                     *sandboxstore.PGSandboxStore
 	rootFSObjectStore                objectstore.Store
@@ -86,6 +87,11 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 		})
 	}
 
+	if s.sandboxResourceResizeController != nil {
+		go logControllerErrorExact(ctx, s.logger, "Sandbox resource resize controller failed", func() error {
+			return s.sandboxResourceResizeController.Run(ctx, 2)
+		})
+	}
 	s.startRootFSMaintenance(ctx)
 	s.startMigrationImageGC(ctx)
 }

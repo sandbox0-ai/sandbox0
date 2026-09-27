@@ -346,6 +346,17 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure Nomad sandbox mutation service", zap.Error(err))
 	}
+	resizeRuntime, ok := sandboxRuntime.(service.SandboxResourceResizeRuntime)
+	if !ok {
+		logger.Fatal("Nomad sandbox runtime lacks resource resize capability")
+	}
+	sandboxResourceResize, err := service.NewSandboxResourceResizeService(sandboxStore, resizeRuntime, templateResourcePolicy)
+	if err != nil {
+		logger.Fatal("Failed to configure resource resize service", zap.Error(err))
+	}
+	sandboxResourceResizeController := service.NewSandboxResourceResizeController(sandboxStore, sandboxResourceResize, logger)
+	sandboxResourceResize.SetEnqueuer(sandboxResourceResizeController.EnqueueSandboxResourceResize)
+	sandboxUpdater.SetResourceResizeService(sandboxResourceResize)
 	runningSnapshotter, ok := sandboxRuntime.(service.SandboxRunningRootFSSnapshotter)
 	if !ok {
 		logger.Fatal("Nomad sandbox runtime lacks exact running RootFS snapshot authority")
@@ -510,6 +521,7 @@ func main() {
 		sandboxBillingPauseController:    sandboxBillingPauseController,
 		sandboxRootFSController:          sandboxRootFSController,
 		sandboxNetworkMutationController: sandboxNetworkMutationController,
+		sandboxResourceResizeController:  sandboxResourceResizeController,
 		templateBuildWorker:              templateBuildWorker,
 		sandboxStore:                     sandboxStore,
 		rootFSObjectStore:                rootFSObjectStore,

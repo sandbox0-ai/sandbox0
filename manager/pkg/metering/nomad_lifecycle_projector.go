@@ -55,33 +55,37 @@ type nomadMeteringQueueItem struct {
 }
 
 type nomadSandboxMeteringSource struct {
-	SandboxID           string
-	TeamID              string
-	UserID              string
-	TemplateID          string
-	ClusterID           string
-	DesiredState        string
-	AllocationNamespace string
-	OwnerKind           string
-	ResourceMillicpu    int64
-	ResourceMemoryMiB   int64
-	ClaimedAt           *time.Time
-	ExpiresAt           *time.Time
-	HardExpiresAt       *time.Time
-	DeletedAt           *time.Time
-	InitialActiveAt     *time.Time
-	ObservedAt          time.Time
+	SandboxID                string
+	TeamID                   string
+	UserID                   string
+	TemplateID               string
+	ClusterID                string
+	DesiredState             string
+	AllocationNamespace      string
+	OwnerKind                string
+	ResourceMillicpu         int64
+	InitialResourceMillicpu  int64
+	InitialResourceMemoryMiB int64
+	ResourceMemoryMiB        int64
+	ClaimedAt                *time.Time
+	ExpiresAt                *time.Time
+	HardExpiresAt            *time.Time
+	DeletedAt                *time.Time
+	InitialActiveAt          *time.Time
+	ObservedAt               time.Time
 }
 
 type nomadMeteringLifecycleTransition struct {
-	ID          string
-	Kind        string
-	Phase       string
-	Source      string
-	Epoch       int64
-	Error       string
-	CommittedAt *time.Time
-	AbortedAt   *time.Time
+	ID                string
+	Kind              string
+	Phase             string
+	Source            string
+	Epoch             int64
+	Error             string
+	CommittedAt       *time.Time
+	ResourceMillicpu  int64
+	ResourceMemoryMiB int64
+	AbortedAt         *time.Time
 }
 
 type nomadProjectionMutations struct {
@@ -276,8 +280,9 @@ func loadNomadMeteringSource(ctx context.Context, tx pgx.Tx, sandboxID string) (
 			sandbox.runtime_namespace, sandbox.owner_kind,
 			sandbox.resource_millicpu, sandbox.resource_memory_mib,
 			sandbox.claimed_at, sandbox.expires_at, sandbox.hard_expires_at,
-			sandbox.deleted_at, claim.completed_at, NOW()
+			sandbox.deleted_at, claim.completed_at, NOW(), initial.cpu_millicores, initial.memory_mib
 		FROM manager.sandboxes AS sandbox
+ JOIN manager.sandbox_metering_initial_resources initial ON initial.sandbox_id=sandbox.sandbox_id
 		LEFT JOIN manager.sandbox_runtime_claims AS claim
 			ON claim.sandbox_id = sandbox.sandbox_id
 		WHERE sandbox.sandbox_id = $1
@@ -288,6 +293,7 @@ func loadNomadMeteringSource(ctx context.Context, tx pgx.Tx, sandboxID string) (
 		&source.ResourceMillicpu, &source.ResourceMemoryMiB,
 		&source.ClaimedAt, &source.ExpiresAt, &source.HardExpiresAt,
 		&source.DeletedAt, &source.InitialActiveAt, &source.ObservedAt,
+		&source.InitialResourceMillicpu, &source.InitialResourceMemoryMiB,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("nomad metering source %s is missing", sandboxID)
@@ -305,7 +311,7 @@ func loadNomadMeteringLifecycleTransitions(
 	afterEpoch int64,
 ) ([]nomadMeteringLifecycleTransition, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT txn_id, kind, phase, source, epoch, error, committed_at, aborted_at
+		SELECT txn_id, kind, phase, source, epoch, error, committed_at, aborted_at, resource_millicpu, resource_memory_mib
 		FROM manager.sandbox_lifecycle_txns
 		WHERE sandbox_id = $1 AND epoch > $2 AND phase IN ($3, $4)
 		ORDER BY epoch, txn_id
@@ -320,6 +326,7 @@ func loadNomadMeteringLifecycleTransitions(
 		if err := rows.Scan(
 			&transition.ID, &transition.Kind, &transition.Phase, &transition.Source,
 			&transition.Epoch, &transition.Error, &transition.CommittedAt, &transition.AbortedAt,
+			&transition.ResourceMillicpu, &transition.ResourceMemoryMiB,
 		); err != nil {
 			return nil, fmt.Errorf("scan Nomad metering lifecycle transition: %w", err)
 		}
@@ -354,10 +361,14 @@ func (p *NomadLifecycleProjector) project(
 			ResourceMillicpu: source.ResourceMillicpu, ResourceMemoryMiB: source.ResourceMemoryMiB,
 			ClaimedAt: cloneTimePtr(source.ClaimedAt),
 		}
+		if source.InitialResourceMillicpu > 0 && source.InitialResourceMemoryMiB > 0 {
+			state.ResourceMillicpu = source.InitialResourceMillicpu
+			state.ResourceMemoryMiB = source.InitialResourceMemoryMiB
+		}
 		result.state = state
 		result.events = append(result.events, p.nomadSandboxEvent(
 			source, clusterID, *source.ClaimedAt, meteringpkg.EventTypeSandboxClaimed,
-			claimedEventID(source.SandboxID, *source.ClaimedAt), nomadClaimEventData(source),
+			claimedEventID(source.SandboxID, *source.ClaimedAt), nomadInitialClaimEventData(source),
 		))
 		if source.InitialActiveAt != nil {
 			state.ActiveSince = cloneTimePtr(source.InitialActiveAt)
@@ -368,10 +379,6 @@ func (p *NomadLifecycleProjector) project(
 	} else {
 		if state.SandboxID != source.SandboxID || state.TerminatedAt != nil && source.DeletedAt == nil {
 			return nil, fmt.Errorf("nomad metering projection identity changed for %s", source.SandboxID)
-		}
-		if state.ResourceMillicpu != 0 && state.ResourceMillicpu != source.ResourceMillicpu ||
-			state.ResourceMemoryMiB != 0 && state.ResourceMemoryMiB != source.ResourceMemoryMiB {
-			return nil, fmt.Errorf("nomad metering resources changed without a durable resize transition")
 		}
 		if state.TerminatedAt == nil && state.ActiveSince == nil && !state.Paused && source.InitialActiveAt != nil {
 			state.ActiveSince = cloneTimePtr(source.InitialActiveAt)
@@ -384,8 +391,6 @@ func (p *NomadLifecycleProjector) project(
 	state.TemplateID = source.TemplateID
 	state.ClusterID = clusterID
 	state.OwnerKind = source.OwnerKind
-	state.ResourceMillicpu = source.ResourceMillicpu
-	state.ResourceMemoryMiB = source.ResourceMemoryMiB
 	state.ClaimedAt = cloneTimePtr(source.ClaimedAt)
 
 	for _, transition := range transitions {
@@ -421,6 +426,14 @@ func (p *NomadLifecycleProjector) project(
 				if err != nil {
 					return nil, err
 				}
+				if transition.ResourceMillicpu > 0 && transition.ResourceMemoryMiB > 0 {
+					if !state.Paused && state.ActiveSince != nil &&
+						(state.ResourceMillicpu != transition.ResourceMillicpu || state.ResourceMemoryMiB != transition.ResourceMemoryMiB) {
+						return nil, fmt.Errorf("resource change requires a completed pause before resume")
+					}
+					state.ResourceMillicpu = transition.ResourceMillicpu
+					state.ResourceMemoryMiB = transition.ResourceMemoryMiB
+				}
 				if state.Paused || state.ActiveSince == nil {
 					result.events = append(result.events, p.nomadSandboxEvent(
 						source, clusterID, occurredAt, meteringpkg.EventTypeSandboxResumed,
@@ -436,6 +449,9 @@ func (p *NomadLifecycleProjector) project(
 		state.SourceLifecycleEpoch = transition.Epoch
 	}
 
+	if state.ResourceMillicpu != source.ResourceMillicpu || state.ResourceMemoryMiB != source.ResourceMemoryMiB {
+		return nil, fmt.Errorf("nomad metering resources changed without a durable resize transition")
+	}
 	if source.DeletedAt != nil && state.TerminatedAt == nil {
 		terminatedAt := source.DeletedAt.UTC()
 		if !state.Paused {
@@ -709,4 +725,13 @@ func (p *NomadLifecycleProjector) recordProjectionResults(
 			p.metrics.MeteringWindowsTotal.WithLabelValues(window.WindowType, result).Inc()
 		}
 	}
+}
+
+func nomadInitialClaimEventData(source *nomadSandboxMeteringSource) map[string]any {
+	initial := *source
+	if source.InitialResourceMillicpu > 0 && source.InitialResourceMemoryMiB > 0 {
+		initial.ResourceMillicpu = source.InitialResourceMillicpu
+		initial.ResourceMemoryMiB = source.InitialResourceMemoryMiB
+	}
+	return nomadClaimEventData(&initial)
 }

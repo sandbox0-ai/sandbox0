@@ -67,7 +67,7 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	sandboxID string,
 	source string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false, false, nil)
+	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false, false, nil, "")
 }
 
 // RequestNomadSandboxBillingPause commits a planned pause only while the
@@ -81,7 +81,7 @@ func (s *PGSandboxStore) RequestNomadSandboxBillingPause(
 		return nil, fmt.Errorf("admission version must not be negative")
 	}
 	return s.requestNomadSandboxPause(
-		ctx, sandboxID, SandboxLifecycleSourceAuto, nil, false, false, &admissionVersion,
+		ctx, sandboxID, SandboxLifecycleSourceAuto, nil, false, false, &admissionVersion, "",
 	)
 }
 
@@ -93,7 +93,7 @@ func (s *PGSandboxStore) ContinueNomadSandboxPause(
 	sandboxID string,
 ) (*NomadSandboxPauseCandidate, error) {
 	return s.requestNomadSandboxPause(
-		ctx, sandboxID, SandboxLifecycleSourceManual, nil, false, true, nil,
+		ctx, sandboxID, SandboxLifecycleSourceManual, nil, false, true, nil, "",
 	)
 }
 
@@ -104,7 +104,7 @@ func (s *PGSandboxStore) RequestNomadSandboxTTLPause(
 	ctx context.Context,
 	sandboxID string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true, false, nil)
+	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true, false, nil, "")
 }
 
 // RequestNomadSandboxPressurePause persists the same planned pause while
@@ -121,7 +121,7 @@ func (s *PGSandboxStore) RequestNomadSandboxPressurePause(
 	}
 	copy := *request
 	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
-	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false, false, nil)
+	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false, false, nil, "")
 }
 
 func (s *PGSandboxStore) requestNomadSandboxPause(
@@ -132,6 +132,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	requireExpiredTTL bool,
 	continueOnly bool,
 	billingAdmissionVersion *int64,
+	resourceResizeOperationID string,
 ) (*NomadSandboxPauseCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
@@ -142,8 +143,8 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		return nil, fmt.Errorf("sandbox_id is required, canonical, and at most 512 bytes")
 	}
 	source = strings.TrimSpace(source)
-	if source != SandboxLifecycleSourceManual && source != SandboxLifecycleSourceAuto {
-		return nil, fmt.Errorf("pause source must be manual or auto")
+	if source != SandboxLifecycleSourceManual && source != SandboxLifecycleSourceAuto && (source != SandboxLifecycleSourceResourceResize || resourceResizeOperationID == "") {
+		return nil, fmt.Errorf("pause source requires manual, auto, or an exact resource resize owner")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -154,6 +155,24 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	if !continueOnly && source != SandboxLifecycleSourceResourceResize {
+		resize, resizeErr := getSandboxResourceResize(ctx, tx, sandboxID)
+		if resizeErr != nil {
+			return nil, resizeErr
+		}
+		if resize != nil && resize.pending() {
+			return nil, fmt.Errorf("%w: resource resize owns pause", ErrNomadSandboxPauseConflict)
+		}
+	}
+	if source == SandboxLifecycleSourceResourceResize {
+		resize, resizeErr := getSandboxResourceResize(ctx, tx, sandboxID)
+		if resizeErr != nil {
+			return nil, resizeErr
+		}
+		if resize == nil || resize.OperationID != resourceResizeOperationID || resize.Phase != SandboxResourceResizePausing || resize.FromGeneration != record.RuntimeGeneration {
+			return nil, fmt.Errorf("%w: resource resize owner changed", ErrNomadSandboxPauseConflict)
+		}
 	}
 	if billingAdmissionVersion != nil {
 		var version int64
@@ -181,7 +200,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 		}
 		if continuedLifecycle == nil || continuedLifecycle.Kind != SandboxLifecycleKindPause ||
 			(continuedLifecycle.Source != SandboxLifecycleSourceManual &&
-				continuedLifecycle.Source != SandboxLifecycleSourceAuto) {
+				continuedLifecycle.Source != SandboxLifecycleSourceAuto && continuedLifecycle.Source != SandboxLifecycleSourceResourceResize) {
 			return nil, ErrNomadSandboxPauseNotPending
 		}
 	}
@@ -382,7 +401,7 @@ func nomadCommittedPlannedPauseLifecycleMatches(
 	}
 	return txn.ID == operationID && txn.SandboxID == record.ID &&
 		txn.Kind == SandboxLifecycleKindPause &&
-		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto) &&
+		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto || txn.Source == SandboxLifecycleSourceResourceResize) &&
 		!txn.Cancelable && txn.CancelRequestedAt.IsZero() && txn.Phase == SandboxLifecyclePhaseCommitted &&
 		txn.FromGeneration == record.RuntimeGeneration && txn.FromRuntimeNamespace == slot.AllocationNamespace &&
 		txn.FromRuntimeID == slot.AllocationID && txn.ExpectedGenerationID == grant.InitialGenerationID &&
@@ -400,11 +419,16 @@ func nomadPlannedPauseLifecycleMatches(
 	}
 	return txn.ID == operationID && txn.SandboxID == record.ID &&
 		txn.Kind == SandboxLifecycleKindPause &&
-		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto) &&
+		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto || txn.Source == SandboxLifecycleSourceResourceResize) &&
 		!txn.Cancelable && txn.CancelRequestedAt.IsZero() &&
 		(txn.Phase == SandboxLifecyclePhasePreparing || txn.Phase == SandboxLifecyclePhaseBarriered ||
 			txn.Phase == SandboxLifecyclePhasePublishing || txn.Phase == SandboxLifecyclePhaseCommitting) &&
 		txn.FromGeneration == record.RuntimeGeneration &&
 		txn.FromRuntimeNamespace == record.RuntimeNamespace && txn.FromRuntimeID == record.RuntimeID &&
 		txn.ExpectedGenerationID == grant.InitialGenerationID && txn.PreparedGenerationID == ""
+}
+
+// RequestNomadSandboxResourceResizePause admits only the exact durable resize.
+func (s *PGSandboxStore) RequestNomadSandboxResourceResizePause(ctx context.Context, sandboxID, operationID string) (*NomadSandboxPauseCandidate, error) {
+	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceResourceResize, nil, false, false, nil, operationID)
 }

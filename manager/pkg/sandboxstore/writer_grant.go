@@ -1061,7 +1061,7 @@ func beginRootFSWriterRetire(
 						AND lifecycle.sandbox_id = g.sandbox_id
 						AND lifecycle.kind = $11
 						AND lifecycle.phase IN ($12, $13)
-						AND lifecycle.source IN ($14, $15)
+						AND lifecycle.source IN ($14, $15, $16)
 						AND lifecycle.cancelable = FALSE
 						AND lifecycle.cancel_requested_at IS NULL
 						AND lifecycle.from_generation::text = g.runtime_generation
@@ -1079,7 +1079,7 @@ func beginRootFSWriterRetire(
 		normalized.BindingDigest, normalized.ExpectedOldGenerationID, retireKind,
 		RootFSWriterRetireKindPlannedPublish, SandboxLifecycleKindPause,
 		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting,
-		SandboxLifecycleSourceManual, SandboxLifecycleSourceAuto)
+		SandboxLifecycleSourceManual, SandboxLifecycleSourceAuto, SandboxLifecycleSourceResourceResize)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("begin rootfs writer retire", err)
 	}

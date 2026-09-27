@@ -59,8 +59,9 @@ spec:
 
 CPU is platform-derived from memory and is intentionally absent from the
 public API. Claim-time `config.resources.memory` can override the template
-default. The runtime update API does not change an existing sandbox's resource
-lease. Every value remains subject to the platform maximum.
+default. A standalone `config.resources.memory` update replaces an existing
+sandbox's runtime lease, preserving its ID and files while restarting processes.
+Paused sandboxes stay paused. Every value remains subject to the platform maximum.
 
 Carrier allocation resources do not define these limits. Manager leases exact
 CPU and memory from ctld-reported dedicated-node capacity and the task driver

@@ -117,19 +117,35 @@ Sandbox `env_vars` override template/image environment variables for new context
 
 ### Sandbox Resources
 
-Set `config.resources.memory` at claim time when one sandbox needs a different memory limit from its template. The minimum is `128Mi`. The platform maximum defaults to `16Gi` and is configured with manager's `sandbox_max_memory`. Sandbox0 enforces that maximum on template defaults and on sandbox claim, resume, and fork operations. Changing the resource lease of an existing sandbox is not exposed through the generic update endpoint.
+Set `config.resources.memory` at claim time when one sandbox needs a different memory limit from its template. The minimum is `128Mi`. The platform maximum defaults to `16Gi` and is configured with manager's `sandbox_max_memory`. Sandbox0 enforces that maximum on template defaults and on sandbox claim, resume, and fork operations. Use the Update Sandbox API with `config.resources.memory` to change an existing sandbox.
 
 The request only accepts memory. Manager derives CPU from
 `team_template_memory_per_cpu` and applies the platform minimum. PostgreSQL
 records the exact resource lease and ctld enforces it in the sandbox cgroup;
-Nomad carrier resources are overhead only. To change memory, claim another
-sandbox with the required resource override; the Update Sandbox API does not
-change an existing sandbox's resource lease.
+Nomad carrier resources are overhead only.
+
+Send a standalone resource update using `PUT /api/v1/sandboxes/{id}`:
+
+```json
+{"config":{"resources":{"memory":"4Gi"}}}
+```
+
+Changing resources preserves the sandbox ID and durable files but restarts
+processes and terminal sessions. A running sandbox first completes filesystem
+pause and physical cleanup, then starts with a fresh resource lease. A paused
+sandbox stays paused and uses the new limits on its next start. Retained memory
+checkpoints are discarded; resize does not restore the old processes.
+
+Submit resources separately from lifecycle and service updates. The operation
+survives request timeout and manager restart. A `503` can mean the change is still
+in progress; retry the same limit. Repeating an applied limit is a no-op. A
+conflicting resize or lifecycle operation returns `409`. If fresh capacity is
+unavailable, files remain preserved in the paused sandbox while retries continue.
 
 The CPU limit is the memory-derived amount rounded up to a whole millicore,
-with a minimum of `150m` (0.15 CPU). The minimum also applies when a stored
+with a minimum of `500m` (0.5 CPU). The minimum also applies when a stored
 template predates this rule. Claim, resume and fork allocate a new resource
-lease; existing running leases are not resized. CPU admission and compute
+lease; resource updates also replace the lease after completing pause. CPU admission and compute
 metering use the full amount recorded in that lease.
 
 Claim-time helpers expose this as `WithSandboxMemory` in Go, `memory` in Python,

@@ -17,10 +17,11 @@ type NomadSandboxMutationStore interface {
 	WithSandboxLock(context.Context, string, func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error
 }
 
-// NomadSandboxUpdater persists runtime-neutral Nomad sandbox mutations. Fields
-// that alter a running runtime remain fail-closed until their exact node-side
-// mutation has committed.
+// NomadSandboxUpdater persists runtime-neutral mutations and delegates standalone
+// resource changes to durable compute replacement. Other runtime fields remain
+// fail-closed until their runtime orchestration is configured.
 type NomadSandboxUpdater struct {
+	resources  *SandboxResourceResizeService
 	store      NomadSandboxMutationStore
 	reader     *NomadSandboxReader
 	defaultTTL time.Duration
@@ -50,8 +51,8 @@ func NewNomadSandboxUpdater(
 	return &NomadSandboxUpdater{store: store, reader: reader, defaultTTL: defaultTTL, now: now}, nil
 }
 
-// UpdateSandbox updates mutable durable fields that do not require replacing
-// or mutating a running allocation.
+// UpdateSandbox updates mutable durable fields or admits a standalone resource
+// resize that replaces compute while retaining the sandbox identity and files.
 func (u *NomadSandboxUpdater) UpdateSandbox(
 	ctx context.Context,
 	sandboxID string,
@@ -60,9 +61,20 @@ func (u *NomadSandboxUpdater) UpdateSandbox(
 	if config == nil {
 		return nil, fmt.Errorf("sandbox config is required")
 	}
-	if config.EnvVars != nil || config.Resources != nil || config.Network != nil {
-		return nil, fmt.Errorf("%w: Nomad env, resource, and network updates require runtime orchestration",
+	if config.EnvVars != nil || config.Network != nil {
+		return nil, fmt.Errorf("%w: Nomad env and network updates require runtime orchestration",
 			ErrSandboxRuntimeUpdateUnavailable)
+	}
+	if config.Resources != nil {
+		if u.resources == nil {
+			return nil, fmt.Errorf("%w: Nomad resource resize authority is not configured", ErrSandboxRuntimeUpdateUnavailable)
+		}
+		// Keep asynchronous compute replacement separate from immediate metadata
+		// edits so a rejected or interrupted resize cannot partially apply them.
+		if config.TTL != nil || config.HardTTL != nil || config.AutoResume != nil || config.Services != nil {
+			return nil, fmt.Errorf("%w: update resources separately from lifecycle and service fields", ErrInvalidClaimRequest)
+		}
+		return u.resources.UpdateResources(ctx, sandboxID, config.Resources)
 	}
 	err := u.store.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
@@ -148,4 +160,9 @@ func (u *NomadSandboxUpdater) RefreshSandbox(
 		SandboxID: sandboxID, ExpiresAt: optionalTime(plan.expiresAt),
 		HardExpiresAt: optionalTime(plan.hardExpiresAt),
 	}, nil
+}
+
+// SetResourceResizeService enables durable compute replacement for resource patches.
+func (u *NomadSandboxUpdater) SetResourceResizeService(resources *SandboxResourceResizeService) {
+	u.resources = resources
 }

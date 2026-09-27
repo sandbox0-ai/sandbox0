@@ -847,11 +847,22 @@ func lockRuntimeSlotClaimAdmission(
 	if err != nil {
 		return false, fmt.Errorf("lock Nomad resume slot admission: %w", err)
 	}
-	if lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
+	if lifecycle.Kind != SandboxLifecycleKindResume || (lifecycle.Source != SandboxLifecycleSourceManual && lifecycle.Source != SandboxLifecycleSourceResourceResize) ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
 		lifecycle.ExpectedGenerationID != request.SourceGenerationID ||
 		lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
 		return false, fmt.Errorf("%w: Nomad resume lifecycle identity changed", ErrRuntimeSlotConflict)
+	}
+	if lifecycle.Source == SandboxLifecycleSourceResourceResize {
+		resize, resizeErr := getSandboxResourceResize(ctx, tx, request.SandboxID)
+		if resizeErr != nil {
+			return false, resizeErr
+		}
+		if resize == nil || resize.FromGeneration != lifecycle.FromGeneration ||
+			(resize.Phase != SandboxResourceResizeResuming && resize.Phase != SandboxResourceResizeApplied) ||
+			resize.CPUMillicores != request.Resources.CPUMillicores || resize.MemoryBytes != request.Resources.MemoryBytes {
+			return false, fmt.Errorf("%w: resize lease does not match the admitted resource target", ErrRuntimeSlotConflict)
+		}
 	}
 	switch lifecycle.Phase {
 	case SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
@@ -1123,6 +1134,10 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 	if _, err := lockRuntimeSlotClaimAdmission(ctx, tx, &AcquireRuntimeSlotRequest{
 		OperationID: normalized.OperationID, SandboxID: preliminary.SandboxID,
 		SourceGenerationID: preliminary.SourceGenerationID,
+		Resources: protocol.RuntimeResourceRequest{
+			Version: protocol.RuntimeResourceRequestVersion, CPUMillicores: preliminary.ResourceLease.CPUMillicores,
+			MemoryBytes: preliminary.ResourceLease.MemoryBytes, PIDsLimit: preliminary.ResourceLease.PIDsLimit,
+		},
 	}); err != nil {
 		return nil, err
 	}

@@ -595,7 +595,7 @@ func (r *Reconciler) plannedPausePending(
 	if lifecycle == nil || lifecycle.ID != operationID || lifecycle.SandboxID != slot.SandboxID ||
 		lifecycle.Kind != sandboxstore.SandboxLifecycleKindPause ||
 		(lifecycle.Source != sandboxstore.SandboxLifecycleSourceManual &&
-			lifecycle.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
+			lifecycle.Source != sandboxstore.SandboxLifecycleSourceAuto && lifecycle.Source != sandboxstore.SandboxLifecycleSourceResourceResize) ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
 		(lifecycle.Phase != sandboxstore.SandboxLifecyclePhasePreparing &&
 			lifecycle.Phase != sandboxstore.SandboxLifecyclePhaseBarriered &&

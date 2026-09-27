@@ -37,6 +37,7 @@ type resizeServiceTestRuntime struct {
 	pauseOperations []string
 	resumeCalls     int
 	resumeErr       error
+	resumeWait      bool
 }
 
 func (r *resizeServiceTestRuntime) PauseSandboxForResourceResize(_ context.Context, _ string, operation string) error {
@@ -44,13 +45,39 @@ func (r *resizeServiceTestRuntime) PauseSandboxForResourceResize(_ context.Conte
 	r.store.resize.Phase = sandboxstore.SandboxResourceResizeResuming
 	return nil
 }
-func (r *resizeServiceTestRuntime) ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error) {
+func (r *resizeServiceTestRuntime) ResumeSandboxAndWait(ctx context.Context, _ string) (*managerapi.ResumeSandboxResponse, error) {
 	r.resumeCalls++
+	if r.resumeWait {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if r.resumeErr != nil {
 		return nil, r.resumeErr
 	}
 	r.store.resize.Phase = sandboxstore.SandboxResourceResizeApplied
 	return &managerapi.ResumeSandboxResponse{SandboxID: "sandbox-a", Resumed: true}, nil
+}
+
+func TestSandboxResourceResizeReturnsPendingBeforeGatewayDeadline(t *testing.T) {
+	service, store, runtime := newResizeServiceFixture(t)
+	store.resize = &sandboxstore.SandboxResourceResize{SandboxID: "sandbox-a", OperationID: "resize-one", WasActive: true, Phase: sandboxstore.SandboxResourceResizePausing}
+	runtime.resumeWait = true
+	var enqueued string
+	service.SetEnqueuer(func(id string) { enqueued = id })
+	gatewayCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := service.UpdateResources(gatewayCtx, "sandbox-a", &managerapi.SandboxResourceConfig{Memory: "512Mi"})
+	require.ErrorIs(t, err, ErrSandboxRuntimeUpdateUnavailable)
+	require.NoError(t, gatewayCtx.Err(), "a pending response must arrive before the gateway abandons the request")
+	require.Equal(t, "sandbox-a", enqueued)
+	require.Equal(t, sandboxstore.SandboxResourceResizeResuming, store.resize.Phase)
+	// The HTTP wait expires without canceling the durable operation. A later
+	// reconciliation completes it without pausing the sandbox a second time.
+	runtime.resumeWait = false
+	require.NoError(t, service.CompleteSandboxResourceResize(context.Background(), "sandbox-a"))
+	require.Equal(t, []string{"resize-one"}, runtime.pauseOperations)
+	require.Equal(t, sandboxstore.SandboxResourceResizeApplied, store.resize.Phase)
 }
 
 func newResizeServiceFixture(t *testing.T) (*SandboxResourceResizeService, *resizeServiceTestStore, *resizeServiceTestRuntime) {

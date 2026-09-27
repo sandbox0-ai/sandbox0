@@ -38,7 +38,9 @@ Deletion, hard expiry and crash recovery supersede the resize; the reconciler
 cancels its intent when those authorities change its owner. Node side effects
 still use their original exact, durable lifecycle and writer identities.
 
-Requests wait for at most 20 seconds before reporting `503` for pending work.
+Requests wait for at most 5 seconds before reporting `503` for pending work,
+leaving time to deliver that response within the gateways' default 10-second
+proxy deadline. The resize continues after this synchronous wait expires.
 A controller discovers pending rows at startup and every 30 seconds, pages
 through all operations even if an earlier page is blocked, and retries with
 backoff. Capacity or quota shortage leaves the files in a paused sandbox;

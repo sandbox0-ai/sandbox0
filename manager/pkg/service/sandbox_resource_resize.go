@@ -25,6 +25,9 @@ type SandboxResourceResizeRuntime interface {
 	ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
 }
 
+// Leave response time inside the gateways' default ten-second proxy budget.
+const sandboxResourceResizeRequestWait = 5 * time.Second
+
 // SandboxResourceResizeService replaces compute while preserving sandbox ID and
 // durable files. The desired operation, pause, cleanup and resume are durable;
 // request deadlines and manager restarts cannot turn it into a config-only edit.
@@ -98,12 +101,15 @@ func (s *SandboxResourceResizeService) UpdateResources(ctx context.Context, sand
 	}
 	// Give normal pause/cleanup a bounded opportunity to finish synchronously.
 	// PostgreSQL scanning, not this wait or this replica, owns further progress.
-	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, sandboxResourceResizeRequestWait)
 	defer cancel()
 	for {
 		err = s.CompleteSandboxResourceResize(waitCtx, sandboxID)
 		if err == nil {
 			return s.reader.GetSandbox(ctx, sandboxID)
+		}
+		if waitCtx.Err() != nil {
+			return nil, fmt.Errorf("%w: resource resize is durably pending; retry the same memory limit", ErrSandboxRuntimeUpdateUnavailable)
 		}
 		if !errors.Is(err, sandboxstore.ErrSandboxResourceResizePending) {
 			return nil, err

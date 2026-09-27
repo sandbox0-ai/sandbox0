@@ -798,6 +798,23 @@ func releaseUnreferencedRootFSMaterializationObject(
 	tx pgx.Tx,
 	objectKey, teamID string,
 ) (bool, error) {
+	// An unregistered legacy graph may reference this same content address.
+	// A generation-level hold cannot protect such an object from another owner.
+	var unknown bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM manager.rootfs_generations WHERE storage_inventory_required)`).Scan(&unknown); err != nil {
+		return false, err
+	}
+	if unknown {
+		_, err := tx.Exec(ctx, `INSERT INTO manager.rootfs_legacy_object_gc_holds(object_key,team_id)
+			SELECT object_key,$2 FROM manager.rootfs_materialization_objects WHERE object_key=$1
+			ON CONFLICT DO NOTHING`, objectKey, strings.TrimSpace(teamID))
+		return false, err
+	}
+	// Revisit custody is removed only when all unknown graphs have converged.
+	// Any real catalog references still prevent the DELETE below.
+	if _, err := tx.Exec(ctx, `DELETE FROM manager.rootfs_legacy_object_gc_holds WHERE object_key=$1`, objectKey); err != nil {
+		return false, err
+	}
 	// Older external import catalogs may still hold a restrictive FK. Keep
 	// that custody without aborting unrelated retirements in the outer transaction.
 	deletion, err := tx.Begin(ctx)

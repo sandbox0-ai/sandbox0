@@ -1305,6 +1305,9 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 		return nil, nil
 	}
 	opts = normalizeRootFSObjectDeletionOptions(opts)
+	if err := s.reconcileRootFSLegacyObjectGCHolds(ctx, opts.Limit); err != nil {
+		return nil, err
+	}
 	claimed, err := s.claimPendingRootFSObjectDeletions(ctx, opts)
 	if err != nil {
 		return nil, err
@@ -1315,46 +1318,22 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
-		var registered bool
-		if err := s.pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM manager.rootfs_materialization_objects WHERE object_key = $1
-			)
-		`, item.ObjectKey).Scan(&registered); err != nil {
-			return deleted, fmt.Errorf("check rootfs object registration for %q: %w", item.ObjectKey, err)
-		}
-		if registered {
-			if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
-				return deleted, err
-			}
-			continue
-		}
-		if err := deleter.Delete(item.ObjectKey); err != nil {
-			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, opts, err); updateErr != nil {
+		didDelete, deleteErr := s.deleteClaimedRootFSObject(ctx, deleter, item, opts)
+		if deleteErr != nil {
+			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, opts, deleteErr); updateErr != nil {
 				return deleted, updateErr
 			}
-			errs = append(errs, fmt.Errorf("delete rootfs object %q: %w", item.ObjectKey, err))
+			errs = append(errs, fmt.Errorf("delete rootfs object %q: %w", item.ObjectKey, deleteErr))
 			if !opts.ContinueOnError {
 				return deleted, errors.Join(errs...)
 			}
 			continue
 		}
-		if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
-			return deleted, err
+		if didDelete {
+			deleted = append(deleted, item.ObjectKey)
 		}
-		deleted = append(deleted, item.ObjectKey)
 	}
 	return deleted, errors.Join(errs...)
-}
-
-func (s *PGSandboxStore) clearRootFSObjectDeletion(ctx context.Context, objectKey, claimedBy string) error {
-	if _, err := s.pool.Exec(ctx, `
-		DELETE FROM manager.rootfs_object_deletions
-		WHERE object_key = $1 AND claimed_by = $2
-	`, objectKey, claimedBy); err != nil {
-		return fmt.Errorf("clear rootfs object deletion %q: %w", objectKey, err)
-	}
-	return nil
 }
 
 func (s *PGSandboxStore) RootFSObjectDeletionQueueStats(ctx context.Context) (*RootFSObjectDeletionQueueStats, error) {

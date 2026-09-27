@@ -1,4 +1,6 @@
 -- +goose Up
+-- Fail and retry rather than queue an unbounded runtime catalog lock.
+SET LOCAL lock_timeout = '5s';
 -- The retired ACK importer kept an external FK after its catalog commit.
 -- Preserve its audit rows, but let the current generation/base inventories own
 -- object liveness after a fully committed cutover. Incomplete imports keep

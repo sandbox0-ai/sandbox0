@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 )
@@ -15,8 +16,11 @@ const cleanupBatchSize = 64
 // custody. Its caller must exclude all future upload, download and restore work
 // before invoking it. Object age or an absent manifest is never that authority.
 type Collector struct {
-	objects objectstore.ContextCleanupStore
-	reader  checkpointObjectReader
+	objects        objectstore.ContextCleanupStore
+	reader         checkpointObjectReader
+	cursorMu       sync.Mutex
+	cursors        map[string]cleanupCursor
+	cursorSequence uint64
 }
 
 func NewCollector(objects objectstore.Store) (*Collector, error) {
@@ -54,12 +58,15 @@ func (c *Collector) Collect(ctx context.Context, binding Binding) (bool, error) 
 		}
 	}
 	prefix := imagePrefix(digest)
-	objects, more, _, err := c.objects.ListContext(ctx, prefix, "", "", "", cleanupBatchSize)
+	objects, more, err := c.listCleanupPage(ctx, prefix, cleanupBatchSize)
 	if err != nil {
 		return false, err
 	}
-	if len(objects) > cleanupBatchSize || len(objects) == 0 && more {
+	if len(objects) > cleanupBatchSize {
 		return false, fmt.Errorf("invalid checkpoint cleanup listing")
+	}
+	if len(objects) == 0 && more {
+		return false, nil
 	}
 	previous := ""
 	for _, object := range objects {
@@ -87,14 +94,14 @@ func (c *Collector) Collect(ctx context.Context, binding Binding) (bool, error) 
 	// No publication marker may mean early capture never completed, rather
 	// than an empty scope. That requires terminal capture authority, not an
 	// invented final RootFS binding supplied to this collector.
-	remaining, more, _, err := c.objects.ListContext(ctx, capture, "", "", "", 1)
+	remaining, more, err := c.listCleanupPage(ctx, capture, 1)
 	if err != nil {
 		return false, err
 	}
-	if len(remaining) != 0 || more {
+	if len(remaining) != 0 {
 		return false, fmt.Errorf("unbound capture cleanup requires terminal capture authority")
 	}
-	return true, nil
+	return !more, nil
 }
 
 // CollectCapture removes a bounded page of tentative data only after regional
@@ -106,11 +113,11 @@ func (c *Collector) CollectCapture(ctx context.Context, scope CaptureScope) (boo
 	if err != nil {
 		return false, err
 	}
-	objects, more, _, err := c.objects.ListContext(ctx, prefix, "", "", "", cleanupBatchSize)
+	objects, more, err := c.listCleanupPage(ctx, prefix, cleanupBatchSize)
 	if err != nil {
 		return false, err
 	}
-	if len(objects) > cleanupBatchSize || len(objects) == 0 && more {
+	if len(objects) > cleanupBatchSize {
 		return false, fmt.Errorf("invalid capture cleanup listing")
 	}
 	previous := ""
@@ -160,5 +167,5 @@ func (c *Collector) CollectCapture(ctx context.Context, scope CaptureScope) (boo
 			return false, err
 		}
 	}
-	return len(objects) == 0, nil
+	return len(objects) == 0 && !more, nil
 }

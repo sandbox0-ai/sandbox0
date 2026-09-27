@@ -16,6 +16,7 @@ import (
 type cleanupFaultStore struct {
 	objectstore.ContextCleanupStore
 	list      func(context.Context, string) ([]objectstore.Info, bool, string, error)
+	listPage  func(context.Context, string, string, int64) ([]objectstore.Info, bool, string, error)
 	failAfter int
 	deletes   int
 }
@@ -25,6 +26,9 @@ func (s *cleanupFaultStore) GetContext(ctx context.Context, key string, off, lim
 }
 
 func (s *cleanupFaultStore) ListContext(ctx context.Context, prefix, after, token, delimiter string, limit int64) ([]objectstore.Info, bool, string, error) {
+	if s.listPage != nil {
+		return s.listPage(ctx, prefix, token, limit)
+	}
 	if s.list != nil {
 		return s.list(ctx, prefix)
 	}

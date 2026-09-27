@@ -95,3 +95,29 @@ func TestConfigureRootFSCompositeMaterializerRequiresWorker(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigureRootFSCompositeMaterializerAllowsCompleteMaintenanceHold(t *testing.T) {
+	cfg := &config.ManagerConfig{RootFSMaintenance: config.RootFSMaintenanceConfig{
+		Disabled: true, SquashDisabled: true, MaterializerDisabled: true,
+	}}
+	objects := objectstore.NewMemoryStore(t.Name())
+	worker, err := configureRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{}, objects)
+	if err != nil || worker != nil {
+		t.Fatalf("held materializer = %v, %v", worker, err)
+	}
+	for name, invalid := range map[string]objectstore.Store{
+		"missing":        nil,
+		"nonconditional": objectStoreWithoutContextualConditionalAccess{Store: objects},
+	} {
+		t.Run(name, func(t *testing.T) {
+			worker, err := configureRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{}, invalid)
+			if err == nil || worker != nil {
+				t.Fatalf("invalid held materializer = %v, %v", worker, err)
+			}
+		})
+	}
+	cfg.RootFSMaintenance.MaterializerInterval.Duration = -time.Second
+	if worker, err := configureRootFSCompositeMaterializer(cfg, rootFSCompositeMaterializerTestStore{}, objects); err == nil || worker != nil {
+		t.Fatalf("invalid held configuration = %v, %v", worker, err)
+	}
+}

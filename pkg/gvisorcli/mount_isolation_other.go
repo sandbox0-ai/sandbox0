@@ -1,3 +1,5 @@
+//go:build !linux
+
 // Copyright 2026 Sandbox0 Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,23 +14,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package nomadruntime
+package gvisorcli
 
-import "github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
+import (
+	"context"
+	"fmt"
+	"os/exec"
+)
 
-type Runsc = gvisorcli.Runsc
-type WaitResult = gvisorcli.WaitResult
-type RunscState = gvisorcli.RunscState
-type RunscStats = gvisorcli.RunscStats
-
-func newCommandRunsc(config Config) Runsc {
-	return gvisorcli.New(gvisorcli.Config{
-		Path:            config.RunscPath,
-		Root:            config.RunscRoot,
-		Platform:        config.Platform,
-		Overlay2:        config.Overlay2,
-		FileAccess:      config.FileAccess,
-		DirectFS:        config.DirectFS,
-		RootFSMountRoot: config.RootFSMountRoot,
-	})
+func (r *Command) isolatedCommand(ctx context.Context, bundle string, args ...string) *exec.Cmd {
+	cmd := r.command(ctx, args...)
+	if r.config.RootFSMountRoot != "" {
+		cmd.Err = fmt.Errorf("isolated runsc mounts require Linux")
+	}
+	return cmd
 }

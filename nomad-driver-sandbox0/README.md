@@ -377,3 +377,34 @@ nomad-rootfs-sessionctl \
 
 The raw one-time writer token is stripped before the RPC. Exact retries reuse
 the same proof; a different unresolved operation fails closed.
+
+## Launch mount lifetime
+
+Stock runsc's executable-file references can retain a detached host mount tree
+including unrelated NBD/XFS filesystems. Create and restore therefore launch
+from a private mount namespace with unrelated RootFS mounts and their bind
+aliases removed by normal unmount. The current OCI root and explicit mount
+sources stay visible. The mount root comes from ctld's runtime attestation;
+the driver does not maintain a separate authored copy. The qualified runsc
+binary, companions, CPU identity and guest security policy remain unchanged.
+
+The opt-in regression requires an isolated Linux host, root, stock runsc,
+mkfs.xfs, and an unused NBD device. It checks actual XFS superblock release
+while a second guest runs, including OverlayFS and external bind aliases:
+
+```sh
+CGO_ENABLED=0 go test -c ./pkg/gvisorcli -o /tmp/gvisorcli.test
+SANDBOX0_RUN_PRIVILEGED_MOUNT_ISOLATION=1 \
+SANDBOX0_MOUNT_ISOLATION_NBD=/dev/nbd0 \
+SANDBOX0_RUN_PRIVILEGED_CHECKPOINT=1 \
+SANDBOX0_CHECKPOINT_MEMORY_MIB=32 \
+/tmp/gvisorcli.test -test.v \
+  -test.run='^(TestRootFSPrunePaths.*|TestPrivilegedRunscUnrelatedXFSRelease|TestPrivilegedExecutionCheckpoint)$'
+```
+
+Run the build command from the runtime repository root, outside the
+independent driver module. Never run this probe on a production NBD
+device. New launches prevent new pins; existing pinned mount trees still
+require normal authorized guest lifecycle recovery. Preserve captured memory
+images and never infer that a successful host unmount proves block-device
+release.

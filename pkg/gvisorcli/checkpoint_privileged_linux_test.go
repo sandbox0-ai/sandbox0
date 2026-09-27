@@ -66,6 +66,7 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 	for _, directFS := range []bool{true, false} {
 		t.Run(fmt.Sprintf("directfs_%t", directFS), func(t *testing.T) {
 			root := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(root, "unrelated-mounts"), 0700))
 			rootfs := filepath.Join(root, "rootfs")
 			evidence := filepath.Join(root, "evidence")
 			for _, directory := range []string{rootfs, evidence, filepath.Join(rootfs, "proc"),
@@ -84,7 +85,7 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 			defer cancel()
 			makeRunner := func(name string) CheckpointRunsc {
 				config := Config{Path: runsc, Root: filepath.Join(root, name), Platform: "systrap",
-					Overlay2: "none", FileAccess: "shared", DirectFS: directFS}
+					Overlay2: "none", FileAccess: "shared", DirectFS: directFS, RootFSMountRoot: filepath.Join(root, "unrelated-mounts")}
 				runner := New(config).(CheckpointRunsc)
 				t.Cleanup(func() {
 					cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)

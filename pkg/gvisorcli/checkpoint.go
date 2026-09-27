@@ -147,7 +147,7 @@ func (r *Command) Restore(ctx context.Context, containerID, imagePath string) er
 	if state.ID != containerID || state.Status != "created" {
 		return fmt.Errorf("runsc restore requires the exact created destination")
 	}
-	return r.run(ctx, "restore", "--image-path="+imagePath, "--detach", containerID)
+	return r.runCommand(r.isolatedCommand(ctx, state.Bundle, "restore", "--image-path="+imagePath, "--detach", containerID), "restore")
 }
 
 func validateCheckpointArguments(ctx context.Context, containerID, imagePath string) error {

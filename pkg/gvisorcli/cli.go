@@ -69,6 +69,8 @@ type Config struct {
 	Overlay2       string
 	FileAccess     string
 	DirectFS       bool
+	// RootFSMountRoot enables private launch mounts using ctld's attested root.
+	RootFSMountRoot string
 }
 
 type Command struct {
@@ -86,7 +88,7 @@ func New(config Config) Runsc {
 }
 
 func (r *Command) Create(ctx context.Context, bundleDir, containerID string) error {
-	return r.run(ctx, "create", "--bundle", bundleDir, containerID)
+	return r.runCommand(r.isolatedCommand(ctx, bundleDir, "create", "--bundle", bundleDir, containerID), "create")
 }
 
 func (r *Command) Start(ctx context.Context, containerID string) error {
@@ -198,7 +200,10 @@ func (r *Command) run(ctx context.Context, args ...string) error {
 	// gVisor's create/start commands leave Sentry and Gofer children running.
 	// Do not give them an exec.Cmd stdout/stderr pipe: the parent would block
 	// until those long-lived children close the inherited pipe descriptors.
-	cmd := r.command(ctx, args...)
+	return r.runCommand(r.command(ctx, args...), args[0])
+}
+
+func (r *Command) runCommand(cmd *exec.Cmd, operation string) error {
 	temp, err := os.CreateTemp("", "sandbox0-runsc-stderr-*")
 	if err != nil {
 		return fmt.Errorf("create runsc stderr file: %w", err)
@@ -219,10 +224,10 @@ func (r *Command) run(ctx context.Context, args ...string) error {
 	stderr, readErr := io.ReadAll(io.LimitReader(temp, maxRunscStderrBytes+1))
 	_ = temp.Close()
 	if len(stderr) > maxRunscStderrBytes {
-		return fmt.Errorf("runsc %s stderr exceeds %d bytes", args[0], maxRunscStderrBytes)
+		return fmt.Errorf("runsc %s stderr exceeds %d bytes", operation, maxRunscStderrBytes)
 	}
 	if err != nil {
-		return classifyRunscError(args[0], err, string(stderr))
+		return classifyRunscError(operation, err, string(stderr))
 	}
 	if readErr != nil {
 		return readErr

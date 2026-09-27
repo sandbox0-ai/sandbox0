@@ -39,8 +39,9 @@ cancels its intent when those authorities change its owner. Node side effects
 still use their original exact, durable lifecycle and writer identities.
 
 Requests wait for at most 20 seconds before reporting `503` for pending work.
-A controller discovers pending rows at startup and every 30 seconds and retries
-with backoff. Capacity or quota shortage leaves the files in a paused sandbox;
+A controller discovers pending rows at startup and every 30 seconds, pages
+through all operations even if an earlier page is blocked, and retries with
+backoff. Capacity or quota shortage leaves the files in a paused sandbox;
 it does not edit the source lease, silently fall back to old resources or lose
 the operation when a request disconnects. If a reply is lost after commit, the
 next request observes an applied limit and does nothing.

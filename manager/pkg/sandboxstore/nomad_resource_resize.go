@@ -220,11 +220,11 @@ func (s *PGSandboxStore) PrepareSandboxResourceResize(ctx context.Context, sandb
 	return r, tx.Commit(ctx)
 }
 
-func (s *PGSandboxStore) ListPendingSandboxResourceResizes(ctx context.Context, limit int) ([]*SandboxResourceResize, error) {
+func (s *PGSandboxStore) ListPendingSandboxResourceResizes(ctx context.Context, afterSandboxID string, limit int) ([]*SandboxResourceResize, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("resource resize scan limit must be between 1 and 1000")
 	}
-	rows, err := s.pool.Query(ctx, sandboxResourceResizeSelect+` WHERE phase IN ('pausing','resuming') ORDER BY updated_at,sandbox_id LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, sandboxResourceResizeSelect+` WHERE phase IN ('pausing','resuming') AND sandbox_id > $1 ORDER BY sandbox_id LIMIT $2`, afterSandboxID, limit)
 	if err != nil {
 		return nil, err
 	}

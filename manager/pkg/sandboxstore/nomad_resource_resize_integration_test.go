@@ -40,6 +40,13 @@ func TestSandboxResourceResizeReplacesExactLeaseAndPreservesRootFSIntegration(t 
 			// A different manager recovers the same desired operation; changing
 			// its target while pending cannot create another restart.
 			other := NewPGSandboxStore(f.pool)
+			pending, err := other.ListPendingSandboxResourceResizes(f.ctx, "", 1)
+			require.NoError(t, err)
+			require.Len(t, pending, 1)
+			require.Equal(t, f.sandboxID, pending[0].SandboxID)
+			pageAfter, err := other.ListPendingSandboxResourceResizes(f.ctx, f.sandboxID, 1)
+			require.NoError(t, err)
+			require.Empty(t, pageAfter)
 			retry, err := other.BeginSandboxResourceResize(f.ctx, request)
 			require.NoError(t, err)
 			require.Equal(t, r.OperationID, retry.OperationID)
@@ -107,7 +114,7 @@ func TestSandboxResourceResizeReplacesExactLeaseAndPreservesRootFSIntegration(t 
 			r, err = other.PrepareSandboxResourceResize(f.ctx, f.sandboxID)
 			require.NoError(t, err)
 			require.Equal(t, SandboxResourceResizeApplied, r.Phase)
-			pending, err := other.ListPendingSandboxResourceResizes(f.ctx, 100)
+			pending, err = other.ListPendingSandboxResourceResizes(f.ctx, "", 100)
 			require.NoError(t, err)
 			require.Empty(t, pending)
 			request = resizeFixtureRequest(t, f, test.memory, test.cpu, test.memoryBytes)

@@ -17,7 +17,7 @@ type SandboxResourceResizeStore interface {
 	NomadSandboxProjectionStore
 	BeginSandboxResourceResize(context.Context, sandboxstore.RequestSandboxResourceResize) (*sandboxstore.SandboxResourceResize, error)
 	PrepareSandboxResourceResize(context.Context, string) (*sandboxstore.SandboxResourceResize, error)
-	ListPendingSandboxResourceResizes(context.Context, int) ([]*sandboxstore.SandboxResourceResize, error)
+	ListPendingSandboxResourceResizes(context.Context, string, int) ([]*sandboxstore.SandboxResourceResize, error)
 }
 
 type SandboxResourceResizeRuntime interface {

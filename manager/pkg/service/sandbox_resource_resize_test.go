@@ -28,7 +28,7 @@ func (s *resizeServiceTestStore) BeginSandboxResourceResize(_ context.Context, r
 func (s *resizeServiceTestStore) PrepareSandboxResourceResize(context.Context, string) (*sandboxstore.SandboxResourceResize, error) {
 	return s.resize, nil
 }
-func (s *resizeServiceTestStore) ListPendingSandboxResourceResizes(context.Context, int) ([]*sandboxstore.SandboxResourceResize, error) {
+func (s *resizeServiceTestStore) ListPendingSandboxResourceResizes(context.Context, string, int) ([]*sandboxstore.SandboxResourceResize, error) {
 	return []*sandboxstore.SandboxResourceResize{s.resize}, nil
 }
 

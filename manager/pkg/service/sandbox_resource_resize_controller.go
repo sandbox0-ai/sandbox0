@@ -16,7 +16,7 @@ const (
 )
 
 type sandboxResourceResizeStore interface {
-	ListPendingSandboxResourceResizes(context.Context, int) ([]*sandboxstore.SandboxResourceResize, error)
+	ListPendingSandboxResourceResizes(context.Context, string, int) ([]*sandboxstore.SandboxResourceResize, error)
 }
 
 type sandboxResourceResizeReconciler interface {
@@ -96,14 +96,23 @@ func (c *SandboxResourceResizeController) Run(ctx context.Context, workers int) 
 }
 
 func (c *SandboxResourceResizeController) enqueuePending(ctx context.Context) {
-	mutations, err := c.store.ListPendingSandboxResourceResizes(ctx, c.scanLimit)
-	if err != nil {
-		c.logger.Warn("Failed to list pending sandbox resource resizes", zap.Error(err))
-		return
-	}
-	for _, mutation := range mutations {
-		if mutation != nil {
-			c.EnqueueSandboxResourceResize(mutation.SandboxID)
+	// Page through every pending operation. A fixed first page would let
+	// long-lived capacity waits hide later operations after a manager restart.
+	afterSandboxID := ""
+	for ctx.Err() == nil {
+		mutations, err := c.store.ListPendingSandboxResourceResizes(ctx, afterSandboxID, c.scanLimit)
+		if err != nil {
+			c.logger.Warn("Failed to list pending sandbox resource resizes", zap.Error(err))
+			return
+		}
+		for _, mutation := range mutations {
+			if mutation != nil {
+				c.EnqueueSandboxResourceResize(mutation.SandboxID)
+				afterSandboxID = mutation.SandboxID
+			}
+		}
+		if len(mutations) < c.scanLimit {
+			return
 		}
 	}
 }

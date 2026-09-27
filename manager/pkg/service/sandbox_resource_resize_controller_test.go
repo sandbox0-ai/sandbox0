@@ -75,6 +75,30 @@ func TestSandboxResourceResizeControllerForgetsPreemptedOperation(t *testing.T) 
 	}
 }
 
+func TestSandboxResourceResizeControllerScansBeyondBlockedFirstPage(t *testing.T) {
+	store := &sandboxResourceResizeControllerTestStore{}
+	for _, id := range []string{"sandbox-a", "sandbox-b", "sandbox-c", "sandbox-d", "sandbox-e"} {
+		store.mutations = append(store.mutations, &sandboxstore.SandboxResourceResize{
+			SandboxID: id, Phase: sandboxstore.SandboxResourceResizeResuming,
+		})
+	}
+	controller := NewSandboxResourceResizeController(store, nil, nil)
+	controller.scanLimit = 2
+	defer controller.queue.ShutDown()
+	controller.enqueuePending(context.Background())
+	if store.listCalls != 3 {
+		t.Fatalf("pending scan pages = %d, want 3", store.listCalls)
+	}
+	for _, operation := range store.mutations {
+		id, shutdown := controller.queue.Get()
+		if shutdown || id != operation.SandboxID {
+			t.Fatalf("queued sandbox = %q, shutdown = %v, want %q", id, shutdown, operation.SandboxID)
+		}
+		controller.queue.Done(id)
+		controller.queue.Forget(id)
+	}
+}
+
 type sandboxResourceResizeControllerTestStore struct {
 	mutations []*sandboxstore.SandboxResourceResize
 	listCalls int
@@ -82,10 +106,20 @@ type sandboxResourceResizeControllerTestStore struct {
 
 func (s *sandboxResourceResizeControllerTestStore) ListPendingSandboxResourceResizes(
 	_ context.Context,
-	_ int,
+	afterSandboxID string,
+	limit int,
 ) ([]*sandboxstore.SandboxResourceResize, error) {
 	s.listCalls++
-	return s.mutations, nil
+	var page []*sandboxstore.SandboxResourceResize
+	for _, mutation := range s.mutations {
+		if mutation.SandboxID > afterSandboxID {
+			page = append(page, mutation)
+		}
+		if len(page) == limit {
+			break
+		}
+	}
+	return page, nil
 }
 
 type sandboxResourceResizeControllerTestReconciler struct {

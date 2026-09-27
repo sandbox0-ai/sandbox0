@@ -69,7 +69,14 @@ func TestRootFSLegacyPublicationWaitsForPhysicalDeleteS3Integration(t *testing.T
 	}
 	conn, err := store.pool.Acquire(t.Context())
 	require.NoError(t, err)
-	defer conn.Release()
+	defer func() {
+		select {
+		case <-resume:
+		default:
+			close(resume)
+		}
+		conn.Release()
+	}()
 	pid := conn.Conn().PgConn().PID()
 	publication := make(chan error, 1)
 	go func() {

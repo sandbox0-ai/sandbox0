@@ -798,8 +798,15 @@ func releaseUnreferencedRootFSMaterializationObject(
 	tx pgx.Tx,
 	objectKey, teamID string,
 ) (bool, error) {
+	// Older external import catalogs may still hold a restrictive FK. Keep
+	// that custody without aborting unrelated retirements in the outer transaction.
+	deletion, err := tx.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = deletion.Rollback(ctx) }()
 	var uploadedAt *time.Time
-	err := tx.QueryRow(ctx, `
+	err = deletion.QueryRow(ctx, `
 		DELETE FROM manager.rootfs_materialization_objects object_record
 		WHERE object_record.object_key = $1
 			AND NOT EXISTS (
@@ -826,7 +833,29 @@ func releaseUnreferencedRootFSMaterializationObject(
 		return false, nil
 	}
 	if err != nil {
+		var violation *pgconn.PgError
+		if errors.As(err, &violation) && violation.Code == "23503" && violation.SchemaName != "manager" && violation.SchemaName != "" {
+			if rollbackErr := deletion.Rollback(ctx); rollbackErr != nil {
+				return false, rollbackErr
+			}
+			var externalCustody bool
+			checkErr := tx.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM pg_constraint constraint_record
+				WHERE constraint_record.contype='f' AND constraint_record.conname=$1
+				AND constraint_record.conrelid=to_regclass(quote_ident($2)||'.'||quote_ident($3))
+				AND constraint_record.confrelid='manager.rootfs_materialization_objects'::regclass
+			)`, violation.ConstraintName, violation.SchemaName, violation.TableName).Scan(&externalCustody)
+			if checkErr != nil {
+				return false, checkErr
+			}
+			if externalCustody {
+				return false, nil
+			}
+		}
 		return false, fmt.Errorf("release unreferenced materialization object %s: %w", objectKey, err)
+	}
+	if err := deletion.Commit(ctx); err != nil {
+		return false, err
 	}
 	if uploadedAt == nil {
 		return false, nil

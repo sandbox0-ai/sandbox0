@@ -17,9 +17,13 @@ permissions:
   contents: read
 
 jobs:
-  migration-contracts:
+  migration-contracts-shards:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     services:
       postgres:
         image: postgres:16
@@ -36,6 +40,7 @@ jobs:
           --health-retries 12
     env:
       INTEGRATION_DATABASE_URL: postgres://sandbox0:isolated-ci@localhost:5432/migration_test?sslmode=disable
+      SHARD_INDEX: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -43,7 +48,31 @@ jobs:
           go-version: '1.25.5'
           cache: true
       - name: Verify PostgreSQL migration authority and recovery
-        run: go test -race -count=1 -timeout=20m ./manager/pkg/sandboxstore
+        shell: bash
+        run: |
+          go test -c -race -o "$RUNNER_TEMP/sandboxstore.test" ./manager/pkg/sandboxstore
+          # Each shard owns a separate PostgreSQL service. Enumerate the binary
+          # so every test, example and fuzz seed belongs to exactly one shard.
+          pattern=$("$RUNNER_TEMP/sandboxstore.test" -test.list '^(Test|Example|Fuzz)' |
+            awk -v shard="$SHARD_INDEX" '/^(Test|Example|Fuzz)/ {
+              if (count++ % 4 == shard) {
+                printf "%s%s", separator, $0; separator="|"
+              }
+            }')
+          test -n "$pattern"
+          "$RUNNER_TEMP/sandboxstore.test" -test.run "^($pattern)$" -test.count=1 -test.timeout=20m -test.v
+
+  # Keep the existing required check name while requiring every shard to pass.
+  migration-contracts:
+    if: always()
+    needs: migration-contracts-shards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every PostgreSQL shard to pass
+        env:
+          SHARD_RESULT: ${{ needs.migration-contracts-shards.result }}
+        run: test "$SHARD_RESULT" = success
 
   nomad-driver:
     runs-on: ubuntu-24.04

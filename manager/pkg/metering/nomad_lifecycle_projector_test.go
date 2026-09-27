@@ -308,3 +308,46 @@ func assertNomadRuntimeWindow(t *testing.T, window *meteringpkg.Window, start, e
 		t.Fatalf("window value = %d %s, want %d %s", window.Value, window.Unit, want, meteringpkg.WindowUnitMiBMilliseconds)
 	}
 }
+
+func TestNomadLifecycleProjectionPricesEachResizeAtItsCommittedSize(t *testing.T) {
+	projector := &NomadLifecycleProjector{regionID: "region-1", clusterID: "cluster-default"}
+	claimedAt, activeAt := nomadMeteringTestTime(0), nomadMeteringTestTime(1)
+	pause1, resume1 := nomadMeteringTestTime(2), nomadMeteringTestTime(3)
+	pause2, resume2 := nomadMeteringTestTime(4), nomadMeteringTestTime(5)
+	pause3 := nomadMeteringTestTime(6)
+	source := nomadMeteringTestSource(claimedAt, &activeAt)
+	source.InitialResourceMillicpu, source.InitialResourceMemoryMiB = 1000, 1024
+	source.ResourceMillicpu, source.ResourceMemoryMiB = 1000, 2048
+	source.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	source.ObservedAt = nomadMeteringTestTime(7)
+	transitions := []nomadMeteringLifecycleTransition{
+		{ID: "pause-1", Kind: "pause", Phase: "committed", Epoch: 1, CommittedAt: &pause1},
+		{ID: "resume-1", Kind: "resume", Phase: "committed", Epoch: 2, CommittedAt: &resume1, ResourceMillicpu: 2000, ResourceMemoryMiB: 4096},
+		{ID: "pause-2", Kind: "pause", Phase: "committed", Epoch: 3, CommittedAt: &pause2},
+		{ID: "resume-2", Kind: "resume", Phase: "committed", Epoch: 4, CommittedAt: &resume2, ResourceMillicpu: 1000, ResourceMemoryMiB: 2048},
+		{ID: "pause-3", Kind: "pause", Phase: "committed", Epoch: 5, CommittedAt: &pause3},
+	}
+	// A first projection delayed until after both resizes must still use the
+	// initial claim size, then each durable resume snapshot.
+	mutations, err := projector.project(source, nil, transitions, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mutations.windows) != 3 {
+		t.Fatalf("windows=%v", mutations.windows)
+	}
+	assertNomadRuntimeWindow(t, mutations.windows[0], activeAt, pause1, 1024)
+	assertNomadRuntimeWindow(t, mutations.windows[1], resume1, pause2, 4096)
+	assertNomadRuntimeWindow(t, mutations.windows[2], resume2, pause3, 2048)
+	if mutations.state.ResourceMemoryMiB != 2048 {
+		t.Fatal("last size was not retained")
+	}
+	// Restarted projectors skip previously committed epochs without repricing.
+	again, err := projector.project(source, mutations.state, transitions, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.windows) != 0 {
+		t.Fatal("resource history was billed twice")
+	}
+}

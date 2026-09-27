@@ -2470,9 +2470,14 @@ type SandboxTemplateStatus struct {
 	Creation *TemplateCreationStatus `json:"creation,omitempty"`
 }
 
-// SandboxUpdateConfig Durable lifecycle and service fields that can be updated without replacing
-// the current runtime allocation. Network policy uses the dedicated network
-// endpoint. Environment, resource, and webhook changes require a new runtime.
+// SandboxUpdateConfig Durable lifecycle and service fields, or a standalone resources.memory change.
+// Resource changes preserve the sandbox ID and durable files but restart processes
+// through filesystem pause and a fresh CPU/memory lease. Paused sandboxes stay
+// paused with the new next-start configuration; retained memory is discarded.
+// Submit resources separately from lifecycle and service fields. The operation
+// survives request timeout and manager restart. Retry the same limit after 503;
+// an already-applied limit is a no-op. Network policy uses its dedicated endpoint.
+// Environment and webhook changes require a new runtime.
 type SandboxUpdateConfig struct {
 	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
 	// make an inactive sandbox available. This setting does not control platform-initiated
@@ -2482,8 +2487,11 @@ type SandboxUpdateConfig struct {
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
 	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
-	HardTtl  *int32               `json:"hard_ttl,omitempty"`
-	Services *[]SandboxAppService `json:"services,omitempty"`
+	HardTtl *int32 `json:"hard_ttl,omitempty"`
+
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	Resources *SandboxResourceConfig `json:"resources,omitempty"`
+	Services  *[]SandboxAppService   `json:"services,omitempty"`
 
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`
@@ -2491,9 +2499,14 @@ type SandboxUpdateConfig struct {
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
 type SandboxUpdateRequest struct {
-	// Config Durable lifecycle and service fields that can be updated without replacing
-	// the current runtime allocation. Network policy uses the dedicated network
-	// endpoint. Environment, resource, and webhook changes require a new runtime.
+	// Config Durable lifecycle and service fields, or a standalone resources.memory change.
+	// Resource changes preserve the sandbox ID and durable files but restart processes
+	// through filesystem pause and a fresh CPU/memory lease. Paused sandboxes stay
+	// paused with the new next-start configuration; retained memory is discarded.
+	// Submit resources separately from lifecycle and service fields. The operation
+	// survives request timeout and manager restart. Retry the same limit after 503;
+	// an already-applied limit is a no-op. Network policy uses its dedicated endpoint.
+	// Environment and webhook changes require a new runtime.
 	Config *SandboxUpdateConfig `json:"config,omitempty"`
 }
 

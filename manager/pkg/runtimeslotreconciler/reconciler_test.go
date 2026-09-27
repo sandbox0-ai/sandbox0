@@ -559,6 +559,14 @@ func TestReconcilerCleansPlannedRetiredWriterWithoutReplacingItsAuthority(t *tes
 }
 
 func TestReconcilerLeavesActivePlannedPauseForNodePublication(t *testing.T) {
+	checkReconcilerLeavesActivePlannedPauseForNodePublication(t, sandboxstore.SandboxLifecycleSourceManual)
+}
+
+func TestReconcilerLeavesResourceResizePauseForNodePublication(t *testing.T) {
+	checkReconcilerLeavesActivePlannedPauseForNodePublication(t, sandboxstore.SandboxLifecycleSourceResourceResize)
+}
+
+func checkReconcilerLeavesActivePlannedPauseForNodePublication(t *testing.T, source string) {
 	fixture := newReconcileFixture(t, true)
 	fixture.store.slot.State = sandboxstore.RuntimeSlotStateOrphaned
 	fixture.store.slot.OrphanObservationDigest = bytes.Repeat([]byte{0x33}, 32)
@@ -572,7 +580,7 @@ func TestReconcilerLeavesActivePlannedPauseForNodePublication(t *testing.T) {
 	fixture.store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
 		ID: operationID, SandboxID: fixture.store.slot.SandboxID,
 		Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
-		Source: sandboxstore.SandboxLifecycleSourceManual, Cancelable: false,
+		Source: source, Cancelable: false,
 		FromGeneration: 1, FromRuntimeNamespace: fixture.store.grant.RuntimeNamespace,
 		FromRuntimeID:        fixture.store.grant.RuntimeIncarnationID,
 		ExpectedGenerationID: fixture.store.grant.InitialGenerationID,

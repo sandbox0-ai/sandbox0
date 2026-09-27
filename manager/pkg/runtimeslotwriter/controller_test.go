@@ -474,6 +474,14 @@ func TestControllerFencesConsumedWriterAfterFailedClaimDeletion(t *testing.T) {
 }
 
 func TestControllerFencesConsumedWriterAfterFailedResumeTermination(t *testing.T) {
+	checkControllerFencesConsumedWriterAfterFailedResumeTermination(t, sandboxstore.SandboxLifecycleSourceManual)
+}
+
+func TestControllerFencesConsumedWriterAfterFailedResourceResizeTermination(t *testing.T) {
+	checkControllerFencesConsumedWriterAfterFailedResumeTermination(t, sandboxstore.SandboxLifecycleSourceResourceResize)
+}
+
+func checkControllerFencesConsumedWriterAfterFailedResumeTermination(t *testing.T, source string) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
 	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
 	store.record.RuntimeGeneration = 6
@@ -490,7 +498,7 @@ func TestControllerFencesConsumedWriterAfterFailedResumeTermination(t *testing.T
 	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
 		ID: resumeOperationID, SandboxID: store.record.ID,
 		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhaseAborted,
-		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		Source: source, Epoch: store.record.LifecycleEpoch,
 		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
 		ExpectedGenerationID: store.grant.InitialGenerationID,
 		Error:                "resume runtime did not reach command-ready", AbortedAt: time.Now().UTC(),
@@ -583,6 +591,14 @@ func TestControllerRejectsUnfencedInitialClaimWithoutRuntimeBinding(t *testing.T
 }
 
 func TestControllerPreemptsExactFailedResumeBeforeCrashCleanup(t *testing.T) {
+	checkControllerPreemptsExactFailedResumeBeforeCrashCleanup(t, sandboxstore.SandboxLifecycleSourceManual)
+}
+
+func TestControllerPreemptsFailedResourceResizeResumeBeforeCrashCleanup(t *testing.T) {
+	checkControllerPreemptsExactFailedResumeBeforeCrashCleanup(t, sandboxstore.SandboxLifecycleSourceResourceResize)
+}
+
+func checkControllerPreemptsExactFailedResumeBeforeCrashCleanup(t *testing.T, source string) {
 	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
 	store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	store.record.RuntimeGeneration = 6
@@ -595,7 +611,7 @@ func TestControllerPreemptsExactFailedResumeBeforeCrashCleanup(t *testing.T) {
 	store.lifecycle = &sandboxstore.SandboxLifecycleTxn{
 		ID: resumeOperationID, SandboxID: store.record.ID,
 		Kind: sandboxstore.SandboxLifecycleKindResume, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
-		Source: sandboxstore.SandboxLifecycleSourceManual, Epoch: store.record.LifecycleEpoch,
+		Source: source, Epoch: store.record.LifecycleEpoch,
 		FromGeneration: store.record.RuntimeGeneration, ToGeneration: store.record.RuntimeGeneration + 1,
 		ExpectedGenerationID: store.grant.InitialGenerationID,
 	}

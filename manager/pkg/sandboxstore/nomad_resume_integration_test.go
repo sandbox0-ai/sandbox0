@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -488,6 +489,10 @@ func prepareNomadResumeRuntime(
 	requested *NomadSandboxResumeCandidate,
 	suffix string,
 ) *preparedNomadResumeRuntime {
+	return prepareNomadResumeRuntimeWithResources(t, fixture, requested, suffix, runtimeSlotTestResources())
+}
+
+func prepareNomadResumeRuntimeWithResources(t *testing.T, fixture *nomadPauseStoreFixture, requested *NomadSandboxResumeCandidate, suffix string, resources protocol.RuntimeResourceRequest) *preparedNomadResumeRuntime {
 	t.Helper()
 	registration := runtimeSlotTestRegistration("slot-nomad-resume-"+suffix, "allocation-nomad-resume-"+suffix)
 	registration.AllocationNamespace = "nomad"
@@ -508,7 +513,7 @@ func prepareNomadResumeRuntime(
 		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
 		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
 		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
-		Resources: runtimeSlotTestResources(),
+		Resources: resources,
 	}
 	claimed, err := fixture.store.AcquireRuntimeSlot(fixture.ctx, acquire)
 	require.NoError(t, err)

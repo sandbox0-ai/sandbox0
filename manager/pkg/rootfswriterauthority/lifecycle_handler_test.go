@@ -138,13 +138,21 @@ func TestLifecycleHandlerRejectsUnknownRequestFields(t *testing.T) {
 }
 
 func TestPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T) {
+	checkPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t, sandboxstore.SandboxLifecycleSourceAuto)
+}
+
+func TestPreparePlannedPublishLifecycleAdvancesResourceResizeIntent(t *testing.T) {
+	checkPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t, sandboxstore.SandboxLifecycleSourceResourceResize)
+}
+
+func checkPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T, source string) {
 	record := &sandboxstore.SandboxRecord{
 		ID: "sandbox-1", RuntimeNamespace: "nomad", RuntimeID: "allocation-1",
 	}
 	grant := &sandboxstore.RootFSWriterGrant{ID: "grant-1", SandboxID: record.ID}
 	tx := &plannedPublishLifecycleTx{active: &sandboxstore.SandboxLifecycleTxn{
 		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
-		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceAuto,
+		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: source,
 		FromGeneration: 7, FromRuntimeNamespace: record.RuntimeNamespace,
 		FromRuntimeID: record.RuntimeID, ExpectedGenerationID: "generation-1",
 	}}

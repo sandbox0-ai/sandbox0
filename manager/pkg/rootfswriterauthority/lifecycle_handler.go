@@ -420,7 +420,7 @@ func preparePlannedPublishLifecycle(
 	}
 	if record == nil || active.ID != operationID || active.SandboxID != grant.SandboxID ||
 		active.Kind != sandboxstore.SandboxLifecycleKindPause ||
-		(active.Source != sandboxstore.SandboxLifecycleSourceManual && active.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
+		(active.Source != sandboxstore.SandboxLifecycleSourceManual && active.Source != sandboxstore.SandboxLifecycleSourceAuto && active.Source != sandboxstore.SandboxLifecycleSourceResourceResize) ||
 		active.Cancelable || !active.CancelRequestedAt.IsZero() || active.FromGeneration != runtimeGeneration ||
 		active.FromRuntimeNamespace != record.RuntimeNamespace || active.FromRuntimeID != record.RuntimeID ||
 		active.ExpectedGenerationID != expectedHead || active.PreparedGenerationID != "" {

@@ -131,3 +131,18 @@ func TestExecutionStatePreservationKeepsFilesystemDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxResourceUpdatesDescribeDurableRestartAndPendingResponses(t *testing.T) {
+	document := loadOpenAPIDocument(t)
+	schema := document.Components.Schemas["SandboxUpdateConfig"].Value
+	if schema.Properties["resources"] == nil || schema.Properties["resources"].Ref != "#/components/schemas/SandboxResourceConfig" {
+		t.Fatal("update must use the shared memory-only resource contract")
+	}
+	if !strings.Contains(schema.Description, "restart processes") || !strings.Contains(schema.Description, "Retry the same limit after 503") {
+		t.Fatal("resource update must describe restart and durable retry behavior")
+	}
+	operation := document.Paths.Value("/api/v1/sandboxes/{id}").Put
+	if operation.Responses.Status(409) == nil || operation.Responses.Status(503) == nil {
+		t.Fatal("conflict and pending resize responses are missing")
+	}
+}

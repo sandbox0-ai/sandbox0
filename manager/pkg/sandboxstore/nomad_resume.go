@@ -113,6 +113,9 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 	if record.TeamID != normalized.ExpectedTeamID {
 		return nil, false, fmt.Errorf("%w: sandbox team identity changed", ErrNomadSandboxResumeConflict)
 	}
+	if _, err := checkResourceResizeResumeAdmission(ctx, tx, record.ID, normalized.Memory); err != nil {
+		return nil, false, err
+	}
 	claim, err := lockSandboxRuntimeClaim(ctx, tx, record.ID)
 	if err != nil {
 		return nil, false, err
@@ -221,6 +224,10 @@ func requestNomadSandboxResumeTx(ctx context.Context, tx pgx.Tx, normalized *Req
 	if record.TeamID != normalized.ExpectedTeamID {
 		return nil, fmt.Errorf("%w: sandbox team identity changed", ErrNomadSandboxResumeConflict)
 	}
+	resize, err := checkResourceResizeResumeAdmission(ctx, tx, record.ID, normalized.Memory)
+	if err != nil {
+		return nil, err
+	}
 	claim, err := lockSandboxRuntimeClaim(ctx, tx, record.ID)
 	if err != nil {
 		return nil, err
@@ -293,6 +300,9 @@ func requestNomadSandboxResumeTx(ctx context.Context, tx pgx.Tx, normalized *Req
 		Phase: SandboxLifecyclePhasePreparing, Source: SandboxLifecycleSourceManual, Cancelable: false,
 		FromGeneration: record.RuntimeGeneration, ToGeneration: record.RuntimeGeneration + 1,
 		ExpectedGenerationID: sourceGenerationID,
+	}
+	if resize != nil {
+		lifecycle.Source = SandboxLifecycleSourceResourceResize
 	}
 	if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad resume lifecycle: %w", err)
@@ -764,7 +774,7 @@ func nomadResumeLifecycleMatches(
 	committed bool,
 ) bool {
 	if lifecycle == nil || record == nil || lifecycle.ID != operationID || lifecycle.SandboxID != record.ID ||
-		lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
+		lifecycle.Kind != SandboxLifecycleKindResume || (lifecycle.Source != SandboxLifecycleSourceManual && lifecycle.Source != SandboxLifecycleSourceResourceResize) ||
 		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() || lifecycle.ExpectedGenerationID != sourceGenerationID ||
 		lifecycle.PreparedGenerationID != "" || lifecycle.ToGeneration != lifecycle.FromGeneration+1 ||
 		lifecycle.Epoch <= 0 || lifecycle.Epoch != record.LifecycleEpoch ||

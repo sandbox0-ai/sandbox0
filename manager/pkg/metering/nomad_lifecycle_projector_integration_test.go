@@ -135,6 +135,7 @@ func commitNomadMeteringResume(
 	store *sandboxstore.PGSandboxStore,
 	sandboxID, operationID string,
 	generation int64,
+	resources ...[2]int64,
 ) {
 	t.Helper()
 	if err := store.WithSandboxLock(ctx, sandboxID, func(
@@ -148,6 +149,12 @@ func commitNomadMeteringResume(
 			FromGeneration: record.RuntimeGeneration, ToGeneration: generation,
 		}); err != nil {
 			return err
+		}
+		if len(resources) > 0 {
+			record.ResourceMillicpu, record.ResourceMemoryMiB = resources[0][0], resources[0][1]
+			if err := tx.SaveSandbox(lockCtx, record); err != nil {
+				return err
+			}
 		}
 		if err := tx.SaveRuntime(
 			lockCtx, sandboxID, "default", "allocation-2", generation,
@@ -238,3 +245,56 @@ type nomadMeteringMigrationLogger struct{}
 
 func (nomadMeteringMigrationLogger) Printf(string, ...any) {}
 func (nomadMeteringMigrationLogger) Fatalf(string, ...any) {}
+
+func TestNomadLifecycleProjectorRetainsResizeSnapshotsIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newNomadMeteringIntegrationPool(t)
+	store := sandboxstore.NewPGSandboxStore(pool)
+	claimedAt := time.Now().UTC().Add(-time.Minute)
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-metering-resize", TeamID: "team-1", UserID: "user-1", TemplateID: "template-1",
+		TemplateName: "template-1", TemplateNamespace: "default", ClusterID: "cluster-1", DesiredState: sandboxstore.SandboxDesiredStateActive,
+		RuntimeID: "allocation-1", RuntimeNamespace: "default", RuntimeGeneration: 1, ResourceMillicpu: 1000, ResourceMemoryMiB: 1024, ClaimedAt: claimedAt, CreatedAt: claimedAt}
+	if err := store.UpsertSandbox(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO manager.sandbox_runtime_claims (sandbox_id,operation_id,phase,completed_at) VALUES ($1,'initial-resize-claim','ready',$2)`, record.ID, claimedAt); err != nil {
+		t.Fatal(err)
+	}
+	commitNomadMeteringPause(t, ctx, store, record.ID, "resize-pause-1", 1)
+	commitNomadMeteringResume(t, ctx, store, record.ID, "resize-resume-1", 2, [2]int64{2000, 4096})
+	time.Sleep(2 * time.Millisecond)
+	commitNomadMeteringPause(t, ctx, store, record.ID, "resize-pause-2", 2)
+	commitNomadMeteringResume(t, ctx, store, record.ID, "resize-resume-2", 3, [2]int64{1000, 2048})
+	var cpu, memory int64
+	if err := pool.QueryRow(ctx, `SELECT cpu_millicores,memory_mib FROM manager.sandbox_metering_initial_resources WHERE sandbox_id=$1`, record.ID).Scan(&cpu, &memory); err != nil {
+		t.Fatal(err)
+	}
+	if cpu != 1000 || memory != 1024 {
+		t.Fatalf("initial resources=%d/%d", cpu, memory)
+	}
+	if err := pool.QueryRow(ctx, `SELECT resource_millicpu,resource_memory_mib FROM manager.sandbox_lifecycle_txns WHERE txn_id='resize-resume-1'`).Scan(&cpu, &memory); err != nil {
+		t.Fatal(err)
+	}
+	if cpu != 2000 || memory != 4096 {
+		t.Fatalf("resume snapshot=%d/%d", cpu, memory)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE manager.sandbox_lifecycle_txns SET resource_memory_mib=2048 WHERE txn_id='resize-resume-1'`); err == nil {
+		t.Fatal("committed resource history could be rewritten")
+	}
+	repo := meteringoutbox.NewRepository(pool)
+	projector, err := NewNomadLifecycleProjector(repo, "region-1", "cluster-1", NomadLifecycleProjectorConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := projector.RunOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("delayed projection=(%d,%v)", n, err)
+	}
+	state, err := repo.GetSandboxProjectionState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ResourceMemoryMiB != 2048 || state.ResourceMillicpu != 1000 || state.Paused {
+		t.Fatalf("final projection=%v", state)
+	}
+	assertNomadMeteringOutboxCount(t, ctx, pool, "window", meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds, 2)
+}

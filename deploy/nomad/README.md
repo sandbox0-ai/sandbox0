@@ -464,3 +464,52 @@ mount, network, writer, and lease-cgroup state absent.
 
 See [node-provided procd](procd-runtime.md) for digest-pinned runtime mounts,
 legacy RootFS compatibility, phased rollout, and session recovery readiness.
+
+## RootFS storage maintenance cutover
+
+A generation-retirement cutover changes both regional inventory and node object
+publication. Before enabling deletion, upgrade every object publisher, including
+existing fixed and elastic workers and the artifact used to enroll future
+workers. Verify the running executables as well as deployment receipts. A new
+manager alone does not establish that all publishers use catalog custody before
+uploading or referencing an object.
+
+Keep the maintenance controller, squash scheduling and materializer together
+under a complete hold during the upgrade:
+
+```yaml
+rootfs_maintenance:
+  disabled: true
+  squash_disabled: true
+  materializer_disabled: true
+```
+
+The complete hold is a temporary deployment state. Preserve the held flags when
+aligning importer artifacts, and validate the enabled materializer configuration
+before releasing the hold. Keep normal runtime cleanup and metering export
+running; do not rewrite lifecycle rows, object reference counts or billing
+history to advance a deployment.
+
+After publisher verification, enable materialization first and exercise an
+owned test filesystem through overwrite/checkpoint, named snapshot, fork,
+restore and pause/resume. Begin reclamation with bounded `batch_size`,
+`max_batches_per_run` and `workers`, inspecting missing-object records,
+reconciliation failures, the persistent deletion queue and storage observations
+before increasing those limits. Retained snapshot/fork data, shared packs and
+bounded operation replay holds are distinct from unneeded historical data.
+Measure both catalog bytes and provider-retained object versions; logical
+reclamation does not immediately expire noncurrent bucket versions.
+
+Verify storage accounting through deletion of the test team's final filesystem,
+a real zero-storage interval and subsequent creation. A retained snapshot or
+fork must keep a nonzero observation. Replaying an older zero observation must
+not close newer storage, and export/import retries must not duplicate usage.
+For legacy projection discrepancies without a trustworthy historical deletion
+time, retain the audit evidence and converge current observations without
+inventing a historical credit or changing a settled ledger.
+
+Preserve coordinated PostgreSQL and object-store recovery data before cutover.
+Once the irreversible custody migrations apply, recover with compatible code
+and retained recovery data rather than an older binary. Keep release manifests
+immutable, including bundled operator tools: rebuilding changed tools requires
+a distinct release identity, even when the runtime source behavior is unchanged.

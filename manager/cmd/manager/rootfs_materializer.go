@@ -48,12 +48,26 @@ func configureRootFSCompositeMaterializer(
 	store rootfsmaterializer.GenerationStore,
 	objects objectstore.Store,
 ) (*rootfsmaterializer.Worker, error) {
-	worker, err := buildRootFSCompositeMaterializer(cfg, store, objects)
+	// A complete maintenance hold permits schema/publisher replacement without
+	// starting background materialization. Validate its eventual configuration
+	// and object-store capabilities even while the worker is held.
+	held := cfg != nil && cfg.RootFSMaintenance.Disabled &&
+		cfg.RootFSMaintenance.SquashDisabled && cfg.RootFSMaintenance.MaterializerDisabled
+	validatedConfig := cfg
+	if held {
+		heldConfig := *cfg
+		heldConfig.RootFSMaintenance.MaterializerDisabled = false
+		validatedConfig = &heldConfig
+	}
+	worker, err := buildRootFSCompositeMaterializer(validatedConfig, store, objects)
 	if err != nil {
 		return nil, err
 	}
 	if cfg != nil && worker == nil {
 		return nil, fmt.Errorf("nomad sandbox runtime requires the RootFS composite materializer and conditional object storage")
+	}
+	if held {
+		return nil, nil
 	}
 	return worker, nil
 }

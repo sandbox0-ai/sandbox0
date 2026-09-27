@@ -142,7 +142,7 @@ func (s *PGSandboxStore) inventoryRootFSGeneration(ctx context.Context, source r
 		}
 		page, readErr := rootfsblock.InspectInventoryMappingPage(ctx, source, descriptor.Version, object, uint64(start), uint64(count), level)
 		if readErr != nil {
-			return false, readErr
+			return false, fmt.Errorf("inventory generation %s mapping page %s: %w", id, object.Key, readErr)
 		}
 		if err = recordRootFSInventoryPage(ctx, tx, source, id, version, object, page); errors.Is(err, errRootFSLegacyInventoryPending) {
 			_, err = tx.Exec(ctx, `UPDATE manager.rootfs_generations SET inventory_attempted_at=clock_timestamp() WHERE generation_id=$1`, id)
@@ -151,7 +151,7 @@ func (s *PGSandboxStore) inventoryRootFSGeneration(ctx context.Context, source r
 			}
 			return false, tx.Commit(ctx)
 		} else if err != nil {
-			return false, err
+			return false, fmt.Errorf("inventory generation %s register page %s: %w", id, object.Key, err)
 		}
 		if _, err = tx.Exec(ctx, `DELETE FROM manager.rootfs_generation_inventory_pages WHERE generation_id=$1 AND page_id=$2`, id, pageID); err != nil {
 			return false, err

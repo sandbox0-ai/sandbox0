@@ -54,7 +54,7 @@ func adoptRootFSLegacyInventoryObjects(ctx context.Context, tx pgx.Tx, source ro
 		}
 		body, err := contextual.GetContext(ctx, object.key, 0, rootfsblock.DefaultPackBytes+1)
 		if err != nil {
-			return err
+			return fmt.Errorf("authenticate legacy object %s for generation %s: %w", object.key, generationID, err)
 		}
 		payload, err := io.ReadAll(io.LimitReader(body, rootfsblock.DefaultPackBytes+1))
 		closeErr := body.Close()
@@ -78,6 +78,13 @@ func adoptRootFSLegacyInventoryObjects(ctx context.Context, tx pgx.Tx, source ro
 		var kind, checksum string
 		var size int64
 		if err = tx.QueryRow(ctx, `SELECT object_kind,object_size,checksum FROM manager.rootfs_materialization_objects WHERE object_key=$1 FOR UPDATE`, object.key).Scan(&kind, &size, &checksum); err != nil {
+			return err
+		}
+		// The migration may inherit a queued retirement made before unknown
+		// graph protection existed. After authenticating the complete object,
+		// cancel only an unclaimed retirement; never steal an in-flight DELETE.
+		if _, err = tx.Exec(ctx, `DELETE FROM manager.rootfs_object_deletions
+			WHERE object_key=$1 AND (claimed_until IS NULL OR claimed_until<=clock_timestamp())`, object.key); err != nil {
 			return err
 		}
 		var deleting bool

@@ -82,12 +82,31 @@ func TestCheckpointWaitsForPhysicalExitAfterEarlyStoppedObservation(t *testing.T
 func TestCheckpointPhysicalExitCancellationRetainsImageAndDoesNotKill(t *testing.T) {
 	child, _ := checkpointLiveProcess(t)
 	runner, log := checkpointEarlyStoppedRunner(t, child.Process.Pid)
+	waiting := make(chan struct{})
+	physicalSource := *runner
+	runner.checkpointSource = func(ctx context.Context, id string) (checkpointExitWaiter, error) {
+		waiter, err := physicalSource.pinCheckpointSource(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return checkpointSignaledExitWaiter{checkpointExitWaiter: waiter, waiting: waiting}, nil
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	image := filepath.Join(t.TempDir(), "image")
 	done := make(chan error, 1)
 	go func() { done <- runner.Checkpoint(ctx, "source", image) }()
 	awaitCheckpointSave(t, runner)
+	// The save marker is written inside the command, before its process returns.
+	// Cancel only once physical-exit observation starts; otherwise this test can
+	// accidentally kill the checkpoint command instead of canceling the waiter.
+	select {
+	case <-waiting:
+	case err := <-done:
+		t.Fatalf("checkpoint failed before physical-exit observation: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("physical-exit observation did not start")
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -106,6 +125,16 @@ func TestCheckpointPhysicalExitCancellationRetainsImageAndDoesNotKill(t *testing
 	if strings.Contains(readCheckpointCalls(t, log), "\nkill\n") {
 		t.Fatal("capture invoked kill")
 	}
+}
+
+type checkpointSignaledExitWaiter struct {
+	checkpointExitWaiter
+	waiting chan struct{}
+}
+
+func (w checkpointSignaledExitWaiter) Wait(ctx context.Context) error {
+	close(w.waiting)
+	return w.checkpointExitWaiter.Wait(ctx)
 }
 
 func TestCheckpointRejectsChangedSourceWhilePinningPhysicalExit(t *testing.T) {

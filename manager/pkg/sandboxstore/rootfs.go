@@ -107,6 +107,7 @@ type RootFSGarbageCollectionResult struct {
 	DeletedObjectKeys  []string
 	ExpiredSnapshots   int
 	DeletedFilesystems int
+	DeletedGenerations int
 }
 
 type DeletePendingRootFSObjectsOptions struct {
@@ -888,11 +889,18 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	if _, err := s.deleteTerminalRootFSHeadRollbacks(ctx, teamID, limit); err != nil {
 		return nil, err
 	}
+	if err := s.ReconcileRootFSNodeUploadGarbage(ctx, teamID, limit); err != nil {
+		return nil, err
+	}
 	deletedRunningCaptures, err := s.DeleteReleasedNomadRunningRootFSCaptures(ctx, teamID, limit)
 	if err != nil {
 		return nil, err
 	}
 	deletedFilesystems, err := s.DeleteUnreferencedRootFSFilesystems(ctx, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
+	deletedGenerations, err := s.DeleteUnreferencedRootFSGenerations(ctx, teamID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -902,6 +910,7 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 		DeletedObjectKeys:  deletedObjectKeys,
 		ExpiredSnapshots:   expiredSnapshots,
 		DeletedFilesystems: deletedRunningCaptures + deletedFilesystems,
+		DeletedGenerations: deletedGenerations,
 	}
 	return result, deleteErr
 }
@@ -967,6 +976,9 @@ func (s *PGSandboxStore) DeleteUnreferencedRootFSFilesystems(ctx context.Context
 		return 0, nil
 	}
 	limit = normalizeRootFSObjectLimit(limit)
+	if err := s.releaseRootFSHistoricalCustody(ctx, strings.TrimSpace(teamID), limit); err != nil {
+		return 0, fmt.Errorf("release terminal rootfs custody: %w", err)
+	}
 	total := 0
 	for total < limit {
 		deleted, err := s.deleteUnreferencedRootFSFilesystemLeaves(ctx, strings.TrimSpace(teamID), limit-total)
@@ -990,7 +1002,7 @@ func (s *PGSandboxStore) deleteUnreferencedRootFSFilesystemLeaves(ctx context.Co
 	rows, err := tx.Query(ctx, `
 		SELECT filesystem.filesystem_id
 		FROM manager.rootfs_filesystems filesystem
-		WHERE ($1 = '' OR filesystem.team_id = $1)
+		WHERE NOT EXISTS(SELECT 1 FROM manager.rootfs_generations pending WHERE pending.filesystem_id=filesystem.filesystem_id AND pending.storage_inventory_required) AND ($1 = '' OR filesystem.team_id = $1)
 			AND NOT EXISTS (
 				SELECT 1 FROM manager.sandbox_rootfs_bindings binding
 				WHERE binding.filesystem_id = filesystem.filesystem_id
@@ -1121,27 +1133,10 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 	}
 	observedAt := time.Now().UTC()
 	rows, err := s.pool.Query(ctx, `
-		WITH attributed AS (
-			SELECT DISTINCT filesystem.team_id, object.object_key, object.object_size
-			FROM manager.rootfs_generation_materialization_objects locator
-			JOIN manager.rootfs_generations generation USING (generation_id)
-			JOIN manager.rootfs_filesystems filesystem
-				ON filesystem.filesystem_id = generation.filesystem_id
-			JOIN manager.rootfs_materialization_objects object USING (object_key)
-			WHERE object.uploaded_at IS NOT NULL
-				AND ($1 = '' OR filesystem.team_id = $1)
-		),
-		known_teams AS (
-			SELECT DISTINCT team_id FROM manager.rootfs_filesystems
-			WHERE team_id <> '' AND ($1 = '' OR team_id = $1)
-			UNION SELECT $1 WHERE $1 <> ''
-		)
-		SELECT known_teams.team_id, COUNT(attributed.object_key),
-			COALESCE(SUM(attributed.object_size), 0)
-		FROM known_teams
-		LEFT JOIN attributed ON attributed.team_id = known_teams.team_id
-		GROUP BY known_teams.team_id
-		ORDER BY known_teams.team_id
+		SELECT team_id, object_count, storage_bytes
+		FROM manager.rootfs_storage_usage
+		WHERE team_id <> '' AND ($1 = '' OR team_id = $1)
+		ORDER BY team_id
 	`, strings.TrimSpace(teamID))
 	if err != nil {
 		return nil, fmt.Errorf("list rootfs storage usage: %w", err)
@@ -1167,25 +1162,44 @@ func (s *PGSandboxStore) RecordRootFSStorageObservations(ctx context.Context, re
 	if !ok {
 		return nil, nil
 	}
+	txRecorder, ok := recorder.(rootFSStorageTransactionRecorder)
+	if !ok {
+		return nil, fmt.Errorf("rootfs storage metering requires a transactional recorder")
+	}
+	if err := s.seedOrphanRootFSStorageAccounts(ctx); err != nil {
+		return nil, err
+	}
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	} else {
 		observedAt = observedAt.UTC()
 	}
-	usages, err := s.ListRootFSStorageUsage(ctx, teamID)
+	rows, err := s.pool.Query(ctx, `SELECT usage.team_id,usage.object_count,usage.storage_bytes
+		FROM manager.rootfs_storage_usage usage
+		WHERE ($1='' OR usage.team_id=$1) AND (usage.storage_bytes>0
+			OR EXISTS (SELECT 1 FROM manager.rootfs_storage_transitions pending WHERE pending.team_id=usage.team_id)
+			OR EXISTS (SELECT 1 FROM metering.storage_projection_state state WHERE state.subject_type='rootfs'
+				AND state.subject_id=usage.team_id AND state.size_bytes>0))
+		ORDER BY usage.last_metered_at NULLS FIRST,usage.team_id LIMIT 1000`, strings.TrimSpace(teamID))
 	if err != nil {
+		return nil, err
+	}
+	var usages []RootFSStorageUsage
+	for rows.Next() {
+		var usage RootFSStorageUsage
+		if err := rows.Scan(&usage.TeamID, &usage.ObjectCount, &usage.StorageBytes); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		usages = append(usages, usage)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	for i := range usages {
 		usages[i].ObservedAt = observedAt
-		if err := recorder.RecordStorageObservation(ctx, &meteringpkg.StorageObservation{
-			SubjectType: meteringpkg.SubjectTypeRootFS,
-			SubjectID:   usages[i].TeamID,
-			Product:     meteringpkg.ProductSandbox,
-			TeamID:      usages[i].TeamID,
-			SizeBytes:   usages[i].StorageBytes,
-			ObservedAt:  observedAt,
-		}); err != nil {
+		if err := s.recordRootFSStorageTeam(ctx, txRecorder, usages[i].TeamID, observedAt); err != nil {
 			return usages, fmt.Errorf("record rootfs storage observation for team %q: %w", usages[i].TeamID, err)
 		}
 	}

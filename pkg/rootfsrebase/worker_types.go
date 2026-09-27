@@ -309,3 +309,9 @@ func (r WorkerResult) ValidateFor(request WorkerRequest) error {
 	}
 	return nil
 }
+
+// UploadOwnerID separates an offline operation's object custody from live
+// sandbox writer grants without exposing a user-facing identifier.
+func UploadOwnerID(operationID string) string {
+	return "node-rebase-" + digest.FromString("sandbox0-node-rebase-upload-v1/"+operationID).Encoded()
+}

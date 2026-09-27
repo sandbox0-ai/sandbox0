@@ -110,6 +110,9 @@ func (s *PGSandboxStore) AuthorizeNomadSandboxMigrationPublication(ctx context.C
 	if err := insertPreparedRootFSGeneration(ctx, tx, generation); err != nil {
 		return nil, err
 	}
+	if err := publishRootFSNodeUploads(ctx, tx, reservation.SourceWriterGrantID, assignment.OperationID, generation); err != nil {
+		return nil, err
+	}
 	if err := (sandboxStoreTx{tx: tx}).SetLifecycleTxnPreparedGeneration(ctx, reservation.Lifecycle.ID, generation.ID); err != nil {
 		return nil, err
 	}

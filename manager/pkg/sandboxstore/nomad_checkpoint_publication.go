@@ -60,6 +60,9 @@ func (s *PGSandboxStore) AuthorizeNomadCheckpointPublication(ctx context.Context
 		if err := insertPreparedRootFSGeneration(ctx, tx, generation); err != nil {
 			return err
 		}
+		if err := publishRootFSNodeUploads(ctx, tx, c.SourceWriterGrantID, c.Lifecycle.ID, generation); err != nil {
+			return err
+		}
 		if err := (sandboxStoreTx{tx: tx}).SetLifecycleTxnPreparedGeneration(ctx, c.Lifecycle.ID, generation.ID); err != nil {
 			return err
 		}

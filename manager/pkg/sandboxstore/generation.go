@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 )
 
 const (
@@ -342,6 +343,9 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		}
 		if insertErr := insertPreparedRootFSGeneration(lockCtx, txStore.tx, normalized.Generation); insertErr != nil {
 			return insertErr
+		}
+		if err := publishRootFSNodeUploads(lockCtx, txStore.tx, rootfsrebase.UploadOwnerID(normalized.OperationID), normalized.OperationID, normalized.Generation); err != nil {
+			return err
 		}
 		tag, updateErr := txStore.tx.Exec(lockCtx, `
 				UPDATE manager.rootfs_filesystems

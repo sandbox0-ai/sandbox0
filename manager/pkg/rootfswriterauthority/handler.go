@@ -91,6 +91,10 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			serveBatchRenew(config, writer, request)
 			return
 		}
+		if strings.HasSuffix(request.URL.EscapedPath(), nodeUploadSuffix) {
+			serveNodeUpload(config, writer, request)
+			return
+		}
 		if isPreconsumeAbortPath(request.URL.EscapedPath()) {
 			servePreconsumeAbort(config, writer, request)
 			return

@@ -771,6 +771,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID); err != nil {
 		return fmt.Errorf("release deleted sandbox runtime checkpoint: %w", err)
 	}
+	if err := releaseRootFSCheckpointForkStorage(ctx, tx, sandboxID, "", 1); err != nil {
+		return fmt.Errorf("release deleted memory fork disk custody: %w", err)
+	}
 	if err := releaseDeletedSandboxCheckpointStorage(ctx, tx, sandboxID); err != nil {
 		return err
 	}
@@ -828,10 +831,24 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
 	}
 	if len(filesystemIDs) > 0 {
+		// An origin filesystem may remain as fork provenance after its last
+		// sandbox binding is gone. Its former head is no longer a live read
+		// root: snapshots, fork heads and incomplete generation dependencies
+		// retain precisely the versions they still need. Keep the origin row
+		// and immutable IDs without indefinitely billing its unrelated head.
+		if _, err := tx.Exec(ctx, `UPDATE manager.rootfs_filesystems filesystem
+			SET head_generation_id=NULL,updated_at=NOW()
+			WHERE filesystem_id=ANY($1::TEXT[])
+			AND NOT EXISTS (SELECT 1 FROM manager.sandbox_rootfs_bindings binding WHERE binding.filesystem_id=filesystem.filesystem_id)
+			AND NOT EXISTS (SELECT 1 FROM manager.rootfs_writer_grants writer WHERE writer.filesystem_id=filesystem.filesystem_id
+				AND writer.state IN ('issued','consumed','retiring'))`, filesystemIDs); err != nil {
+			return fmt.Errorf("release deleted sandbox rootfs heads: %w", err)
+		}
 		deletableRows, err := tx.Query(ctx, `
 				SELECT f.filesystem_id
 				FROM manager.rootfs_filesystems AS f
 				WHERE f.filesystem_id = ANY($1::text[])
+				AND NOT EXISTS(SELECT 1 FROM manager.rootfs_generations pending WHERE pending.filesystem_id=f.filesystem_id AND pending.storage_inventory_required)
 				AND NOT EXISTS (
 				SELECT 1
 				FROM manager.sandbox_rootfs_bindings b

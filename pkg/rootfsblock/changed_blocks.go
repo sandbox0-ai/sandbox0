@@ -201,7 +201,15 @@ func (i *mappingExtentIterator) readPage(object ObjectRange, expectedDigest stri
 	if err := i.ctx.Err(); err != nil {
 		return MappingPage{}, err
 	}
-	body, err := i.source.Get(object.Key, object.Offset, object.StoredLength())
+	var body io.ReadCloser
+	var err error
+	if source, ok := i.source.(interface {
+		GetContext(context.Context, string, int64, int64) (io.ReadCloser, error)
+	}); ok {
+		body, err = source.GetContext(i.ctx, object.Key, object.Offset, object.StoredLength())
+	} else {
+		body, err = i.source.Get(object.Key, object.Offset, object.StoredLength())
+	}
 	if err != nil {
 		return MappingPage{}, err
 	}

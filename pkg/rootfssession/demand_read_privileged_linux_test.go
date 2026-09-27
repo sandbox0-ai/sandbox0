@@ -52,11 +52,13 @@ func TestPrivilegedDemandReadEncryptedRootFSReattachesXFSOverlay(t *testing.T) {
 		prefixBytes   int64
 		parallelBytes int64
 	}{
-		{"legacy-1m", 1 << 20, 1 << 20, 0, 0, 0},
+		// Format2 uses 64 KiB data ranges; older encryption envelopes may
+		// still have 1 MiB frames. Preserve that frame fallback coverage.
+		{"legacy-1m-frame-no-cache", rootfsblock.CompressedDataRangeBytes, 1 << 20, 0, 0, 0},
 		{"adaptive-64k-no-cache", 64 << 10, 64 << 10, 0, 0, 0},
 		{"adaptive-64k-cached", 64 << 10, 64 << 10, rootfsblock.DefaultReadCacheBytes, 0, 0},
 		{"prefix-64k-cached", 64 << 10, 64 << 10, rootfsblock.DefaultReadCacheBytes, 256 << 10, 0},
-		{"prefix-legacy-frame-cached", 1 << 20, 1 << 20, rootfsblock.DefaultReadCacheBytes, 256 << 10, 0},
+		{"prefix-legacy-frame-cached", rootfsblock.CompressedDataRangeBytes, 1 << 20, rootfsblock.DefaultReadCacheBytes, 256 << 10, 0},
 		{"parallel-64k-cached", 64 << 10, 64 << 10, rootfsblock.DefaultReadCacheBytes, 256 << 10, 256 << 10},
 		{"parallel-legacy-frame-cached", 64 << 10, 1 << 20, rootfsblock.DefaultReadCacheBytes, 256 << 10, 256 << 10},
 	} {

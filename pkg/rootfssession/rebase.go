@@ -326,7 +326,7 @@ func (m *Manager) ExecuteRebase(
 		return result, err
 	}
 	built, err := rootfsblock.BuildIncrementalGenerationFromBlockReader(
-		workCtx, m.source, targetBase, live.checkpoint, m.publisher, rootfsblock.BuildOptions{},
+		workCtx, m.source, targetBase, live.checkpoint, m.rebasePublisher(request), rootfsblock.BuildOptions{},
 	)
 	if err != nil {
 		return result, fmt.Errorf("publish rebased target generation: %w", err)

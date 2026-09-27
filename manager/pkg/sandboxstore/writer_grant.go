@@ -1304,22 +1304,6 @@ func completeRootFSWriterRetireAndPublishGeneration(
 		return nil, fmt.Errorf("%w: expected generation %q, got %q",
 			ErrRootFSHeadConflict, normalized.ExpectedOldGenerationID, currentHead)
 	}
-	var oldSourceDigest, oldBaseArtifact, oldBaseRoot string
-	if err := db.QueryRow(ctx, `
-		SELECT source_oci_digest, base_artifact_digest, base_block_root
-		FROM manager.rootfs_generations
-		WHERE generation_id = $1
-		FOR SHARE
-	`, normalized.ExpectedOldGenerationID).Scan(
-		&oldSourceDigest, &oldBaseArtifact, &oldBaseRoot,
-	); err != nil {
-		return nil, fmt.Errorf("lock previous rootfs generation: %w", err)
-	}
-	if generation.ParentGenerationID != normalized.ExpectedOldGenerationID ||
-		generation.SourceOCIDigest != oldSourceDigest || generation.BaseArtifactDigest != oldBaseArtifact ||
-		generation.BaseBlockRoot != oldBaseRoot {
-		return nil, fmt.Errorf("%w: sealed generation changed immutable lineage", ErrRootFSGenerationConflict)
-	}
 
 	if record.State == RootFSWriterGrantStateRetired {
 		if lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.ExpectedGenerationID != normalized.ExpectedOldGenerationID ||
@@ -1341,6 +1325,25 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	if record.State != RootFSWriterGrantStateRetiring {
 		return nil, rootFSWriterGrantStateError(record)
 	}
+	// Exact terminal retries validate the immutable published identity above;
+	// they do not require an obsolete parent row to remain forever.
+	var oldSourceDigest, oldBaseArtifact, oldBaseRoot string
+	if err := db.QueryRow(ctx, `
+		SELECT source_oci_digest, base_artifact_digest, base_block_root
+		FROM manager.rootfs_generations
+		WHERE generation_id = $1
+		FOR SHARE
+	`, normalized.ExpectedOldGenerationID).Scan(
+		&oldSourceDigest, &oldBaseArtifact, &oldBaseRoot,
+	); err != nil {
+		return nil, fmt.Errorf("lock previous rootfs generation: %w", err)
+	}
+	if generation.ParentGenerationID != normalized.ExpectedOldGenerationID ||
+		generation.SourceOCIDigest != oldSourceDigest || generation.BaseArtifactDigest != oldBaseArtifact ||
+		generation.BaseBlockRoot != oldBaseRoot {
+		return nil, fmt.Errorf("%w: sealed generation changed immutable lineage", ErrRootFSGenerationConflict)
+	}
+
 	if lifecycle.CancelRequested ||
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting {
 		return nil, fmt.Errorf("%w: lifecycle txn %s is not publishable",
@@ -1374,6 +1377,9 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	if !matches {
 		return nil, fmt.Errorf("%w: generation %s has different immutable fields",
 			ErrRootFSGenerationConflict, generation.ID)
+	}
+	if err := publishRootFSNodeUploads(ctx, db, normalized.GrantID, normalized.OperationID, generation); err != nil {
+		return nil, err
 	}
 	tag, err := db.Exec(ctx, `
 		UPDATE manager.rootfs_filesystems

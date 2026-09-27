@@ -300,6 +300,31 @@ func (r *Repository) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, 
 	return r.upsertStorageProjectionState(ctx, tx, state)
 }
 
+// ReconcileZeroStorageObservationTx ends a legacy projection whose removal
+// boundary is unknown. It does not invent a charge for the unobserved interval.
+// The caller must preserve the returned previous state in an audit journal in
+// this same transaction. Existing windows and financial history are unchanged.
+func (r *Repository) ReconcileZeroStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) (*metering.StorageProjectionState, error) {
+	if tx == nil || observation == nil || observation.SizeBytes != 0 {
+		return nil, fmt.Errorf("zero storage reconciliation requires a transaction and zero-byte observation")
+	}
+	state, err := r.normalizeStorageObservation(ctx, tx, observation)
+	if err != nil {
+		return nil, err
+	}
+	previous, err := getStorageProjectionState(ctx, tx, state.SubjectType, state.SubjectID, true)
+	if err != nil {
+		return nil, err
+	}
+	if previous != nil {
+		if state.ObservedAt.Before(previous.ObservedAt) {
+			return nil, nil
+		}
+		state.UnbilledByteNanoseconds = previous.UnbilledByteNanoseconds
+	}
+	return previous, r.upsertStorageProjectionState(ctx, tx, state)
+}
+
 func (r *Repository) CloseStorageObservation(ctx context.Context, observation *metering.StorageObservation) error {
 	return r.InTx(ctx, func(tx pgx.Tx) error {
 		return r.CloseStorageObservationTx(ctx, tx, observation)

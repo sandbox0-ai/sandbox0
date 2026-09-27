@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/stretchr/testify/require"
@@ -312,28 +311,23 @@ type nomadPauseStoreFixture struct {
 	initial             *RootFSGeneration
 }
 
-func (f *nomadPauseStoreFixture) publishPlannedPause(t *testing.T, operationID string) {
+func (f *nomadPauseStoreFixture) publishPlannedPause(t *testing.T, operationID string, prepared ...*RootFSGeneration) {
 	t.Helper()
-	blockHead := digest.FromString("nomad-pause-head-" + f.sandboxID).String()
-	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
-		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 1 << 30,
-		BlockSizeBytes: rootfsblock.LogicalBlockSize,
-		MappingRoot: rootfsblock.MappingRootLocator{
-			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
-			Object: rootfsblock.ObjectRange{
-				Key: "rootfs/nomad-pause/map.page", Length: 4096,
-				Checksum: digest.FromString("nomad-pause-map-page-" + f.sandboxID).String(),
-			},
-		},
-	})
-	require.NoError(t, err)
-	next := &RootFSGeneration{
-		ID: "generation-nomad-pause-" + f.sandboxID, FilesystemID: f.filesystem.ID,
-		ParentGenerationID: f.initial.ID, SourceOCIDigest: f.initial.SourceOCIDigest,
-		BaseArtifactDigest: f.initial.BaseArtifactDigest, BaseBlockRoot: f.initial.BaseBlockRoot,
-		CurrentBlockHead: blockHead, WriterEpoch: f.writerEpoch,
-		FormatGeneration: f.initial.FormatGeneration, DurabilityState: RootFSGenerationStateS3Materialized,
-		LocatorVersion: f.initial.LocatorVersion + 1, Descriptor: descriptor,
+	var next *RootFSGeneration
+	if len(prepared) > 0 {
+		next = prepared[0]
+	} else {
+		// Metadata lifecycle fixtures have no object store. Use an actual inline
+		// checkpoint rather than claim that a nonexistent S3 mapping was uploaded.
+		// Real S3 retention tests pass their registered prepared generation here.
+		base, err := rootfsblock.DecodeDescriptor(f.initial.Descriptor)
+		require.NoError(t, err)
+		sealed, descriptor, err := rootfsblock.BuildCompositeGeneration(base, []rootfsblock.BlockUpdate{{Sequence: 1, Block: 0, Data: bytes.Repeat([]byte{0x73}, rootfsblock.LogicalBlockSize)}})
+		require.NoError(t, err)
+		next = &RootFSGeneration{ID: "generation-nomad-pause-" + f.sandboxID, FilesystemID: f.filesystem.ID,
+			ParentGenerationID: f.initial.ID, SourceOCIDigest: f.initial.SourceOCIDigest, BaseArtifactDigest: f.initial.BaseArtifactDigest, BaseBlockRoot: f.initial.BaseBlockRoot,
+			CurrentBlockHead: sealed.MappingRoot.RootDigest, WriterEpoch: f.writerEpoch, FormatGeneration: f.initial.FormatGeneration,
+			DurabilityState: RootFSGenerationStateCompositeDurable, LocatorVersion: f.initial.LocatorVersion + 1, Descriptor: descriptor}
 	}
 	proof := sha256.Sum256([]byte("nomad-pause-proof-" + f.sandboxID))
 	require.NoError(t, f.store.WithSandboxLock(f.ctx, f.sandboxID, func(
@@ -371,6 +365,10 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string, configure ...func(*A
 }
 
 func newNomadPauseStoreFixtureOnNode(t *testing.T, suffix string, pool *pgxpool.Pool, node string, configure ...func(*AcquireRuntimeSlotRequest)) *nomadPauseStoreFixture {
+	return newNomadPauseStoreFixtureWithBase(t, suffix, pool, node, readyRootFSBaseArtifactTestRequest(), configure...)
+}
+
+func newNomadPauseStoreFixtureWithBase(t *testing.T, suffix string, pool *pgxpool.Pool, node string, base *PutReadyRootFSBaseArtifactRequest, configure ...func(*AcquireRuntimeSlotRequest)) *nomadPauseStoreFixture {
 	t.Helper()
 	ctx := context.Background()
 	store := NewPGSandboxStore(pool)
@@ -387,7 +385,7 @@ func newNomadPauseStoreFixtureOnNode(t *testing.T, suffix string, pool *pgxpool.
 		Record: record, OperationID: operationID, LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
-	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, base)
 	require.NoError(t, err)
 	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
 		SandboxID: sandboxID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef,

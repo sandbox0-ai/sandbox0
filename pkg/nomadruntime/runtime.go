@@ -322,6 +322,19 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	if err := initializeRuntimeObjectStore(ctx, store); err != nil {
 		return nil, err
 	}
+	var authority rootFSWriterAuthority
+	if config.RootFSAuthorityURL != "" {
+		client, clientErr := managerauthority.NewManagerClient(managerauthority.ManagerClientConfig{
+			BaseURL: config.RootFSAuthorityURL, CAFile: config.RootFSAuthorityCAFile,
+			ClientCertFile: config.RootFSAuthorityClientCertFile,
+			ClientKeyFile:  config.RootFSAuthorityClientKeyFile,
+			TokenFile:      config.RootFSAuthorityTokenFile, Timeout: 2 * time.Second,
+		})
+		if clientErr != nil {
+			return nil, fmt.Errorf("create RootFS writer authority client: %w", clientErr)
+		}
+		authority = client
+	}
 	hostRuntime, err := rootfssession.NewLinuxRuntime(rootfssession.LinuxRuntimeConfig{
 		DevicePaths: config.RootFSNBDDevices,
 	})
@@ -339,6 +352,12 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		},
 		Source:    conditional,
 		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
+		PublisherForRebase: func(request rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher {
+			return nodeJournalPublisher{authority: authority, operation: request.OperationID, rebase: true, publisher: rootfsblock.ObjectStorePublisher{Store: conditional}}
+		},
+		PublisherForOperation: func(stage rootfshandoff.StageRequest, operation string) rootfsblock.ImmutableObjectPublisher {
+			return nodeJournalPublisher{authority: authority, stage: stage, operation: operation, publisher: rootfsblock.ObjectStorePublisher{Store: conditional}}
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
@@ -370,20 +389,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		"max_bytes", dirtyTailUsage.MaxBytes,
 		"journal_owners", dirtyTailUsage.Owners,
 	)
-	var authority rootFSWriterAuthority
-	if config.RootFSAuthorityURL != "" {
-		client, clientErr := managerauthority.NewManagerClient(managerauthority.ManagerClientConfig{
-			BaseURL: config.RootFSAuthorityURL, CAFile: config.RootFSAuthorityCAFile,
-			ClientCertFile: config.RootFSAuthorityClientCertFile,
-			ClientKeyFile:  config.RootFSAuthorityClientKeyFile,
-			TokenFile:      config.RootFSAuthorityTokenFile, Timeout: 2 * time.Second,
-		})
-		if clientErr != nil {
-			_ = sessions.Close()
-			return nil, fmt.Errorf("create RootFS writer authority client: %w", clientErr)
-		}
-		authority = client
-	}
+
 	return &rootfsRuntime{
 		checkpoints: checkpoints, sessions: sessions, authority: authority, info: runtimeInfoFromConfig(*config), logger: logger,
 		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),

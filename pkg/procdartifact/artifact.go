@@ -58,7 +58,7 @@ func Resolve(root string, a Artifact) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("inspect procd cache: %w", err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !trustedOwner(info) || info.Mode().Perm()&0022 != 0 {
+		if info.Mode()&os.ModeSymlink != 0 || !trustedCacheOwner(current, root, info) || info.Mode().Perm()&0022 != 0 {
 			return "", fmt.Errorf("procd cache must be root-owned without symlinks or group/world write permissions: %s", current)
 		}
 		if current == path {

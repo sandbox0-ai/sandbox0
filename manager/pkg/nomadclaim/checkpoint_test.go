@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
@@ -94,6 +95,34 @@ func TestMemoryResumeServiceUsesCapturedAssignmentAndOrdinaryRegionalCommit(t *t
 			_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
 			require.NoError(t, err)
 			require.Len(t, p.authorities, 1, "already-active retry cannot restore twice")
+		})
+	}
+}
+
+func TestMemoryResumeKeepsCapturedProcdAfterImporterUpgrade(t *testing.T) {
+	for _, protocol := range []string{"sandbox0.procd.v1", "sandbox0.procd.v2"} {
+		t.Run(protocol, func(t *testing.T) {
+			f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+			assignment := &f.store.resumeCandidate.Checkpoint.Assignment
+			captured := procdartifact.Artifact{Digest: "sha256:" + strings.Repeat("a", 64), Protocol: "sandbox0.procd.v1"}
+			assignment.Target.Procd = &captured
+			source := assignment.Target
+			source.RuntimeGeneration = assignment.Capture.RuntimeGeneration
+			capture, err := runtimecontrol.NewCheckpointCaptureAssignment(assignment.Capture.OperationID, source)
+			require.NoError(t, err)
+			assignment.Capture = capture
+			selected := procdartifact.Artifact{Digest: "sha256:" + strings.Repeat("b", 64), Protocol: protocol}
+			f.service.runtimeProcd = &selected
+
+			_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+			if protocol != captured.Protocol {
+				require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+				require.Empty(t, planner.authorities)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, planner.authorities, 1)
+			require.Equal(t, captured, *planner.requests[0].Runtime.Procd)
 		})
 	}
 }

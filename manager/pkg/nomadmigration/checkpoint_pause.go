@@ -167,15 +167,10 @@ func NewCheckpointPause(store CheckpointPauseStore, node CheckpointPauseNode, ob
 			return true, nil
 		}
 		if w.Publication == nil {
-			// Recover before dispatch: an existing intent belongs to the driver, and
-			// an uncertain outcome can only enter physical failure reconciliation.
-			captured, err := node.RecoverMigrationCapture(ctx, source)
-			if errdefs.IsNotFound(err) {
-				if err := store.AuthorizeNomadCheckpointCaptureDispatch(ctx, source); err != nil {
-					return false, err
-				}
-				captured, err = node.CaptureMigration(ctx, source)
-			}
+			// An intent may outlive a lost dispatch response. Re-entering the exact
+			// driver operation observes an in-flight checkpoint or records an
+			// uncertain outcome; the driver never starts the checkpoint twice.
+			captured, err := observeCheckpointCapture(ctx, source, store.AuthorizeNomadCheckpointCaptureDispatch, node)
 			if err != nil {
 				return false, err
 			}
@@ -253,4 +248,21 @@ func NewCheckpointPause(store CheckpointPauseStore, node CheckpointPauseNode, ob
 		err = store.CommitNomadCheckpointSourceFence(ctx, *command, *proof)
 		return err == nil, err
 	}}, nil
+}
+
+func observeCheckpointCapture(
+	ctx context.Context,
+	source protocol.MigrationCaptureRequest,
+	authorize func(context.Context, protocol.MigrationCaptureRequest) error,
+	node CheckpointPauseNode,
+) (*protocol.MigrationCapture, error) {
+	captured, err := node.RecoverMigrationCapture(ctx, source)
+	if errdefs.IsNotFound(err) || (err == nil && captured != nil && captured.Validate() == nil &&
+		captured.Request == source && captured.State == protocol.MigrationCaptureIntent) {
+		if err := authorize(ctx, source); err != nil {
+			return nil, err
+		}
+		return node.CaptureMigration(ctx, source)
+	}
+	return captured, err
 }

@@ -67,6 +67,34 @@ func TestRuntimeAssignmentCarriesSecurityClassAndEphemeralMounts(t *testing.T) {
 	}
 }
 
+func TestRuntimeAssignmentUsesRegionalNPMCacheUnlessSandboxOverridesIt(t *testing.T) {
+	const cache = "http://nora.internal:4000/npm/"
+	s := &Service{defaultNPMRegistryURL: cache}
+	req := &service.ClaimRequest{SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	assignment, err := s.runtimeAssignment(v1alpha1.TemplateSpec{}, req)
+	require.NoError(t, err)
+	require.Equal(t, cache, assignment.EnvVars["NPM_CONFIG_REGISTRY"])
+
+	spec := v1alpha1.TemplateSpec{EnvVars: map[string]string{"npm_config_registry": "https://private.example/npm/"}}
+	assignment, err = s.runtimeAssignment(spec, req)
+	require.NoError(t, err)
+	require.NotContains(t, assignment.EnvVars, "NPM_CONFIG_REGISTRY")
+	require.Equal(t, "https://private.example/npm/", assignment.EnvVars["npm_config_registry"])
+}
+
+func TestRegionalNPMCacheURLRejectsCredentialsAndNonRegistryPaths(t *testing.T) {
+	f := newClaimServiceFixture(t)
+	for _, invalid := range []string{
+		"http://user:password@nora.internal/npm/",
+		"http://nora.internal/admin/",
+		"file:///tmp/npm/",
+	} {
+		f.config.DefaultNPMRegistryURL = invalid
+		_, err := New(f.config)
+		require.ErrorContains(t, err, "default npm registry URL")
+	}
+}
+
 func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templateID string) (*templatepkg.Template, error) {
 	if f.template == nil || f.template.TemplateID != templateID ||
 		(f.template.Scope == naming.ScopeTeam && f.template.TeamID != teamID) {

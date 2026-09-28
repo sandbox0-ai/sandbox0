@@ -8,6 +8,9 @@ database_url: ${SANDBOX0_DATABASE_URL}
 database_max_conns: 40
 database_min_conns: 4
 default_sandbox_ttl: 30m
+# Optional; set only after the regional public npm cache passes health and
+# dependency-install benchmarks. Template/request npm registry env takes precedence.
+# default_npm_registry_url: http://nora.internal:4000/npm/
 team_template_memory_per_cpu: 2Gi
 sandbox_max_memory: 32Gi
 procd_client_timeout: 5s

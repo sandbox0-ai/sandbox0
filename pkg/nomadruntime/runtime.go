@@ -311,10 +311,6 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS object store: %w", err)
 	}
-	checkpoints, err := runtimecheckpoint.New(store, runtimecheckpoint.MaxImageBytes)
-	if err != nil {
-		return nil, err
-	}
 	conditional, ok := store.(objectstore.ContextConditionalStore)
 	if !ok || !objectstore.SupportsContextConditionalCreate(store) {
 		return nil, fmt.Errorf("RootFS object store %s does not support contextual conditional access", store)
@@ -361,6 +357,11 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
+	}
+	checkpoints, err := runtimecheckpoint.NewWithChunkCache(store, runtimecheckpoint.MaxImageBytes, sessions.CheckpointChunkCache())
+	if err != nil {
+		_ = sessions.Close()
+		return nil, fmt.Errorf("create checkpoint store: %w", err)
 	}
 	// Recovery is fail-closed: do not expose the node runtime socket until all
 	// crash-surviving journal intents have completed. Immutable object

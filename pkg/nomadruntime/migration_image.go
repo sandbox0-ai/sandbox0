@@ -21,14 +21,24 @@ type migrationImageDownloadRuntime interface {
 	PrepareMigrationImageFiles(context.Context, runtimecheckpoint.Binding, runtimecheckpoint.Reference, string, bool, func(int64, uint64) error) (runtimecheckpoint.Manifest, error)
 }
 
+type migrationImageDownloadStatsRuntime interface {
+	PrepareMigrationImageFilesWithStats(context.Context, runtimecheckpoint.Binding, runtimecheckpoint.Reference, string, bool, func(int64, uint64) error) (runtimecheckpoint.Manifest, runtimecheckpoint.DownloadStats, error)
+}
+
 func (r *rootfsRuntime) PrepareMigrationImageFiles(ctx context.Context, binding runtimecheckpoint.Binding, reference runtimecheckpoint.Reference, directory string, verify bool, admit func(int64, uint64) error) (runtimecheckpoint.Manifest, error) {
+	manifest, _, err := r.PrepareMigrationImageFilesWithStats(ctx, binding, reference, directory, verify, admit)
+	return manifest, err
+}
+
+func (r *rootfsRuntime) PrepareMigrationImageFilesWithStats(ctx context.Context, binding runtimecheckpoint.Binding, reference runtimecheckpoint.Reference, directory string, verify bool, admit func(int64, uint64) error) (runtimecheckpoint.Manifest, runtimecheckpoint.DownloadStats, error) {
 	if r == nil || r.checkpoints == nil {
-		return runtimecheckpoint.Manifest{}, errdefs.ErrUnavailable
+		return runtimecheckpoint.Manifest{}, runtimecheckpoint.DownloadStats{}, errdefs.ErrUnavailable
 	}
 	if verify {
-		return r.checkpoints.VerifyLocal(ctx, binding, reference, directory)
+		manifest, err := r.checkpoints.VerifyLocal(ctx, binding, reference, directory)
+		return manifest, runtimecheckpoint.DownloadStats{}, err
 	}
-	return r.checkpoints.DownloadWithAdmission(ctx, binding, reference, directory, admit)
+	return r.checkpoints.DownloadWithAdmissionStats(ctx, binding, reference, directory, admit)
 }
 
 // MigrationDestinationCustody is kept in the existing exclusive slot journal.
@@ -196,6 +206,7 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 		}
 	}
 	transport := "regional"
+	var downloadStats runtimecheckpoint.DownloadStats
 	if custody.Prepared != nil {
 		transport = "local-verification"
 	}
@@ -224,7 +235,18 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 		if peer {
 			transport = "regional-fallback"
 		}
-		manifest, err = runtime.PrepareMigrationImageFiles(ctx, request.Receipt.Binding, request.Receipt.Reference, custody.ImageDirectory, custody.Prepared != nil, d.checkMigrationStagingBudget)
+		if measured, ok := d.runtime.(migrationImageDownloadStatsRuntime); ok {
+			manifest, downloadStats, err = measured.PrepareMigrationImageFilesWithStats(ctx, request.Receipt.Binding, request.Receipt.Reference, custody.ImageDirectory, custody.Prepared != nil, d.checkMigrationStagingBudget)
+		} else {
+			manifest, err = runtime.PrepareMigrationImageFiles(ctx, request.Receipt.Binding, request.Receipt.Reference, custody.ImageDirectory, custody.Prepared != nil, d.checkMigrationStagingBudget)
+		}
+		if downloadStats.CacheChunks > 0 {
+			if downloadStats.RegionalChunks == 0 {
+				transport = "node-cache"
+			} else {
+				transport = "regional-cache"
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -243,7 +265,10 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 		return nil, err
 	}
 	d.logMigrationTiming(request.OperationID(), "image-preparation", transferStarted,
-		"transport", transport, "image_bytes", result.TotalBytes)
+		"transport", transport, "image_bytes", result.TotalBytes,
+		"cache_chunks", downloadStats.CacheChunks, "cache_bytes", downloadStats.CacheBytes,
+		"cloned_chunks", downloadStats.ClonedChunks, "cloned_bytes", downloadStats.ClonedBytes,
+		"regional_chunks", downloadStats.RegionalChunks, "regional_bytes", downloadStats.RegionalBytes)
 	return &result, nil
 }
 

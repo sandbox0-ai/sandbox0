@@ -149,10 +149,25 @@ guarantee claim/command latency.
 
 `NewReadCacheWithDisk` optionally adds a node-owned disk tier below the memory
 LRU and above the object source. All session readers on that node share it.
+The node's runtime checkpoint store uses this same directory and disk LRU for
+verified 8-MiB memory-image chunks. The 128-MiB memory tier remains dedicated
+to RootFS reads; checkpoint chunks do not evict decoded mapping pages from it.
 Keys use the decoded SHA-256 and length, so immutable bytes can be reused across
 object locations, generations, and raw/compressed encodings. Descriptor and
 parent/child validation still runs; writable branches and composite-tail
 overrides never enter this cache.
+
+Checkpoint chunks enter the disk cache during final, verified regional
+publication and are reused on a later same-node restore. The exact regional
+manifest, source binding, lifecycle authority and separate migration staging
+quota remain required. A cache miss or damaged chunk falls back to regional
+storage; the cache is never an execution or durability receipt. On a compatible
+same-filesystem Linux destination, a cached chunk is range-cloned into the
+private image and the cloned bytes are hashed before they can become a restore
+receipt. Unsupported cloning falls back to the verified cache read and write
+path. Cold regional downloads do not synchronously fill the cache. RootFS ranges and checkpoint
+chunks evict each other under one disk budget, so a large checkpoint can displace
+older RootFS entries.
 
 The directory contains plaintext and must be dedicated host-private storage,
 outside every sandbox mount. It is restricted to mode 0700, holds a single-owner
@@ -184,8 +199,9 @@ publishes completed files; no cache fsync extends the claim path. On process
 restart, completed entries are reusable and an incomplete staging file is
 discarded. Host crashes may lose cache data; checksum validation handles torn
 files on their next use. `Close` drains accepted fills and releases ownership.
-`ReadCache.Stats` reports hits, misses, writes, errors, dropped fills, occupancy,
-and queued bytes. Local disk reuse is distinct from a fresh node with no cache;
+`ReadCache.Stats` reports combined disk hits, misses, writes, errors, dropped
+fills, occupancy and queued bytes. Checkpoint image-preparation logs also report
+per-restore cache and regional chunk counts and bytes. Local disk reuse is distinct from a fresh node with no cache;
 neither a new sandbox nor clearing guest page cache establishes the latter.
 
 ## Remaining acceptance

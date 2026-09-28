@@ -104,7 +104,7 @@ func TestCheckpointImageDownloadBoundsParallelChunks(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	result := make(chan error, 1)
 	go func() {
-		result <- materializeFile(t.Context(), root, file, downloadConcurrency, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+		result <- materializeFile(t.Context(), root, file, downloadConcurrency, nil, func(ctx context.Context, chunk Chunk) ([]byte, error) {
 			current := active.Add(1)
 			defer active.Add(-1)
 			for {

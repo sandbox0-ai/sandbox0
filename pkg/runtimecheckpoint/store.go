@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
@@ -47,6 +49,34 @@ type Store struct {
 	objects   objectstore.ContextConditionalStore
 	maxBytes  int64
 	manifests manifestCache
+	chunks    ChunkCache
+}
+
+// ChunkCache is disposable node-local storage for verified immutable image
+// chunks. The regional manifest and lifecycle receipt remain authoritative.
+// Implementations verify digest and size on every hit and bound eviction.
+type ChunkCache interface {
+	GetCheckpointChunk(digest string, size int64) ([]byte, bool)
+	PutCheckpointChunk(digest string, payload []byte)
+}
+
+// ChunkCloner optionally copies a cache hit into an unexposed private image
+// file using filesystem range cloning. The implementation verifies the cloned
+// immutable source bytes before cloning the same inode. False falls back to
+// ordinary cache reading and then regional storage; errors abort preparation.
+type ChunkCloner interface {
+	CloneCheckpointChunk(context.Context, string, int64, *os.File, int64) (bool, error)
+}
+
+// DownloadStats accounts for verified image chunks; manifest reads are small
+// and remain regional. Counts belong to one transfer, not a shared node delta.
+type DownloadStats struct {
+	CacheChunks    int64
+	CacheBytes     int64
+	ClonedChunks   int64
+	ClonedBytes    int64
+	RegionalChunks int64
+	RegionalBytes  int64
 }
 
 // New requires an already-configured regional store, normally constructed by
@@ -57,10 +87,16 @@ type Store struct {
 // buffers and never load the full image. Regional downloads use at most
 // downloadConcurrency chunk buffers; ordered peer streams use one.
 func New(objects objectstore.Store, maxBytes int64) (*Store, error) {
+	return NewWithChunkCache(objects, maxBytes, nil)
+}
+
+// NewWithChunkCache reuses the node's RootFS disk LRU for memory image chunks.
+// A cache failure never grants restore authority or blocks regional fallback.
+func NewWithChunkCache(objects objectstore.Store, maxBytes int64, chunks ChunkCache) (*Store, error) {
 	if !objectstore.SupportsContextConditionalCreate(objects) || maxBytes <= 0 || maxBytes > MaxImageBytes {
 		return nil, fmt.Errorf("checkpoint store needs bounded context-aware immutable storage")
 	}
-	return &Store{objects: objects.(objectstore.ContextConditionalStore), maxBytes: maxBytes}, nil
+	return &Store{objects: objects.(objectstore.ContextConditionalStore), maxBytes: maxBytes, chunks: chunks}, nil
 }
 
 // Publish uploads an immutable, completed runsc image. The caller must hold
@@ -105,36 +141,75 @@ func (s *Store) Publish(ctx context.Context, binding Binding, directory string) 
 // node recovery; it must never be passed to runsc or mistaken for a completed
 // transfer. The caller journals success only after this method returns nil.
 func (s *Store) Download(ctx context.Context, expected Binding, ref Reference, directory string) (Manifest, error) {
-	return s.download(ctx, expected, ref, directory, nil)
+	manifest, _, err := s.download(ctx, expected, ref, directory, nil)
+	return manifest, err
 }
 
 // DownloadWithAdmission verifies the immutable manifest, then checks its disk
 // footprint before creating a directory or reading image chunks. The callback
 // must use node-owned authority, never a size supplied by an unverified caller.
 func (s *Store) DownloadWithAdmission(ctx context.Context, expected Binding, ref Reference, directory string, admit func(int64, uint64) error) (Manifest, error) {
+	manifest, _, err := s.DownloadWithAdmissionStats(ctx, expected, ref, directory, admit)
+	return manifest, err
+}
+
+// DownloadWithAdmissionStats exposes per-restore cache use for node timing logs.
+func (s *Store) DownloadWithAdmissionStats(ctx context.Context, expected Binding, ref Reference, directory string, admit func(int64, uint64) error) (Manifest, DownloadStats, error) {
 	if admit == nil {
-		return Manifest{}, fmt.Errorf("checkpoint staging admission is required")
+		return Manifest{}, DownloadStats{}, fmt.Errorf("checkpoint staging admission is required")
 	}
 	return s.download(ctx, expected, ref, directory, admit)
 }
 
-func (s *Store) download(ctx context.Context, expected Binding, ref Reference, directory string, admit func(int64, uint64) error) (Manifest, error) {
+func (s *Store) download(ctx context.Context, expected Binding, ref Reference, directory string, admit func(int64, uint64) error) (Manifest, DownloadStats, error) {
 	manifest, err := s.loadManifest(ctx, expected, ref)
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, DownloadStats{}, err
 	}
 	prefix, err := manifest.chunkPrefix()
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, DownloadStats{}, err
 	}
-	return materializeImage(ctx, manifest, directory, admit, downloadConcurrency, func(ctx context.Context, chunk Chunk) ([]byte, error) {
-		return s.readObject(ctx, prefix+strings.TrimPrefix(chunk.Digest, "sha256:"), chunk.Size)
+	var cacheChunks, cacheBytes, clonedChunks, clonedBytes, regionalChunks, regionalBytes atomic.Int64
+	var cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error)
+	if cloner, ok := s.chunks.(ChunkCloner); ok {
+		cloneChunk = func(ctx context.Context, chunk Chunk, output *os.File, offset int64) (bool, error) {
+			cloned, err := cloner.CloneCheckpointChunk(ctx, chunk.Digest, chunk.Size, output, offset)
+			if cloned {
+				cacheChunks.Add(1)
+				cacheBytes.Add(chunk.Size)
+				clonedChunks.Add(1)
+				clonedBytes.Add(chunk.Size)
+			}
+			return cloned, err
+		}
+	}
+	result, err := materializeImage(ctx, manifest, directory, admit, downloadConcurrency, cloneChunk, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+		if s.chunks != nil {
+			if payload, ok := s.chunks.GetCheckpointChunk(chunk.Digest, chunk.Size); ok {
+				cacheChunks.Add(1)
+				cacheBytes.Add(chunk.Size)
+				return payload, nil
+			}
+		}
+		payload, err := s.readObject(ctx, prefix+strings.TrimPrefix(chunk.Digest, "sha256:"), chunk.Size)
+		if err == nil {
+			regionalChunks.Add(1)
+			regionalBytes.Add(int64(len(payload)))
+			// The shared disk cache rechecks the digest before atomically
+			// admitting the range. A damaged or evicted entry repairs itself on
+			// the first regional fallback instead of missing on every resume.
+			s.cacheChunk(chunk, payload)
+		}
+		return payload, err
 	})
+	return result, DownloadStats{cacheChunks.Load(), cacheBytes.Load(), clonedChunks.Load(), clonedBytes.Load(), regionalChunks.Load(), regionalBytes.Load()}, err
 }
 
 // Both regional downloads and peer streams use the same admission, private
 // file creation, chunk verification and crash-durable completion boundary.
 func materializeImage(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error, concurrency int,
+	cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error),
 	readChunk func(context.Context, Chunk) ([]byte, error)) (Manifest, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return Manifest{}, fmt.Errorf("checkpoint destination must be an absolute canonical path")
@@ -163,7 +238,7 @@ func materializeImage(ctx context.Context, manifest Manifest, directory string, 
 	}
 	defer root.Close()
 	for _, file := range manifest.Files {
-		if err := materializeFile(ctx, root, file, concurrency, readChunk); err != nil {
+		if err := materializeFile(ctx, root, file, concurrency, cloneChunk, readChunk); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -302,8 +377,18 @@ func (s *Store) inspectImageFiles(ctx context.Context, root *os.Root, allowEmpty
 
 func (s *Store) publishFile(ctx context.Context, root *os.Root, file File, bindingDigest string) (File, error) {
 	return scanImageFile(ctx, root, file, func(ctx context.Context, chunk Chunk, payload []byte) error {
-		return s.putImmutable(ctx, chunkKey(bindingDigest, chunk.Digest), payload)
+		if err := s.putImmutable(ctx, chunkKey(bindingDigest, chunk.Digest), payload); err != nil {
+			return err
+		}
+		s.cacheChunk(chunk, payload)
+		return nil
 	})
+}
+
+func (s *Store) cacheChunk(chunk Chunk, payload []byte) {
+	if s.chunks != nil && int64(len(payload)) == chunk.Size {
+		s.chunks.PutCheckpointChunk(chunk.Digest, payload)
+	}
 }
 
 // scanImageFile checks a retained local file with bounded parallel reads. A
@@ -380,11 +465,13 @@ func scanImageFile(ctx context.Context, root *os.Root, file File, publish func(c
 	return file, nil
 }
 
-func materializeFile(ctx context.Context, root *os.Root, file File, concurrency int, readChunk func(context.Context, Chunk) ([]byte, error)) error {
+func materializeFile(ctx context.Context, root *os.Root, file File, concurrency int,
+	cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error),
+	readChunk func(context.Context, Chunk) ([]byte, error)) error {
 	if err := root.MkdirAll(path.Dir(file.Path), 0o700); err != nil {
 		return err
 	}
-	output, err := root.OpenFile(file.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	output, err := root.OpenFile(file.Path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -394,12 +481,25 @@ func materializeFile(ctx context.Context, root *os.Root, file File, concurrency 
 	}
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(concurrency)
+	var cloneMu sync.Mutex
 	for index, chunk := range file.Chunks {
 		if err := groupCtx.Err(); err != nil {
 			break
 		}
 		offset := int64(index) * ChunkBytes
 		group.Go(func() error {
+			if cloneChunk != nil {
+				// Filesystem range cloning uses one destination inode. Serializing
+				// those short local operations
+				// avoids XFS extent-lock contention between parallel chunks;
+				// regional misses still download through the existing pool.
+				cloneMu.Lock()
+				cloned, err := cloneChunk(groupCtx, chunk, output, offset)
+				cloneMu.Unlock()
+				if err != nil || cloned {
+					return err
+				}
+			}
 			payload, err := readChunk(groupCtx, chunk)
 			if err != nil {
 				return err

@@ -53,6 +53,7 @@ type diskReadCache struct {
 	root     *os.Root
 	lock     *os.File
 	maxBytes int64
+	writeMu  sync.Mutex
 	mu       sync.Mutex
 	items    map[readCacheKey]*list.Element
 	pending  map[readCacheKey]struct{}
@@ -352,6 +353,8 @@ func (c *diskReadCache) writeLoop() {
 }
 
 func (c *diskReadCache) write(item diskCacheWrite) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	// Check again at the storage boundary. Only authenticated immutable bytes
 	// are recoverable cache entries, including after a process restart.
 	sum := sha256.Sum256(item.payload)
@@ -389,6 +392,28 @@ func (c *diskReadCache) write(item diskCacheWrite) {
 	c.bytes += item.key.length
 	c.mu.Unlock()
 	c.writes.Add(1)
+}
+
+// putVerified writes a published checkpoint chunk into the same disk LRU as
+// RootFS ranges. It is synchronous because the caller reuses its 8-MiB buffer
+// immediately; the small asynchronous RootFS fill queue cannot retain it.
+// Failure is a cache miss on a later restore, never a publication failure.
+func (c *diskReadCache) putVerified(key readCacheKey, payload []byte) {
+	if c == nil {
+		return
+	}
+	if _, ok := diskCacheName(key); !ok || int64(len(payload)) != key.length || key.length > c.maxBytes {
+		return
+	}
+	c.readers.RLock()
+	defer c.readers.RUnlock()
+	c.mu.Lock()
+	_, exists := c.items[key]
+	closed := c.closed
+	c.mu.Unlock()
+	if !exists && !closed {
+		c.write(diskCacheWrite{key: key, payload: payload})
+	}
 }
 
 func (c *diskReadCache) Close() error {

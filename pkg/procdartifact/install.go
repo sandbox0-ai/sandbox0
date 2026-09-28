@@ -62,7 +62,7 @@ func installReader(root string, input io.Reader, expected string) (string, error
 		if err != nil {
 			return "", err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !trustedOwner(info) || info.Mode().Perm()&0022 != 0 {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !trustedCacheOwner(current, root, info) || info.Mode().Perm()&0022 != 0 {
 			return "", fmt.Errorf("untrusted procd cache directory: %s", current)
 		}
 	}

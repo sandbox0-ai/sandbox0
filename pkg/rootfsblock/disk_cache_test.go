@@ -41,6 +41,32 @@ func waitDiskWrites(t *testing.T, cache *ReadCache) {
 	require.Eventually(t, func() bool { return cache.Stats().QueuedWriteBytes == 0 }, 5*time.Second, time.Millisecond)
 }
 
+func TestCheckpointChunksAndRootFSRangesShareDiskLRU(t *testing.T) {
+	config := testDiskConfig(t, MaxMappingRootBytes)
+	cache := openTestDiskCache(t, 0, config)
+	rootfs := bytes.Repeat([]byte{0x31}, LogicalBlockSize)
+	rootKey := readCacheKey{checksum: digest.FromBytes(rootfs).String(), length: int64(len(rootfs))}
+	cache.addVerified(rootKey, rootfs)
+	waitDiskWrites(t, cache)
+	checkpoint := bytes.Repeat([]byte{0x52}, MaxMappingRootBytes)
+	checkpointDigest := digest.FromBytes(checkpoint).String()
+	cache.PutCheckpointChunk(checkpointDigest, checkpoint)
+	require.EqualValues(t, len(checkpoint), cache.Stats().DiskBytes)
+	require.Equal(t, 1, cache.Stats().DiskEntries)
+	_, rootPresent := cache.get(rootKey)
+	require.False(t, rootPresent, "checkpoint fill must evict the oldest RootFS range")
+	got, checkpointPresent := cache.GetCheckpointChunk(checkpointDigest, int64(len(checkpoint)))
+	require.True(t, checkpointPresent)
+	require.Equal(t, checkpoint, got)
+	cache.addVerified(rootKey, rootfs)
+	waitDiskWrites(t, cache)
+	_, checkpointPresent = cache.GetCheckpointChunk(checkpointDigest, int64(len(checkpoint)))
+	require.False(t, checkpointPresent, "RootFS fill must evict the oldest checkpoint chunk")
+	_, rootPresent = cache.get(rootKey)
+	require.True(t, rootPresent)
+	require.LessOrEqual(t, cache.Stats().DiskBytes, config.MaxBytes)
+}
+
 func TestDiskCacheReadsWholeGenerationAfterRestartWithoutSource(t *testing.T) {
 	for _, version := range []int{CompressedFormatVersion} {
 		for _, chunk := range []int{4096, coalescedReadBytes} {

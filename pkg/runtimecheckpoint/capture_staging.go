@@ -300,7 +300,11 @@ func (s *CaptureStager) Publish(ctx context.Context, binding Binding, directory 
 	}
 	for i, file := range files {
 		files[i], err = scanImageFile(ctx, root, file, func(ctx context.Context, expected Chunk, payload []byte) error {
-			return s.stageVerifiedChunk(ctx, expected, payload)
+			if err := s.stageVerifiedChunk(ctx, expected, payload); err != nil {
+				return err
+			}
+			s.store.cacheChunk(expected, payload)
+			return nil
 		})
 		if err != nil {
 			return Reference{}, err

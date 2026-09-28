@@ -2375,6 +2375,10 @@ func (m *Manager) Close() error {
 // ReadCacheStats reports node-wide immutable range reuse across all sessions.
 func (m *Manager) ReadCacheStats() rootfsblock.ReadCacheStats { return m.readCache.Stats() }
 
+// CheckpointChunkCache shares the node's private disk LRU with immutable
+// runtime checkpoint chunks. The manager retains ownership and closes it.
+func (m *Manager) CheckpointChunkCache() *rootfsblock.ReadCache { return m.readCache }
+
 // NodeDirtyTailUsage reports aggregate branch occupancy, including journals
 // recovered at startup but not currently opened by a live session.
 func (m *Manager) NodeDirtyTailUsage() rootfsblock.NodeDirtyTailUsage {

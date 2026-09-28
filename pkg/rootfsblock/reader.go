@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -450,6 +451,43 @@ func (c *ReadCache) addMemory(key readCacheKey, payload []byte) {
 
 // Close drains the bounded disk write queue and releases this node's cache lock.
 func (c *ReadCache) Close() error { return c.disk.Close() }
+
+// GetCheckpointChunk consults the shared node disk LRU without displacing
+// RootFS mapping pages from its separate 128-MiB memory tier. Disk hits are
+// always checked against the requested digest and size.
+func (c *ReadCache) GetCheckpointChunk(checksum string, size int64) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	key := readCacheKey{checksum: checksum, length: size}
+	if _, ok := diskCacheName(key); !ok {
+		return nil, false
+	}
+	return c.disk.get(key)
+}
+
+// PutCheckpointChunk accepts bytes only after regional publication. The disk
+// cache rehashes them before its atomic fill and enforces the same LRU budget
+// as RootFS ranges; an unavailable cache simply drops the fill.
+func (c *ReadCache) PutCheckpointChunk(checksum string, payload []byte) {
+	if c != nil {
+		c.disk.putVerified(readCacheKey{checksum: checksum, length: int64(len(payload))}, payload)
+	}
+}
+
+// CloneCheckpointChunk verifies the immutable cache file, then clones the
+// same open inode into an unexposed destination file. Unsupported filesystems
+// fall back to the normal verified cache read and write path.
+func (c *ReadCache) CloneCheckpointChunk(ctx context.Context, checksum string, size int64, output *os.File, offset int64) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	key := readCacheKey{checksum: checksum, length: size}
+	if _, ok := diskCacheName(key); !ok {
+		return false, nil
+	}
+	return c.disk.cloneVerified(ctx, key, output, offset)
+}
 
 // Stats exposes disk reuse independently of process-local memory hits.
 func (c *ReadCache) Stats() ReadCacheStats { return c.disk.stats() }

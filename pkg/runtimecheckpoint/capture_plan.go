@@ -89,7 +89,13 @@ func (s *CaptureStager) PublishPlanned(ctx context.Context, binding Binding, pla
 		}
 	}
 	for _, file := range manifest.Files {
-		if _, err := scanImageFile(ctx, root, file, s.stageVerifiedChunk); err != nil {
+		if _, err := scanImageFile(ctx, root, file, func(ctx context.Context, chunk Chunk, payload []byte) error {
+			if err := s.stageVerifiedChunk(ctx, chunk, payload); err != nil {
+				return err
+			}
+			s.store.cacheChunk(chunk, payload)
+			return nil
+		}); err != nil {
 			return Reference{}, err
 		}
 	}

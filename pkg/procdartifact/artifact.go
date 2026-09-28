@@ -3,6 +3,7 @@
 package procdartifact
 
 import (
+	_ "crypto/sha256" // register SHA-256 for go-digest even in small standalone tools
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,10 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const DefaultCacheDir = "/var/lib/sandbox0-procd"
+// The node data mount also holds RootFS and memory checkpoint caches. Keep
+// executables in their own append-only namespace: a running mount or a saved
+// memory image can refer to an older digest indefinitely.
+const DefaultCacheDir = "/var/lib/sandbox0/procd-cache-v1"
 
 // Artifact pins the executable and its wire/persistent-state compatibility contract.
 // An existing runtime, including a memory checkpoint, must retain this exact pair.

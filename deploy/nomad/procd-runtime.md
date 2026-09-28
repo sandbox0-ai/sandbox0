@@ -13,29 +13,35 @@ existing PostgreSQL reservation and the driver's persisted claim. Retrying a
 claim with a different executable is a conflicting assignment, never an implicit
 upgrade. Changing the manager policy affects new runtime generations only.
 
-Driver 0.3.0 or newer resolves the exact executable under
-`/var/lib/sandbox0-procd/sha256/<hex>/procd` (configurable using
+The driver resolves the exact executable under the node data disk at
+`/var/lib/sandbox0/procd-cache-v1/sha256/<hex>/procd` (configurable using
 `procd_artifact_dir`). Every path component must be root-owned, without symlinks
-or group/world write access. The cache is a sibling of service-owned
-`/var/lib/sandbox0`, so service users cannot replace a cache ancestor. The executable is a non-writable regular file,
+or group/world write access. The executable is a non-writable regular file,
 verified against the assigned digest before RootFS attachment and runsc launch.
 The OCI bundle binds only that file read-only at `/procd`, with `nosuid,nodev`.
 Neither the host directory nor host credentials are exposed to the guest. procd
 still executes inside stock gVisor and the sandbox resource lease.
 
 The manager rejects mounted-executable configuration with an older driver class.
-A missing or corrupt node artifact fails the claim; there is no fallback to the
-embedded binary. Operators must install the selected artifact on every eligible
-worker and include it in the authenticated bootstrap release for new workers
-before publishing that selection. This deployment ordering is a prerequisite,
-not an assertion that driver availability implies artifact availability.
+A missing node artifact is fetched on demand from the private runtime OSS bucket
+using the worker's RAM role. The key is derived from the assigned digest:
+`sandbox0-nomad-runtime/procd/sha256/<hex>/procd`. The root-owned source file at
+`/etc/sandbox0/procd-artifact-source.json` contains only the HTTPS OSS endpoint
+and bucket. The download is SHA-256 checked and installed without replacing an
+existing inode. A missing object, failed download, or corrupt local entry fails
+the claim; there is no fallback to a different procd version. Every historical
+digest referenced by a memory checkpoint must be published before a worker is
+asked to restore it. Rollouts publish the new procd object before updating nodes.
 
 The installer publishes by digest without replacing an existing inode. Keep all
 versions referenced by live allocations, saved memory images, pending operations,
 or rollback policy. Release-directory cleanup cannot remove the separate cache.
+The procd namespace is append-only. It shares the large node data disk with the
+RootFS and memory caches, but it is excluded from their LRU because a saved
+checkpoint may reference an old executable after an elastic worker disappears.
 Cache pruning must only remove versions proven unreferenced under a maintenance
 fence; the installer deliberately does not guess which live versions are safe to
-remove.
+remove. Operators should include procd-cache-v1 in node disk usage monitoring.
 
 ## Existing and new RootFS artifacts
 

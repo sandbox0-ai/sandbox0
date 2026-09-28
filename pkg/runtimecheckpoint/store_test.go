@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
@@ -76,6 +78,72 @@ func TestCheckpointImageRoundTripAcrossChunks(t *testing.T) {
 	}
 	_, err = store.Download(t.Context(), testBinding(), ref, destination)
 	require.ErrorIs(t, err, os.ErrExist, "a retry must not consume a partial image directory")
+}
+
+func TestCheckpointImageDownloadBoundsParallelChunks(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.Chmod(directory, 0o700))
+	root, err := openPrivateDirectory(directory)
+	require.NoError(t, err)
+	defer root.Close()
+
+	const chunkCount = downloadConcurrency + 1
+	file := File{Path: "pages.img", Size: chunkCount * ChunkBytes}
+	payloads := make(map[string][]byte, chunkCount)
+	for index := range chunkCount {
+		payload := bytes.Repeat([]byte{byte(index + 1)}, ChunkBytes)
+		chunk := Chunk{Digest: digest.FromBytes(payload).String(), Size: ChunkBytes}
+		file.Chunks = append(file.Chunks, chunk)
+		payloads[chunk.Digest] = payload
+	}
+
+	started := make(chan struct{}, chunkCount)
+	release := make(chan struct{})
+	var active, peak atomic.Int32
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	result := make(chan error, 1)
+	go func() {
+		result <- materializeFile(t.Context(), root, file, downloadConcurrency, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				previous := peak.Load()
+				if current <= previous || peak.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			started <- struct{}{}
+			select {
+			case <-release:
+				return payloads[chunk.Digest], nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		})
+	}()
+	for range downloadConcurrency {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("download did not start the configured number of chunks concurrently")
+		}
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("parallel download did not complete")
+	}
+	require.Equal(t, int32(downloadConcurrency), peak.Load())
+	actual, err := os.ReadFile(filepath.Join(directory, file.Path))
+	require.NoError(t, err)
+	require.Len(t, actual, int(file.Size))
+	for index := range chunkCount {
+		start := index * ChunkBytes
+		require.Equal(t, payloads[file.Chunks[index].Digest], actual[start:start+ChunkBytes])
+	}
 }
 
 func TestCheckpointImagesReuseRegionalEnvelopeEncryption(t *testing.T) {

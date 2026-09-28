@@ -128,7 +128,7 @@ func ReceivePeerImage(ctx context.Context, expected Binding, ref Reference, dire
 		return Manifest{}, err
 	}
 	buffer := make([]byte, ChunkBytes)
-	manifest, err = materializeImage(ctx, manifest, directory, admit, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+	manifest, err = materializeImage(ctx, manifest, directory, admit, 1, func(ctx context.Context, chunk Chunk) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

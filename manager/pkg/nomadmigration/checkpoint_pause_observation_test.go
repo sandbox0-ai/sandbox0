@@ -47,11 +47,14 @@ func TestCheckpointPauseReentersDriverAfterLostDispatchResponse(t *testing.T) {
 		recoverError error
 		wantDispatch bool
 		wantState    string
+		driverState  string
 	}{
-		{"lost dispatch response", intent, nil, true, protocol.MigrationCaptureUncertain},
-		{"missing intent", nil, errdefs.ErrNotFound, true, protocol.MigrationCaptureUncertain},
-		{"completed capture", completed, nil, false, protocol.MigrationCaptureComplete},
-		{"unavailable node", nil, errdefs.ErrUnavailable, false, ""},
+		{name: "lost dispatch response", recovered: intent, wantDispatch: true, wantState: protocol.MigrationCaptureUncertain},
+		{name: "checkpoint still in flight", recovered: intent, wantDispatch: true, wantState: protocol.MigrationCaptureIntent, driverState: protocol.MigrationCaptureIntent},
+		{name: "missing intent", recoverError: errdefs.ErrNotFound, wantDispatch: true, wantState: protocol.MigrationCaptureUncertain},
+		{name: "completed capture", recovered: completed, wantState: protocol.MigrationCaptureComplete},
+		{name: "uncertain capture", recovered: uncertain, wantState: protocol.MigrationCaptureUncertain},
+		{name: "unavailable node", recoverError: errdefs.ErrUnavailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var authorized, dispatched int
@@ -63,6 +66,9 @@ func TestCheckpointPauseReentersDriverAfterLostDispatchResponse(t *testing.T) {
 				capture: func(_ context.Context, got protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
 					require.Equal(t, source, got)
 					dispatched++
+					if test.driverState == protocol.MigrationCaptureIntent {
+						return intent, nil
+					}
 					return uncertain, nil
 				},
 			}
@@ -104,4 +110,15 @@ func TestCheckpointPauseReentersDriverAfterLostDispatchResponse(t *testing.T) {
 	}, node)
 	require.ErrorIs(t, err, authorizationError)
 	require.False(t, dispatched, "a stale lifecycle must not reach the driver")
+	changed := *intent
+	changed.Request.ProcdInstanceID = "other"
+	node.recover = func(context.Context, protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
+		return &changed, nil
+	}
+	_, err = observeCheckpointCapture(t.Context(), source, func(context.Context, protocol.MigrationCaptureRequest) error {
+		t.Fatal("changed intent must not be authorized")
+		return nil
+	}, node)
+	require.NoError(t, err)
+	require.False(t, dispatched, "changed intent must not reach the driver")
 }

@@ -22,6 +22,7 @@ type checkpointPauseWorkerNode struct {
 	capture                                    *protocol.MigrationCapture
 	captureCalls, publishCalls, fenceCalls     int
 	lostCapture, lostPublication, invalidFence bool
+	intentInFlight                             bool
 	recoveryErr                                error
 }
 
@@ -74,7 +75,18 @@ func (n *checkpointPauseWorkerNode) RecoverMigrationCapture(_ context.Context, r
 }
 func (n *checkpointPauseWorkerNode) CaptureMigration(_ context.Context, request protocol.MigrationCaptureRequest) (*protocol.MigrationCapture, error) {
 	n.captureCalls++
-	require.Equal(n.t, 1, n.captureCalls, "capture cannot execute twice after an uncertain response")
+	require.Equal(n.t, 1, n.captureCalls, "the manager retries one exact driver operation")
+	if n.capture != nil && n.capture.State == protocol.MigrationCaptureIntent {
+		if n.intentInFlight {
+			return n.capture, nil
+		}
+		// The driver has no in-flight checkpoint for this retained node intent.
+		// Re-entering it resolves uncertainty without running checkpoint again.
+		uncertain := *n.capture
+		uncertain.State = protocol.MigrationCaptureUncertain
+		n.capture = &uncertain
+		return n.capture, nil
+	}
 	publication := checkpointWorkerPublication(n.t, n.f, n.checkpoint, n.source, request)
 	n.capture = &publication.Capture
 	if n.lostCapture {
@@ -181,22 +193,55 @@ func TestNomadCheckpointPauseWorkerRecoversLostRepliesAndDefersCapacityReleaseIn
 	require.False(t, found)
 }
 
-func TestNomadCheckpointPauseWorkerNeverRecapturesIntentOrUnreachableSourceIntegration(t *testing.T) {
-	n, _ := newCheckpointPauseWorkerFixture(t, "worker-intent")
+func TestNomadCheckpointPauseWorkerReentersRetainedIntentAndReleasesStagingIntegration(t *testing.T) {
+	n, operation := newCheckpointPauseWorkerFixture(t, "worker-intent")
 	advanceCheckpointPauseWorker(t, n, 3)
 	source := n.checkpoint.Evidence.Preflight.Source
 	d, err := source.Digest()
 	require.NoError(t, err)
 	n.capture = &protocol.MigrationCapture{Request: source, RequestDigest: d, State: protocol.MigrationCaptureIntent}
-	r, err := runCheckpointPauseWorker(t, n)
-	require.NoError(t, err)
-	require.Equal(t, 1, r.Skipped)
 	n.recoveryErr = errors.New("node unreachable")
 	_, err = runCheckpointPauseWorker(t, n)
 	require.ErrorContains(t, err, "node unreachable")
+	n.recoveryErr = nil
 	require.Zero(t, n.captureCalls)
+	r, err := runCheckpointPauseWorker(t, n)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Advanced)
+	require.Equal(t, 1, n.captureCalls)
+	work, err := n.f.store.GetNomadCheckpointPauseWork(n.f.ctx, operation)
+	require.NoError(t, err)
+	require.NotNil(t, work.Failure, "retained intent must enter physical failure cleanup")
+	advanceCheckpointPauseWorker(t, n, 3)
+	remaining, err := n.f.store.ListNomadCheckpointPauses(n.f.ctx, "", 8)
+	require.NoError(t, err)
+	require.Empty(t, remaining, "failed capture must release its staging reservation")
 	require.Zero(t, n.publishCalls)
 	require.Zero(t, n.fenceCalls)
+}
+
+func TestNomadCheckpointPauseWorkerObservesInFlightIntentThenPublishesIntegration(t *testing.T) {
+	n, _ := newCheckpointPauseWorkerFixture(t, "worker-intent-in-flight")
+	advanceCheckpointPauseWorker(t, n, 3)
+	source := n.checkpoint.Evidence.Preflight.Source
+	digest, err := source.Digest()
+	require.NoError(t, err)
+	n.capture = &protocol.MigrationCapture{Request: source, RequestDigest: digest, State: protocol.MigrationCaptureIntent}
+	n.intentInFlight = true
+	result, err := runCheckpointPauseWorker(t, n)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Skipped)
+	require.Equal(t, 1, n.captureCalls, "reentry observes the driver's existing checkpoint")
+	n.intentInFlight = false
+	publication := checkpointWorkerPublication(t, n.f, n.checkpoint, n.source, source)
+	n.capture = &publication.Capture
+	advanceCheckpointPauseWorker(t, n, 3)
+	require.Equal(t, 1, n.captureCalls, "completed capture is not dispatched again")
+	require.Equal(t, 1, n.publishCalls)
+	require.Equal(t, 1, n.fenceCalls)
+	remaining, err := n.f.store.ListNomadCheckpointPauses(n.f.ctx, "", 8)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
 }
 
 func TestNomadCheckpointPauseWorkerDispatchRevalidatesLiveOwnerIntegration(t *testing.T) {

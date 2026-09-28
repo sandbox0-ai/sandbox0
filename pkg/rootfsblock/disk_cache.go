@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	diskCacheMaxEntries = 131072
-	diskCacheQueueBytes = 8 << 20
+	diskCacheMinEntries    = 131072
+	diskCacheMaxEntries    = 1 << 19
+	diskCacheBytesPerEntry = 64 << 10
+	diskCacheQueueBytes    = 8 << 20
 )
 
 // DiskCacheConfig enables a disposable, node-owned tier below the verified
@@ -50,29 +52,30 @@ type diskCacheWrite struct {
 // write queue are bounded separately from disk occupancy. Startup streams the
 // directory rather than loading an unbounded list; content is checked on use.
 type diskReadCache struct {
-	root     *os.Root
-	lock     *os.File
-	maxBytes int64
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	items    map[readCacheKey]*list.Element
-	pending  map[readCacheKey]struct{}
-	order    *list.List
-	bytes    int64
-	queued   int64
-	closed   bool
-	queue    chan diskCacheWrite
-	done     chan struct{}
-	close    sync.Once
-	closeErr error
-	readers  sync.RWMutex
-	slots    chan struct{}
-	flights  singleflight.Group
-	hits     atomic.Uint64
-	misses   atomic.Uint64
-	writes   atomic.Uint64
-	errors   atomic.Uint64
-	drops    atomic.Uint64
+	root       *os.Root
+	lock       *os.File
+	maxBytes   int64
+	maxEntries int
+	writeMu    sync.Mutex
+	mu         sync.Mutex
+	items      map[readCacheKey]*list.Element
+	pending    map[readCacheKey]struct{}
+	order      *list.List
+	bytes      int64
+	queued     int64
+	closed     bool
+	queue      chan diskCacheWrite
+	done       chan struct{}
+	close      sync.Once
+	closeErr   error
+	readers    sync.RWMutex
+	slots      chan struct{}
+	flights    singleflight.Group
+	hits       atomic.Uint64
+	misses     atomic.Uint64
+	writes     atomic.Uint64
+	errors     atomic.Uint64
+	drops      atomic.Uint64
 }
 
 func openDiskReadCache(config DiskCacheConfig) (*diskReadCache, error) {
@@ -127,7 +130,7 @@ func openDiskReadCache(config DiskCacheConfig) (*diskReadCache, error) {
 		return nil, fmt.Errorf("lock node read cache: %w", err)
 	}
 	c := &diskReadCache{
-		root: root, lock: lock, maxBytes: config.MaxBytes,
+		root: root, lock: lock, maxBytes: config.MaxBytes, maxEntries: diskCacheEntryLimit(config.MaxBytes),
 		items: make(map[readCacheKey]*list.Element), order: list.New(),
 		pending: make(map[readCacheKey]struct{}),
 		queue:   make(chan diskCacheWrite, 32), done: make(chan struct{}), slots: make(chan struct{}, 8),
@@ -139,6 +142,20 @@ func openDiskReadCache(config DiskCacheConfig) (*diskReadCache, error) {
 	}
 	go c.writeLoop()
 	return c, nil
+}
+
+// Scale the index with the byte budget for common 64-KiB RootFS ranges.
+// Small caches retain their existing entry bound; even a large node retains
+// at most 524288 entries so cache metadata and recovery scans stay bounded.
+func diskCacheEntryLimit(maxBytes int64) int {
+	entries := maxBytes / diskCacheBytesPerEntry
+	if entries < diskCacheMinEntries {
+		return diskCacheMinEntries
+	}
+	if entries > diskCacheMaxEntries {
+		return diskCacheMaxEntries
+	}
+	return int(entries)
 }
 
 func diskCacheName(key readCacheKey) (string, bool) {
@@ -216,7 +233,7 @@ func (c *diskReadCache) restore() error {
 // makeRoom is called with mu held, or before the cache is exposed. Failed
 // removal does not free accounting: a full/unwritable cache simply stops filling.
 func (c *diskReadCache) makeRoom(length int64) bool {
-	for c.bytes > c.maxBytes-length || len(c.items) >= diskCacheMaxEntries {
+	for c.bytes > c.maxBytes-length || len(c.items) >= c.maxEntries {
 		oldest := c.order.Back()
 		if oldest == nil {
 			return false

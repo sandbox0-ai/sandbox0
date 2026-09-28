@@ -208,6 +208,25 @@ func TestDiskCacheEnforcesBudgetAndRecoversIncompleteWrite(t *testing.T) {
 	require.Len(t, files, 2, "only one range and the owner lock remain")
 }
 
+func TestDiskCacheEntryBudgetScalesAndEvictsByLRU(t *testing.T) {
+	require.Equal(t, 131072, diskCacheEntryLimit(8<<30))
+	require.Equal(t, 1<<19, diskCacheEntryLimit(64<<30))
+	require.Equal(t, 1<<19, diskCacheEntryLimit(1<<40))
+	cache := openTestDiskCache(t, 0, testDiskConfig(t, 1<<20))
+	cache.disk.maxEntries = 2
+	keys := make([]readCacheKey, 3)
+	for index := range keys {
+		payload := bytes.Repeat([]byte{byte(index + 1)}, LogicalBlockSize)
+		keys[index] = readCacheKey{checksum: digest.FromBytes(payload).String(), length: int64(len(payload))}
+		cache.disk.putVerified(keys[index], payload)
+	}
+	require.Equal(t, 2, cache.Stats().DiskEntries)
+	_, hit := cache.disk.get(keys[0])
+	require.False(t, hit)
+	_, hit = cache.disk.get(keys[2])
+	require.True(t, hit)
+}
+
 func TestDiskCacheRequiresExclusivePrivateDirectory(t *testing.T) {
 	config := testDiskConfig(t, 1<<20)
 	cache := openTestDiskCache(t, 0, config)

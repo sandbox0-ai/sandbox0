@@ -181,13 +181,16 @@ In ctld's `nomad_runtime` configuration:
 nomad_runtime:
     read_cache_bytes: 134217728
     read_cache_directory: /var/lib/sandbox0/ctld/read-cache-v1
-    read_disk_cache_bytes: 8589934592
+    read_disk_cache_bytes: 68719476736
 ```
 
 Memory defaults to 128MiB when omitted. Disk caching is opt-in: its directory and
 positive byte budget must be supplied together. The disk budget counts payload
-bytes, not filesystem metadata or allocation rounding. At most 131072 ranges
-are indexed, independently bounding metadata even with tiny mapping entries.
+bytes, not filesystem metadata or allocation rounding. The index scales with
+the budget at one entry per 64KiB, from 131072 entries on an 8-GiB cache to a
+hard ceiling of 524288 entries on larger caches. A 64-GiB cache can therefore
+hold about 32 GiB of 64-KiB RootFS ranges, or more bytes when it also holds
+larger checkpoint chunks. This bounds metadata and cold-start scanning.
 Eviction follows process-local LRU order; restart reconstructs bounded occupancy
 without persisting per-hit recency. This disposable tier is never a durability
 source for user writes.

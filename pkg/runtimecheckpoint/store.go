@@ -17,9 +17,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Bound publication memory and object-store pressure independently of image
-// size. Chunks upload concurrently; the manifest is still published last.
-const publicationConcurrency = 4
+// Bound image transfer memory and object-store pressure independently of image
+// size. Upload keeps four 8 MiB chunks in flight; download keeps eight.
+const (
+	publicationConcurrency = 4
+	downloadConcurrency    = 8
+)
 
 // Reference is persisted by the regional transaction only after all image
 // chunks and the manifest have been published. The binding digest scopes all
@@ -51,7 +54,8 @@ type Store struct {
 // maxBytes bounds accepted image bytes. The caller separately enforces disk
 // admission while capturing; this upload check cannot bound producer writes.
 // Publication and local verification use at most publicationConcurrency chunk
-// buffers and never load the full image. Download and peer streams use one.
+// buffers and never load the full image. Regional downloads use at most
+// downloadConcurrency chunk buffers; ordered peer streams use one.
 func New(objects objectstore.Store, maxBytes int64) (*Store, error) {
 	if !objectstore.SupportsContextConditionalCreate(objects) || maxBytes <= 0 || maxBytes > MaxImageBytes {
 		return nil, fmt.Errorf("checkpoint store needs bounded context-aware immutable storage")
@@ -123,14 +127,14 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 	if err != nil {
 		return Manifest{}, err
 	}
-	return materializeImage(ctx, manifest, directory, admit, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+	return materializeImage(ctx, manifest, directory, admit, downloadConcurrency, func(ctx context.Context, chunk Chunk) ([]byte, error) {
 		return s.readObject(ctx, prefix+strings.TrimPrefix(chunk.Digest, "sha256:"), chunk.Size)
 	})
 }
 
 // Both regional downloads and peer streams use the same admission, private
 // file creation, chunk verification and crash-durable completion boundary.
-func materializeImage(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error,
+func materializeImage(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error, concurrency int,
 	readChunk func(context.Context, Chunk) ([]byte, error)) (Manifest, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return Manifest{}, fmt.Errorf("checkpoint destination must be an absolute canonical path")
@@ -159,7 +163,7 @@ func materializeImage(ctx context.Context, manifest Manifest, directory string, 
 	}
 	defer root.Close()
 	for _, file := range manifest.Files {
-		if err := materializeFile(ctx, root, file, readChunk); err != nil {
+		if err := materializeFile(ctx, root, file, concurrency, readChunk); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -376,7 +380,7 @@ func scanImageFile(ctx context.Context, root *os.Root, file File, publish func(c
 	return file, nil
 }
 
-func materializeFile(ctx context.Context, root *os.Root, file File, readChunk func(context.Context, Chunk) ([]byte, error)) error {
+func materializeFile(ctx context.Context, root *os.Root, file File, concurrency int, readChunk func(context.Context, Chunk) ([]byte, error)) error {
 	if err := root.MkdirAll(path.Dir(file.Path), 0o700); err != nil {
 		return err
 	}
@@ -385,20 +389,39 @@ func materializeFile(ctx context.Context, root *os.Root, file File, readChunk fu
 		return err
 	}
 	defer output.Close()
-	for _, chunk := range file.Chunks {
-		if err := ctx.Err(); err != nil {
-			return err
+	if err := output.Truncate(file.Size); err != nil {
+		return err
+	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(concurrency)
+	for index, chunk := range file.Chunks {
+		if err := groupCtx.Err(); err != nil {
+			break
 		}
-		payload, err := readChunk(ctx, chunk)
-		if err != nil {
-			return err
-		}
-		if int64(len(payload)) != chunk.Size || digest.FromBytes(payload).String() != chunk.Digest {
-			return fmt.Errorf("checkpoint chunk size or digest mismatch")
-		}
-		if _, err := output.Write(payload); err != nil {
-			return err
-		}
+		offset := int64(index) * ChunkBytes
+		group.Go(func() error {
+			payload, err := readChunk(groupCtx, chunk)
+			if err != nil {
+				return err
+			}
+			if int64(len(payload)) != chunk.Size || digest.FromBytes(payload).String() != chunk.Digest {
+				return fmt.Errorf("checkpoint chunk size or digest mismatch")
+			}
+			written, err := output.WriteAt(payload, offset)
+			if err != nil {
+				return err
+			}
+			if written != len(payload) {
+				return io.ErrShortWrite
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := output.Sync(); err != nil {
 		return err

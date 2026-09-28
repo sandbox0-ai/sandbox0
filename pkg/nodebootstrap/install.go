@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeenrollment"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 )
 
 func (b *Bootstrapper) validateRuntimeRelease(artifact nodeenrollment.RuntimeArtifact) (string, error) {
@@ -164,6 +165,17 @@ func (b *Bootstrapper) installExactIdentity(
 	nomadKeyPayload []byte,
 	authoritySigner crypto.Signer,
 ) error {
+	source := procdartifact.Source{Endpoint: bootstrap.RuntimeArtifact.OSSEndpoint, Bucket: bootstrap.RuntimeArtifact.OSSBucket}
+	if err := source.Validate(); err != nil {
+		return fmt.Errorf("validate procd artifact source: %w", err)
+	}
+	sourcePayload, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteFile(procdartifact.DefaultSourceFile, append(sourcePayload, '\n'), 0o600); err != nil {
+		return fmt.Errorf("install procd artifact source: %w", err)
+	}
 	authorityKeyPayload, err := os.ReadFile(b.config.AuthorityKeyFile)
 	if err != nil {
 		return err

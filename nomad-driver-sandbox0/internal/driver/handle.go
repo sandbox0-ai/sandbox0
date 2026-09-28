@@ -441,7 +441,7 @@ func (h *taskHandle) writeClaimBundle(
 	h.mu.Unlock()
 	var procdPath string
 	if assignment != nil && assignment.Procd != nil {
-		procdPath, err = procdartifact.Resolve(h.procdArtifactDir, *assignment.Procd)
+		procdPath, err = procdartifact.Ensure(context.Background(), h.procdArtifactDir, procdartifact.DefaultSourceFile, *assignment.Procd)
 		if err != nil {
 			return fmt.Errorf("resolve assigned procd: %w", err)
 		}

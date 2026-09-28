@@ -83,6 +83,12 @@ func bindCheckpointResumePlan(candidate *sandboxstore.NomadSandboxResumeCandidat
 	expected := plan.assignment
 	expected.RuntimeGeneration = target.RuntimeGeneration
 	expected.ResetCopiedSessionState = target.ResetCopiedSessionState
+	// An importer upgrade changes only the executable selected for new claims.
+	// A retained process image must keep its captured executable; the worker
+	// verifies that exact digest in its immutable local procd cache.
+	if expected.Procd != nil && target.Procd != nil && expected.Procd.Protocol == target.Procd.Protocol {
+		expected.Procd = target.Procd
+	}
 	expectedRevision, err := expected.Revision()
 	if err != nil {
 		return err

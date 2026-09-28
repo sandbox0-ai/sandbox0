@@ -15,9 +15,12 @@ upgrade. Changing the manager policy affects new runtime generations only.
 
 The driver resolves the exact executable under the node data disk at
 `/var/lib/sandbox0/procd-cache-v1/sha256/<hex>/procd` (configurable using
-`procd_artifact_dir`). Every path component must be root-owned, without symlinks
-or group/world write access. The executable is a non-writable regular file,
-verified against the assigned digest before RootFS attachment and runsc launch.
+`procd_artifact_dir`). Every path component must be root-owned except the
+dedicated `/var/lib/sandbox0` data mount, which may be owned by the trusted
+host `sandbox0` account. No component may be a symlink or group/world writable.
+The cache directory and digest directories remain root-owned. The executable
+is a non-writable regular file, verified against the assigned digest before
+RootFS attachment and runsc launch.
 The OCI bundle binds only that file read-only at `/procd`, with `nosuid,nodev`.
 Neither the host directory nor host credentials are exposed to the guest. procd
 still executes inside stock gVisor and the sandbox resource lease.

@@ -81,7 +81,11 @@ Chrome profile data, cookies, local storage, extension state, downloads, and fil
 
 Do not pass Steel `persist` or `userDataDir` session options unless you intentionally want to override the template's `CHROME_USER_DATA_DIR`.
 
-Running processes, sockets, and memory are not preserved across pause/resume. Runtime requests are routed to a committed generation and may wait while lifecycle transactions commit.
+The default filesystem-only pause restarts Steel and Chromium after resume.
+Explicit experimental [memory pause/resume](/docs/sandbox/pause-resume#explicit-memory-pause-and-resume)
+can retain supported process state, but CDP and other external clients must
+reconnect. Runtime requests are routed to a committed generation and may wait
+while lifecycle transactions commit.
 
 ## Capabilities
 

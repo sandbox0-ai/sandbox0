@@ -14,8 +14,9 @@ connections.
 Experimental memory pause/resume explicitly opts into preserving supported process
 state with `memory: true`. It reuses the execution capture and restore machinery
 of [system maintenance migration](/docs/sandbox#system-maintenance-migration),
-but retains a checkpoint while no runtime is allocated. Existing calls, TTL pause,
-and automatic resume keep their filesystem-only behavior.
+but retains a checkpoint while no runtime is allocated. Existing calls and TTL
+pause keep their filesystem-only behavior. Automatic resume restores memory
+when the paused sandbox has a retained checkpoint, as described below.
 
 ## Default Filesystem-Only Behavior
 

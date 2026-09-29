@@ -71,9 +71,11 @@ The writable rootfs is tied to the sandbox identity. Pause/resume preserves it;
 deleting the sandbox removes it. Named rootfs snapshots are independent restore
 points that support restore, claim-time initialization, and fork workflows.
 
-`/tmp` remains ephemeral and is excluded from checkpoints. Keep repositories,
-dependency environments, agent memory, and generated artifacts under ordinary
-writable rootfs paths such as `/workspace` or `/var/tmp`.
+`/tmp` remains a runtime tmpfs and is excluded from RootFS checkpoints. An
+explicit memory checkpoint can retain supported tmpfs state, but a default
+filesystem-only pause discards it. Keep repositories, dependency environments,
+agent memory, and generated artifacts under ordinary writable RootFS paths such
+as `/workspace` or `/var/tmp`.
 
 ## Parallel Tasks
 

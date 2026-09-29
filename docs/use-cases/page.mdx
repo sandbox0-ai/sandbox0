@@ -68,10 +68,12 @@ Agent gateways often maintain channel connections, scheduled jobs, local caches,
 
 You can still pause a sandbox manually. If the sandbox has `auto_resume: true`
 and the service route has `resume: true`, a later public request can claim a
-fresh runtime allocation and restart the `cmd` service. Running processes,
-sockets, memory, and in-flight connections are not preserved across
-pause/resume; durable state should live in the sandbox RootFS or an external
-system.
+fresh runtime allocation. The default filesystem-only pause restarts the `cmd`
+service and does not preserve processes or memory. An explicit experimental
+`memory: true` pause retains supported process state; automatic resume restores
+that checkpoint instead of restarting the service. External connections still
+need to reconnect. Keep durable application data in the sandbox RootFS or an
+external system. See [Pause And Resume](/docs/sandbox/pause-resume).
 
 ## Secret Boundary
 

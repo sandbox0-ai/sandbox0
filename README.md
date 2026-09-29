@@ -29,6 +29,7 @@ credentials, and team-scoped API keys.
 | --- | --- |
 | **Storage and compute are separated** | Writable RootFS generations are application-encrypted and stored in S3-compatible object storage. Compute nodes keep disposable caches, not the durable source of truth. |
 | **The sandbox lifetime is policy-controlled** | `ttl` and `hard_ttl` default to `0` (disabled). Pause idle compute and later resume the same sandbox identity, or keep it running. |
+| **Optional memory checkpoints** | Explicit experimental `memory: true` pause and resume can retain supported processes and memory alongside the writable RootFS. The default pause remains filesystem-only. |
 | **gVisor isolation** | Stock `runsc` provides a per-sandbox application-kernel boundary on dedicated Nomad client nodes. |
 | **One resource-neutral warm pool** | Warm Nomad carrier allocations are compatible by immutable runtime properties, not CPU or memory size. Claim-time CPU and memory are leased atomically from node capacity. |
 | **Durable environment reuse** | Snapshot, restore, fork, and template-from-sandbox use immutable block-COW RootFS generations rather than republishing mutable workspace state as an image. |
@@ -104,6 +105,7 @@ More examples:
 - [Sandbox lifecycle and execution](https://sandbox0.ai/docs/sandbox)
 - [Templates and the unified warm pool](https://sandbox0.ai/docs/template)
 - [RootFS snapshots, restore, and fork](https://sandbox0.ai/docs/sandbox/snapshot-restore)
+- [Filesystem and memory pause/resume](https://sandbox0.ai/docs/sandbox/pause-resume)
 - [Network policy](https://sandbox0.ai/docs/sandbox/network)
 - [Credentials and egress auth](https://sandbox0.ai/docs/credential)
 - [Self-hosted deployment](https://sandbox0.ai/docs/self-hosted)
@@ -137,15 +139,22 @@ format, and security class.
 
 | State | Durable? | Location |
 | --- | --- | --- |
-| Running processes, memory, sockets | No | Current gVisor runtime allocation |
+| Running processes and memory | Only with explicit memory pause/resume | Retained execution checkpoint tied to the committed RootFS generation |
+| External connections | Not guaranteed after memory resume | Clients reconnect to the new runtime allocation |
 | Writable RootFS | Yes, after a committed checkpoint | Encrypted regional S3-compatible storage |
 | Named RootFS snapshot | Yes | Immutable block-COW generation |
 | Lifecycle, capacity leases, policy, and metering producer state | Yes | Regional PostgreSQL |
 | Historical metering read model | Rebuildable | ClickHouse projection from the PostgreSQL outbox |
 
-Pause checkpoints the exact writable RootFS and releases runtime compute.
-Resume creates a new runtime generation for the same sandbox identity. Live
-processes, memory, and sockets are intentionally not checkpointed.
+By default, pause checkpoints the writable RootFS and releases runtime compute;
+resume starts a new runtime generation for the same sandbox identity. On a
+deployment that supports memory checkpoints, explicit `memory: true` on both
+pause and resume also retains and restores supported guest processes, memory,
+PIDs, open files, and runtime tmpfs state. The runtime generation still changes,
+and clients must reconnect to SSH, streaming, and external TCP connections.
+Named RootFS snapshots remain filesystem-only. See
+[Pause And Resume](https://sandbox0.ai/docs/sandbox/pause-resume) for the
+experimental memory mode and its compatibility requirements.
 
 ## Self-Hosted Architecture
 
@@ -184,7 +193,9 @@ and SDK copies must be synchronized from it rather than edited by hand.
 ## Known Boundaries
 
 - Sandbox0 is a runtime boundary, not an agent framework.
-- Pause/resume preserves durable RootFS state, not processes, sockets, or memory.
+- The default pause/resume mode preserves RootFS state only. Explicit memory
+  pause/resume can retain supported process state; external connections still
+  need to reconnect.
 - Production nodes must be dedicated to Sandbox0. Nomad carrier resources cover
   driver overhead only and are not sandbox CPU or memory limits.
 - Production acceptance requires truthful physical capacity, multi-node failure

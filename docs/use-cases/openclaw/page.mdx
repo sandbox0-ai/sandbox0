@@ -60,9 +60,10 @@ curl -fsS "$OPENCLAW_PUBLIC_URL/health" \
     -H "authorization: Bearer $OPENCLAW_ROUTE_TOKEN"
 ```
 
-Running processes, sockets, and memory are not checkpointed. After resume,
-Sandbox0 starts the configured service command again against the restored
-rootfs.
+With the default filesystem-only pause, the OpenClaw process is not retained;
+after resume, Sandbox0 starts the configured service command again against the
+restored RootFS. Explicit experimental [memory pause/resume](/docs/sandbox/pause-resume#explicit-memory-pause-and-resume)
+can retain supported process state instead. External clients must reconnect.
 
 ## Next Steps
 

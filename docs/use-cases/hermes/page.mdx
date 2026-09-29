@@ -32,8 +32,11 @@ when you need to preserve or fan out an initialized Hermes workspace. A new
 sandbox can be claimed with the snapshot ID, or the current sandbox can be
 restored after it is paused.
 
-Running processes, memory, and sockets are intentionally not preserved across
-pause/resume.
+The default filesystem-only pause does not retain running Hermes processes or
+memory; the service starts again after resume. Explicit experimental
+[memory pause/resume](/docs/sandbox/pause-resume#explicit-memory-pause-and-resume)
+can retain supported process state. External clients must reconnect after
+either mode.
 
 ## Next Steps
 

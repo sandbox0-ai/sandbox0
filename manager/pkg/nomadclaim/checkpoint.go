@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
@@ -83,6 +84,16 @@ func bindCheckpointResumePlan(candidate *sandboxstore.NomadSandboxResumeCandidat
 	expected := plan.assignment
 	expected.RuntimeGeneration = target.RuntimeGeneration
 	expected.ResetCopiedSessionState = target.ResetCopiedSessionState
+	// Regional registry defaults apply to fresh processes. A memory restore
+	// keeps the captured value (including its absence), unless the sandbox or
+	// stored template explicitly configures npm's registry.
+	if !hasExplicitNPMRegistry(candidate.Record) {
+		expected.EnvVars = maps.Clone(expected.EnvVars)
+		delete(expected.EnvVars, "NPM_CONFIG_REGISTRY")
+		if registry, exists := target.EnvVars["NPM_CONFIG_REGISTRY"]; exists {
+			expected.EnvVars["NPM_CONFIG_REGISTRY"] = registry
+		}
+	}
 	// An importer upgrade changes only the executable selected for new claims.
 	// A retained process image must keep its captured executable; the worker
 	// verifies that exact digest in its immutable local procd cache.
@@ -99,4 +110,20 @@ func bindCheckpointResumePlan(candidate *sandboxstore.NomadSandboxResumeCandidat
 	}
 	plan.assignment = target
 	return nil
+}
+
+func hasExplicitNPMRegistry(record *sandboxstore.SandboxRecord) bool {
+	for _, environment := range []map[string]string{record.Config.EnvVars, record.TemplateSpec.EnvVars} {
+		for key := range environment {
+			if strings.EqualFold(key, "npm_config_registry") {
+				return true
+			}
+		}
+	}
+	for _, variable := range record.TemplateSpec.MainContainer.Env {
+		if strings.EqualFold(variable.Name, "npm_config_registry") {
+			return true
+		}
+	}
+	return false
 }

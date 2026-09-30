@@ -59,13 +59,13 @@ func validCtldNomadConfig() *apiconfig.CtldConfig {
 }
 
 func TestConfiguredNomadRuntimeFactoryValidatesBeforePrimaryElection(t *testing.T) {
-	factory, err := configuredNomadRuntimeFactory(&apiconfig.CtldConfig{}, "/run/sandbox0/network.sock")
+	factory, err := configuredNomadRuntimeFactory(&apiconfig.CtldConfig{}, "/run/sandbox0/network.sock", nil)
 	if err != nil || factory != nil {
 		t.Fatalf("disabled factory = %v, %v", factory, err)
 	}
 
 	config := validCtldNomadConfig()
-	factory, err = configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock")
+	factory, err = configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock", nil)
 	if err != nil || factory == nil {
 		t.Fatalf("configured factory = %v, %v", factory, err)
 	}
@@ -78,12 +78,12 @@ func TestConfiguredNomadRuntimeFactoryValidatesBeforePrimaryElection(t *testing.
 	}
 
 	config.NomadRuntime.NomadAddress = "http://127.0.0.1:4646"
-	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "HTTPS origin") {
+	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "HTTPS origin", nil) {
 		t.Fatalf("insecure Nomad address error = %v", err)
 	}
 	config.NomadRuntime.NomadAddress = "https://127.0.0.1:4646"
 	config.NomadRuntime.NodeControlTimeout.Duration = 500 * time.Millisecond
-	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "between one second and one minute") {
+	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "between one second and one minute", nil) {
 		t.Fatalf("unsafe node control timeout error = %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestConfiguredMigrationStagingQuotaRequiresCompleteLimits(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(tc.fields), &config.NomadRuntime); err != nil {
 				t.Fatal(err)
 			}
-			factory, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock")
+			factory, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock", nil)
 			if (err == nil) != tc.valid {
 				t.Fatalf("configuration error = %v, valid = %v", err, tc.valid)
 			}
@@ -115,5 +115,14 @@ func TestConfiguredMigrationStagingQuotaRequiresCompleteLimits(t *testing.T) {
 				t.Fatal("valid runtime lacks a factory")
 			}
 		})
+	}
+}
+
+func TestConfiguredNomadRuntimeRejectsNoncanonicalNetworkCA(t *testing.T) {
+	for _, path := range []string{"relative/ca.crt", "/etc/../ca.crt"} {
+		_, err := configuredNomadRuntimeFactory(validCtldNomadConfig(), "/run/sandbox0/ctld-runtime-slot-network.sock", &apiconfig.NetworkRuntimeConfig{MITMCACertPath: path})
+		if err == nil || !strings.Contains(err.Error(), "network_mitm_ca_file") {
+			t.Fatalf("invalid public CA %q: %v", path, err)
+		}
 	}
 }

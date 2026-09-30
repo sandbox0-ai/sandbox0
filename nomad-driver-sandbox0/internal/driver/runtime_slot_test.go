@@ -650,6 +650,8 @@ func TestSlowRuntimeSlotClaimTimingIsWarning(t *testing.T) {
 
 func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
+	fixture.rootfs.runtimeInfo.NetworkMITMCAFile = testNetworkMITMCA(t)
+	fixture.task.Env[networkMITMCAFileEnv] = "/untrusted/ca.key"
 	var claimLogs bytes.Buffer
 	fixture.plugin.logger = hclog.New(&hclog.LoggerOptions{
 		Output: &claimLogs, JSONFormat: true, Level: hclog.Info,
@@ -747,6 +749,22 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 		if strings.HasPrefix(value, "UNTRUSTED_TASK_ENV=") || strings.HasPrefix(value, "NOMAD_ALLOC_ADDR_") {
 			t.Fatalf("Nomad task environment leaked into procd OCI environment: %q", value)
 		}
+	}
+
+	if !contains(spec.Process.Env, networkMITMCAFileEnv+"="+networkMITMCADestination) {
+		t.Fatal("guest missing node-owned CA environment")
+	}
+	foundCA := false
+	for _, mount := range spec.Mounts {
+		if mount.Destination == networkMITMCADestination {
+			foundCA = true
+			if mount.Source != fixture.rootfs.runtimeInfo.NetworkMITMCAFile || !contains(mount.Options, "ro") || !contains(mount.Options, "noexec") {
+				t.Fatal("guest CA mount is not read-only node-owned public certificate")
+			}
+		}
+	}
+	if !foundCA {
+		t.Fatal("guest missing public CA mount")
 	}
 	lease := runtimeSlotResourceLease(t, fixture, stage)
 	if spec.Linux == nil || spec.Linux.CgroupsPath != "/sandbox0/"+lease.CgroupName ||

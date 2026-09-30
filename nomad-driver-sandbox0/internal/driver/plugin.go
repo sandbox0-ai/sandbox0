@@ -434,12 +434,17 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		return nil, nil, err
 	}
 	rootfsAllowedRoot := ""
+	networkMITMCAFile := ""
 	if rootfs != nil {
 		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
 		if err != nil {
 			return nil, nil, err
 		}
 		rootfsAllowedRoot = info.MountRoot
+		networkMITMCAFile = info.NetworkMITMCAFile
+		if err := validateNetworkMITMCAFile(networkMITMCAFile); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	runnerConfig := *p.config
@@ -457,6 +462,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
 		procdArtifactDir:              p.config.ProcdArtifactDir,
+		networkMITMCAFile:             networkMITMCAFile,
 		rootfs:                        rootfs,
 		procdPort:                     protocol.NomadProcdPort,
 		logger:                        p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
@@ -514,12 +520,17 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		return err
 	}
 	rootfsAllowedRoot := ""
+	networkMITMCAFile := ""
 	if rootfs != nil {
 		info, err := loadRootFSRuntimeInfo(p.ctx, rootfs)
 		if err != nil {
 			return err
 		}
 		rootfsAllowedRoot = info.MountRoot
+		networkMITMCAFile = info.NetworkMITMCAFile
+		if err := validateNetworkMITMCAFile(networkMITMCAFile); err != nil {
+			return err
+		}
 	}
 	runnerConfig := *p.config
 	runnerConfig.RootFSMountRoot = rootfsAllowedRoot
@@ -538,6 +549,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		resourceCgroupRoot:            p.config.ResourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: p.config.ProcdInternalJWTPublicKeyFile,
 		procdArtifactDir:              p.config.ProcdArtifactDir,
+		networkMITMCAFile:             networkMITMCAFile,
 		rootfs:                        rootfs,
 		procdPort:                     protocol.NomadProcdPort,
 		logger:                        p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),

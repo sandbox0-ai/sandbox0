@@ -15,13 +15,19 @@
 package driver
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -261,4 +267,28 @@ func TestProcdMountOverridesRootFSWithoutExposingHostDirectory(t *testing.T) {
 	}
 	require.Equal(t, 1, count)
 	require.Equal(t, []string{"/procd"}, spec.Process.Args)
+}
+
+func testNetworkMITMCA(t *testing.T) string {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	cert := &x509.Certificate{SerialNumber: big.NewInt(1), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, cert, cert, public, private)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "mitm-ca.crt")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644))
+	return path
+}
+func TestNetworkMITMCARejectsMissingAndPrivateMaterial(t *testing.T) {
+	path := testNetworkMITMCA(t)
+	require.NoError(t, validateNetworkMITMCAFile(path))
+	require.NoError(t, validateNetworkMITMCAFile(""))
+	require.Error(t, validateNetworkMITMCAFile("relative"))
+	require.Error(t, validateNetworkMITMCAFile(path+"-missing"))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	data = append(data, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("never mount this")})...)
+	require.NoError(t, os.WriteFile(path, data, 0644))
+	require.Error(t, validateNetworkMITMCAFile(path))
 }

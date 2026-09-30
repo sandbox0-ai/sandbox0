@@ -78,12 +78,12 @@ func TestConfiguredNomadRuntimeFactoryValidatesBeforePrimaryElection(t *testing.
 	}
 
 	config.NomadRuntime.NomadAddress = "http://127.0.0.1:4646"
-	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "HTTPS origin", nil) {
+	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock", nil); err == nil || !strings.Contains(err.Error(), "HTTPS origin") {
 		t.Fatalf("insecure Nomad address error = %v", err)
 	}
 	config.NomadRuntime.NomadAddress = "https://127.0.0.1:4646"
 	config.NomadRuntime.NodeControlTimeout.Duration = 500 * time.Millisecond
-	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock"); err == nil || !strings.Contains(err.Error(), "between one second and one minute", nil) {
+	if _, err := configuredNomadRuntimeFactory(config, "/run/sandbox0/ctld-runtime-slot-network.sock", nil); err == nil || !strings.Contains(err.Error(), "between one second and one minute") {
 		t.Fatalf("unsafe node control timeout error = %v", err)
 	}
 }

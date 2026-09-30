@@ -83,6 +83,7 @@ type RuntimeNodePoolNodeUsage struct {
 	NonterminalSlots   int
 	CapacityLive       bool
 	ProviderReady      bool
+	PredecessorRelease bool
 	AdmittedAt         time.Time
 	DrainStartedAt     time.Time
 	DrainReason        string
@@ -361,7 +362,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			COALESCE(leases.active_leases, 0), COALESCE(slots.ready_slots, 0),
 			COALESCE(slots.nonterminal_slots, 0), capacity.node_uid IS NOT NULL,
 			instance.provider_ready_at IS NOT NULL,
-			instance.admitted_at, instance.drain_started_at, COALESCE(fence.reason, '')
+			instance.admitted_at, instance.drain_started_at, COALESCE(fence.reason, ''), NOT (`+runtimeReleaseAdmissionSQL("instance")+`)
 		FROM manager.runtime_node_instances AS instance
 		LEFT JOIN live_capacity AS capacity
 			ON capacity.cluster_id = instance.cluster_id
@@ -469,6 +470,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 					AND slot.state = 'fastpath_ready'
 					AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases reserved WHERE reserved.slot_id=slot.slot_id)
 					AND slot.heartbeat_expires_at > NOW()
+					AND `+runtimeReleaseAdmissionSQL("slot")+`
 			),
 			(
 				SELECT COUNT(*)::integer
@@ -487,6 +489,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 								AND active_lease.lease_state = 'active'
 						)
 					)
+					AND `+runtimeReleaseAdmissionSQL("slot")+`
 					AND NOT EXISTS (
 						SELECT 1 FROM manager.runtime_node_instances AS elastic_node
 						WHERE elastic_node.cluster_id = slot.cluster_id
@@ -1604,7 +1607,7 @@ func scanRuntimeNodePoolNodeUsage(row runtimeSlotScanner) (RuntimeNodePoolNodeUs
 		&node.AllocationCIDR, &node.State, &node.CPUMillicores, &node.MemoryBytes,
 		&node.UsedCPUMillicores, &node.UsedMemoryBytes, &node.ActiveLeases,
 		&node.ReadySlots, &node.NonterminalSlots, &node.CapacityLive, &node.ProviderReady,
-		&admittedAt, &drainStartedAt, &node.DrainReason,
+		&admittedAt, &drainStartedAt, &node.DrainReason, &node.PredecessorRelease,
 	); err != nil {
 		return RuntimeNodePoolNodeUsage{}, err
 	}

@@ -725,6 +725,7 @@ func (f *fakeClaimStore) CompleteSandboxClaim(_ context.Context, request *sandbo
 	record.RuntimeNamespace = request.AllocationNamespace
 	f.records[request.SandboxID] = cloneClaimRecord(record)
 	f.claimPhases[request.SandboxID] = sandboxstore.SandboxRuntimeClaimPhaseReady
+	f.activeSlot = &sandboxstore.RuntimeSlot{ID: request.SlotID, SandboxID: request.SandboxID, ClaimOperationID: request.OperationID, AllocationID: request.AllocationID, AllocationNamespace: request.AllocationNamespace, State: sandboxstore.RuntimeSlotStateActive, ProcdInstanceID: "procd-claimed", ProcdAddress: "http://10.0.0.8:49983", CommandReadyDigest: make([]byte, sha256.Size), CommandReadyAt: time.Now(), AuthorityObservedAt: time.Now(), HeartbeatExpiresAt: time.Now().Add(time.Minute)}
 	f.writeCount++
 	return record, nil
 }
@@ -1048,9 +1049,34 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retried.SandboxID != response.SandboxID || len(fixture.planner.requests) != 2 ||
-		fixture.planner.requests[1].OperationID != fixture.planner.requests[0].OperationID {
+	if retried.SandboxID != response.SandboxID || retried.RuntimeID != response.RuntimeID || len(fixture.planner.requests) != 1 {
 		t.Fatalf("retry response=%+v requests=%+v", retried, fixture.planner.requests)
+	}
+	if len(fixture.store.ensureCalls) != 1 {
+		t.Fatalf("completed retry reinitialized a live RootFS: %d calls", len(fixture.store.ensureCalls))
+	}
+}
+
+func TestClaimRetryAfterWriterAcquisitionDoesNotReinitializeRootFS(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	request := &service.ClaimRequest{TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "lost-response"}
+	fixture.planner.err = errors.New("lost node response")
+	_, err := fixture.service.ClaimSandbox(t.Context(), request)
+	if err == nil {
+		t.Fatal("expected initial response loss")
+	}
+	var sandboxID string
+	for id := range fixture.store.records {
+		sandboxID = id
+	}
+	fixture.store.activeSlot = &sandboxstore.RuntimeSlot{SandboxID: sandboxID, ClaimOperationID: request.OperationID, State: sandboxstore.RuntimeSlotStateStarting}
+	fixture.planner.err = nil
+	_, err = fixture.service.ClaimSandbox(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.ensureCalls) != 1 {
+		t.Fatal("writer-acquired retry reinitialized RootFS")
 	}
 }
 
@@ -2309,8 +2335,8 @@ func TestServiceAllowsExactRetryAfterQuotaBecomesFullOrUnavailable(t *testing.T)
 		t.Fatal(err)
 	}
 	if retry.SandboxID != first.SandboxID || retryDuringOutage.SandboxID != first.SandboxID ||
-		fixture.store.writeCount != 4 {
-		// One initial reservation plus one runtime-binding completion write per successful planner call.
+		fixture.store.writeCount != 2 {
+		// Exact completed retries acknowledge the original runtime without dispatch or another completion write.
 		t.Fatalf("retries=%+v/%+v first=%+v writes=%d",
 			retry, retryDuringOutage, first, fixture.store.writeCount)
 	}

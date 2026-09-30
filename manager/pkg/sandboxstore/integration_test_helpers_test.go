@@ -49,6 +49,9 @@ func applySandboxStoreMigrationsThrough(t *testing.T, pool *pgxpool.Pool, versio
 	}
 	require.NoError(t, migrate.Up(t.Context(), pool, ".", migrate.WithBaseFS(selected),
 		migrate.WithLogger(noopSandboxStoreMigrateLogger{}), migrate.WithSchema(sandboxStoreSchemaName)))
+	// Storage migration fixtures still require the independently versioned
+	// release authority used by current placement and lease code.
+	require.NoError(t, runRuntimeReleaseMigrations(t.Context(), pool, noopSandboxStoreMigrateLogger{}))
 }
 
 func prepareSandboxStoreCredentialSchema(t *testing.T, pool *pgxpool.Pool) {

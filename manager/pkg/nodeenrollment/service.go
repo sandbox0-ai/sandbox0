@@ -20,6 +20,7 @@ import (
 )
 
 type Store interface {
+	PinRuntimeNodeReleaseArtifact(context.Context, string, string, sandboxstore.RuntimeReleaseArtifact) (sandboxstore.RuntimeReleaseArtifact, error)
 	EnsureRuntimeNodePoolState(context.Context, string, string) (*sandboxstore.RuntimeNodePoolState, error)
 	PutRuntimeNodeEnrollmentChallenge(context.Context, string, string, string, string, time.Duration) error
 	ConsumeRuntimeNodeEnrollmentChallenge(context.Context, string, string, string, string) error
@@ -65,13 +66,7 @@ type Config struct {
 	RuntimeArtifact    RuntimeArtifact
 }
 
-type RuntimeArtifact struct {
-	SourceCommit string `json:"source_commit"`
-	ObjectKey    string `json:"object_key"`
-	SHA256       string `json:"sha256"`
-	OSSEndpoint  string `json:"oss_endpoint"`
-	OSSBucket    string `json:"oss_bucket"`
-}
+type RuntimeArtifact = sandboxstore.RuntimeReleaseArtifact
 
 // LoadRuntimeArtifact reads the atomically updated immutable-release pointer
 // used by manager. The referenced object remains content-addressed; only this
@@ -271,6 +266,10 @@ func (s *Service) Bootstrap(
 	if err != nil {
 		return nil, err
 	}
+	artifact, err := s.store.PinRuntimeNodeReleaseArtifact(ctx, s.config.ClusterID, nodeUID, s.config.RuntimeArtifact)
+	if err != nil {
+		return nil, fmt.Errorf("pin enrollment runtime release: %w", err)
+	}
 	if err := s.cloud.PrepareElasticInstance(ctx, identity.InstanceID, reservation.AllocationCIDR); err != nil {
 		return nil, fmt.Errorf("prepare elastic instance network: %w", err)
 	}
@@ -286,7 +285,7 @@ func (s *Service) Bootstrap(
 		ProviderInstanceID: identity.InstanceID, NodeName: nodeName, NodeUID: nodeUID,
 		AllocationCIDR: reservation.AllocationCIDR, NomadCertificatePEM: certificate,
 		NomadCACertificatePEM: ca, NomadIntroductionJWT: introduction,
-		RuntimeArtifact: s.config.RuntimeArtifact,
+		RuntimeArtifact: artifact,
 	}, nil
 }
 
@@ -301,6 +300,24 @@ func (s *Service) Finalize(
 		return nil, err
 	}
 	nodeName := elasticNodeName(identity.InstanceID)
+	nodeUID := fmt.Sprintf("ecs/%s/%s", s.config.CloudRegion, identity.InstanceID)
+	artifact, err := s.store.PinRuntimeNodeReleaseArtifact(ctx, s.config.ClusterID, nodeUID, s.config.RuntimeArtifact)
+	if err != nil {
+		return nil, err
+	}
+	renderer := s.runtimeConfig
+	if artifact != s.config.RuntimeArtifact {
+		history, ok := renderer.(interface {
+			ForArtifact(RuntimeArtifact) (RuntimeConfigRenderer, error)
+		})
+		if !ok {
+			return nil, errors.New("worker release changed during enrollment; retained artifact requires its original control configuration")
+		}
+		renderer, err = history.ForArtifact(artifact)
+		if err != nil {
+			return nil, err
+		}
+	}
 	status, err := s.store.GetRuntimeNodeDrainStatus(ctx, s.config.PoolID, identity.InstanceID)
 	if err != nil {
 		return nil, err
@@ -317,7 +334,6 @@ func (s *Service) Finalize(
 	if err := s.nomad.FenceRegisteredNode(ctx, request.NomadNodeID); err != nil {
 		return nil, fmt.Errorf("fence registered Nomad node: %w", err)
 	}
-	nodeUID := fmt.Sprintf("ecs/%s/%s", s.config.CloudRegion, identity.InstanceID)
 	agentUID := fmt.Sprintf("ctld/%s/%s", s.config.RegionID, identity.InstanceID)
 	commonName := "ctld-" + strings.TrimPrefix(nodeName, "s0-")
 	nomadCert, err := s.issuer.IssueNomadExact(ctx, request.NomadNodeID, identity.PrivateIPv4, nodeName, request.NomadCSRPEM)
@@ -338,7 +354,7 @@ func (s *Service) Finalize(
 	if err != nil {
 		return nil, err
 	}
-	runtimeArchive, err := s.runtimeConfig.Render(RuntimeConfigIdentity{
+	runtimeArchive, err := renderer.Render(RuntimeConfigIdentity{
 		NodeName: nodeName, NodeID: request.NomadNodeID, NodeUID: nodeUID,
 		AgentUID: agentUID, PrivateIP: identity.PrivateIPv4,
 		AllocationCIDR: status.Instance.AllocationCIDR,

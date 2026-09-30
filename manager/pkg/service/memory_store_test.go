@@ -718,3 +718,22 @@ func cloneRootFSSnapshotForTest(snapshot *sandboxstore.RootFSSnapshot) *sandboxs
 	clone := *snapshot
 	return &clone
 }
+
+func sandboxLifecycleTxnCancelRequested(txn *sandboxstore.SandboxLifecycleTxn) bool {
+	return txn != nil && !txn.CancelRequestedAt.IsZero()
+}
+
+func sandboxLifecycleTxnCancelableAutoPause(txn *sandboxstore.SandboxLifecycleTxn) bool {
+	if txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		txn.Source != sandboxstore.SandboxLifecycleSourceAuto || !txn.Cancelable {
+		return false
+	}
+	switch txn.Phase {
+	case sandboxstore.SandboxLifecyclePhasePreparing,
+		sandboxstore.SandboxLifecyclePhaseBarriered,
+		sandboxstore.SandboxLifecyclePhasePublishing:
+		return true
+	default:
+		return false
+	}
+}

@@ -235,15 +235,6 @@ func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Start starts the HTTP server.
-func (s *Server) Start() error {
-	listener, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return err
-	}
-	return s.Serve(listener)
-}
-
 // Serve starts accepting probes while runtime activation is still pending.
 // The existing runtimeReadyMiddleware continues to gate authenticated commands.
 func (s *Server) Serve(listener net.Listener) error {

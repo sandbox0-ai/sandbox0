@@ -1,8 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -104,12 +102,7 @@ func (r MigrationPublicationRequest) Digest() (string, error) {
 	if _, err := r.Binding(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 // MigrationPublication is an immutable object-store receipt. Its request

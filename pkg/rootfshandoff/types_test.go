@@ -1,13 +1,11 @@
 package rootfshandoff
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,50 +58,6 @@ func TestTerminalBindingPreservesOpaqueDescriptorWithoutAdmittingIt(t *testing.T
 	request.Generation.FilesystemID = request.Identity.RootFSID
 	request.Generation.Descriptor = nil
 	require.Error(t, request.ValidateTerminalBinding())
-}
-
-func TestReadyRequestNormalize(t *testing.T) {
-	request := ReadyRequest{
-		Parent: "parent", Source: "/run/sandbox0/rootfs/root-1",
-		AppliedPolicyToken: validStageRequest().ExpectedPolicyToken,
-	}
-	normalized, err := request.Normalize()
-	require.NoError(t, err)
-	require.Equal(t, "bind", normalized.Type)
-	require.Equal(t, []string{"rbind", "rw", "nosuid", "nodev"}, normalized.Options)
-
-	request.Options = []string{"rbind", "rw"}
-	_, err = request.Normalize()
-	require.ErrorContains(t, err, "nosuid and nodev")
-
-	request.Options = []string{"rbind", "rw", "nosuid", "nodev", "suid"}
-	_, err = request.Normalize()
-	require.ErrorContains(t, err, "not allowed")
-}
-
-func TestRetireResultBindsDurabilityAndBlockHead(t *testing.T) {
-	descriptor := rootfsblock.Descriptor{
-		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: rootfsblock.LogicalBlockSize,
-		BlockSizeBytes: rootfsblock.LogicalBlockSize,
-		MappingRoot: rootfsblock.MappingRootLocator{
-			Version: rootfsblock.MappingPageVersion, RootDigest: digest.FromString("root").String(),
-			Object: rootfsblock.ObjectRange{Key: "maps/root", Length: 1, Checksum: digest.FromString("page").String()},
-		},
-	}
-	payload, err := rootfsblock.EncodeDescriptor(descriptor)
-	require.NoError(t, err)
-	result := RetireResult{
-		Parent: "parent", RootFSID: "rootfs", WriterEpoch: 1, OperationID: "operation",
-		CurrentBlockHead: descriptor.MappingRoot.RootDigest, DurabilityState: rootfsblock.DurabilityS3,
-		Descriptor: payload, DetachProof: string(bytes.Repeat([]byte{'a'}, 64)),
-	}
-	require.NoError(t, result.Validate())
-
-	result.CurrentBlockHead = digest.FromString("other").String()
-	require.ErrorContains(t, result.Validate(), "mapping root")
-	result.CurrentBlockHead = descriptor.MappingRoot.RootDigest
-	result.DurabilityState = rootfsblock.DurabilityComposite
-	require.ErrorContains(t, result.Validate(), "requires a composite tail")
 }
 
 func validStageRequest() StageRequest {

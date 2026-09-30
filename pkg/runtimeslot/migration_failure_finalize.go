@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -19,12 +16,7 @@ func (r MigrationFailureFinalizeRequest) Digest() (string, error) {
 	if err := r.Proof.ValidateFor(r.Request); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	d := sha256.Sum256(payload)
-	return hex.EncodeToString(d[:]), nil
+	return digestJSON(r)
 }
 
 type MigrationFailureFinalizeProof struct {

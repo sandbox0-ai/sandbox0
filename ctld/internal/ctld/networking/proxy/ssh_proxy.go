@@ -92,7 +92,7 @@ func (s *Server) dialUpstreamSSH(req *adapterRequest, material *resolvedSSHProxy
 	if username == "" {
 		return nil, fmt.Errorf("upstream ssh username is required")
 	}
-	hostForVerify := sshHostForVerify(req)
+	hostForVerify := req.destination()
 	hostKeyCallback, err := newKnownHostsCallback(hostForVerify, req.DestPort, material.KnownHosts)
 	if err != nil {
 		return nil, err
@@ -327,19 +327,6 @@ func defaultTransparentSSHHostSigner() (ssh.Signer, error) {
 		defaultSSHHostSigner, defaultSSHHostSignerErr = ssh.NewSignerFromKey(privateKey)
 	})
 	return defaultSSHHostSigner, defaultSSHHostSignerErr
-}
-
-func sshHostForVerify(req *adapterRequest) string {
-	if req == nil {
-		return ""
-	}
-	if host := strings.TrimSpace(req.Host); host != "" {
-		return host
-	}
-	if req.DestIP != nil {
-		return req.DestIP.String()
-	}
-	return ""
 }
 
 func newKnownHostsCallback(host string, port int, knownHosts []string) (ssh.HostKeyCallback, error) {

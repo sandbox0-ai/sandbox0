@@ -24,7 +24,7 @@ func ValidateSandboxNetworkTrafficPolicy(policy *SandboxNetworkPolicy) error {
 	if policy.Egress == nil {
 		return nil
 	}
-	if len(policy.Egress.TrafficRules) > 0 && hasLegacyTrafficLists(policy.Egress) {
+	if len(policy.Egress.TrafficRules) > 0 && policy.Egress.HasLegacyTrafficLists() {
 		return fmt.Errorf("egress trafficRules cannot be combined with legacy allowed*/denied* fields")
 	}
 
@@ -218,7 +218,8 @@ func validHTTPMethod(method string) bool {
 	}
 }
 
-func hasLegacyTrafficLists(egress *NetworkEgressPolicy) bool {
+// HasLegacyTrafficLists reports whether egress uses the legacy allow/deny lists.
+func (egress *NetworkEgressPolicy) HasLegacyTrafficLists() bool {
 	if egress == nil {
 		return false
 	}

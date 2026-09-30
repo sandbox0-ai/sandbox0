@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -73,12 +70,7 @@ func (r MigrationAdoptionRequest) Digest() (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 // MigrationAdoptionProof acknowledges durable removal of the target's private

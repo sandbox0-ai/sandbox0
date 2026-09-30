@@ -414,7 +414,7 @@ func (h *taskHandle) writeClaimBundle(
 	if h.taskConfig.NetworkIsolation != nil {
 		netnsPath = h.taskConfig.NetworkIsolation.Path
 		if netnsPath != "" && !filepath.IsAbs(netnsPath) {
-			return errors.New("Nomad network namespace path must be absolute")
+			return errors.New("nomad network namespace path must be absolute")
 		}
 	}
 	if err := resourceLease.Validate(); err != nil {

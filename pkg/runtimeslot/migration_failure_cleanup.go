@@ -3,7 +3,6 @@ package runtimeslot
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -43,12 +42,7 @@ func (r MigrationFailureCleanupRequest) Digest() (string, error) {
 		"sha256:"+c.ResourceLeaseDigest != resources {
 		return "", fmt.Errorf("failed destination cleanup changed physical custody")
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	d := sha256.Sum256(payload)
-	return hex.EncodeToString(d[:]), nil
+	return digestJSON(r)
 }
 
 // MigrationFailureCleanupProof proves physical detach and carrier cleanup.

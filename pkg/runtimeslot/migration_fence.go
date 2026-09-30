@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -20,12 +17,7 @@ func (r MigrationSourceFenceRequest) Digest() (string, error) {
 	if err := r.Publication.ValidateFor(r.PublicationRequest); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 func (r MigrationSourceFenceRequest) RootFSRequest() (rootfshandoff.MigrationRootFSDetachRequest, error) {
@@ -49,12 +41,7 @@ type MigrationSourceFenceProof struct {
 
 func (p MigrationSourceFenceProof) ProofDigest() (string, error) {
 	p.Digest = ""
-	payload, err := json.Marshal(p)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(p)
 }
 
 func (p MigrationSourceFenceProof) ValidateFor(request MigrationSourceFenceRequest) error {

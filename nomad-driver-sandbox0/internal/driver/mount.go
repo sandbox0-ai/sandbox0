@@ -22,11 +22,3 @@ type systemMounter = hostmount.System
 func validateRootfsPath(source, allowedRoot string) (string, error) {
 	return hostmount.ValidateRootFSPath(source, allowedRoot)
 }
-
-func validateExistingPath(source, allowedRoot string) (string, error) {
-	return hostmount.ValidateExistingPath(source, allowedRoot)
-}
-
-func startsWithDotDot(path string) bool {
-	return hostmount.StartsWithDotDot(path)
-}

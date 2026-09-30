@@ -29,7 +29,7 @@ credentials, and team-scoped API keys.
 | --- | --- |
 | **Storage and compute are separated** | Writable RootFS generations are application-encrypted and stored in S3-compatible object storage. Compute nodes keep disposable caches, not the durable source of truth. |
 | **The sandbox lifetime is policy-controlled** | `ttl` and `hard_ttl` default to `0` (disabled). Pause idle compute and later resume the same sandbox identity, or keep it running. |
-| **Optional memory checkpoints** | Explicit experimental `memory: true` pause and resume can retain supported processes and memory alongside the writable RootFS. The default pause remains filesystem-only. |
+| **Optional memory checkpoints** | Explicit experimental `memory: true` pause and resume can retain supported processes and memory alongside the writable RootFS. Memory fork creates a paused child that can continue the captured processes. The default pause remains filesystem-only. |
 | **gVisor isolation** | Stock `runsc` provides a per-sandbox application-kernel boundary on dedicated Nomad client nodes. |
 | **One resource-neutral warm pool** | Warm Nomad carrier allocations are compatible by immutable runtime properties, not CPU or memory size. Claim-time CPU and memory are leased atomically from node capacity. |
 | **Durable environment reuse** | Snapshot, restore, fork, and template-from-sandbox use immutable block-COW RootFS generations rather than republishing mutable workspace state as an image. |
@@ -155,6 +155,38 @@ and clients must reconnect to SSH, streaming, and external TCP connections.
 Named RootFS snapshots remain filesystem-only. See
 [Pause And Resume](https://sandbox0.ai/docs/sandbox/pause-resume) for the
 experimental memory mode and its compatibility requirements.
+
+### Pause, Resume, And Memory Fork
+
+Memory pause/resume and fork are experimental and require a deployment that
+supports memory checkpoints. Choose memory on both pause and resume:
+
+```bash
+s0 sandbox pause <sandbox-id> --memory
+s0 sandbox resume <sandbox-id> --memory
+
+# Fork captured execution state into a paused child, then restore the child.
+s0 sandbox fork <sandbox-id> --memory --idempotency-key branch-task-001
+s0 sandbox resume <child-sandbox-id> --memory
+```
+
+The API equivalents use `memory: true`; memory fork also requires a stable
+`Idempotency-Key`. Reuse the same key and request body if the fork is pending or
+the connection fails. Pause can return before checkpoint publication and cleanup
+finish; use SDK lifecycle wait helpers or inspect sandbox status before resuming.
+Forking a running source with memory capture replaces the parent's runtime too;
+the parent resumes into a new carrier before the fork completes.
+
+A memory resume requires a retained image matching the committed RootFS and
+compatible runsc, platform, CPU, and runtime configuration. Missing or
+incompatible memory returns an error without falling back to a filesystem-only
+restart. With `auto_resume: true`, supported inbound access restores retained
+memory when available. Explicit calls without `memory: true`, TTL pauses, and
+billing pauses keep their filesystem-only defaults.
+
+Reconnect SSH, streaming, and external TCP clients after resume; their existing
+connections are not guaranteed to survive. Named snapshots, snapshot claims,
+restore, rebase, and template-from-sandbox remain RootFS operations.
 
 ## Self-Hosted Architecture
 

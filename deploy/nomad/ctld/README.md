@@ -16,11 +16,15 @@ journal. It does not preserve running guest filesystems across primary exit:
 the current NBD server belongs to that process, and disconnecting it shuts down
 the mounted XFS filesystem. An unchanged Nomad allocation set is not proof of
 guest continuity. Before planned ctld updates, fence regional claims, durably
-pause the explicitly authorized sandboxes, and drain their physical runtimes;
-then update B before A and resume from the committed RootFS heads. An unplanned
-primary loss recovers from the last committed generation and may lose the dirty
-tail. Both processes run on the same node; durable sandbox truth remains in
-PostgreSQL and S3.
+pause the explicitly authorized sandboxes with `memory: true`, verify their
+retained checkpoints against the target runtime, and drain their physical
+runtimes. Then update B before A, resume with `memory: true`, and verify process
+continuity. Keep the node fence and maintenance journal if capture, compatibility,
+cleanup, or restore fails; never silently fall back to a RootFS-only restart.
+A disk-only exception requires explicit authorization for the exact sandboxes
+acknowledging process and memory loss. An unplanned primary loss recovers from
+the last committed generation and may lose the dirty tail. Both processes run
+on the same node; durable sandbox truth remains in PostgreSQL and S3.
 
 If an interrupted planned pause leaves a claimed slot quiescing with an XFS
 reference to an NBD device after the host mount paths disappear, keep the

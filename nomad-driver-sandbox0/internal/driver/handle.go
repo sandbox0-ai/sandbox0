@@ -108,6 +108,7 @@ type taskHandleOptions struct {
 	resourceCgroupRoot            string
 	procdArtifactDir              string
 	procdInternalJWTPublicKeyFile string
+	networkMITMCAFile             string
 	rootfs                        RootFSRuntime
 	procdPort                     int
 	logger                        hclog.Logger
@@ -132,6 +133,7 @@ type taskHandle struct {
 	resourceCgroupRoot            string
 	procdArtifactDir              string
 	procdInternalJWTPublicKeyFile string
+	networkMITMCAFile             string
 	rootfs                        RootFSRuntime
 	procdPort                     int
 	networkChain                  string
@@ -319,6 +321,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		rootfsAllowedRoot:             options.rootfsAllowedRoot,
 		resourceCgroupRoot:            options.resourceCgroupRoot,
 		procdInternalJWTPublicKeyFile: options.procdInternalJWTPublicKeyFile,
+		networkMITMCAFile:             options.networkMITMCAFile,
 		procdArtifactDir:              options.procdArtifactDir,
 		rootfs:                        options.rootfs,
 		procdPort:                     options.procdPort,
@@ -474,6 +477,7 @@ func (h *taskHandle) writeClaimBundle(
 		NetNSPath:                     netnsPath,
 		ResolvConfPath:                resolvMount.HostPath,
 		ProcdInternalJWTPublicKeyFile: h.procdInternalJWTPublicKeyFile,
+		NetworkMITMCAFile:             h.networkMITMCAFile,
 		Resources:                     resources,
 		SecurityClass:                 h.driverConfig.SecurityClass,
 		EphemeralMounts:               ephemeralMounts,

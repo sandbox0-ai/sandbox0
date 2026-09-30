@@ -45,6 +45,15 @@ state. A restricted team that requires billing pause must keep its durable
 RootFS head paused until billing admission is legitimately restored; a
 successful command-ready probe alone does not override that policy.
 
+For HTTPS egress credential projection, configure `mitm_ca_cert_path` and
+`mitm_ca_key_path` in the node network configuration. ctld advertises only the
+public certificate path in its private runtime metadata. The driver validates
+the CA and binds it read-only at `/var/run/sandbox0/networking/mitm-ca.crt`;
+procd builds its temporary combined CA bundle and exports the common TLS trust
+variables. The private signing key remains on the node. Upgrade ctld and the
+driver together on drained workers; existing guests receive the trust mount
+on their next runtime start.
+
 Build ctld and the driver and obtain the complete pinned official runsc archive.
 For split-runtime releases, keep `gvisor-bin/` beside the supplied `runsc`; the
 installer validates and copies all five companions. Migration requires the

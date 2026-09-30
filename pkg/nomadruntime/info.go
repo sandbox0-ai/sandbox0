@@ -28,6 +28,7 @@ const RuntimeInfoVersion = 1
 // driver must use instead of duplicating privileged ctld settings in HCL.
 type RuntimeInfo struct {
 	Version                         int    `json:"version"`
+	NetworkMITMCAFile               string `json:"network_mitm_ca_file,omitempty"`
 	MountRoot                       string `json:"mount_root"`
 	MaxDirtyTailBytes               int64  `json:"max_dirty_tail_bytes"`
 	MaxNodeDirtyTailBytes           int64  `json:"max_node_dirty_tail_bytes"`
@@ -41,6 +42,11 @@ func (i RuntimeInfo) Validate() error {
 	}
 	if err := validateCanonicalAbsolutePath("mount_root", i.MountRoot); err != nil {
 		return err
+	}
+	if i.NetworkMITMCAFile != "" {
+		if err := validateCanonicalAbsolutePath("network_mitm_ca_file", i.NetworkMITMCAFile); err != nil {
+			return err
+		}
 	}
 	if i.MaxDirtyTailBytes <= 0 || i.MaxNodeDirtyTailBytes <= 0 || i.DirtyTailRetirementReserveBytes <= 0 {
 		return fmt.Errorf("ctld Nomad runtime dirty-tail limits must be positive")
@@ -72,6 +78,7 @@ func runtimeInfoFromConfig(config Config) RuntimeInfo {
 	config.ApplyDefaults()
 	return RuntimeInfo{
 		Version: RuntimeInfoVersion, MountRoot: config.RootFSMountRoot,
+		NetworkMITMCAFile:               config.NetworkMITMCAFile,
 		MaxDirtyTailBytes:               config.RootFSMaxDirtyTailBytes,
 		MaxNodeDirtyTailBytes:           config.RootFSMaxNodeDirtyTailBytes,
 		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,

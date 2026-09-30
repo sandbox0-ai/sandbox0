@@ -42,6 +42,7 @@ func TestRuntimeInfoRejectsUnboundedOrNoncanonicalMetadata(t *testing.T) {
 	valid := runtimeInfoFromConfig(Config{RootFSMountRoot: "/run/sandbox0/rootfs"})
 	for name, mutate := range map[string]func(*RuntimeInfo){
 		"version":       func(info *RuntimeInfo) { info.Version++ },
+		"relative CA":   func(info *RuntimeInfo) { info.NetworkMITMCAFile = "ca.crt" },
 		"relative root": func(info *RuntimeInfo) { info.MountRoot = "rootfs" },
 		"zero session":  func(info *RuntimeInfo) { info.MaxDirtyTailBytes = 0 },
 		"zero node":     func(info *RuntimeInfo) { info.MaxNodeDirtyTailBytes = 0 },
@@ -57,4 +58,15 @@ func TestRuntimeInfoRejectsUnboundedOrNoncanonicalMetadata(t *testing.T) {
 			require.Error(t, candidate.Validate())
 		})
 	}
+}
+
+func TestRuntimeInfoBindsPublicNetworkCA(t *testing.T) {
+	info := runtimeInfoFromConfig(Config{NetworkMITMCAFile: "/etc/sandbox0/mitm/ca.crt"})
+	require.Equal(t, "/etc/sandbox0/mitm/ca.crt", info.NetworkMITMCAFile)
+	bound, err := info.Digest()
+	require.NoError(t, err)
+	info.NetworkMITMCAFile = ""
+	without, err := info.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, bound, without)
 }

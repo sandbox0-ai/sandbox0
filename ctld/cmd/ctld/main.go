@@ -121,7 +121,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
-	nomadFactory, err := configuredNomadRuntimeFactory(cfg, runtimeSlotNetworkSocket)
+	networkConfig, err := loadNetworkRuntimeConfig(networkRuntimeConfigPath)
+	if err != nil {
+		return fmt.Errorf("load ctld network trust config: %w", err)
+	}
+	nomadFactory, err := configuredNomadRuntimeFactory(cfg, runtimeSlotNetworkSocket, networkConfig)
 	if err != nil {
 		return fmt.Errorf("validate ctld Nomad runtime config: %w", err)
 	}

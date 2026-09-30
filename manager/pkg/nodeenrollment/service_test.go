@@ -15,14 +15,6 @@ import (
 type enrollmentStoreStub struct {
 	challenge string
 	status    sandboxstore.RuntimeNodePoolNodeUsage
-	artifact  sandboxstore.RuntimeReleaseArtifact
-}
-
-func (s *enrollmentStoreStub) PinRuntimeNodeReleaseArtifact(_ context.Context, _, _ string, candidate sandboxstore.RuntimeReleaseArtifact) (sandboxstore.RuntimeReleaseArtifact, error) {
-	if s.artifact.SourceCommit == "" {
-		s.artifact = candidate
-	}
-	return s.artifact, nil
 }
 
 func TestLoadRuntimeArtifactRequiresTrustedOwnerAndClosedManifest(t *testing.T) {

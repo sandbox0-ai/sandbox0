@@ -470,7 +470,6 @@ func main() {
 	)
 
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
-		RuntimeReleaseProbes:    sandboxStore,
 		SandboxReader:           sandboxReader,
 		SandboxUpdater:          sandboxUpdater,
 		SandboxNetworkPolicy:    nomadSandboxNetworkPolicy,

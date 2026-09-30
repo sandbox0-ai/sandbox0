@@ -48,9 +48,8 @@ type RuntimeNodeConsolidationCPUProbe struct {
 // placement. Missing evidence makes the candidate ineligible for this pass.
 func (s *PGSandboxStore) GetRuntimeNodeConsolidationCPUPlan(ctx context.Context, poolID, instanceID string) (*RuntimeNodeConsolidationCPUPlan, error) {
 	var clusterID, nodeID, nodeUID string
-	err := s.pool.QueryRow(ctx, `SELECT cluster_id,nomad_node_id,node_uid FROM manager.runtime_node_instances instance
+	err := s.pool.QueryRow(ctx, `SELECT cluster_id,nomad_node_id,node_uid FROM manager.runtime_node_instances
 		WHERE pool_id=$1 AND provider_instance_id=$2 AND pool_kind='elastic' AND state='active'
-		AND `+runtimeReleaseAdmissionSQL("instance")+`
 		AND provider_ready_at IS NOT NULL`, poolID, instanceID).Scan(&clusterID, &nodeID, &nodeUID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -151,19 +150,6 @@ func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, pool
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var clusterID, nodeID, nodeUID string
 	var ready bool
-	// Take release authority before any instance/slot locks, like idle release
-	// retirement. A queued exclusive cutover must not create a lock inversion.
-	err = tx.QueryRow(ctx, `SELECT cluster_id FROM manager.runtime_node_instances
-		WHERE pool_id=$1 AND provider_instance_id=$2`, poolID, instanceID).Scan(&clusterID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if err := lockRuntimeRelease(ctx, tx, clusterID, true); err != nil {
-		return false, err
-	}
 	err = tx.QueryRow(ctx, `SELECT cluster_id,nomad_node_id,node_uid,
 		state='active' AND provider_ready_at IS NOT NULL
 		FROM manager.runtime_node_instances
@@ -174,15 +160,6 @@ func (s *PGSandboxStore) BeginRuntimeNodeConsolidation(ctx context.Context, pool
 	}
 	if err != nil {
 		return false, err
-	}
-	// A release predecessor keeps its processes until natural completion.
-	var releaseAdmitted bool
-	if err := tx.QueryRow(ctx, `SELECT `+runtimeReleaseAdmissionSQL("instance")+`
-		FROM manager.runtime_node_instances instance WHERE pool_id=$1 AND provider_instance_id=$2`, poolID, instanceID).Scan(&releaseAdmitted); err != nil {
-		return false, err
-	}
-	if !releaseAdmitted {
-		return false, nil
 	}
 	var sourceLive bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM manager.runtime_node_capacities capacity

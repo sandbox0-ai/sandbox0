@@ -32,7 +32,6 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	runtimeReleaseProbes    RuntimeReleaseProbeAuthority
 	router                  *gin.Engine
 	sandboxReader           SandboxReader
 	sandboxUpdater          SandboxUpdater
@@ -110,12 +109,7 @@ type SandboxRootFSService interface {
 // ServerDependencies names the manager capabilities exposed over HTTP. Using
 // this struct keeps composition changes local and avoids order-dependent
 // constructor calls as features are added or removed.
-type RuntimeReleaseProbeAuthority interface {
-	ValidateRuntimeReleaseProbe(context.Context, string, string, string, string) (bool, error)
-}
-
 type ServerDependencies struct {
-	RuntimeReleaseProbes    RuntimeReleaseProbeAuthority
 	SandboxReader           SandboxReader
 	SandboxUpdater          SandboxUpdater
 	SandboxNetworkPolicy    SandboxNetworkPolicyService
@@ -171,7 +165,6 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		deps.SandboxRootFSRebaser, _ = deps.SandboxClaimer.(service.SandboxRootFSRebaser)
 	}
 	server := &Server{
-		runtimeReleaseProbes:    deps.RuntimeReleaseProbes,
 		router:                  router,
 		sandboxReader:           deps.SandboxReader,
 		sandboxUpdater:          deps.SandboxUpdater,
@@ -291,7 +284,6 @@ func (s *Server) setupRoutes() {
 	internal := s.router.Group("/internal/v1")
 	internal.Use(s.authMiddleware())
 	{
-		internal.POST("/runtime-release/probe", s.probeRuntimeRelease)
 		internalSandboxes := internal.Group("/sandboxes")
 		{
 			internalSandboxes.GET("/:id", s.getSandboxInternal)

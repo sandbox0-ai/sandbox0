@@ -633,7 +633,6 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 				WHERE state = $1
-					AND `+runtimeReleaseClaimAdmissionSQL("runtime_slots", "$14")+`
 					AND NOT carrier_retired
 					AND heartbeat_expires_at > NOW()
 					AND compatibility_digest = $2
@@ -696,7 +695,7 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
 			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination,
-			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID, request.OperationID))
+			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}
@@ -704,19 +703,6 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			return nil, protocol.RuntimeResourceLease{}, nil, err
 		}
 		excludedSlots = append(excludedSlots, slot.ID)
-		// Serialize the admission cut with hot release activation. Recheck after
-		// waiting: this slot may have been selected under the predecessor policy.
-		if err := lockRuntimeRelease(ctx, tx, slot.ClusterID, true); err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
-		var releaseAdmitted bool
-		if err := tx.QueryRow(ctx, `SELECT `+runtimeReleaseClaimAdmissionSQL("slot", "$2")+`
-			FROM manager.runtime_slots slot WHERE slot_id=$1`, slot.ID, request.OperationID).Scan(&releaseAdmitted); err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
-		if !releaseAdmitted {
-			continue
-		}
 
 		var capacityCPU, capacityMemory int64
 		var physicalCPU, physicalMemory int64

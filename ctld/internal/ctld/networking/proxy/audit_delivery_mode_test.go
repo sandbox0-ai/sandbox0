@@ -53,9 +53,8 @@ func TestHTTPAuditSinkDefaultsAttemptsToDurableAsync(t *testing.T) {
 			var firstRequestOnce sync.Once
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				requestAvailable := available.Load()
 				firstRequestOnce.Do(func() { close(firstRequest) })
-				if requestAvailable {
+				if available.Load() {
 					w.WriteHeader(http.StatusAccepted)
 					return
 				}

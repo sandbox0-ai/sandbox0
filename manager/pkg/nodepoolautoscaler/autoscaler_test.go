@@ -425,31 +425,3 @@ func TestRetiringLeaseBacklogDoesNotCreateReplacementDemand(t *testing.T) {
 	require.Equal(t, 1, decision.TargetElastic)
 	require.Equal(t, 84, store.snapshot.ClusterActiveLeases)
 }
-
-func TestHotReleaseKeepsSelectedWarmCapacityBesideBusyPredecessors(t *testing.T) {
-	store, cloud := &fakeStore{}, &fakeCloud{desired: 3}
-	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
-		{ProviderInstanceID: "old-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, ProviderReady: true, CapacityLive: true, PredecessorRelease: true, ActiveLeases: 1},
-		{ProviderInstanceID: "old-2", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, ProviderReady: true, CapacityLive: true, PredecessorRelease: true, ActiveLeases: 1},
-		{ProviderInstanceID: "selected", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, ProviderReady: true, CapacityLive: true},
-	}
-	decision, err := testWorker(t, store, cloud).Reconcile(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, 3, decision.TargetElastic)
-	require.Empty(t, cloud.sets)
-}
-
-func TestHotReleaseRetainedBusyNodesDoNotConsumeEnrollmentBudget(t *testing.T) {
-	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
-	store.snapshot.Nodes = []sandboxstore.RuntimeNodePoolNodeUsage{
-		{ProviderInstanceID: "old-1", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, ProviderReady: true, CapacityLive: true, PredecessorRelease: true, ActiveLeases: 1},
-		{ProviderInstanceID: "old-2", PoolKind: sandboxstore.RuntimeNodePoolKindElastic, State: sandboxstore.RuntimeNodeInstanceActive, ProviderReady: true, CapacityLive: true, PredecessorRelease: true, ActiveLeases: 1},
-	}
-	worker := testWorker(t, store, cloud)
-	worker.config.MaxPendingNodes = 1
-	decision, err := worker.Reconcile(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, 3, decision.TargetElastic)
-	require.Equal(t, "scale_out", decision.Action)
-	require.Equal(t, []int{3}, cloud.sets)
-}

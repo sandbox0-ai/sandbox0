@@ -296,13 +296,6 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 		}
 		return Decision{Action: "not_leader"}, nil
 	}
-	if releases, ok := w.store.(interface {
-		RetireIdlePredecessorRuntimeNodes(context.Context, string) (int, error)
-	}); ok {
-		if _, err := releases.RetireIdlePredecessorRuntimeNodes(ctx, w.config.PoolID); err != nil {
-			return Decision{}, fmt.Errorf("retire idle predecessor runtime: %w", err)
-		}
-	}
 	snapshot, err := w.store.GetRuntimeNodePoolSnapshot(ctx, w.config.PoolID)
 	if err != nil {
 		return Decision{}, err
@@ -376,13 +369,10 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	}
 	decision.CapacityLimited = required > liveFixed+w.config.MaxElasticNodes
 	now := w.config.Now().UTC()
-	readyElastic, predecessorBusy := 0, 0
+	readyElastic := 0
 	for _, node := range snapshot.Nodes {
-		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State != sandboxstore.RuntimeNodeInstanceRevoked && node.PredecessorRelease && node.ActiveLeases > 0 {
-			predecessorBusy++
-		}
 		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic &&
-			node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive && !node.PredecessorRelease {
+			node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive {
 			readyElastic++
 		}
 	}
@@ -421,7 +411,7 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 		}
 		// Include instances which have not registered yet by subtracting observed
 		// ready workers from cloud desired capacity, rather than counting only DB rows.
-		applied := min(target, w.config.MaxElasticNodes, current+w.config.MaxScaleOutStep, readyElastic+predecessorBusy+w.config.MaxPendingNodes)
+		applied := min(target, w.config.MaxElasticNodes, current+w.config.MaxScaleOutStep, readyElastic+w.config.MaxPendingNodes)
 		if applied <= current {
 			decision.Action = "scale_out_pending_budget"
 			return decision, nil
@@ -724,22 +714,17 @@ func (w *Worker) targetWithBusyFloor(snapshot *sandboxstore.RuntimeNodePoolSnaps
 	}
 	// Live sandboxes cannot be consolidated by pretending their leases can move
 	// to the fixed worker. Lifecycle hooks remain the final race-safe authority.
-	busyElastic, readyElastic, predecessorBusy := 0, 0, 0
+	busyElastic, readyElastic := 0, 0
 	for _, node := range snapshot.Nodes {
 		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State != sandboxstore.RuntimeNodeInstanceRevoked && node.ActiveLeases > 0 {
 			busyElastic++
-			if node.PredecessorRelease {
-				predecessorBusy++
-			}
 		}
-		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive && !node.PredecessorRelease {
+		if node.PoolKind == sandboxstore.RuntimeNodePoolKindElastic && node.State == sandboxstore.RuntimeNodeInstanceActive && node.ProviderReady && node.CapacityLive {
 			readyElastic++
 		}
 	}
 	if protectBusy {
-		// Busy predecessors cannot provide fresh release capacity, and cannot
-		// be replaced by the selected idle node during scale-in.
-		elastic = max(elastic, busyElastic, predecessorBusy+w.config.FixedNodes-liveFixedNodes)
+		elastic = max(elastic, busyElastic)
 	}
 	for _, demand := range snapshot.DemandShapes {
 		// Add a progress floor only for a request a fresh worker can actually
@@ -761,7 +746,7 @@ func (w *Worker) targetWithBusyFloor(snapshot *sandboxstore.RuntimeNodePoolSnaps
 			}
 		}
 		if !fits {
-			elastic = max(elastic, readyElastic+predecessorBusy+1)
+			elastic = max(elastic, readyElastic+1)
 			break
 		}
 	}

@@ -84,15 +84,13 @@ func bindCheckpointResumePlan(candidate *sandboxstore.NomadSandboxResumeCandidat
 	expected := plan.assignment
 	expected.RuntimeGeneration = target.RuntimeGeneration
 	expected.ResetCopiedSessionState = target.ResetCopiedSessionState
-	// Regional registry defaults apply to fresh processes. A memory restore
-	// keeps the captured value (including its absence), unless the sandbox or
-	// stored template explicitly configures npm's registry.
-	if !hasExplicitNPMRegistry(candidate.Record) {
+	// A newly enabled regional registry is a default for fresh processes, not
+	// a mutation of a retained process. Only ignore its injection when capture
+	// had no registry and the persisted sandbox/template has no explicit one.
+	// Existing captured values lack provenance, so their drift still fails.
+	if _, capturedRegistry := target.EnvVars["NPM_CONFIG_REGISTRY"]; !capturedRegistry && !hasExplicitNPMRegistry(candidate.Record) {
 		expected.EnvVars = maps.Clone(expected.EnvVars)
 		delete(expected.EnvVars, "NPM_CONFIG_REGISTRY")
-		if registry, exists := target.EnvVars["NPM_CONFIG_REGISTRY"]; exists {
-			expected.EnvVars["NPM_CONFIG_REGISTRY"] = registry
-		}
 	}
 	// An importer upgrade changes only the executable selected for new claims.
 	// A retained process image must keep its captured executable; the worker

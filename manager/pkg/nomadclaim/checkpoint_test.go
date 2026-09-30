@@ -131,8 +131,6 @@ func TestMemoryResumeKeepsCapturedProcdAfterImporterUpgrade(t *testing.T) {
 func TestMemoryResumeKeepsCapturedInheritedNPMRegistry(t *testing.T) {
 	for _, change := range []struct{ captured, current string }{
 		{"", "https://npm-cache.example.com"},
-		{"https://old-cache.example.com", "https://npm-cache.example.com"},
-		{"https://old-cache.example.com", ""},
 	} {
 		t.Run(change.captured+"->"+change.current, func(t *testing.T) {
 			f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
@@ -153,6 +151,22 @@ func TestMemoryResumeKeepsCapturedInheritedNPMRegistry(t *testing.T) {
 			require.Equal(t, assignment.Target.EnvVars, planner.requests[0].Runtime.EnvVars)
 		})
 	}
+}
+
+func TestMemoryResumeRejectsCapturedNPMRegistryDriftWithoutProvenance(t *testing.T) {
+	f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+	assignment := &f.store.resumeCandidate.Checkpoint.Assignment
+	assignment.Target.EnvVars["NPM_CONFIG_REGISTRY"] = "https://custom.example.com/npm/"
+	source := assignment.Target
+	source.RuntimeGeneration = assignment.Capture.RuntimeGeneration
+	capture, err := runtimecontrol.NewCheckpointCaptureAssignment(assignment.Capture.OperationID, source)
+	require.NoError(t, err)
+	assignment.Capture = capture
+	f.service.defaultNPMRegistryURL = "https://npm-cache.example.com"
+	_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+	require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+	require.Empty(t, planner.authorities)
+	require.Zero(t, planner.coldCalls)
 }
 
 func TestMemoryResumeRejectsExplicitNPMRegistryDrift(t *testing.T) {

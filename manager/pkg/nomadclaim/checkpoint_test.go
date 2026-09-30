@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,6 +125,73 @@ func TestMemoryResumeKeepsCapturedProcdAfterImporterUpgrade(t *testing.T) {
 			require.Len(t, planner.authorities, 1)
 			require.Equal(t, captured, *planner.requests[0].Runtime.Procd)
 		})
+	}
+}
+
+func TestMemoryResumeKeepsCapturedInheritedNPMRegistry(t *testing.T) {
+	for _, change := range []struct{ captured, current string }{
+		{"", "https://npm-cache.example.com"},
+	} {
+		t.Run(change.captured+"->"+change.current, func(t *testing.T) {
+			f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+			assignment := &f.store.resumeCandidate.Checkpoint.Assignment
+			if change.captured != "" {
+				assignment.Target.EnvVars["NPM_CONFIG_REGISTRY"] = change.captured
+			}
+			source := assignment.Target
+			source.RuntimeGeneration = assignment.Capture.RuntimeGeneration
+			capture, err := runtimecontrol.NewCheckpointCaptureAssignment(assignment.Capture.OperationID, source)
+			require.NoError(t, err)
+			assignment.Capture = capture
+			f.service.defaultNPMRegistryURL = change.current
+
+			_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+			require.NoError(t, err)
+			require.Zero(t, planner.coldCalls)
+			require.Equal(t, assignment.Target.EnvVars, planner.requests[0].Runtime.EnvVars)
+		})
+	}
+}
+
+func TestMemoryResumeRejectsCapturedNPMRegistryDriftWithoutProvenance(t *testing.T) {
+	f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+	assignment := &f.store.resumeCandidate.Checkpoint.Assignment
+	assignment.Target.EnvVars["NPM_CONFIG_REGISTRY"] = "https://custom.example.com/npm/"
+	source := assignment.Target
+	source.RuntimeGeneration = assignment.Capture.RuntimeGeneration
+	capture, err := runtimecontrol.NewCheckpointCaptureAssignment(assignment.Capture.OperationID, source)
+	require.NoError(t, err)
+	assignment.Capture = capture
+	f.service.defaultNPMRegistryURL = "https://npm-cache.example.com"
+	_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+	require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+	require.Empty(t, planner.authorities)
+	require.Zero(t, planner.coldCalls)
+}
+
+func TestMemoryResumeRejectsExplicitNPMRegistryDrift(t *testing.T) {
+	for _, source := range []string{"sandbox", "template", "container"} {
+		for _, key := range []string{"NPM_CONFIG_REGISTRY", "npm_config_registry"} {
+			t.Run(source+"/"+key, func(t *testing.T) {
+				f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+				record := f.store.records[id]
+				const registry = "https://custom.example.com/npm/"
+				switch source {
+				case "sandbox":
+					record.Config.EnvVars = map[string]string{key: registry}
+				case "template":
+					record.TemplateSpec.EnvVars[key] = registry
+				case "container":
+					record.TemplateSpec.MainContainer.Env = append(record.TemplateSpec.MainContainer.Env,
+						v1alpha1.EnvVar{Name: key, Value: registry})
+				}
+				f.service.defaultNPMRegistryURL = "https://npm-cache.example.com"
+				_, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+				require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+				require.Empty(t, planner.authorities)
+				require.Zero(t, planner.coldCalls)
+			})
+		}
 	}
 }
 

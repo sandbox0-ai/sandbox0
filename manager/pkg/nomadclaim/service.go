@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -133,6 +134,7 @@ type pausedRebaseController interface {
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
 	RuntimeProcd           *procdartifact.Artifact
+	DefaultNPMRegistryURL  string
 	Store                  Store
 	Templates              templatestore.TemplateStore
 	RuntimeClasses         *RuntimeClassCatalog
@@ -161,6 +163,7 @@ type Config struct {
 // Service claims resource-neutral Nomad slots and binds exact resource leases.
 type Service struct {
 	runtimeProcd           *procdartifact.Artifact
+	defaultNPMRegistryURL  string
 	store                  Store
 	templates              templatestore.TemplateStore
 	runtimeClasses         *RuntimeClassCatalog
@@ -221,6 +224,14 @@ func New(config Config) (*Service, error) {
 	if config.ClaimTTL < time.Second || config.ClaimTTL > time.Minute {
 		return nil, fmt.Errorf("nomad claim TTL must be between 1s and 1m")
 	}
+	if config.DefaultNPMRegistryURL != "" {
+		registry, err := url.Parse(config.DefaultNPMRegistryURL)
+		if err != nil || (registry.Scheme != "http" && registry.Scheme != "https") ||
+			registry.Host == "" || registry.User != nil || registry.RawQuery != "" ||
+			registry.Fragment != "" || !strings.HasSuffix(registry.Path, "/npm/") {
+			return nil, fmt.Errorf("default npm registry URL must be an HTTP(S) URL ending in /npm/ without credentials, query, or fragment")
+		}
+	}
 	format, err := rootfsimporter.ImageImportFormat(config.RootFSFormatGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("nomad claim RootFS artifact policy: %w", err)
@@ -254,8 +265,9 @@ func New(config Config) (*Service, error) {
 		config.Logger = zap.NewNop()
 	}
 	return &Service{
-		runtimeProcd: config.RuntimeProcd,
-		store:        config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
+		runtimeProcd:          config.RuntimeProcd,
+		defaultNPMRegistryURL: config.DefaultNPMRegistryURL,
+		store:                 config.Store, templates: config.Templates, runtimeClasses: config.RuntimeClasses,
 		planner: config.Planner, allocation: config.Allocation, plannedRetire: config.PlannedRetire,
 		runningFork:  config.RunningFork,
 		pausedRebase: config.PausedRebase,
@@ -1675,6 +1687,18 @@ func (s *Service) runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *serv
 	a, err := runtimeAssignment(spec, req)
 	if err != nil {
 		return a, err
+	}
+	if s.defaultNPMRegistryURL != "" {
+		customRegistry := false
+		for key := range a.EnvVars {
+			if strings.EqualFold(key, "npm_config_registry") {
+				customRegistry = true
+				break
+			}
+		}
+		if !customRegistry {
+			a.EnvVars["NPM_CONFIG_REGISTRY"] = s.defaultNPMRegistryURL
+		}
 	}
 	if s.runtimeProcd != nil {
 		value := *s.runtimeProcd

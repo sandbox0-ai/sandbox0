@@ -48,8 +48,11 @@ type ManagerConfig struct {
 	MetricsPort int `yaml:"metrics_port" json:"metricsPort"`
 
 	// Sandbox
-	DefaultSandboxTTL        Duration `yaml:"default_sandbox_ttl" json:"defaultSandboxTTL"`
-	TeamTemplateMemoryPerCPU string   `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
+	DefaultSandboxTTL Duration `yaml:"default_sandbox_ttl" json:"defaultSandboxTTL"`
+	// Optional regional public-package cache. Claims use it only when a template
+	// or request has not supplied its own npm registry environment variable.
+	DefaultNPMRegistryURL    string `yaml:"default_npm_registry_url" json:"-"`
+	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 	// SandboxMaxMemory is the maximum memory limit accepted for a single sandbox.
 	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"sandboxMaxMemory"`
 	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.

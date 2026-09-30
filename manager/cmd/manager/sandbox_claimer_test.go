@@ -18,10 +18,11 @@ func TestSandboxRuntimeClaimConfigPreservesImportGeometryPolicy(t *testing.T) {
 			cfg := &config.ManagerConfig{RootFSImporter: config.RootFSImporterConfig{
 				DataRangeBytes: configured, ProcdProtocol: "sandbox0.procd.v3",
 				ProcdDigest: "sha256:" + strings.Repeat("f", 64),
-			}}
+			}, DefaultNPMRegistryURL: "http://nora.internal:4000/npm/"}
 			got := sandboxRuntimeClaimConfig(cfg, sandboxRuntimeBackendDependencies{runtimeClasses: catalog}, nil)
 			if got.RootFSImportDataRangeBytes != configured || got.RuntimeClasses != catalog ||
-				got.RootFSProcdProtocol != cfg.RootFSImporter.ProcdProtocol || got.RootFSProcdDigest != cfg.RootFSImporter.ProcdDigest {
+				got.RootFSProcdProtocol != cfg.RootFSImporter.ProcdProtocol || got.RootFSProcdDigest != cfg.RootFSImporter.ProcdDigest ||
+				got.DefaultNPMRegistryURL != cfg.DefaultNPMRegistryURL {
 				t.Fatalf("claim policy=%+v, want raw import geometry %d and unchanged runtime catalog", got, configured)
 			}
 		})

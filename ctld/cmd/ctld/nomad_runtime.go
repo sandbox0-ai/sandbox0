@@ -27,6 +27,7 @@ type nomadRuntimeFactory func(*zap.Logger) (primaryService, error)
 func configuredNomadRuntimeFactory(
 	ctldConfig *apiconfig.CtldConfig,
 	networkSocket string,
+	networkConfig *apiconfig.NetworkRuntimeConfig,
 ) (nomadRuntimeFactory, error) {
 	if ctldConfig == nil || !ctldConfig.NomadRuntime.Enabled {
 		return nil, nil
@@ -79,6 +80,9 @@ func configuredNomadRuntimeFactory(
 		MigrationStagingProjectID:             source.MigrationStagingProjectID,
 		MigrationStagingInodes:                source.MigrationStagingInodes,
 		RuntimeResourceCgroupRoot:             source.ResourceCgroupRoot,
+	}
+	if networkConfig != nil {
+		runtimeConfig.NetworkMITMCAFile = strings.TrimSpace(networkConfig.MITMCACertPath)
 	}
 	runtimeConfig.ApplyDefaults()
 	nomadConfig := nomadruntime.NomadAllocationConfig{

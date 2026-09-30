@@ -33,6 +33,9 @@ import (
 type Config struct {
 	SocketPath string
 
+	// Public CA used by the node egress proxy; the private key never enters a guest.
+	NetworkMITMCAFile string
+
 	RunscPath                 string
 	RunscRoot                 string
 	Platform                  string
@@ -172,6 +175,9 @@ func (c Config) Validate() error {
 		{"rootfs_authority_token_file", c.RootFSAuthorityTokenFile},
 		{"runtime_slot_node_boot_id_file", c.RuntimeSlotNodeBootIDFile},
 		{"runtime_slot_journal_path", c.RuntimeSlotJournalPath},
+	}
+	if c.NetworkMITMCAFile != "" {
+		paths = append(paths, struct{ name, value string }{"network_mitm_ca_file", c.NetworkMITMCAFile})
 	}
 	if c.RootFSObjectEncryptionEnabled {
 		paths = append(paths, struct{ name, value string }{

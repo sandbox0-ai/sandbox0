@@ -15,10 +15,13 @@
 package driver
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sandbox0-ai/sandbox0/pkg/gvisorcli"
@@ -36,12 +39,45 @@ type specOptions struct {
 	NetNSPath                     string
 	ResolvConfPath                string
 	ProcdInternalJWTPublicKeyFile string
+	NetworkMITMCAFile             string
 	Resources                     *driversResources
 	SecurityClass                 string
 	EphemeralMounts               []runtimecontrol.EphemeralMount
 }
 
 const procdInternalJWTPublicKeyDestination = "/config/internal_jwt_public.key"
+const networkMITMCADestination = "/var/run/sandbox0/networking/mitm-ca.crt"
+const networkMITMCAFileEnv = "SANDBOX0_NETWORK_MITM_CA_FILE"
+
+func validateNetworkMITMCAFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("network MITM CA path must be canonical and absolute")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read network MITM CA: %w", err)
+	}
+	count := 0
+	for len(strings.TrimSpace(string(data))) > 0 {
+		block, rest := pem.Decode(data)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return fmt.Errorf("network MITM CA must contain only public certificates")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !cert.IsCA {
+			return fmt.Errorf("network MITM CA contains an invalid CA certificate")
+		}
+		count++
+		data = rest
+	}
+	if count == 0 {
+		return fmt.Errorf("network MITM CA is empty")
+	}
+	return nil
+}
 
 // driversResources avoids exporting Nomad types through the OCI helper API.
 type driversResources struct {
@@ -77,6 +113,9 @@ func buildSpec(options specOptions) specs.Spec {
 		Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024}},
 	}
 	process.Env = append(process.Env, options.Env...)
+	if options.NetworkMITMCAFile != "" {
+		process.Env = append(process.Env, networkMITMCAFileEnv+"="+networkMITMCADestination)
+	}
 
 	namespaces := []specs.LinuxNamespace{
 		{Type: specs.PIDNamespace},
@@ -171,6 +210,13 @@ func buildSpec(options specOptions) specs.Spec {
 			Type:        "bind",
 			Source:      options.ProcdInternalJWTPublicKeyFile,
 			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
+	}
+
+	if options.NetworkMITMCAFile != "" {
+		mounts = append(mounts, specs.Mount{
+			Destination: networkMITMCADestination, Type: "bind", Source: options.NetworkMITMCAFile,
+			Options: []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
 		})
 	}
 

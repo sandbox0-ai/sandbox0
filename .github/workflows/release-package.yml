@@ -47,6 +47,10 @@ permissions:
 env:
   IMAGE_REPO: sandbox0ai/infra
 
+concurrency:
+  group: release-package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   metadata:
     name: release-package / metadata

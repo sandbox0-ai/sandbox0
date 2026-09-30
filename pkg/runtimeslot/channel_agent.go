@@ -500,7 +500,7 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 			return connectedAt, fmt.Errorf("node channel command must be bounded text JSON: %w", errdefs.ErrUnavailable)
 		}
 		var command NodeChannelCommand
-		if err := decodeNodeChannelMessage(payload, &command); err != nil {
+		if err := DecodeNodeChannelMessage(payload, &command); err != nil {
 			return connectedAt, fmt.Errorf("decode node channel command: %w: %w", err, errdefs.ErrUnavailable)
 		}
 		// A successor boot may recover an already authorized capture and clean
@@ -930,7 +930,8 @@ func writeNodeChannelMessage(connection *websocket.Conn, value any, deadline tim
 	return err
 }
 
-func decodeNodeChannelMessage(payload []byte, target any) error {
+// DecodeNodeChannelMessage rejects unknown fields and trailing JSON values.
+func DecodeNodeChannelMessage(payload []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

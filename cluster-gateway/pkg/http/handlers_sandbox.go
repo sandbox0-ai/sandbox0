@@ -108,57 +108,11 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	s.proxyToManager(c)
 }
 
-// updateSandbox updates sandbox configuration
-func (s *Server) updateSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+// mutateSandbox forwards lifecycle/configuration mutations and invalidates cached state.
+func (s *Server) mutateSandbox(c *gin.Context) {
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
-}
-
-// deleteSandbox deletes a sandbox
-func (s *Server) deleteSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
-	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
-}
-
-// pauseSandbox pauses a sandbox
-func (s *Server) pauseSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
-	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
-}
-
-// resumeSandbox resumes a paused sandbox
-func (s *Server) resumeSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
-	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
-}
-
-// refreshSandbox refreshes sandbox TTL
-func (s *Server) refreshSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
 	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }

@@ -762,7 +762,7 @@ func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, 
 
 func nomadProcdEndpoint(task *drivers.TaskConfig) (string, string, error) {
 	if task == nil {
-		return "", "", fmt.Errorf("Nomad task config is required")
+		return "", "", fmt.Errorf("nomad task config is required")
 	}
 	name := "NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel
 	raw, ok := task.Env[name]

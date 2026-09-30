@@ -6,13 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
-	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 const (
@@ -160,51 +157,6 @@ type NetworkPolicyToken struct {
 	NetNSIdentity        string `json:"netns_identity"`
 }
 
-// ReadyRequest resolves the staged logical generation to a protected host
-// mount. Prepare may wait for this transition, but it never returns a
-// placeholder root.
-type ReadyRequest struct {
-	Parent             string             `json:"parent"`
-	Source             string             `json:"source"`
-	Type               string             `json:"type,omitempty"`
-	Options            []string           `json:"options,omitempty"`
-	AppliedPolicyToken NetworkPolicyToken `json:"applied_policy_token"`
-}
-
-// ConsumerRequest asks the rootfs runtime to bind a prepared backend key to the
-// exact runtime consumer record after the runtime has committed it. Some
-// runtime paths consume Prepare mounts without a later backend Mounts call,
-// so lifecycle code must not depend on that callback to record the handoff.
-type ConsumerRequest struct {
-	Parent string `json:"parent"`
-}
-
-func (r ConsumerRequest) Validate() error {
-	if strings.TrimSpace(r.Parent) == "" {
-		return fmt.Errorf("parent is required")
-	}
-	return nil
-}
-
-type ParentStatus struct {
-	StageRequest
-	State                     string                     `json:"state"`
-	ActiveKey                 string                     `json:"active_key,omitempty"`
-	Mount                     *Mount                     `json:"mount,omitempty"`
-	WriterLease               *protocol.LeaseObservation `json:"writer_lease,omitempty"`
-	WriterAuthorityDegradedAt string                     `json:"writer_authority_degraded_at,omitempty"`
-	WriterAuthorityLastError  string                     `json:"writer_authority_last_error,omitempty"`
-	CreatedAt                 string                     `json:"created_at"`
-	UpdatedAt                 string                     `json:"updated_at"`
-}
-
-// RetireRequest identifies one planned writer retirement. OperationID is
-// stable across Manager, ctld, the rootfs runtime, and PostgreSQL retries.
-type RetireRequest struct {
-	Parent      string `json:"parent"`
-	OperationID string `json:"operation_id"`
-}
-
 // PlannedRetireOperationID returns the stable regional lifecycle identity for
 // one exact writer incarnation. Both the control plane and node runtime use
 // this value so a pause intent can exist before Nomad asks the driver to stop.
@@ -221,41 +173,6 @@ func CrashRetireOperationID(parent, writerGrantID string, writerEpoch int64) str
 	payload := fmt.Sprintf("%s\x00%s\x00%d", parent, writerGrantID, writerEpoch)
 	sum := sha256.Sum256([]byte(payload))
 	return "nomad-crash-" + hex.EncodeToString(sum[:16])
-}
-
-func (r RetireRequest) Validate() error {
-	if strings.TrimSpace(r.Parent) == "" || strings.TrimSpace(r.OperationID) == "" {
-		return fmt.Errorf("parent and operation_id are required")
-	}
-	return nil
-}
-
-// RetireResult is returned only after the Task-facing mount, physical device,
-// and writable branch session have been revoked and the branch is sealed.
-type RetireResult struct {
-	Parent           string `json:"parent"`
-	RootFSID         string `json:"rootfs_id"`
-	WriterEpoch      int64  `json:"writer_epoch"`
-	OperationID      string `json:"operation_id"`
-	CurrentBlockHead string `json:"current_block_head"`
-	DurabilityState  string `json:"durability_state"`
-	Descriptor       []byte `json:"descriptor"`
-	DetachProof      string `json:"detach_proof"`
-}
-
-// CrashFenceRequest identifies one non-cooperative writer revocation. The
-// operation is allocated regionally before this request reaches the node and
-// must remain stable across every retry.
-type CrashFenceRequest struct {
-	Parent      string `json:"parent"`
-	OperationID string `json:"operation_id"`
-}
-
-func (r CrashFenceRequest) Validate() error {
-	if strings.TrimSpace(r.Parent) == "" || strings.TrimSpace(r.OperationID) == "" {
-		return fmt.Errorf("parent and operation_id are required")
-	}
-	return nil
 }
 
 // CrashFenceSessionObservation is produced by the physical session owner
@@ -409,11 +326,6 @@ func (p CrashFenceProof) Digest() ([sha256.Size]byte, error) {
 	return sha256.Sum256(payload), nil
 }
 
-type CrashFenceResult struct {
-	Proof       CrashFenceProof `json:"proof"`
-	ProofDigest string          `json:"proof_digest"`
-}
-
 // RunningForkCheckpointProof binds one briefly frozen branch boundary to the
 // regional target generation. The descriptor digest remains stable evidence
 // after an asynchronous materializer advances the generation locator.
@@ -530,50 +442,6 @@ func (p RunningForkCheckpointProof) Digest() ([sha256.Size]byte, error) {
 	return sha256.Sum256(payload), nil
 }
 
-func (r CrashFenceResult) Validate() error {
-	digest, err := r.Proof.Digest()
-	if err != nil {
-		return err
-	}
-	if r.ProofDigest != hex.EncodeToString(digest[:]) {
-		return fmt.Errorf("proof_digest does not match proof")
-	}
-	return nil
-}
-
-func (r RetireResult) Validate() error {
-	if strings.TrimSpace(r.Parent) == "" || strings.TrimSpace(r.RootFSID) == "" ||
-		r.WriterEpoch <= 0 || strings.TrimSpace(r.OperationID) == "" ||
-		strings.TrimSpace(r.CurrentBlockHead) == "" || strings.TrimSpace(r.DurabilityState) == "" ||
-		len(r.Descriptor) == 0 {
-		return fmt.Errorf("retire result fields are incomplete")
-	}
-	proof, err := hex.DecodeString(strings.TrimSpace(r.DetachProof))
-	if err != nil || len(proof) != sha256.Size || hex.EncodeToString(proof) != strings.TrimSpace(r.DetachProof) {
-		return fmt.Errorf("detach_proof must be a canonical 32-byte hexadecimal digest")
-	}
-	descriptor, err := rootfsblock.DecodeDescriptor(r.Descriptor)
-	if err != nil {
-		return fmt.Errorf("descriptor: %w", err)
-	}
-	if descriptor.MappingRoot.RootDigest != r.CurrentBlockHead {
-		return fmt.Errorf("current_block_head does not match descriptor mapping root")
-	}
-	switch r.DurabilityState {
-	case rootfsblock.DurabilityS3:
-		if descriptor.CompositeTail != nil {
-			return fmt.Errorf("s3_materialized result cannot contain a composite tail")
-		}
-	case rootfsblock.DurabilityComposite:
-		if descriptor.CompositeTail == nil {
-			return fmt.Errorf("composite_durable result requires a composite tail")
-		}
-	default:
-		return fmt.Errorf("unsupported durability_state %q", r.DurabilityState)
-	}
-	return nil
-}
-
 type GateRequest struct {
 	SlotNonce string `json:"slot_nonce"`
 }
@@ -587,34 +455,6 @@ type GateImage struct {
 	DiffID          string `json:"diff_id"`
 	Parent          string `json:"parent_chain_id"`
 	LeaseID         string `json:"lease_id"`
-}
-
-// RuntimeIncarnation is the host rootfs runtime's admitted node/runtime identity.
-// Ctld obtains this fact over the root-only local socket rather than trusting
-// a Manager request or duplicating node bootstrap configuration.
-type RuntimeIncarnation struct {
-	NodeUID              string `json:"node_uid"`
-	BootID               string `json:"boot_id"`
-	RuntimeGeneration    string `json:"runtime_generation"`
-	HostMountNamespaceID string `json:"host_mount_namespace_id"`
-	AdmissionReady       bool   `json:"admission_ready"`
-	WriterRenewalReady   bool   `json:"writer_renewal_ready"`
-}
-
-func (i RuntimeIncarnation) Validate() error {
-	for name, value := range map[string]string{
-		"node_uid": i.NodeUID, "boot_id": i.BootID, "runtime_generation": i.RuntimeGeneration,
-		"host_mount_namespace_id": i.HostMountNamespaceID,
-	} {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("%s is required", name)
-		}
-	}
-	return nil
-}
-
-type WriterGrantBatchRenewRequest struct {
-	Items []StageRequest `json:"items"`
 }
 
 type Mount struct {
@@ -750,48 +590,6 @@ func (r StageRequest) BindingDigest() ([sha256.Size]byte, error) {
 func (r StageRequest) WithoutWriterGrantToken() StageRequest {
 	r.Identity.WriterGrantToken = ""
 	return r
-}
-
-func (r ReadyRequest) Normalize() (ReadyRequest, error) {
-	r.Parent = strings.TrimSpace(r.Parent)
-	r.Source = strings.TrimSpace(r.Source)
-	r.Type = strings.TrimSpace(r.Type)
-	if r.Parent == "" {
-		return ReadyRequest{}, fmt.Errorf("parent is required")
-	}
-	if err := r.AppliedPolicyToken.Validate(); err != nil {
-		return ReadyRequest{}, fmt.Errorf("applied_policy_token: %w", err)
-	}
-	if r.Source == "" || !filepath.IsAbs(r.Source) {
-		return ReadyRequest{}, fmt.Errorf("source must be an absolute path")
-	}
-	if r.Type == "" {
-		r.Type = "bind"
-	}
-	if r.Type != "bind" {
-		return ReadyRequest{}, fmt.Errorf("only bind mounts are supported")
-	}
-	if len(r.Options) == 0 {
-		r.Options = []string{"rbind", "rw", "nosuid", "nodev"}
-	}
-	if !slices.Contains(r.Options, "bind") && !slices.Contains(r.Options, "rbind") {
-		return ReadyRequest{}, fmt.Errorf("bind or rbind option is required")
-	}
-	allowed := map[string]struct{}{
-		"bind": {}, "rbind": {}, "rw": {}, "nosuid": {}, "nodev": {}, "noatime": {},
-	}
-	for _, option := range r.Options {
-		if _, ok := allowed[option]; !ok {
-			return ReadyRequest{}, fmt.Errorf("mount option %q is not allowed", option)
-		}
-	}
-	if !slices.Contains(r.Options, "rw") {
-		return ReadyRequest{}, fmt.Errorf("rw option is required")
-	}
-	if !slices.Contains(r.Options, "nosuid") || !slices.Contains(r.Options, "nodev") {
-		return ReadyRequest{}, fmt.Errorf("nosuid and nodev options are required")
-	}
-	return r, nil
 }
 
 func (t NetworkPolicyToken) Validate() error {

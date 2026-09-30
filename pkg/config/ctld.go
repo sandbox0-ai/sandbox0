@@ -94,18 +94,6 @@ type CtldNomadRuntimeConfig struct {
 	NodeControlTimeout Duration `yaml:"node_control_timeout" json:"-"`
 }
 
-// LoadCtldConfig loads the shared ctld configuration file.
-func LoadCtldConfig() *CtldConfig {
-	path := ctldConfigPath()
-	cfg, err := loadCtldConfig(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load ctld config from %s: %v, using defaults\n", path, err)
-		cfg = &CtldConfig{}
-	}
-	applyCtldDefaults(cfg)
-	return cfg
-}
-
 // LoadCtldConfigStrict loads the configured ctld file without falling back to
 // defaults. Production ctld startup uses this path so malformed or missing
 // node authority configuration cannot select another runtime mode.

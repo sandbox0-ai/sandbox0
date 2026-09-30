@@ -50,6 +50,19 @@ type adapterRequest struct {
 	UDPPayload     []byte
 }
 
+func (r *adapterRequest) destination() string {
+	if r == nil {
+		return ""
+	}
+	if host := strings.TrimSpace(r.Host); host != "" {
+		return host
+	}
+	if r.DestIP != nil {
+		return r.DestIP.String()
+	}
+	return ""
+}
+
 func (r *adapterRequest) appendProtocolAudit(entries ...protocolOperationAudit) {
 	if r == nil || r.Audit == nil || len(entries) == 0 {
 		return

@@ -87,7 +87,7 @@ func (a Assignment) Validate() error {
 	for index, mount := range a.EphemeralMounts {
 		if mount.MountPath == "" || strings.TrimSpace(mount.MountPath) != mount.MountPath ||
 			!strings.HasPrefix(mount.MountPath, "/") || path.Clean(mount.MountPath) != mount.MountPath ||
-			mount.SizeBytes < 1<<20 || mount.SizeBytes > 1<<40 || reservedEphemeralPath(mount.MountPath) {
+			mount.SizeBytes < 1<<20 || mount.SizeBytes > 1<<40 || IsReservedEphemeralMountPath(mount.MountPath) {
 			return fmt.Errorf("ephemeral mount %d is invalid", index)
 		}
 		for previous := 0; previous < index; previous++ {
@@ -101,7 +101,8 @@ func (a Assignment) Validate() error {
 	return nil
 }
 
-func reservedEphemeralPath(value string) bool {
+// IsReservedEphemeralMountPath reports whether a canonical mount path overlaps runtime files.
+func IsReservedEphemeralMountPath(value string) bool {
 	if value == "/" || value == "/dev" || value == "/proc" || value == "/sys" || value == "/config" || value == "/procd" {
 		return true
 	}

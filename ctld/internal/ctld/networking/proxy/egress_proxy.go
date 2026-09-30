@@ -105,7 +105,7 @@ func (s *Server) resolveSOCKS5ProxyAuth(ctx context.Context, req *adapterRequest
 		SandboxID:       req.Compiled.SandboxID,
 		BindingDigest:   req.Compiled.CredentialBindingDigest,
 		AuthRef:         cfg.CredentialRef,
-		Destination:     egressProxyDestination(req),
+		Destination:     req.destination(),
 		DestinationPort: req.DestPort,
 		Transport:       "tcp",
 		Protocol:        "socks5",
@@ -142,19 +142,6 @@ func (s *Server) resolveSOCKS5ProxyAuth(ctx context.Context, req *adapterRequest
 		return nil, fmt.Errorf("resolve egress proxy credentials for %q: %w", cfg.CredentialRef, err)
 	}
 	return &xproxy.Auth{User: material.Username, Password: material.Password}, nil
-}
-
-func egressProxyDestination(req *adapterRequest) string {
-	if req == nil {
-		return ""
-	}
-	if host := strings.TrimSpace(req.Host); host != "" {
-		return host
-	}
-	if req.DestIP != nil {
-		return req.DestIP.String()
-	}
-	return ""
 }
 
 func resolveSOCKS5ProxyDialAddress(ctx context.Context, compiled *policy.CompiledPolicy, cfg *policy.CompiledEgressProxy) (string, error) {

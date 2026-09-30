@@ -109,12 +109,7 @@ func (g MigrationRestoreCPUGrant) Digest() (string, error) {
 	if err := g.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(g)
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.Sum256(payload)
-	return hex.EncodeToString(hash[:]), nil
+	return digestJSON(g)
 }
 
 // MigrationRestoreCPUResetProof is physical node evidence, never a timer or an

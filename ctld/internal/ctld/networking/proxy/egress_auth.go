@@ -662,7 +662,7 @@ func (s *Server) resolveEgressAuth(req *adapterRequest, decision trafficDecision
 		TeamID:          compiledTeamID(req.Compiled),
 		AuthRef:         decision.MatchedAuthRule.AuthRef,
 		RuleName:        decision.MatchedAuthRule.Name,
-		Destination:     authDestination(req),
+		Destination:     req.destination(),
 		DestinationPort: req.DestPort,
 		Transport:       decision.Transport,
 		Protocol:        decision.Protocol,
@@ -757,24 +757,11 @@ func buildEgressAuthCacheKey(req *adapterRequest, decision trafficDecision) egre
 		SandboxID:       compiledSandboxID(req.Compiled),
 		BindingDigest:   compiledCredentialBindingDigest(req.Compiled),
 		AuthRef:         decision.MatchedAuthRule.AuthRef,
-		Destination:     authDestination(req),
+		Destination:     req.destination(),
 		DestinationPort: req.DestPort,
 		Transport:       decision.Transport,
 		Protocol:        decision.Protocol,
 	}
-}
-
-func authDestination(req *adapterRequest) string {
-	if req == nil {
-		return ""
-	}
-	if host := strings.TrimSpace(req.Host); host != "" {
-		return host
-	}
-	if req.DestIP != nil {
-		return req.DestIP.String()
-	}
-	return ""
 }
 
 func compiledSandboxID(compiled *policy.CompiledPolicy) string {

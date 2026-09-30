@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/quantity"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
 
@@ -23,7 +24,7 @@ func ResolveEphemeralMounts(spec sandboxspec.TemplateSpec) ([]ResolvedEphemeralM
 		if mountPath != mount.MountPath || !strings.HasPrefix(mountPath, "/") || path.Clean(mountPath) != mountPath {
 			return nil, fmt.Errorf("spec.ephemeralMounts[%d].mountPath must be a canonical absolute path", index)
 		}
-		if reservedEphemeralMountPath(mountPath) {
+		if runtimecontrol.IsReservedEphemeralMountPath(mountPath) {
 			return nil, fmt.Errorf("spec.ephemeralMounts[%d].mountPath overlaps a reserved runtime path", index)
 		}
 		limit, err := quantity.Parse(strings.TrimSpace(mount.SizeLimit))
@@ -50,17 +51,6 @@ func ResolveEphemeralMounts(spec sandboxspec.TemplateSpec) ([]ResolvedEphemeralM
 type ResolvedEphemeralMount struct {
 	MountPath string
 	SizeBytes int64
-}
-
-func reservedEphemeralMountPath(value string) bool {
-	if value == "/" || value == "/dev" || value == "/proc" || value == "/sys" || value == "/config" || value == "/procd" {
-		return true
-	}
-	if strings.HasPrefix(value, "/proc/") || strings.HasPrefix(value, "/sys/") ||
-		strings.HasPrefix(value, "/config/") || strings.HasPrefix(value, "/procd/") {
-		return true
-	}
-	return strings.HasPrefix(value, "/dev/") && value != "/dev/shm"
 }
 
 func pathOverlaps(left, right string) bool {

@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -63,12 +60,7 @@ func (r MigrationCaptureRequest) Digest() (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 const (

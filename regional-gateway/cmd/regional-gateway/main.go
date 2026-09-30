@@ -12,9 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/meteringbackend"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
-	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/http"
 	"go.uber.org/zap"
 )
@@ -58,9 +56,11 @@ func main() {
 	defer pool.Close()
 
 	// Run database migrations
-	if err := runMigrations(ctx, pool, logger); err != nil {
+	logger.Info("Running database migrations")
+	if err := gatewaymigrations.Run(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
+	logger.Info("Database migrations completed successfully")
 	meteringDB, meteringRepo, err := meteringbackend.Open(ctx, &cfg.Metering, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
@@ -118,23 +118,4 @@ func initDatabase(ctx context.Context, cfg *config.RegionalGatewayConfig, logger
 	)
 
 	return pool, nil
-}
-
-// runMigrations runs database migrations on startup
-func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
-	logger.Info("Running database migrations")
-
-	if err := migrate.Up(ctx, pool, ".",
-		migrate.WithBaseFS(gatewaymigrations.FS),
-		migrate.WithLogger(observability.NewMigrateLogger(logger)),
-		migrate.WithSchema("shared_gateway"),
-	); err != nil {
-		return fmt.Errorf("migrate up: %w", err)
-	}
-	if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-		return fmt.Errorf("quota migrations: %w", err)
-	}
-
-	logger.Info("Database migrations completed successfully")
-	return nil
 }

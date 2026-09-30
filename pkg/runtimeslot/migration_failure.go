@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -28,12 +25,7 @@ func (r MigrationFailureRequest) Digest() (string, error) {
 	if err := r.Restore.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
+	return digestJSON(r)
 }
 
 // MigrationFailureStopProof proves only that the exact destination container

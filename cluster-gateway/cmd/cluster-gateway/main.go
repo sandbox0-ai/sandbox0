@@ -14,9 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/meteringbackend"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
-	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 )
 
@@ -56,9 +54,11 @@ func main() {
 		pool = initDatabase(ctx, cfg, logger, obsProvider)
 		defer pool.Close()
 
-		if err := runMigrations(ctx, pool, logger); err != nil {
+		logger.Info("Running database migrations")
+		if err := gatewaymigrations.Run(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 			logger.Fatal("Failed to run database migrations", zap.Error(err))
 		}
+		logger.Info("Database migrations completed successfully")
 	}
 	sandboxObservabilityDB, sandboxObservabilityRepo, err := initSandboxObservability(ctx, cfg, logger)
 	if err != nil {
@@ -130,22 +130,4 @@ func initDatabase(ctx context.Context, cfg *config.ClusterGatewayConfig, logger 
 	)
 
 	return pool
-}
-
-func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
-	logger.Info("Running database migrations")
-
-	if err := migrate.Up(ctx, pool, ".",
-		migrate.WithBaseFS(gatewaymigrations.FS),
-		migrate.WithLogger(observability.NewMigrateLogger(logger)),
-		migrate.WithSchema("shared_gateway"),
-	); err != nil {
-		return fmt.Errorf("migrate up: %w", err)
-	}
-	if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-		return fmt.Errorf("quota migrations: %w", err)
-	}
-
-	logger.Info("Database migrations completed successfully")
-	return nil
 }

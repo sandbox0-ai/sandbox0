@@ -354,18 +354,6 @@ func newInternalToken(t *testing.T, gen *internalauth.Generator, perms []string)
 	return token
 }
 
-func newValidator(t *testing.T, target string, publicKey internalauth.PublicKeyType, allowedCallers []string) *internalauth.Validator {
-	t.Helper()
-
-	cfg := internalauth.ValidatorConfig{
-		Target:             target,
-		PublicKey:          publicKey,
-		AllowedCallers:     allowedCallers,
-		ClockSkewTolerance: 10 * time.Second,
-	}
-	return internalauth.NewValidator(cfg)
-}
-
 func doGatewayRequest(t *testing.T, client *http.Client, method, url, token string, body any) (*http.Response, []byte) {
 	t.Helper()
 

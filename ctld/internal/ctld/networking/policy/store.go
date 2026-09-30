@@ -144,26 +144,6 @@ func applySandboxOwner(compiled *CompiledPolicy, info *model.SandboxInfo) {
 	}
 }
 
-func (s *Store) DeleteByKey(namespace, name string) {
-	key := namespace + "/" + name
-	s.mu.Lock()
-	entry := s.byKey[key]
-	delete(s.byKey, key)
-	if entry != nil && entry.sourceIP != "" {
-		delete(s.byIP, entry.sourceIP)
-	}
-	sourceIP := ""
-	if entry != nil {
-		sourceIP = entry.sourceIP
-	}
-	s.logger.Info(
-		"Sandbox network policy deleted by key",
-		zap.String("sandbox", key),
-		zap.String("source_ip", sourceIP),
-	)
-	s.mu.Unlock()
-}
-
 func (s *Store) GetByIP(sourceIP string) *CompiledPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

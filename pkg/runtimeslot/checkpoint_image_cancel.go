@@ -1,9 +1,6 @@
 package runtimeslot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -21,12 +18,7 @@ func (r CheckpointImageCancelRequest) Digest() (string, error) {
 	if err := r.Image.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 type CheckpointImageCancelProof struct {

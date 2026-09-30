@@ -51,7 +51,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ZCode requires Node.js 24.14+. Keep the other pinned agents on the same
 # supported runtime and fail if the distribution resolves an older release.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server tint2 feh wmctrl \
   && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 14)) process.exit(1)' \

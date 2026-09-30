@@ -46,6 +46,25 @@ func TestRuntimeConfigTemplateRendersExactNodeWithoutLivePeerState(t *testing.T)
 	for name, contents := range files {
 		require.NotContains(t, contents, "{{", name)
 	}
+	t.Run("retained generation uses its original configuration", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("root ownership is part of the production history contract")
+		}
+		root := t.TempDir()
+		renderer.archiveFile = filepath.Join(root, "runtime-config-template.tar.gz")
+		history := filepath.Join(root, "runtime-configs")
+		require.NoError(t, os.Mkdir(history, 0700))
+		artifact := RuntimeArtifact{SourceCommit: strings.Repeat("1", 40), SHA256: strings.Repeat("2", 64), ObjectKey: "sandbox0-nomad-runtime/retained.tar.gz", OSSEndpoint: "https://isolated-runtime.invalid", OSSBucket: "isolated-runtime"}
+		required["etc/sandbox0/ctld.yaml.tmpl"] += "retained_release_marker: old\n"
+		require.NoError(t, os.WriteFile(filepath.Join(history, artifact.SHA256+".tar.gz"), writeRuntimeConfigArchive(t, required), 0600))
+		retained, err := renderer.ForArtifact(artifact)
+		require.NoError(t, err)
+		payload, err := retained.Render(RuntimeConfigIdentity{NodeName: "s0-old", NodeID: "old-id", NodeUID: "ecs/test/old", AgentUID: "ctld/test/old", PrivateIP: "10.0.0.20", AllocationCIDR: "172.27.0.64/26", RegionID: "test", ClusterID: "nomad"})
+		require.NoError(t, err)
+		files := readRuntimeConfigArchive(t, payload)
+		require.Contains(t, files["node-runtime/etc/sandbox0/ctld.yaml"], "retained_release_marker: old")
+		require.Contains(t, files["node-runtime/etc/sandbox0/ctld.env"], "ecs/test/old")
+	})
 }
 
 func TestRuntimeConfigTemplateRejectsLinksAndMissingInventory(t *testing.T) {

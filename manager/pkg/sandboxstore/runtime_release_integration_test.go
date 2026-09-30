@@ -44,6 +44,81 @@ func releaseTestActivation(operation string, artifact RuntimeReleaseArtifact, di
 		OperationID: operation, ExpectedRevision: revision, CompatibilityDigest: digest, MinimumReadyNodes: 1, MinimumReadySlots: 1}
 }
 
+func TestRuntimeHotReleaseRebindOnlyOwnedIdleFixedWorkerIntegration(t *testing.T) {
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	fixed := releaseTestReadySlot(t, store, "fixed-ready", "fixed")
+	busy := releaseTestReadySlot(t, store, "busy-ready", "busy")
+	selected := releaseTestReadySlot(t, store, "selected-ready", "selected")
+	for _, node := range []string{fixed.NodeUID, busy.NodeUID} {
+		_, err := store.PinRuntimeNodeReleaseArtifact(t.Context(), "cluster-a", node, releaseTestArtifact("1"))
+		require.NoError(t, err)
+	}
+	_, err := store.PinRuntimeNodeReleaseArtifact(t.Context(), "cluster-a", selected.NodeUID, releaseTestArtifact("2"))
+	require.NoError(t, err)
+	claim := releaseTestClaim(t, store, "busy-fixed-guest", busy.CompatibilityDigest)
+	claim.TargetNodeID, claim.TargetNodeUID, claim.TargetNodeBootID = busy.NodeID, busy.NodeUID, busy.NodeBootID
+	_, err = store.AcquireRuntimeSlot(t.Context(), claim)
+	require.NoError(t, err)
+	_, err = store.ActivateRuntimeRelease(t.Context(), releaseTestActivation("selected", releaseTestArtifact("2"), selected.CompatibilityDigest, 0))
+	require.NoError(t, err)
+	r := RebindIdleRuntimeNodeReleaseRequest{ClusterID: "cluster-a", NodeID: fixed.NodeID, NodeUID: fixed.NodeUID, NodeBootID: fixed.NodeBootID, ExpectedBundleSHA256: releaseTestArtifact("1").SHA256, FenceReason: "audited-runtime-rollout:idle-fixed", Artifact: releaseTestArtifact("2")}
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)
+	require.ErrorIs(t, err, ErrRuntimeReleaseConflict)
+	_, err = pool.Exec(t.Context(), `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason) VALUES($1,$2,$3,'warming','foreign operation')`, r.ClusterID, r.NodeID, r.NodeUID)
+	require.NoError(t, err)
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)
+	require.ErrorIs(t, err, ErrRuntimeReleaseConflict)
+	_, err = pool.Exec(t.Context(), `UPDATE manager.runtime_node_fences SET reason=$1 WHERE node_uid=$2`, r.FenceReason, r.NodeUID)
+	require.NoError(t, err)
+	wrong := r
+	wrong.NodeBootID = "stale-boot"
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), wrong)
+	require.ErrorContains(t, err, "exact boot capacity")
+	wrong = r
+	wrong.ExpectedBundleSHA256 = releaseTestArtifact("3").SHA256
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), wrong)
+	require.ErrorIs(t, err, ErrRuntimeReleaseConflict)
+	wrong = r
+	wrong.Artifact = releaseTestArtifact("3")
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), wrong)
+	require.ErrorIs(t, err, ErrRuntimeReleaseConflict)
+	busyRequest := r
+	busyRequest.NodeID, busyRequest.NodeUID, busyRequest.NodeBootID = busy.NodeID, busy.NodeUID, busy.NodeBootID
+	_, err = pool.Exec(t.Context(), `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason) VALUES($1,$2,$3,'warming',$4)`, r.ClusterID, busy.NodeID, busy.NodeUID, r.FenceReason)
+	require.NoError(t, err)
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), busyRequest)
+	require.ErrorContains(t, err, "busy")
+	// Durable identity outlives a Nomad node registration. A retained lease
+	// under an earlier node ID must also block physical replacement.
+	_, err = pool.Exec(t.Context(), `UPDATE manager.runtime_resource_leases SET node_id='historical-node',node_uid=$1 WHERE node_uid=$2 AND lease_state='active'`, fixed.NodeUID, busy.NodeUID)
+	require.NoError(t, err)
+	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)
+	require.ErrorContains(t, err, "busy")
+	inventory, err := store.GetRuntimeReleaseInventory(t.Context(), r.ClusterID)
+	require.NoError(t, err)
+	for _, node := range inventory {
+		if node.NodeUID == fixed.NodeUID {
+			require.Equal(t, 1, node.ActiveLeases)
+		}
+	}
+	_, err = pool.Exec(t.Context(), `UPDATE manager.runtime_resource_leases SET node_id=$1,node_uid=$2 WHERE node_uid=$3 AND lease_state='active'`, busy.NodeID, busy.NodeUID, fixed.NodeUID)
+	require.NoError(t, err)
+	rebound, err := store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)
+	require.NoError(t, err)
+	require.Equal(t, r.Artifact, rebound)
+	retried, err := store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)
+	require.NoError(t, err)
+	require.Equal(t, rebound, retried)
+	// Ordinary bootstrap retries cannot rewind the explicit fixed replacement.
+	pinned, err := store.PinRuntimeNodeReleaseArtifact(t.Context(), r.ClusterID, r.NodeUID, releaseTestArtifact("1"))
+	require.NoError(t, err)
+	require.Equal(t, rebound, pinned)
+	var active int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT COUNT(*) FROM manager.runtime_resource_leases WHERE node_uid=$1 AND lease_state='active'`, busy.NodeUID).Scan(&active))
+	require.Equal(t, 1, active)
+}
+
 func TestRuntimeHotReleasePreservesClaimsAndRollbackIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)

@@ -33,7 +33,7 @@ func main() {
 	}
 }
 func run() error {
-	phase := flag.String("phase", "status", "status, inventory, pool-snapshot, pin, authorize-probe, probe, activate, retire-idle")
+	phase := flag.String("phase", "status", "status, inventory, pool-snapshot, retirement-status, pin, rebind-idle, authorize-probe, probe, activate, retire-idle")
 	configPath := flag.String("config", "/etc/sandbox0/manager.yaml", "manager config, local to control host")
 	cluster := flag.String("cluster", "", "exact cluster ID")
 	node := flag.String("node", "", "exact Nomad node ID")
@@ -42,6 +42,8 @@ func run() error {
 	manifest := flag.String("manifest", "", "verified immutable worker artifact JSON")
 	source := flag.String("source", "", "exact source commit")
 	bundle := flag.String("bundle-sha256", "", "exact worker bundle SHA-256")
+	previousBundle := flag.String("expected-bundle-sha256", "", "predecessor artifact for fenced idle replacement")
+	fenceReason := flag.String("fence-reason", "", "exact owned audited maintenance fence")
 	operation := flag.String("operation-id", "", "stable release or synthetic probe operation ID")
 	proof := flag.String("probe-operation-id", "", "successful candidate command probe operation")
 	compatibility := flag.String("compatibility", "", "exact slot compatibility digest")
@@ -86,9 +88,28 @@ func run() error {
 		result, err = store.GetRuntimeReleaseInventory(ctx, *cluster)
 	case "pool-snapshot":
 		result, err = store.GetRuntimeNodePoolSnapshot(ctx, *poolID)
+	case "retirement-status":
+		if *node == "" || *uid == "" {
+			return errors.New("exact fenced worker identity is required")
+		}
+		var status struct {
+			ActiveLeases     int  `json:"active_leases"`
+			NonterminalSlots int  `json:"nonterminal_slots"`
+			Quiescent        bool `json:"quiescent"`
+		}
+		var owned bool
+		err = db.QueryRow(ctx, `SELECT
+			EXISTS(SELECT 1 FROM manager.runtime_node_fences WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 AND reason LIKE 'audited-runtime-rollout:%'),
+			(SELECT COUNT(*) FROM manager.runtime_resource_leases WHERE cluster_id=$1 AND node_uid=$3 AND lease_state='active'),
+			(SELECT COUNT(*) FROM manager.runtime_slots WHERE cluster_id=$1 AND node_uid=$3 AND state<>'terminal')`, *cluster, *node, *uid).Scan(&owned, &status.ActiveLeases, &status.NonterminalSlots)
+		if err == nil && !owned {
+			return errors.New("retirement observation requires an audited worker fence")
+		}
+		status.Quiescent = status.ActiveLeases == 0 && status.NonterminalSlots == 0
+		result = status
 	case "status":
 		result, err = store.GetRuntimeReleasePolicy(ctx, *cluster)
-	case "pin":
+	case "pin", "rebind-idle":
 		var artifact sandboxstore.RuntimeReleaseArtifact
 		var payload []byte
 		payload, err = os.ReadFile(*manifest)
@@ -105,7 +126,11 @@ func run() error {
 			err = errors.New("runtime manifest unavailable or oversized")
 		}
 		if err == nil {
-			result, err = store.PinRuntimeNodeReleaseArtifact(ctx, *cluster, *uid, artifact)
+			if *phase == "pin" {
+				result, err = store.PinRuntimeNodeReleaseArtifact(ctx, *cluster, *uid, artifact)
+			} else {
+				result, err = store.RebindIdleRuntimeNodeReleaseArtifact(ctx, sandboxstore.RebindIdleRuntimeNodeReleaseRequest{ClusterID: *cluster, NodeID: *node, NodeUID: *uid, NodeBootID: *boot, ExpectedBundleSHA256: *previousBundle, FenceReason: *fenceReason, Artifact: artifact})
+			}
 		}
 	case "authorize-probe":
 		grant := sandboxstore.RuntimeReleaseProbe{OperationID: *operation, ClusterID: *cluster, NodeID: *node, NodeUID: *uid, NodeBootID: *boot, SourceCommit: *source, BundleSHA256: *bundle}

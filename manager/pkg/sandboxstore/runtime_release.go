@@ -83,6 +83,84 @@ type RuntimeReleasePolicy struct {
 	Revision     int64  `json:"revision"`
 }
 
+// RebindIdleRuntimeNodeReleaseRequest is for verified in-place replacement of
+// an empty fixed worker. Enrollment retries continue using Pin, never Rebind.
+type RebindIdleRuntimeNodeReleaseRequest struct {
+	ClusterID, NodeID, NodeUID, NodeBootID string
+	ExpectedBundleSHA256, FenceReason      string
+	Artifact                               RuntimeReleaseArtifact
+}
+
+func (s *PGSandboxStore) RebindIdleRuntimeNodeReleaseArtifact(ctx context.Context, request RebindIdleRuntimeNodeReleaseRequest) (RuntimeReleaseArtifact, error) {
+	if request.ClusterID == "" || request.NodeID == "" || request.NodeUID == "" || request.NodeBootID == "" ||
+		!releaseSHAPattern.MatchString(request.ExpectedBundleSHA256) || !strings.HasPrefix(request.FenceReason, "audited-runtime-rollout:") || len(request.FenceReason) > 512 {
+		return RuntimeReleaseArtifact{}, fmt.Errorf("invalid fenced runtime artifact replacement")
+	}
+	if err := request.Artifact.Validate(); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := lockRuntimeRelease(ctx, tx, request.ClusterID, true); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	var selected bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM manager.runtime_release_policies
+		WHERE cluster_id=$1 AND source_commit=$2 AND bundle_sha256=$3)`, request.ClusterID, request.Artifact.SourceCommit, request.Artifact.SHA256).Scan(&selected); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	if !selected {
+		return RuntimeReleaseArtifact{}, ErrRuntimeReleaseConflict
+	}
+	var reason string
+	if err := tx.QueryRow(ctx, `SELECT reason FROM manager.runtime_node_fences
+		WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 FOR UPDATE`, request.ClusterID, request.NodeID, request.NodeUID).Scan(&reason); err != nil {
+		return RuntimeReleaseArtifact{}, ErrRuntimeReleaseConflict
+	}
+	if reason != request.FenceReason {
+		return RuntimeReleaseArtifact{}, ErrRuntimeReleaseConflict
+	}
+	var safe bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM manager.runtime_node_capacities WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 AND node_boot_id=$4 AND heartbeat_expires_at>NOW())
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_node_capacities WHERE cluster_id=$1 AND node_uid=$3 AND (node_id<>$2 OR node_boot_id<>$4) AND heartbeat_expires_at>NOW())
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_resource_leases WHERE cluster_id=$1 AND node_uid=$3 AND lease_state='active')
+		AND NOT EXISTS(SELECT 1 FROM manager.runtime_slots WHERE cluster_id=$1 AND node_uid=$3 AND state NOT IN('registered','fastpath_ready','terminal'))`, request.ClusterID, request.NodeID, request.NodeUID, request.NodeBootID).Scan(&safe); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	if !safe {
+		return RuntimeReleaseArtifact{}, fmt.Errorf("fixed worker is busy or its exact boot capacity is unavailable")
+	}
+	var oldSHA string
+	var saved []byte
+	if err := tx.QueryRow(ctx, `SELECT bundle_sha256,artifact FROM manager.runtime_node_release_artifacts
+		WHERE cluster_id=$1 AND node_uid=$2 FOR UPDATE`, request.ClusterID, request.NodeUID).Scan(&oldSHA, &saved); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	var oldArtifact RuntimeReleaseArtifact
+	if err := json.Unmarshal(saved, &oldArtifact); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	if oldArtifact == request.Artifact {
+		return oldArtifact, tx.Commit(ctx)
+	}
+	if oldSHA != request.ExpectedBundleSHA256 {
+		return RuntimeReleaseArtifact{}, ErrRuntimeReleaseConflict
+	}
+	payload, err := json.Marshal(request.Artifact)
+	if err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE manager.runtime_node_release_artifacts SET source_commit=$3,bundle_sha256=$4,artifact=$5
+		WHERE cluster_id=$1 AND node_uid=$2`, request.ClusterID, request.NodeUID, request.Artifact.SourceCommit, request.Artifact.SHA256, payload); err != nil {
+		return RuntimeReleaseArtifact{}, err
+	}
+	return request.Artifact, tx.Commit(ctx)
+}
+
 type ActivateRuntimeReleaseRequest struct {
 	ClusterID           string
 	SourceCommit        string
@@ -374,7 +452,9 @@ type RuntimeReleaseNode struct {
 	CompatibilityDigest string `json:"compatibility_digest"`
 	ReadySlots          int    `json:"ready_slots"`
 	ActiveLeases        int    `json:"active_leases"`
+	PendingSlots        int    `json:"pending_slots"`
 	Fenced              bool   `json:"fenced"`
+	FenceReason         string `json:"fence_reason"`
 }
 
 func (s *PGSandboxStore) GetRuntimeReleaseInventory(ctx context.Context, cluster string) ([]RuntimeReleaseNode, error) {
@@ -383,8 +463,10 @@ func (s *PGSandboxStore) GetRuntimeReleaseInventory(ctx context.Context, cluster
  ORDER BY node_uid,updated_at DESC)
  SELECT live.node_id,live.node_uid,live.node_boot_id,COALESCE(artifact.source_commit,''),COALESCE(artifact.bundle_sha256,''),
  slot.compatibility_digest,COUNT(slot.slot_id)::integer,
- (SELECT COUNT(*)::integer FROM manager.runtime_resource_leases lease WHERE lease.cluster_id=live.cluster_id AND lease.node_id=live.node_id AND lease.node_uid=live.node_uid AND lease.lease_state='active'),
- EXISTS(SELECT 1 FROM manager.runtime_node_fences fence WHERE fence.cluster_id=live.cluster_id AND fence.node_id=live.node_id AND fence.node_uid=live.node_uid)
+ (SELECT COUNT(*)::integer FROM manager.runtime_resource_leases lease WHERE lease.cluster_id=live.cluster_id AND lease.node_uid=live.node_uid AND lease.lease_state='active'),
+ (SELECT COUNT(*)::integer FROM manager.runtime_slots pending WHERE pending.cluster_id=live.cluster_id AND pending.node_uid=live.node_uid AND pending.state NOT IN('registered','fastpath_ready','terminal')),
+ EXISTS(SELECT 1 FROM manager.runtime_node_fences fence WHERE fence.cluster_id=live.cluster_id AND fence.node_id=live.node_id AND fence.node_uid=live.node_uid),
+ COALESCE((SELECT reason FROM manager.runtime_node_fences fence WHERE fence.cluster_id=live.cluster_id AND fence.node_id=live.node_id AND fence.node_uid=live.node_uid),'')
  FROM live LEFT JOIN manager.runtime_node_release_artifacts artifact USING(cluster_id,node_uid)
  JOIN manager.runtime_slots slot ON slot.cluster_id=live.cluster_id AND slot.node_id=live.node_id AND slot.node_uid=live.node_uid AND slot.node_boot_id=live.node_boot_id
  WHERE slot.state='fastpath_ready' AND NOT slot.carrier_retired AND slot.heartbeat_expires_at>NOW()
@@ -398,7 +480,7 @@ func (s *PGSandboxStore) GetRuntimeReleaseInventory(ctx context.Context, cluster
 	result := []RuntimeReleaseNode{}
 	for rows.Next() {
 		var node RuntimeReleaseNode
-		if err = rows.Scan(&node.NodeID, &node.NodeUID, &node.NodeBootID, &node.SourceCommit, &node.BundleSHA256, &node.CompatibilityDigest, &node.ReadySlots, &node.ActiveLeases, &node.Fenced); err != nil {
+		if err = rows.Scan(&node.NodeID, &node.NodeUID, &node.NodeBootID, &node.SourceCommit, &node.BundleSHA256, &node.CompatibilityDigest, &node.ReadySlots, &node.ActiveLeases, &node.PendingSlots, &node.Fenced, &node.FenceReason); err != nil {
 			return nil, err
 		}
 		result = append(result, node)

@@ -1142,8 +1142,19 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, runtimeClass, resourceRequest, now)
-	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
+	reserved, err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings)
+	if err != nil {
 		return nil, err
+	}
+	if reserved.RuntimeID != "" {
+		// A completed claim is an acknowledgement of the original live runtime,
+		// not another command-ready probe with the initial (now expired) lease.
+		active, err := s.projectResumedNomadSandbox(ctx, reserved, nil)
+		if err != nil {
+			return nil, err
+		}
+		clusterID := reserved.ClusterID
+		return &service.ClaimResponse{SandboxID: reserved.ID, Status: "running", ProcdAddress: active.InternalAddr, RuntimeID: reserved.RuntimeID, Template: reserved.TemplateID, ClusterId: &clusterID}, nil
 	}
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {
 		return nil, err
@@ -1468,6 +1479,20 @@ func (s *Service) validateSnapshotGeneration(
 }
 
 func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimRequest, plan rootFSPlan) error {
+	// A response can be lost after the slot/writer was acquired but before the
+	// sandbox's ready projection committed. The matching slot proves initial
+	// storage was already published; retry the planner without reinitializing it.
+	slot, err := s.store.GetRuntimeSlotBySandboxID(ctx, req.SandboxID)
+	if err != nil && !errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+		return err
+	}
+	if err == nil && slot != nil {
+		if slot.SandboxID != req.SandboxID || slot.ClaimOperationID != req.OperationID ||
+			(slot.State != sandboxstore.RuntimeSlotStateClaiming && slot.State != sandboxstore.RuntimeSlotStateStarting && slot.State != sandboxstore.RuntimeSlotStateActive) {
+			return fmt.Errorf("%w: initial claim slot belongs to another lifecycle", service.ErrClaimConflict)
+		}
+		return nil
+	}
 	if plan.snapshotID != "" {
 		_, err := s.store.RestoreRootFSFromSnapshot(ctx, &sandboxstore.RestoreRootFSFromSnapshotRequest{
 			SandboxID: req.SandboxID, SnapshotID: plan.snapshotID, TeamID: req.TeamID,
@@ -1475,7 +1500,7 @@ func (s *Service) initializeRootFS(ctx context.Context, req *service.ClaimReques
 		})
 		return err
 	}
-	_, _, err := s.store.EnsureInitialRootFSGeneration(ctx, &sandboxstore.EnsureInitialRootFSGenerationRequest{
+	_, _, err = s.store.EnsureInitialRootFSGeneration(ctx, &sandboxstore.EnsureInitialRootFSGenerationRequest{
 		SandboxID: req.SandboxID, TeamID: req.TeamID, SourceOCIRef: plan.sourceRef,
 		SourceOCIDigest: plan.sourceDigest, BaseArtifactDigest: plan.baseArtifactDigest,
 	})
@@ -1526,25 +1551,25 @@ func (s *Service) ensureClaimRecord(
 	expected *sandboxstore.SandboxRecord,
 	operationID string,
 	bindings []egressauthstore.CredentialBinding,
-) error {
+) (*sandboxstore.SandboxRecord, error) {
 	existing, found, err := s.store.RetrySandboxClaim(ctx, &sandboxstore.RetrySandboxClaimRequest{
 		Record: expected, OperationID: operationID, LeaseTTL: s.claimTTL,
 		CredentialBindings: bindings,
 	})
 	if err != nil {
-		return mapClaimReservationError("retry sandbox claim", err)
+		return nil, mapClaimReservationError("retry sandbox claim", err)
 	}
 	if found {
-		return validateClaimRecord(existing, expected)
+		return existing, validateClaimRecord(existing, expected)
 	}
 	limit, err := s.quotaLimits.GetLimit(ctx, expected.TeamID, quota.DimensionActiveSandboxes)
 	if err != nil {
-		return fmt.Errorf("load active sandbox quota: %w", err)
+		return nil, fmt.Errorf("load active sandbox quota: %w", err)
 	}
 	var activeLimit *int64
 	if limit != nil {
 		if limit.TeamID != expected.TeamID || limit.Dimension != quota.DimensionActiveSandboxes {
-			return fmt.Errorf("active sandbox quota identity does not match claim")
+			return nil, fmt.Errorf("active sandbox quota identity does not match claim")
 		}
 		activeLimit = &limit.LimitValue
 	}
@@ -1553,9 +1578,9 @@ func (s *Service) ensureClaimRecord(
 		ActiveSandboxLimit: activeLimit, CredentialBindings: bindings,
 	})
 	if err != nil {
-		return mapClaimReservationError("reserve sandbox claim", err)
+		return nil, mapClaimReservationError("reserve sandbox claim", err)
 	}
-	return validateClaimRecord(existing, expected)
+	return existing, validateClaimRecord(existing, expected)
 }
 
 func mapClaimReservationError(operation string, err error) error {

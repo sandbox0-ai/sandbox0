@@ -27,11 +27,23 @@ workers. Release activation never pauses, migrates, stops, or restarts a guest.
    reach zero. Use the existing physical-cleanup and cloud lifecycle protocol;
    exclude these release retirements from execution-state migration. Update an
    idle fixed worker through fenced maintenance with an empty pause allowlist.
+   Wait for both Nomad's terminal allocations and the regional terminal slot
+   proofs before replacing an empty fixed worker, including warm carriers.
+   Rebind its installed artifact only while the exact owned fence remains and
+   no active lease or pending lifecycle work exists. Bootstrap retries cannot
+   change this binding; fixed replacement uses a separate audited operation.
    Busy predecessors may remain indefinitely; there is no forced release deadline.
 
 The release tables have their own migration ledger within the manager schema,
 independent of sandbox-storage migrations. They describe admission and artifact
 identity, not sandbox or RootFS authority.
+
+The first implementation retains the qualified runsc/driver compatibility
+catalog and the cold-start procd selector. A change to those compatibility
+contracts needs separate qualification. Retain existing gateway and HAProxy
+processes for a hot worker release. The infrastructure installer refuses a
+hot release that would require a gateway executable change; that component
+needs its own connection-preserving deployment.
 
 ## Failure and rollback
 
@@ -43,6 +55,12 @@ Rollback is another compare-and-swap selecting a retained, verified release. It
 changes future assignments only and must not stop candidate workloads already
 running. Foreign maintenance fences and active migration/checkpoint work remain
 under their original owners.
+
+An exact completed create retry acknowledges the original command-ready slot.
+It does not reinitialize the writable filesystem or replay the initial startup
+probe after its claim deadline. Changed requests and cleanup-owned operations
+remain conflicts. A partial retry after writer acquisition keeps the original
+slot and proceeds through the existing claim recovery protocol.
 
 ## Acceptance requirements
 

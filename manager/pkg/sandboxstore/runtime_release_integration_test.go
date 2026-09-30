@@ -91,6 +91,9 @@ func TestRuntimeHotReleaseRebindOnlyOwnedIdleFixedWorkerIntegration(t *testing.T
 	require.ErrorContains(t, err, "busy")
 	// Durable identity outlives a Nomad node registration. A retained lease
 	// under an earlier node ID must also block physical replacement.
+	_, err = pool.Exec(t.Context(), `INSERT INTO manager.runtime_node_capacities(cluster_id,node_id,node_uid,node_boot_id,cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,heartbeat_expires_at)
+		SELECT cluster_id,'historical-node',$1,node_boot_id,cpu_millicores,memory_bytes,cpuset_cpus,cpuset_mems,NOW()-INTERVAL '1 minute' FROM manager.runtime_node_capacities WHERE node_uid=$2`, fixed.NodeUID, busy.NodeUID)
+	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), `UPDATE manager.runtime_resource_leases SET node_id='historical-node',node_uid=$1 WHERE node_uid=$2 AND lease_state='active'`, fixed.NodeUID, busy.NodeUID)
 	require.NoError(t, err)
 	_, err = store.RebindIdleRuntimeNodeReleaseArtifact(t.Context(), r)

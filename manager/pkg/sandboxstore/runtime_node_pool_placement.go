@@ -92,6 +92,7 @@ func (s *PGSandboxStore) loadRuntimeNodePoolPlacement(ctx context.Context, snaps
 		WHERE NOT EXISTS (SELECT 1 FROM manager.runtime_node_fences AS fence
 			WHERE fence.cluster_id = live.cluster_id AND fence.node_id = live.node_id
 				AND fence.node_uid = live.node_uid AND fence.state IN ('warming', 'draining', 'revoked'))
+		AND `+runtimeReleaseAdmissionSQL("live")+`
 	`, snapshot.State.ClusterID)
 	if err != nil {
 		return fmt.Errorf("query runtime node placement capacity: %w", err)

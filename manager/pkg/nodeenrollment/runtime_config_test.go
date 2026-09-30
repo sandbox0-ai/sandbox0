@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -97,4 +99,23 @@ func readRuntimeConfigArchive(t *testing.T, payload []byte) map[string]string {
 		result[header.Name] = strings.TrimSpace(string(contents))
 	}
 	return result
+}
+
+func TestRuntimeConfigHistoryFailsClosedForMissingAndUntrustedFiles(t *testing.T) {
+	root := t.TempDir()
+	renderer := &RuntimeConfigTemplate{archiveFile: filepath.Join(root, "runtime-config-template.tar.gz")}
+	artifact := RuntimeArtifact{SourceCommit: strings.Repeat("1", 40), SHA256: strings.Repeat("2", 64), ObjectKey: "sandbox0-nomad-runtime/release.tar.gz", OSSEndpoint: "https://runtime.test", OSSBucket: "runtime-test"}
+	_, err := renderer.ForArtifact(artifact)
+	require.Error(t, err)
+	history := filepath.Join(root, "runtime-configs")
+	require.NoError(t, os.Mkdir(history, 0700))
+	archive := filepath.Join(history, artifact.SHA256+".tar.gz")
+	require.NoError(t, os.WriteFile(archive, []byte("untrusted"), 0666))
+	require.NoError(t, os.Chmod(archive, 0666))
+	_, err = renderer.ForArtifact(artifact)
+	require.ErrorContains(t, err, "unsafe")
+	require.NoError(t, os.Remove(archive))
+	require.NoError(t, os.Symlink(renderer.archiveFile, archive))
+	_, err = renderer.ForArtifact(artifact)
+	require.ErrorContains(t, err, "unsafe")
 }

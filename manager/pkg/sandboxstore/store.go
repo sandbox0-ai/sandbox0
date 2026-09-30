@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/deletionwebhook"
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
+	releasemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/releasemigrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
@@ -183,6 +184,15 @@ func RunSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger s
 		migrate.WithSchema(sandboxStoreSchemaName),
 	); err != nil {
 		return fmt.Errorf("run sandbox store migrations: %w", err)
+	}
+	return runRuntimeReleaseMigrations(ctx, pool, logger)
+}
+
+func runRuntimeReleaseMigrations(ctx context.Context, pool *pgxpool.Pool, logger sandboxStoreLogger) error {
+	if err := migrate.Up(ctx, pool, ".", migrate.WithBaseFS(releasemigrations.FS),
+		migrate.WithLogger(logger), migrate.WithSchema(sandboxStoreSchemaName),
+		migrate.WithTableName("runtime_release_schema_version")); err != nil {
+		return fmt.Errorf("run runtime release migrations: %w", err)
 	}
 	return nil
 }

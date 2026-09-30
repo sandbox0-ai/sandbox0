@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -43,6 +45,7 @@ type runtimeConfigFile struct {
 // bundle. It replaces the retired approach of copying configuration and
 // credentials from another live worker.
 type RuntimeConfigTemplate struct {
+	archiveFile             string
 	files                   []runtimeConfigFile
 	managerAuthorityURL     string
 	managerAuthorityPeerURI string
@@ -58,7 +61,35 @@ func NewRuntimeConfigTemplateFromFile(
 	if len(payload) == 0 || len(payload) > maxRuntimeConfigArchiveBytes {
 		return nil, errors.New("node runtime config template archive size is invalid")
 	}
-	return newRuntimeConfigTemplate(payload, managerAuthorityURL, managerAuthorityPeerURI)
+	renderer, err := newRuntimeConfigTemplate(payload, managerAuthorityURL, managerAuthorityPeerURI)
+	if err == nil {
+		renderer.archiveFile = archiveFile
+	}
+	return renderer, err
+}
+
+// ForArtifact reads the root-owned configuration retained by release tooling.
+// Existing workers can renew exact identities without adopting a newer bundle's
+// configuration. Missing history fails closed before fencing or activation.
+func (r *RuntimeConfigTemplate) ForArtifact(artifact RuntimeArtifact) (RuntimeConfigRenderer, error) {
+	if r == nil || r.archiveFile == "" || artifact.Validate() != nil {
+		return nil, errors.New("retained worker configuration is unavailable")
+	}
+	file := filepath.Join(filepath.Dir(r.archiveFile), "runtime-configs", artifact.SHA256+".tar.gz")
+	info, err := os.Lstat(file)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("retained worker configuration is unavailable or unsafe")
+	}
+	stat, ownerOK := info.Sys().(*syscall.Stat_t)
+	parent, parentErr := os.Lstat(filepath.Dir(file))
+	if !ownerOK || stat.Uid != 0 || parentErr != nil || !parent.IsDir() || parent.Mode().Perm()&0o022 != 0 {
+		return nil, errors.New("retained worker configuration is not trusted")
+	}
+	parentStat, parentOwnerOK := parent.Sys().(*syscall.Stat_t)
+	if !parentOwnerOK || parentStat.Uid != 0 {
+		return nil, errors.New("retained worker configuration directory is not trusted")
+	}
+	return NewRuntimeConfigTemplateFromFile(file, r.managerAuthorityURL, r.managerAuthorityPeerURI)
 }
 
 func newRuntimeConfigTemplate(

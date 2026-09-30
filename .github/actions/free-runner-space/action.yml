@@ -7,4 +7,11 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
+        # Native builds and Docker layers usually fit the stock runner. The
+        # full package purge takes minutes and also removes toolchain caches.
+        available_kb="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')"
+        if (( available_kb >= 20 * 1024 * 1024 )); then
+          echo "At least 20 GiB available; skipping SDK cleanup."
+          exit 0
+        fi
         bash "${{ github.action_path }}/free_disk_space.sh"

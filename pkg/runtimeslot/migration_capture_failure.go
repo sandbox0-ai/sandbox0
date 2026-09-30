@@ -3,7 +3,6 @@ package runtimeslot
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 )
 
@@ -47,12 +46,7 @@ func (r MigrationCaptureFailureRequest) Digest() (string, error) {
 		c.NodeBootID != s.Target.NodeBootID || c.SlotID != s.Target.SlotID || c.AllocationID != s.Target.AllocationID {
 		return "", fmt.Errorf("failed capture cleanup changed uncertain source custody")
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	d := sha256.Sum256(payload)
-	return hex.EncodeToString(d[:]), nil
+	return digestJSON(r)
 }
 
 // MigrationCaptureFailureProof leaves the external crash WAL and capture
@@ -84,12 +78,7 @@ func (r MigrationCaptureFailureFinalizeRequest) Digest() (string, error) {
 	if err := r.Proof.ValidateFor(r.Request); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	d := sha256.Sum256(payload)
-	return hex.EncodeToString(d[:]), nil
+	return digestJSON(r)
 }
 
 type MigrationCaptureFailureFinalizeProof struct {

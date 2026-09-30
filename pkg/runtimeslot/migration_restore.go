@@ -2,8 +2,6 @@ package runtimeslot
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -121,12 +119,7 @@ func (r MigrationRestoreRequest) Digest() (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return digestJSON(r)
 }
 
 // ValidateClaim is called after the ordinary claim has checked its bearer

@@ -161,7 +161,7 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 	}
 
 	if spec.Egress != nil {
-		if len(spec.Egress.TrafficRules) > 0 && hasLegacyTrafficLists(spec.Egress) {
+		if len(spec.Egress.TrafficRules) > 0 && spec.Egress.HasLegacyTrafficLists() {
 			return nil, fmt.Errorf("trafficRules cannot be combined with legacy allowed*/denied* fields")
 		}
 		trafficRules, err := compileTrafficRules(spec.Egress.TrafficRules)
@@ -666,18 +666,6 @@ func compileLegacyDenyRules(cidrs []string, ports []v1alpha1.PortSpec, domains [
 		return nil, nil
 	}
 	return rules, nil
-}
-
-func hasLegacyTrafficLists(egress *v1alpha1.NetworkEgressPolicy) bool {
-	if egress == nil {
-		return false
-	}
-	return len(egress.AllowedCIDRs) > 0 ||
-		len(egress.AllowedDomains) > 0 ||
-		len(egress.DeniedCIDRs) > 0 ||
-		len(egress.DeniedDomains) > 0 ||
-		len(egress.AllowedPorts) > 0 ||
-		len(egress.DeniedPorts) > 0
 }
 
 func normalizeTrafficRuleAppProtocols(values []v1alpha1.TrafficRuleAppProtocol) []string {

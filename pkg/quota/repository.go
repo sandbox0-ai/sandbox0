@@ -172,19 +172,6 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 	return 0, ErrUsageStoreNotConfigured
 }
 
-func (r *Repository) PutLimit(ctx context.Context, limit *Limit) error {
-	if limit == nil {
-		return fmt.Errorf("limit is nil")
-	}
-	return r.PutPolicy(ctx, &Policy{
-		TeamID:     limit.TeamID,
-		Dimension:  limit.Dimension,
-		Kind:       KindForDimension(limit.Dimension),
-		LimitValue: limit.LimitValue,
-		Source:     SourceTeamOverride,
-	})
-}
-
 // PutPolicy creates or replaces a team-specific quota policy.
 func (r *Repository) PutPolicy(ctx context.Context, policy *Policy) error {
 	if r == nil || r.db == nil {

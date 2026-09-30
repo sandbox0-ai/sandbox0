@@ -12,6 +12,17 @@ const (
 	defaultMaxTotal = 65536
 )
 
+// FlowKey identifies a tracked flow on every supported build target.
+type FlowKey struct {
+	Proto   uint8
+	SrcIP   netip.Addr
+	DstIP   netip.Addr
+	SrcPort uint16
+	DstPort uint16
+	Host    string
+	App     string
+}
+
 type Tracker struct {
 	mu        sync.Mutex
 	bySrc     map[string]map[FlowKey]time.Time

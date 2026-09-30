@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -267,7 +266,7 @@ func readNodeChannelHello(connection *websocket.Conn) (protocol.NodeChannelHello
 		return protocol.NodeChannelHello{}, errors.New("node channel hello must be bounded text JSON")
 	}
 	var hello protocol.NodeChannelHello
-	if err := decodeNodeChannelJSON(payload, &hello); err != nil {
+	if err := protocol.DecodeNodeChannelMessage(payload, &hello); err != nil {
 		return protocol.NodeChannelHello{}, err
 	}
 	if err := hello.Validate(); err != nil {
@@ -901,7 +900,7 @@ func (c *nodeChannelConnection) readLoop() {
 			return
 		}
 		var result protocol.NodeChannelResult
-		if err := decodeNodeChannelJSON(payload, &result); err != nil {
+		if err := protocol.DecodeNodeChannelMessage(payload, &result); err != nil {
 			c.close(fmt.Errorf("decode runtime slot node result: %w: %w", err, errdefs.ErrUnavailable))
 			return
 		}
@@ -1006,18 +1005,6 @@ func (c *nodeChannelConnection) close(err error) {
 		_ = c.websocket.Close()
 		close(c.done)
 	})
-}
-
-func decodeNodeChannelJSON(payload []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("node channel message must contain exactly one JSON value")
-	}
-	return nil
 }
 
 func nodeChannelRemoteError(message string, class protocol.NodeChannelErrorClass) error {

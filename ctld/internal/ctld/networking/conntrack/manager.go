@@ -5,7 +5,6 @@ package conntrack
 import (
 	"context"
 	"fmt"
-	"net/netip"
 	"sync"
 
 	ct "github.com/ti-mo/conntrack"
@@ -17,16 +16,6 @@ type Manager struct {
 	mu      sync.Mutex
 	conn    *ct.Conn
 	enabled bool
-}
-
-type FlowKey struct {
-	Proto   uint8
-	SrcIP   netip.Addr
-	DstIP   netip.Addr
-	SrcPort uint16
-	DstPort uint16
-	Host    string
-	App     string
 }
 
 func NewManager(logger *zap.Logger) (*Manager, error) {

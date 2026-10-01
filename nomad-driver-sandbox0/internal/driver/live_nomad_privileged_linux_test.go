@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,12 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.Equal(t, phaseWarm, state.Phase)
 	source := t.TempDir()
 	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	nonce := sha256.Sum256([]byte(state.TaskConfig.ID))
+	suffix := hex.EncodeToString(nonce[:])
+	stage.Parent = "sha256:" + suffix
+	stage.Identity.RootFSID = "fixture-" + suffix
+	stage.Identity.WriterGrantID = "grant-" + suffix
+	stage.Generation.FilesystemID = stage.Identity.RootFSID
 	stage.Identity.AllocationID = state.TaskConfig.AllocID
 	stage.Identity.TaskName = state.TaskConfig.Name
 	stage.Identity.SlotNonce = state.TaskConfig.ID
@@ -109,6 +116,9 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, err)
 	stage.Generation.BaseBlockRoot, stage.Generation.CurrentBlockHead = built.Descriptor.MappingRoot.RootDigest, built.Descriptor.MappingRoot.RootDigest
 	stage.Generation.Descriptor = built.Payload
+	stage.Generation.BaseArtifactDigest = digest.FromBytes(built.Payload).String()
+	stage.Generation.GenerationID = "base-" + stage.Generation.BaseArtifactDigest
+	stage.InitialGeneration = stage.Generation.GenerationID
 	require.NoError(t, stage.Validate())
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f/claim-slot"), []byte(state.TaskConfig.ID), 0600))
 	request := ClaimRequest{OperationID: "operation-1", ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy, Runtime: assignment, Resources: resources}

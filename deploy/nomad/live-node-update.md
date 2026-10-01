@@ -82,11 +82,12 @@ running guests, RootFS mounts or kernel NBD owners; warm allocations and Nomad
 stay running. This is an enablement constraint, not successful publication of
 a new backend on an occupied legacy node.
 
-The deployment guard currently qualifies at most 64 active guests and 512
+The deployment guard currently permits at most 64 active guests and 512
 total warm/active tasks, at least 4 GiB MemAvailable, and fewer than two retained
 proxy generations. Wire/index tests cover 512-session descriptor bounds, but
-that is not 512-active-guest adoption latency qualification. Increasing these
-limits requires a separate density and memory-headroom test. All stock runsc
+that is not active-guest density qualification. The complete-node fixture tests
+two simultaneous active guests; production density and memory headroom need
+separate qualification before relying on the guard's ceiling. All stock runsc
 companions must be byte-identical across the live release.
 
 ## Failure custody
@@ -113,7 +114,7 @@ The isolated Linux fixture uses real kernel generic-netlink NBD, XFS/Overlay,
 stock runsc, Nomad 1.11.3, ctld, task driver and systemd service replacement.
 Regional authority/S3 peers in the complete-node fixture are synthetic; SQL
 fence, capacity and autoscaler concurrency have separate real PostgreSQL tests.
-Three complete releases retain allocation/task identity, Sentry and guest PIDs,
+Three complete releases with two simultaneous guests retain allocation/task identity, Sentry and guest PIDs,
 heap/tmpfs tokens, shared mmap and an unlinked open file while RootFS I/O
 continues and each predecessor storage process exits. A post-transfer
 publication failure is injected separately before completing the same journal.

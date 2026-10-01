@@ -193,15 +193,33 @@ func (r *NomadSandboxReader) projectActive(
 ) (*managerapi.Sandbox, error) {
 	slot, err := r.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
 	if err != nil {
-		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
-			if record.RuntimeID != "" {
-				projected.Status = managerapi.SandboxStatusFailed
-			}
-			return projected, nil
+		if !errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+			return nil, fmt.Errorf("get Nomad runtime slot projection: %w", err)
 		}
-		return nil, fmt.Errorf("get Nomad runtime slot projection: %w", err)
+		if record.RuntimeID != "" {
+			projected.Status = managerapi.SandboxStatusFailed
+		}
+	} else {
+		projected, err = projectNomadSandboxSlot(record, activeTxn, projected, slot)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return projectNomadSandboxSlot(record, activeTxn, projected, slot)
+	if projected.Status == managerapi.SandboxStatusFailed {
+		if store, ok := r.store.(interface {
+			NomadCheckpointPausePending(context.Context, string, int64, int64) (bool, error)
+		}); ok {
+			pending, err := store.NomadCheckpointPausePending(ctx, record.ID, record.RuntimeGeneration, record.LifecycleEpoch)
+			if err != nil {
+				return nil, fmt.Errorf("get checkpoint pause projection: %w", err)
+			}
+			if pending {
+				projected.Status = managerapi.SandboxStatusStarting
+				projected.InternalAddr = ""
+			}
+		}
+	}
+	return projected, nil
 }
 
 func projectNomadSandboxSlot(

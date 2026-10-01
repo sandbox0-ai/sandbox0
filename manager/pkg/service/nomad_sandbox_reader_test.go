@@ -205,3 +205,42 @@ func TestNomadSandboxReaderKeepsWaitersPendingDuringRootFSFallback(t *testing.T)
 		t.Fatalf("projection error = %v", err)
 	}
 }
+
+type pendingCheckpointPauseProjectionStore struct {
+	*memorySandboxStore
+	pending bool
+}
+
+func (s *pendingCheckpointPauseProjectionStore) NomadCheckpointPausePending(_ context.Context, _ string, _, _ int64) (bool, error) {
+	return s.pending, nil
+}
+func TestNomadSandboxReaderKeepsCapturedPauseStartingWhileSourceExits(t *testing.T) {
+	for _, state := range []string{sandboxstore.RuntimeSlotStateQuiescing, sandboxstore.RuntimeSlotStateOrphaned, "absent"} {
+		t.Run(state, func(t *testing.T) {
+			store := &pendingCheckpointPauseProjectionStore{memorySandboxStore: &memorySandboxStore{
+				records:      map[string]*sandboxstore.SandboxRecord{"sandbox-a": {ID: "sandbox-a", TeamID: "team-a", DesiredState: sandboxstore.SandboxDesiredStateActive, RuntimeID: "allocation-a"}},
+				runtimeSlots: map[string]*sandboxstore.RuntimeSlot{"sandbox-a": {ID: "slot-a", SandboxID: "sandbox-a", AllocationID: "allocation-a", State: state}},
+			}, pending: true}
+			if state == "absent" {
+				delete(store.runtimeSlots, "sandbox-a")
+			}
+			reader, err := NewNomadSandboxReader(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := reader.GetSandbox(t.Context(), "sandbox-a")
+			if err != nil || got.Status != managerapi.SandboxStatusStarting || got.Paused || got.InternalAddr != "" {
+				t.Fatalf("pending pause = %+v, %v", got, err)
+			}
+			list, err := reader.ListSandboxes(t.Context(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"})
+			if err != nil || list.Count != 1 || list.Sandboxes[0].Status != managerapi.SandboxStatusStarting {
+				t.Fatalf("pending list = %+v, %v", list, err)
+			}
+			store.pending = false
+			got, err = reader.GetSandbox(t.Context(), "sandbox-a")
+			if err != nil || got.Status != managerapi.SandboxStatusFailed {
+				t.Fatalf("real failure = %+v, %v", got, err)
+			}
+		})
+	}
+}

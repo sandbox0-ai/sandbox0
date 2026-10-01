@@ -134,3 +134,24 @@ func TestCheckpointResumeFallbackRespectsQuotaAndExpirationIntegration(t *testin
 	require.NoError(t, err)
 	require.Empty(t, work, "expired identities must not be resurrected")
 }
+
+func TestCheckpointPauseProjectionProtectsExitingAndCommittedCaptureIntegration(t *testing.T) {
+	f, request := checkpointFinalizationStoreFixture(t, "pause-projection")
+	owner, err := f.store.GetSandbox(f.ctx, f.sandboxID)
+	require.NoError(t, err)
+	pending, err := f.store.NomadCheckpointPausePending(f.ctx, owner.ID, owner.RuntimeGeneration, owner.LifecycleEpoch)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.NoError(t, f.store.CommitNomadCheckpointSourceFinalization(f.ctx, *request, migrationFinalizationStoreProof(t, *request)))
+	markCheckpointAllocationMissing(t, f)
+	_, err = f.store.CompleteNomadSandboxMemoryPause(f.ctx, request.Checkpoint.CheckpointID)
+	require.NoError(t, err)
+	pending, err = f.store.NomadCheckpointPausePending(f.ctx, owner.ID, owner.RuntimeGeneration, owner.LifecycleEpoch)
+	require.NoError(t, err)
+	require.True(t, pending, "a record read before commit must not report false failure")
+	_, err = f.store.RequestNomadSandboxResume(f.ctx, &RequestNomadSandboxResumeRequest{SandboxID: f.sandboxID, ExpectedTeamID: owner.TeamID, Memory: true})
+	require.NoError(t, err)
+	pending, err = f.store.NomadCheckpointPausePending(f.ctx, owner.ID, owner.RuntimeGeneration, owner.LifecycleEpoch)
+	require.NoError(t, err)
+	require.False(t, pending, "history cannot hide another lifecycle")
+}

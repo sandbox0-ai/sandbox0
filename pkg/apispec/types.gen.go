@@ -1827,8 +1827,10 @@ type RestoreSandboxRootFSResponse struct {
 // ResumeSandboxResponse defines model for ResumeSandboxResponse.
 type ResumeSandboxResponse struct {
 	RestoredMemory *string `json:"restored_memory,omitempty"`
-	Resumed        bool    `json:"resumed"`
-	SandboxId      string  `json:"sandbox_id"`
+
+	// Resumed True after a command-ready runtime has committed. False means a durable RootFS fallback is still pending; poll sandbox status until running.
+	Resumed   bool   `json:"resumed"`
+	SandboxId string `json:"sandbox_id"`
 }
 
 // SSHProxyProjection Transparent SSH proxy projection used for SSH egress re-origination.
@@ -2083,7 +2085,7 @@ type SandboxConfig struct {
 
 // SandboxExecutionStateRequest defines model for SandboxExecutionStateRequest.
 type SandboxExecutionStateRequest struct {
-	// Memory Explicitly preserve or restore process memory and execution state. Omitted or false retains the existing filesystem-only behavior. Memory failures are reported without a cold fallback.
+	// Memory On pause, retain process memory and execution state; capture failures remain errors. On resume, prefer retained memory and fall back to the committed RootFS if memory is missing, incompatible, or cannot be restored. Omitted or false uses filesystem-only behavior.
 	Memory *bool `json:"memory,omitempty"`
 }
 

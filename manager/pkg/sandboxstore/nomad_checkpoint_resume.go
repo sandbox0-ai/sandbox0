@@ -90,6 +90,9 @@ func bindNomadResumeMode(ctx context.Context, tx pgx.Tx, record *SandboxRecord, 
 	if err != nil {
 		return nil, "", err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO manager.sandbox_runtime_resume_fallbacks(operation_id) VALUES ($1)`, lifecycle.ID); err != nil {
+		return nil, "", err
+	}
 	return authority, compatibility, nil
 }
 

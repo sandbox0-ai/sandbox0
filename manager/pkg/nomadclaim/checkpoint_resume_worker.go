@@ -23,7 +23,8 @@ type CheckpointResumer interface {
 }
 
 // ResumeMemorySandboxOperation is recovery of a previously accepted operation.
-// Missing or superseded work cannot reserve new quota or cold-start an owner.
+// Durable fallback intent can authorize a new RootFS lifecycle after physical
+// cleanup. Missing or superseded work cannot start a replacement owner.
 func (s *Service) ResumeMemorySandboxOperation(ctx context.Context, sandboxID, operation string) error {
 	if operation == "" || len(operation) > 512 {
 		return errors.New("exact memory resume operation is required")

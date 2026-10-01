@@ -177,12 +177,15 @@ finish; use SDK lifecycle wait helpers or inspect sandbox status before resuming
 Forking a running source with memory capture replaces the parent's runtime too;
 the parent resumes into a new carrier before the fork completes.
 
-A memory resume requires a retained image matching the committed RootFS and
-compatible runsc, platform, CPU, and runtime configuration. Missing or
-incompatible memory returns an error without falling back to a filesystem-only
-restart. With `auto_resume: true`, supported inbound access restores retained
-memory when available. Explicit calls without `memory: true`, TTL pauses, and
-billing pauses keep their filesystem-only defaults.
+Memory resume prefers a retained image matching the committed RootFS and
+compatible runsc, platform, CPU, and workload configuration. Missing or
+incompatible memory falls back to the committed RootFS with fresh processes.
+If memory restore fails after execution is authorized, physical cleanup must
+finish before the filesystem-only replacement starts. This fallback is durable
+across manager restarts. `resumed: false` means fallback is still pending; poll
+until the sandbox is running. With `auto_resume: true`, supported inbound access
+uses the same memory-first recovery. Explicit calls without `memory: true`,
+TTL pauses, and billing pauses keep their filesystem-only defaults.
 
 Reconnect SSH, streaming, and external TCP clients after resume; their existing
 connections are not guaranteed to survive. Named snapshots, snapshot claims,

@@ -42,6 +42,36 @@ func (p *memoryServicePlanner) ClaimCheckpoint(ctx context.Context, r runtimeslo
 		ProcdInstanceID: result.ProcdInstanceID, ProcdAddress: result.ProcdAddress, RequestMethod: "PUT", RequestPath: protocol.ProcdCommandReadyProbePath, ResponseStatus: 200, ResponseBodyDigest: strings.Repeat("a", 64)}
 	return result, nil
 }
+
+type memoryResumeFallbackStore struct {
+	*fakeClaimStore
+	pending bool
+}
+
+func (s *memoryResumeFallbackStore) ResolveNomadCheckpointResumeFallback(ctx context.Context, id, operation, reason string, limit *int64, quotaResolved bool) (string, bool, error) {
+	if reason == "" {
+		return "", false, nil
+	}
+	if s.pending {
+		return "", true, nil
+	}
+	if !quotaResolved {
+		return "", true, sandboxstore.ErrNomadCheckpointFallbackQuotaRequired
+	}
+	if _, err := s.AbortNomadSandboxResume(ctx, id, operation, reason); err != nil {
+		return "", false, err
+	}
+	s.resumeCandidate.Checkpoint = nil
+	s.resumeCandidate.OperationID += "-rootfs"
+	candidate, err := s.RequestNomadSandboxResume(ctx, &sandboxstore.RequestNomadSandboxResumeRequest{
+		SandboxID: id, ExpectedTeamID: s.records[id].TeamID, ActiveSandboxLimit: limit,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return candidate.OperationID, true, nil
+}
+
 func memoryServiceFixture(t *testing.T, kind runtimecontrol.CheckpointRestoreKind) (claimServiceFixture, string, *memoryServicePlanner) {
 	t.Helper()
 	f := newClaimServiceFixture(t)
@@ -74,6 +104,7 @@ func memoryServiceFixture(t *testing.T, kind runtimecontrol.CheckpointRestoreKin
 	candidate.CheckpointCompatibilityDigest = f.runtimeClass.CompatibilityDigest
 	planner := &memoryServicePlanner{fakePlanner: f.planner}
 	f.service.planner = planner
+	f.service.store = &memoryResumeFallbackStore{fakeClaimStore: f.store}
 	return f, id, planner
 }
 func TestMemoryResumeServiceUsesCapturedAssignmentAndOrdinaryRegionalCommit(t *testing.T) {
@@ -117,8 +148,9 @@ func TestMemoryResumeKeepsCapturedProcdAfterImporterUpgrade(t *testing.T) {
 
 			_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
 			if protocol != captured.Protocol {
-				require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+				require.NoError(t, err)
 				require.Empty(t, planner.authorities)
+				require.Equal(t, 1, planner.coldCalls)
 				return
 			}
 			require.NoError(t, err)
@@ -153,7 +185,7 @@ func TestMemoryResumeKeepsCapturedInheritedNPMRegistry(t *testing.T) {
 	}
 }
 
-func TestMemoryResumeRejectsCapturedNPMRegistryDriftWithoutProvenance(t *testing.T) {
+func TestMemoryResumeFallsBackForCapturedNPMRegistryDriftWithoutProvenance(t *testing.T) {
 	f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
 	assignment := &f.store.resumeCandidate.Checkpoint.Assignment
 	assignment.Target.EnvVars["NPM_CONFIG_REGISTRY"] = "https://custom.example.com/npm/"
@@ -164,12 +196,12 @@ func TestMemoryResumeRejectsCapturedNPMRegistryDriftWithoutProvenance(t *testing
 	assignment.Capture = capture
 	f.service.defaultNPMRegistryURL = "https://npm-cache.example.com"
 	_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
-	require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+	require.NoError(t, err)
 	require.Empty(t, planner.authorities)
-	require.Zero(t, planner.coldCalls)
+	require.Equal(t, 1, planner.coldCalls)
 }
 
-func TestMemoryResumeRejectsExplicitNPMRegistryDrift(t *testing.T) {
+func TestMemoryResumeFallsBackForExplicitNPMRegistryDrift(t *testing.T) {
 	for _, source := range []string{"sandbox", "template", "container"} {
 		for _, key := range []string{"NPM_CONFIG_REGISTRY", "npm_config_registry"} {
 			t.Run(source+"/"+key, func(t *testing.T) {
@@ -187,9 +219,9 @@ func TestMemoryResumeRejectsExplicitNPMRegistryDrift(t *testing.T) {
 				}
 				f.service.defaultNPMRegistryURL = "https://npm-cache.example.com"
 				_, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
-				require.ErrorContains(t, err, "sandbox configuration changed since memory capture")
+				require.NoError(t, err)
 				require.Empty(t, planner.authorities)
-				require.Zero(t, planner.coldCalls)
+				require.Equal(t, 1, planner.coldCalls)
 			})
 		}
 	}
@@ -219,14 +251,14 @@ func TestAutomaticResumeSelectsCommittedMemoryOrFilesystemMode(t *testing.T) {
 		require.True(t, f.store.resumeRequests[0].Memory)
 		require.False(t, f.store.resumeRequests[1].Memory)
 	})
-	t.Run("invalid-memory-never-starts-cold", func(t *testing.T) {
+	t.Run("invalid-memory-falls-back", func(t *testing.T) {
 		f, id, planner := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
 		f.store.resumeCandidate.Checkpoint.Assignment.Target.EnvVars["MAIN"] = "changed"
-		_, err := f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
-		require.Error(t, err)
-		require.Zero(t, planner.coldCalls)
-		require.Len(t, f.store.resumeRequests, 1)
-		require.True(t, f.store.resumeRequests[0].Memory)
+		response, err := f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
+		require.NoError(t, err)
+		require.True(t, response.Resumed)
+		require.Equal(t, 1, planner.coldCalls)
+		require.Empty(t, planner.authorities)
 	})
 }
 func TestMemoryResumeServicePreservesUncertainExecutionForExactRetry(t *testing.T) {
@@ -257,7 +289,7 @@ func TestMemoryResumeServicePreservesUncertainExecutionForExactRetry(t *testing.
 		})
 	}
 }
-func TestMemoryResumeServiceRejectsMissingImageOrDriftBeforeExecution(t *testing.T) {
+func TestMemoryResumeServiceFallsBackBeforeExecution(t *testing.T) {
 	for _, failure := range []string{"missing", "compatibility", "config", "authority", "unsupported", "filesystem-mode"} {
 		t.Run(failure, func(t *testing.T) {
 			f, id, p := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
@@ -273,27 +305,45 @@ func TestMemoryResumeServiceRejectsMissingImageOrDriftBeforeExecution(t *testing
 			case "unsupported":
 				f.service.planner = f.planner
 			}
-			var err error
 			if failure == "filesystem-mode" {
-				_, err = f.service.ResumeSandboxAndWait(t.Context(), id)
-			} else {
-				_, err = f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+				_, err := f.service.ResumeSandboxAndWait(t.Context(), id)
+				require.Error(t, err)
+				require.Zero(t, p.coldCalls)
+				return
 			}
-			require.Error(t, err)
+			response, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+			require.NoError(t, err)
+			require.True(t, response.Resumed)
 			require.Empty(t, p.authorities)
-			require.Zero(t, p.coldCalls)
-			require.Empty(t, f.store.resumeCompleteCalls)
-			if failure == "compatibility" || failure == "config" || failure == "authority" || failure == "missing" {
-				require.Len(t, f.store.resumeAbortCalls, 1, "permanent pre-execution drift must close its lifecycle")
-			} else {
-				require.Empty(t, f.store.resumeAbortCalls)
-			}
-			if failure == "unsupported" {
-				require.ErrorIs(t, err, service.ErrSandboxLifecycleUnavailable)
-				require.Empty(t, f.store.resumeRequests)
-			}
+			require.Len(t, f.store.resumeAbortCalls, 1)
+			require.Len(t, f.store.resumeCompleteCalls, 1)
+			require.Equal(t, f.store.resumeCandidate.RuntimeGeneration, f.planner.requests[0].Runtime.RuntimeGeneration)
 		})
 	}
+}
+
+func TestMemoryResumeFallbackWaitsForPhysicalCleanup(t *testing.T) {
+	f, id, p := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+	f.service.store.(*memoryResumeFallbackStore).pending = true
+	f.store.resumeCandidate.CheckpointCompatibilityDigest = "another-runtime"
+	response, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+	require.NoError(t, err)
+	require.False(t, response.Resumed, "durable fallback was accepted, not yet completed")
+	_, err = f.service.ResumeSandboxAutomaticallyAndWait(t.Context(), id)
+	require.ErrorIs(t, err, service.ErrSandboxLifecycleUnavailable)
+	require.Empty(t, p.authorities)
+	require.Zero(t, p.coldCalls)
+	require.Empty(t, f.store.resumeCompleteCalls)
+}
+
+func TestMemoryResumePreservesCapturedProcdAcrossPlatformUpgrade(t *testing.T) {
+	f, id, p := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+	captured := f.store.resumeCandidate.Checkpoint.Assignment.Target.Procd
+	f.service.runtimeProcd = &procdartifact.Artifact{Digest: "sha256:" + strings.Repeat("b", 64), Protocol: f.config.RootFSProcdProtocol}
+	_, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+	require.NoError(t, err)
+	require.Zero(t, p.coldCalls)
+	require.Equal(t, captured, p.authorities[0].Assignment.Target.Procd)
 }
 
 type memoryPauseServiceStore struct {
@@ -353,5 +403,38 @@ func TestMemoryPauseServiceMapsUnavailableSourceToConflict(t *testing.T) {
 		_, err := f.service.PauseMemorySandboxAndWait(t.Context(), "owner")
 		require.True(t, apierror.IsConflict(err), "%v", err)
 		require.Empty(t, f.allocation.requests)
+	}
+}
+
+func TestMemoryResumeKeepsStoredTemplateAfterPublishedTemplateUpgrade(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		t.Run(map[bool]string{false: "memory", true: "rootfs"}[fallback], func(t *testing.T) {
+			f, id, p := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+			template := f.config.Templates.(*fakeTemplateStore).template
+			template.Spec.EnvVars = map[string]string{"TEMPLATE": "upgraded"}
+			template.Spec.MainContainer.Image = "upgraded-image:latest"
+			if fallback {
+				f.store.resumeCandidate.CheckpointCompatibilityDigest = "old-runsc"
+			}
+			response, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+			require.NoError(t, err)
+			require.True(t, response.Resumed)
+			require.Equal(t, "yes", f.planner.requests[0].Runtime.EnvVars["TEMPLATE"])
+			require.Equal(t, fallback, p.coldCalls == 1)
+			require.Equal(t, "generation-paused-1", f.store.resumeCandidate.SourceGenerationID)
+		})
+	}
+}
+
+func TestExplicitMemoryResumeMissingOrMismatchedCheckpointUsesRootFS(t *testing.T) {
+	for _, failure := range []error{sandboxstore.ErrNomadCheckpointNotRetained, sandboxstore.ErrNomadCheckpointConflict} {
+		f, id, p := memoryServiceFixture(t, runtimecontrol.CheckpointResume)
+		f.store.memoryResumeErr = failure
+		f.store.resumeCandidate.Checkpoint = nil
+		response, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+		require.NoError(t, err)
+		require.True(t, response.Resumed)
+		require.Empty(t, p.authorities)
+		require.Equal(t, 1, p.coldCalls)
 	}
 }

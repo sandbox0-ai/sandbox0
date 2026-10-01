@@ -144,6 +144,19 @@ func (r *NomadSandboxReader) projectPaused(
 	record *sandboxstore.SandboxRecord,
 	projected *managerapi.Sandbox,
 ) (*managerapi.Sandbox, error) {
+	if store, ok := r.store.(interface {
+		NomadCheckpointResumeFallbackPending(context.Context, string, int64, int64) (bool, error)
+	}); ok {
+		pending, err := store.NomadCheckpointResumeFallbackPending(ctx, record.ID, record.RuntimeGeneration, record.LifecycleEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("get checkpoint resume fallback projection: %w", err)
+		}
+		if pending {
+			projected.Status = managerapi.SandboxStatusStarting
+			projected.Paused = false
+			return projected, nil
+		}
+	}
 	slot, err := r.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
 	if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
 		if store, ok := r.store.(interface {

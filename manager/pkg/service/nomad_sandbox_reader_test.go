@@ -166,3 +166,42 @@ func TestNomadSandboxReaderDoesNotReportFailedMemoryCaptureAsSuccessfulPause(t *
 		t.Fatalf("ordinary pause: %+v, %v", got, err)
 	}
 }
+
+type pendingCheckpointFallbackProjectionStore struct {
+	*failedCheckpointProjectionStore
+	pending    bool
+	pendingErr error
+}
+
+func (s *pendingCheckpointFallbackProjectionStore) NomadCheckpointResumeFallbackPending(_ context.Context, _ string, generation, epoch int64) (bool, error) {
+	s.generation, s.epoch = generation, epoch
+	return s.pending, s.pendingErr
+}
+func TestNomadSandboxReaderKeepsWaitersPendingDuringRootFSFallback(t *testing.T) {
+	store := &pendingCheckpointFallbackProjectionStore{
+		failedCheckpointProjectionStore: &failedCheckpointProjectionStore{
+			memorySandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+				"sandbox": {ID: "sandbox", TeamID: "team", DesiredState: sandboxstore.SandboxDesiredStatePaused, RuntimeGeneration: 4, LifecycleEpoch: 8},
+			}}, failed: true,
+		}, pending: true,
+	}
+	reader, err := NewNomadSandboxReader(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.GetSandbox(t.Context(), "sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != managerapi.SandboxStatusStarting || got.Paused || store.generation != 4 || store.epoch != 8 {
+		t.Fatalf("fallback projection = %+v", got)
+	}
+	listed, err := reader.ListSandboxes(t.Context(), &sandboxstore.ListSandboxesRequest{TeamID: "team"})
+	if err != nil || len(listed.Sandboxes) != 1 || listed.Sandboxes[0].Status != managerapi.SandboxStatusStarting {
+		t.Fatalf("fallback list projection = %+v, %v", listed, err)
+	}
+	store.pendingErr = errors.New("fallback authority unavailable")
+	if _, err := reader.GetSandbox(t.Context(), "sandbox"); !errors.Is(err, store.pendingErr) {
+		t.Fatalf("projection error = %v", err)
+	}
+}

@@ -687,7 +687,7 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		// memory custody for exact retry or physical failure resolution.
 		// A durable cold fallback can wait on capacity using the same
 		// operation. It must not create a new lifecycle on every worker pass.
-		if !memory && !(expectedOperation != "" && errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable)) {
+		if !memory && (expectedOperation == "" || !errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable)) {
 			err = s.abortFailedNomadResume(ctx, candidate, err)
 		}
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {

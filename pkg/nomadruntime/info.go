@@ -27,6 +27,7 @@ const RuntimeInfoVersion = 1
 // RuntimeInfo is the immutable node-runtime configuration that the task
 // driver must use instead of duplicating privileged ctld settings in HCL.
 type RuntimeInfo struct {
+	LiveUpdateProtocol              int    `json:"live_update_protocol,omitempty"`
 	Version                         int    `json:"version"`
 	NetworkMITMCAFile               string `json:"network_mitm_ca_file,omitempty"`
 	MountRoot                       string `json:"mount_root"`
@@ -37,6 +38,9 @@ type RuntimeInfo struct {
 
 // Validate rejects incomplete, unbounded, or noncanonical runtime metadata.
 func (i RuntimeInfo) Validate() error {
+	if i.LiveUpdateProtocol < 0 || i.LiveUpdateProtocol > 1 {
+		return fmt.Errorf("unsupported live update protocol")
+	}
 	if i.Version != RuntimeInfoVersion {
 		return fmt.Errorf("unsupported ctld Nomad runtime info version %d", i.Version)
 	}
@@ -63,9 +67,12 @@ func (i RuntimeInfo) Validate() error {
 
 // Digest binds slot readiness to the exact root-owned runtime metadata.
 func (i RuntimeInfo) Digest() (string, error) {
+	// A serving capability does not change a guest's immutable limits or
+	// network trust. Keep existing assignment digests stable across its rollout.
 	if err := i.Validate(); err != nil {
 		return "", err
 	}
+	i.LiveUpdateProtocol = 0
 	payload, err := json.Marshal(i)
 	if err != nil {
 		return "", fmt.Errorf("encode ctld Nomad runtime info: %w", err)
@@ -76,11 +83,15 @@ func (i RuntimeInfo) Digest() (string, error) {
 
 func runtimeInfoFromConfig(config Config) RuntimeInfo {
 	config.ApplyDefaults()
-	return RuntimeInfo{
+	info := RuntimeInfo{
 		Version: RuntimeInfoVersion, MountRoot: config.RootFSMountRoot,
 		NetworkMITMCAFile:               config.NetworkMITMCAFile,
 		MaxDirtyTailBytes:               config.RootFSMaxDirtyTailBytes,
 		MaxNodeDirtyTailBytes:           config.RootFSMaxNodeDirtyTailBytes,
 		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,
 	}
+	if config.RootFSTransferableNBD {
+		info.LiveUpdateProtocol = 1
+	}
+	return info
 }

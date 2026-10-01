@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,9 @@ type Server struct {
 	flowMu            sync.Mutex
 	tcpFlows          map[*tcpFlow]struct{}
 	closing           atomic.Bool
+	draining          atomic.Bool
+	activeConnections atomic.Int64
+	acceptWG          sync.WaitGroup
 	shutdownOnce      sync.Once
 	shutdownErr       error
 	cfg               *config.NetworkRuntimeConfig
@@ -65,6 +69,12 @@ type UsageRecorder interface {
 }
 
 func NewServer(cfg *config.NetworkRuntimeConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
+	return NewServerWithListeners(cfg, store, tracker, usageRecorder, logger, nil, opts...)
+}
+
+// NewServerWithListeners adopts listener descriptions only; established TLS
+// and HTTP/2 connections remain on their draining predecessor.
+func NewServerWithListeners(cfg *config.NetworkRuntimeConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, files []*os.File, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("ctld network runtime config is nil")
 	}
@@ -77,18 +87,56 @@ func NewServer(cfg *config.NetworkRuntimeConfig, store *policy.Store, tracker *c
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	if files != nil && len(files) != 3 && len(files) != 4 {
+		return nil, fmt.Errorf("invalid inherited proxy listeners")
+	}
+	if files != nil && (cfg.ProxyHTTPPort == cfg.ProxyHTTPSPort) != (len(files) == 3) {
+		return nil, fmt.Errorf("inherited proxy listener topology changed")
+	}
+	tcpIndex, udpIndex := 0, 2
+	listenTCP := func(address string) (net.Listener, error) {
+		if files == nil {
+			return listenTCPTransparent(address)
+		}
+		listener, err := net.FileListener(files[tcpIndex])
+		tcpIndex++
+		if err != nil {
+			return nil, err
+		}
+		if listener.Addr().String() != address {
+			_ = listener.Close()
+			return nil, fmt.Errorf("inherited proxy address changed")
+		}
+		return listener, nil
+	}
+	listenUDP := func(address string) (*net.UDPConn, error) {
+		if files == nil {
+			return listenUDPTransparent(address)
+		}
+		connection, err := net.FilePacketConn(files[udpIndex])
+		udpIndex++
+		if err != nil {
+			return nil, err
+		}
+		udp, ok := connection.(*net.UDPConn)
+		if !ok || udp.LocalAddr().String() != address {
+			_ = connection.Close()
+			return nil, fmt.Errorf("inherited UDP address changed")
+		}
+		return udp, nil
+	}
 	auditor, err := newAuditLogger(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
-	httpLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
+	httpLn, err := listenTCP(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
 	if err != nil {
 		if auditor != nil {
 			_ = auditor.Close()
 		}
 		return nil, err
 	}
-	httpsLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
+	httpsLn, err := listenTCP(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
 		if auditor != nil {
@@ -96,7 +144,7 @@ func NewServer(cfg *config.NetworkRuntimeConfig, store *policy.Store, tracker *c
 		}
 		return nil, err
 	}
-	udpConn, err := listenUDPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
+	udpConn, err := listenUDP(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
 		_ = httpsLn.Close()
@@ -108,7 +156,7 @@ func NewServer(cfg *config.NetworkRuntimeConfig, store *policy.Store, tracker *c
 	udpHTTPConn := udpConn
 	udpHTTPSConn := udpConn
 	if cfg.ProxyHTTPPort != cfg.ProxyHTTPSPort {
-		udpHTTPConn, err = listenUDPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
+		udpHTTPConn, err = listenUDP(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
 		if err != nil {
 			_ = httpLn.Close()
 			_ = httpsLn.Close()
@@ -217,10 +265,13 @@ func (s *Server) Start(ctx context.Context) {
 	if s.exitCh == nil {
 		s.exitCh = make(chan error, 1)
 	}
+	s.acceptWG.Add(2)
 	go s.runLoop(ctx, "http accept loop", func() {
+		defer s.acceptWG.Done()
 		s.acceptLoop(ctx, "http", s.httpListener, s.handleTCPConn)
 	})
 	go s.runLoop(ctx, "https accept loop", func() {
+		defer s.acceptWG.Done()
 		s.acceptLoop(ctx, "https", s.httpsListener, s.handleTCPConn)
 	})
 	if s.udpHTTPConn != nil {
@@ -243,38 +294,31 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) shutdown(_ context.Context) error {
 	s.closeTCPFlows()
 	s.closeUDPSessions()
-	var err error
-	if s.httpListener != nil {
-		if closeErr := s.httpListener.Close(); closeErr != nil {
-			err = closeErr
+	var result error
+	closeResource := func(closer io.Closer) {
+		if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, err)
 		}
+	}
+	if s.httpListener != nil {
+		closeResource(s.httpListener)
 	}
 	if s.httpsListener != nil {
-		if closeErr := s.httpsListener.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		closeResource(s.httpsListener)
 	}
 	if s.udpHTTPConn != nil {
-		if closeErr := s.udpHTTPConn.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		closeResource(s.udpHTTPConn)
 	}
 	if s.udpHTTPSConn != nil && s.udpHTTPSConn != s.udpHTTPConn {
-		if closeErr := s.udpHTTPSConn.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		closeResource(s.udpHTTPSConn)
 	}
 	if s.auditor != nil {
-		if closeErr := s.auditor.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		closeResource(s.auditor)
 	}
 	if s.bandwidthLimiter != nil {
-		if closeErr := s.bandwidthLimiter.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		closeResource(s.bandwidthLimiter)
 	}
-	return err
+	return result
 }
 
 func (s *Server) Done() <-chan error {
@@ -289,6 +333,9 @@ func (s *Server) runLoop(ctx context.Context, name string, fn func()) {
 		}
 		if ctx.Err() != nil {
 			s.signalExit(ctx.Err())
+			return
+		}
+		if s.draining.Load() {
 			return
 		}
 		s.signalExit(fmt.Errorf("%s exited", name))
@@ -326,7 +373,9 @@ func (s *Server) acceptLoop(ctx context.Context, listener string, ln net.Listene
 			continue
 		}
 		s.metrics.IncProxyConnectionsActive(listener)
+		s.activeConnections.Add(1)
 		go func() {
+			defer s.activeConnections.Add(-1)
 			defer s.metrics.DecProxyConnectionsActive(listener)
 			handler(conn)
 		}()

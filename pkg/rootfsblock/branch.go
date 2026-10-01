@@ -134,6 +134,9 @@ type BranchOptions struct {
 	// writes that would cross a session or node limit wait for a planned
 	// retirement instead of exposing Linux NBD's lossy remote-error mapping.
 	PressureObserver func(DirtyTailPressure)
+	// LiveIndex is an authenticated, ephemeral request-boundary snapshot. It
+	// avoids replaying payloads while the original mounted device queues I/O.
+	LiveIndex *os.File
 }
 
 // DirtyTailUsage describes the exact local unpublished branch occupancy.
@@ -266,9 +269,15 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 		retirementGroup: strings.TrimSpace(options.RetirementGroup),
 	}
 	branch.pressureChanged = sync.NewCond(&branch.mu)
-	if err := branch.open(); err != nil {
+	var openErr error
+	if options.LiveIndex != nil {
+		openErr = branch.openLiveIndex(options.LiveIndex)
+	} else {
+		openErr = branch.open()
+	}
+	if openErr != nil {
 		file.Close()
-		return nil, err
+		return nil, openErr
 	}
 	if branch.nodeDirty != nil {
 		if err := branch.nodeDirty.attach(
@@ -423,6 +432,20 @@ func (b *Branch) Flush() error {
 		return os.ErrClosed
 	}
 	return b.flushLocked()
+}
+
+// DurableSequence verifies the exact journal cut used by a planned ownership
+// transfer. Call only after draining the device and flushing the branch.
+func (b *Branch) DurableSequence() (uint64, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return 0, os.ErrClosed
+	}
+	if b.durable != b.sequence {
+		return 0, fmt.Errorf("branch has unflushed writes")
+	}
+	return b.sequence, nil
 }
 
 // BeginRetirement grants this fenced branch access to the shared node

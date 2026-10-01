@@ -213,7 +213,16 @@ func (p *Plugin) activateRuntimeSlot(
 	handle.mu.Lock()
 	phase := handle.phase
 	handle.mu.Unlock()
-	observation, err := lifecycle.activate(ctx, phase, newAllocation)
+	var observation protocol.Observation
+	if !newAllocation && handle.recoveredConsumerLease != nil {
+		// A live consumer was already adopted against its exact physical and
+		// writer identities. Its original warm-directory inode is hidden by
+		// the active RootFS bind; re-registering warm readiness would replace
+		// that durable carrier identity and its network admission.
+		observation, err = lifecycle.recoverLive(ctx, handle.claim)
+	} else {
+		observation, err = lifecycle.activate(ctx, phase, newAllocation)
+	}
 	if err != nil {
 		return nil, protocol.Observation{}, err
 	}
@@ -221,6 +230,24 @@ func (p *Plugin) activateRuntimeSlot(
 	handle.runtimeSlot = lifecycle
 	handle.mu.Unlock()
 	return lifecycle, observation, nil
+}
+
+func (l *runtimeSlotLifecycle) recoverLive(ctx context.Context, claim *claimMetadata) (protocol.Observation, error) {
+	if claim == nil || claim.OperationID == "" || claim.ClaimID == "" {
+		return protocol.Observation{}, fmt.Errorf("live recovery has no durable regional claim")
+	}
+	observation, err := l.authority.Heartbeat(ctx, l.slotID, l.heartbeat)
+	if err != nil {
+		return protocol.Observation{}, fmt.Errorf("resume exact regional runtime slot heartbeat: %w", err)
+	}
+	if err := validateRuntimeSlotObservation(l.slotID, observation); err != nil {
+		return protocol.Observation{}, err
+	}
+	if (observation.State != protocol.StateActive && observation.State != protocol.StateStarting) ||
+		observation.ClaimOperationID != claim.OperationID || observation.ClaimID != claim.ClaimID {
+		return protocol.Observation{}, fmt.Errorf("live recovery regional claim changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	return observation, nil
 }
 
 func newRuntimeSlotLifecycle(

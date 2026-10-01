@@ -33,6 +33,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/klauspost/compress v1.18.1
+	github.com/mdlayher/netlink v1.7.2
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/oapi-codegen/runtime v1.1.1
 	github.com/opencontainers/go-digest v1.0.0
@@ -132,7 +133,6 @@ require (
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/moby/locker v1.0.1 // indirect

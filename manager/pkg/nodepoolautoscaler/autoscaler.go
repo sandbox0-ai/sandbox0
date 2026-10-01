@@ -244,7 +244,8 @@ func (w *Worker) confirmScaleOutSnapshot(
 }
 
 func sameScaleOutInputs(a, b *sandboxstore.RuntimeNodePoolSnapshot) bool {
-	if a.ClusterFixedUsableSlots != b.ClusterFixedUsableSlots ||
+	if a.LiveNodeUpdateHeld != b.LiveNodeUpdateHeld ||
+		a.ClusterFixedUsableSlots != b.ClusterFixedUsableSlots ||
 		a.ClusterFixedAdaptiveSlots != b.ClusterFixedAdaptiveSlots ||
 		a.ClusterFixedCPU != b.ClusterFixedCPU ||
 		a.ClusterFixedMemory != b.ClusterFixedMemory ||
@@ -284,6 +285,17 @@ func (w *Worker) pressurelessFixedReplacement(snapshot *sandboxstore.RuntimeNode
 
 // Reconcile performs one lease-protected desired-capacity decision.
 func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
+	// Serialize a complete provider decision with installing a live-update
+	// hold. A fresh snapshot alone leaves a gap before the cloud API call.
+	if guard, ok := w.store.(interface {
+		LockRuntimeNodePoolMutations(context.Context, string) (func(), error)
+	}); ok {
+		release, err := guard.LockRuntimeNodePoolMutations(ctx, w.config.ClusterID)
+		if err != nil {
+			return Decision{}, err
+		}
+		defer release()
+	}
 	if _, err := w.store.EnsureRuntimeNodePoolState(ctx, w.config.PoolID, w.config.ClusterID); err != nil {
 		return Decision{}, err
 	}
@@ -299,6 +311,12 @@ func (w *Worker) Reconcile(ctx context.Context) (Decision, error) {
 	snapshot, err := w.store.GetRuntimeNodePoolSnapshot(ctx, w.config.PoolID)
 	if err != nil {
 		return Decision{}, err
+	}
+	if snapshot.LiveNodeUpdateHeld {
+		// The admission fence intentionally hides ready fixed capacity for a
+		// brief same-node handoff. It must not turn into replacement machines,
+		// consolidation or provider mutations while that operation owns it.
+		return Decision{Action: "live_node_update_held"}, nil
 	}
 	current, err := w.cloud.DesiredCapacity(ctx)
 	if err != nil {

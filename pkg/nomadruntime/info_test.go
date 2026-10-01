@@ -15,10 +15,28 @@
 package nomadruntime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestLiveUpdateCapabilityPreservesExistingGuestAssignmentDigest(t *testing.T) {
+	legacy := runtimeInfoFromConfig(Config{RootFSMountRoot: "/run/sandbox0/rootfs"})
+	live := legacy
+	live.LiveUpdateProtocol = 1
+	oldDigest, err := legacy.Digest()
+	require.NoError(t, err)
+	newDigest, err := live.Digest()
+	require.NoError(t, err)
+	require.Equal(t, oldDigest, newDigest)
+	data, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "live_update_protocol")
+	live.LiveUpdateProtocol = 2
+	_, err = live.Digest()
+	require.Error(t, err)
+}
 
 func TestRuntimeInfoDigestBindsRootOwnedLimits(t *testing.T) {
 	info := runtimeInfoFromConfig(Config{

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +49,11 @@ type Daemon struct {
 	runtimeSlotRegistry      runtimeSlotRegistryCloser
 	runtimeSlotControl       runtimeSlotControlCloser
 	ready                    atomic.Bool
+	syncMu                   sync.Mutex
+	draining                 atomic.Bool
+	drainStarted             chan struct{}
+	inheritedListeners       []*os.File
+	flowContext              context.Context
 }
 
 type Options struct {
@@ -94,6 +100,7 @@ func New(cfg *config.NetworkRuntimeConfig, logger *zap.Logger, obsProvider *obse
 		cfg:                      cfg,
 		logger:                   logger,
 		obsProvider:              obsProvider,
+		drainStarted:             make(chan struct{}),
 		runtimeSlotStatePath:     strings.TrimSpace(options.RuntimeSlotStatePath),
 		runtimeSlotControlSocket: strings.TrimSpace(options.RuntimeSlotControlSocket),
 		runtimeSlotNetNSRoot:     strings.TrimSpace(options.RuntimeSlotNetNSRoot),
@@ -107,6 +114,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.ready.Store(false)
 	defer d.ready.Store(false)
 	runCtx, cancel := context.WithCancel(ctx)
+	d.flowContext = runCtx
 	defer cancel()
 	serverExitCh := make(chan error, 2)
 	if err := d.startServers(serverExitCh); err != nil {
@@ -129,6 +137,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		cancel()
 	case runErr = <-serverExitCh:
 		cancel()
+	case <-d.drainStarted:
+		runErr = d.proxyServer.WaitDrained(runCtx)
+		cancel()
 	}
 
 	<-runCtx.Done()
@@ -148,8 +159,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 // Ready reports whether the ctld network runtime has successfully synchronized
 // node redirect state. Ctld uses it as part of the primary readiness gate.
 func (d *Daemon) Ready() bool {
-	return d != nil && d.ready.Load()
+	return d != nil && !d.draining.Load() && d.ready.Load()
 }
+
+// Draining identifies a deliberate owner transfer, including its normal exit
+// after the final retained flow completes.
+func (d *Daemon) Draining() bool { return d != nil && d.draining.Load() }
 
 func (d *Daemon) shutdownContext() (context.Context, context.CancelFunc) {
 	if d.cfg != nil && d.cfg.ShutdownDelay.Duration > 0 {
@@ -287,7 +302,7 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 			d.egressAuthHTTPClient(),
 		)))
 	}
-	proxyServer, err := proxy.NewServer(d.cfg, policyStore, tracker, usageAggregator, d.logger, proxyOpts...)
+	proxyServer, err := proxy.NewServerWithListeners(d.cfg, policyStore, tracker, usageAggregator, d.logger, d.inheritedListeners, proxyOpts...)
 	if err != nil {
 		return err
 	}
@@ -331,12 +346,16 @@ func (d *Daemon) runNetworking(ctx context.Context, cancel context.CancelFunc, p
 			}
 			syncErr := d.syncRedirect(ctx, runtimeSlotRegistry, policyStore, platformState, redirectManager, tracker, conntrackManager, proxyServer, forceRedirectSync)
 			if syncErr == nil && forceRedirectSync && runtimeSlotRegistry != nil {
-				pruned, err := runtimeSlotRegistry.Prune(time.Now())
-				if err != nil {
-					syncErr = fmt.Errorf("prune runtime slot network registry: %w", err)
-				} else if pruned > 0 {
-					d.logger.Info("Pruned terminal runtime slot network records", zap.Int("records", pruned))
+				d.syncMu.Lock()
+				if !d.draining.Load() {
+					pruned, err := runtimeSlotRegistry.Prune(time.Now())
+					if err != nil {
+						syncErr = fmt.Errorf("prune runtime slot network registry: %w", err)
+					} else if pruned > 0 {
+						d.logger.Info("Pruned terminal runtime slot network records", zap.Int("records", pruned))
+					}
 				}
+				d.syncMu.Unlock()
 			}
 			if syncErr != nil {
 				d.logger.Error("Failed to synchronize ctld network runtime", zap.Error(syncErr))
@@ -623,6 +642,11 @@ func (d *Daemon) syncRedirect(
 	proxyServer *proxy.Server,
 	forceRedirectSync bool,
 ) (err error) {
+	d.syncMu.Lock()
+	defer d.syncMu.Unlock()
+	if d.draining.Load() {
+		return d.syncDrainingPolicies(ctx, policyStore, platformState, proxyServer)
+	}
 	started := time.Now()
 	defer func() {
 		result := "success"

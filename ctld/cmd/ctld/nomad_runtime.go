@@ -54,6 +54,7 @@ func configuredNomadRuntimeFactory(
 		RootFSMaxNodeDirtyTailBytes:           source.MaxNodeDirtyTailBytes,
 		RootFSDirtyTailRetirementReserveBytes: source.DirtyTailRetirementReserveBytes,
 		RootFSNBDDevices:                      append([]string(nil), source.NBDDevices...),
+		RootFSTransferableNBD:                 source.TransferableNBD,
 		RootFSReadCacheBytes:                  source.ReadCacheBytes,
 		RootFSReadCacheDirectory:              source.ReadCacheDirectory,
 		RootFSReadDiskCacheBytes:              source.ReadDiskCacheBytes,

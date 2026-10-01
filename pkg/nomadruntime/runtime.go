@@ -31,6 +31,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	sharedconfig "github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/processidentity"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsobjectstore"
@@ -247,6 +248,8 @@ func releaseRejectedRunningFork(publishErr error, acknowledge func() error) erro
 // ConsumerRequest binds the durable block writer to the exact host
 // runtime artifacts that must be absent before crash abandonment.
 type ConsumerRequest struct {
+	RenewalProtocol    int    `json:"renewal_protocol,omitempty"`
+	OwnerProcess       string `json:"owner_process,omitempty"`
 	ActiveKey          string `json:"active_key"`
 	ContainerID        string `json:"container_id"`
 	StableMount        string `json:"stable_mount"`
@@ -265,7 +268,10 @@ type ConsumerLease struct {
 }
 
 const (
-	rootFSConsumerLeaseTTL    = 30 * time.Second
+	rootFSConsumerLeaseTTL = 30 * time.Second
+	// Local driver liveness may bridge planned process replacement. Regional
+	// writer authority is still renewed independently at its original TTL.
+	liveConsumerLeaseTTL      = 2 * time.Minute
 	slowRootFSEnsureThreshold = 500 * time.Millisecond
 )
 
@@ -280,7 +286,8 @@ type CrashTaskObservation struct {
 }
 
 type rootfsRenewal struct {
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	request rootfshandoff.StageRequest
 }
 
 // ConsumedAttachError reports an attach failure after the regional writer
@@ -303,7 +310,7 @@ func (e *ConsumedAttachError) Unwrap() error {
 	return e.Err
 }
 
-func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRuntime, error) {
+func newRuntime(ctx context.Context, config *Config, logger logger, imported ...*LiveRuntimeHandoff) (*rootfsRuntime, error) {
 	if config == nil {
 		return nil, fmt.Errorf("nomad RootFS runtime configuration is required")
 	}
@@ -332,7 +339,8 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 		authority = client
 	}
 	hostRuntime, err := rootfssession.NewLinuxRuntime(rootfssession.LinuxRuntimeConfig{
-		DevicePaths: config.RootFSNBDDevices,
+		DevicePaths:     config.RootFSNBDDevices,
+		TransferableNBD: config.RootFSTransferableNBD,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS host runtime: %w", err)
@@ -357,6 +365,17 @@ func newRuntime(ctx context.Context, config *Config, logger logger) (*rootfsRunt
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
+	}
+	if len(imported) > 0 && imported[0] != nil {
+		proofRuntime := &rootfsRuntime{sessions: sessions, authority: authority}
+		if _, err := proofRuntime.liveWriterRequests(ctx, imported[0].Sessions, imported[0].Requests); err != nil {
+			_ = sessions.Close()
+			return nil, fmt.Errorf("verify live RootFS writers before adoption: %w", err)
+		}
+		if err := sessions.AdoptLiveHandoff(ctx, imported[0].Sessions, imported[0].Files); err != nil {
+			_ = sessions.Close()
+			return nil, fmt.Errorf("adopt live RootFS sessions: %w", err)
+		}
 	}
 	checkpoints, err := runtimecheckpoint.NewWithChunkCache(store, runtimecheckpoint.MaxImageBytes, sessions.CheckpointChunkCache())
 	if err != nil {
@@ -497,6 +516,16 @@ func (r *rootfsRuntime) RegisterConsumer(
 	request rootfshandoff.StageRequest,
 	consumer ConsumerRequest,
 ) (ConsumerLease, error) {
+	return r.registerConsumer(request, consumer, "")
+}
+
+func (r *rootfsRuntime) registerConsumer(request rootfshandoff.StageRequest, consumer ConsumerRequest, previousLease string) (ConsumerLease, error) {
+	if consumer.RenewalProtocol == 1 {
+		alive, err := processidentity.Alive(consumer.OwnerProcess)
+		if err != nil || !alive {
+			return ConsumerLease{}, fmt.Errorf("RootFS consumer process is absent: %w", errdefs.ErrFailedPrecondition)
+		}
+	}
 	hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
 	if err != nil {
 		return ConsumerLease{}, fmt.Errorf("read RootFS owner mount namespace: %w", err)
@@ -541,12 +570,22 @@ func (r *rootfsRuntime) RegisterConsumer(
 	lease := ConsumerLease{
 		LeaseID: hex.EncodeToString(leaseIDBytes), ExpiresAt: time.Now().Add(rootFSConsumerLeaseTTL).UTC(),
 	}
-	err = r.sessions.RegisterConsumer(request.Parent, request.Identity, rootfssession.ConsumerRegistration{
+	if consumer.RenewalProtocol == 1 {
+		lease.ExpiresAt = time.Now().Add(liveConsumerLeaseTTL).UTC()
+	}
+	registration := rootfssession.ConsumerRegistration{
 		LeaseID: lease.LeaseID, ActiveKey: consumer.ActiveKey, ContainerID: consumer.ContainerID,
 		StableMount: consumer.StableMount, HostMountNamespace: consumer.HostMountNamespace,
 		NetNSPath: consumer.NetNSPath, NetNSIdentity: consumer.NetNSIdentity, NetworkChain: consumer.NetworkChain,
-		LeaseExpiresAt: lease.ExpiresAt.Format(time.RFC3339Nano),
-	})
+		LeaseExpiresAt:  lease.ExpiresAt.Format(time.RFC3339Nano),
+		RenewalProtocol: consumer.RenewalProtocol,
+		OwnerProcess:    consumer.OwnerProcess,
+	}
+	if previousLease != "" {
+		err = r.sessions.AdoptConsumer(request.Parent, request.Identity, registration, previousLease)
+	} else {
+		err = r.sessions.RegisterConsumer(request.Parent, request.Identity, registration)
+	}
 	if err != nil {
 		return ConsumerLease{}, err
 	}
@@ -559,6 +598,13 @@ func (r *rootfsRuntime) RenewConsumer(
 	lease ConsumerLease,
 ) (ConsumerLease, error) {
 	lease.ExpiresAt = time.Now().Add(rootFSConsumerLeaseTTL).UTC()
+	current, err := r.sessions.RecoverySession(request.Parent)
+	if err != nil {
+		return ConsumerLease{}, err
+	}
+	if current.Consumer != nil && current.Consumer.RenewalProtocol == 1 {
+		lease.ExpiresAt = time.Now().Add(liveConsumerLeaseTTL).UTC()
+	}
 	if err := r.sessions.RenewConsumer(request.Parent, request.Identity, lease.LeaseID, lease.ExpiresAt); err != nil {
 		return ConsumerLease{}, err
 	}
@@ -966,7 +1012,7 @@ func (r *rootfsRuntime) startRenewal(
 	if old := r.renewals[request.Parent]; old != nil {
 		old.cancel()
 	}
-	renewal := &rootfsRenewal{cancel: cancel}
+	renewal := &rootfsRenewal{cancel: cancel, request: request}
 	r.renewals[request.Parent] = renewal
 	renew := r.authority.RenewWriterGrant
 	if authority, ok := r.authority.(writerBatchAuthority); ok {

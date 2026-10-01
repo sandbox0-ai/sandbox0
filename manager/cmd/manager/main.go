@@ -50,6 +50,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--live-node-update-capabilities" {
+		fmt.Println(`{"protocol":1,"autoscaler_hold":true}`)
+		return
+	}
 	cfg := config.LoadManagerConfig()
 
 	logger, err := observability.NewLogger(observability.LoggerConfig{

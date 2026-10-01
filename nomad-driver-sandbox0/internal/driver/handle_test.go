@@ -395,15 +395,31 @@ type noOpCommandRunner struct{}
 
 func (noOpCommandRunner) Run(context.Context, string, ...string) error { return nil }
 
+var authorizedFixtureOnce sync.Once
+var authorizedFixtureBase rootfshandoff.GenerationDescriptor
+var authorizedFixtureError error
+
 func newAuthorizedRootFSStage(t *testing.T, source string) (rootfshandoff.StageRequest, string, string) {
 	t.Helper()
-	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ContextConditionalStore)
-	descriptor, err := rootfsbuilder.Build(context.Background(), store, rootfsbuilder.Options{
-		SourceRoot: source, ImagePath: filepath.Join(t.TempDir(), "base.xfs"),
-		RootFSID: "rootfs-1", ObjectPrefix: "driver-test/rootfs", Runner: noOpCommandRunner{},
+	// The command runner is deliberately a no-op: every fixture publishes
+	// the same empty mock image. Build its immutable metadata once instead
+	// of hashing 300 MiB again for every migration boundary under -race.
+	authorizedFixtureOnce.Do(func() {
+		store := objectstore.NewMemoryStore("authorized-driver-fixture").(objectstore.ContextConditionalStore)
+		authorizedFixtureBase, authorizedFixtureError = rootfsbuilder.Build(context.Background(), store, rootfsbuilder.Options{
+			SourceRoot: source, ImagePath: filepath.Join(t.TempDir(), "base.xfs"),
+			RootFSID: "rootfs-1", ObjectPrefix: "driver-test/rootfs", Runner: noOpCommandRunner{},
+		})
 	})
+	if authorizedFixtureError != nil {
+		t.Fatalf("build descriptor: %v", authorizedFixtureError)
+	}
+	descriptor := authorizedFixtureBase
+	descriptor.Descriptor = append([]byte(nil), descriptor.Descriptor...)
+	var err error
+	descriptor.SourceOCIDigest, err = rootfsbuilder.DigestDirectory(source)
 	if err != nil {
-		t.Fatalf("build descriptor: %v", err)
+		t.Fatalf("digest fixture source: %v", err)
 	}
 	token := "one-shot-writer-token"
 	zeroDigest := "sha256:" + strings.Repeat("0", 64)

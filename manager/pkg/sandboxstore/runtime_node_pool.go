@@ -31,6 +31,27 @@ const (
 
 var ErrRuntimeNodeNotFound = errors.New("runtime node instance not found")
 
+// LockRuntimeNodePoolMutations serializes provider decisions with the live
+// update fence installer. Both use the cluster-scoped advisory lock, retained
+// until the complete cloud decision finishes. Closing the DB connection also
+// releases it, so a crashed controller cannot leave a persistent lock.
+func (s *PGSandboxStore) LockRuntimeNodePoolMutations(ctx context.Context, clusterID string) (func(), error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	release := func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('sandbox0-live-node-update:' || $1, 0))`, clusterID); err != nil {
+		release()
+		return nil, fmt.Errorf("lock runtime node pool provider mutations: %w", err)
+	}
+	return release, nil
+}
+
 // RuntimeNodePoolState is the durable desired-capacity and stabilization state
 // for one provider-backed worker pool. Cloud inventory remains authoritative
 // for actual instance count.
@@ -89,6 +110,7 @@ type RuntimeNodePoolNodeUsage struct {
 }
 
 type RuntimeNodePoolSnapshot struct {
+	LiveNodeUpdateHeld         bool
 	State                      RuntimeNodePoolState
 	Nodes                      []RuntimeNodePoolNodeUsage
 	LiveCPUMillicores          int64
@@ -433,6 +455,11 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			ORDER BY node_uid, updated_at DESC
 		)
 		SELECT
+			EXISTS (
+				SELECT 1 FROM manager.runtime_node_fences AS live_update
+				WHERE live_update.cluster_id = $1 AND live_update.state = 'draining'
+					AND live_update.reason LIKE 'audited-runtime-rollout:live-node-update:%'
+			),
 			COALESCE(SUM(lease.cpu_millicores), 0)::bigint,
 			COALESCE(SUM(lease.memory_bytes), 0)::bigint,
 			COUNT(lease.lease_id)::integer,
@@ -513,6 +540,7 @@ func (s *PGSandboxStore) GetRuntimeNodePoolSnapshot(
 			ON workload_slot.resource_lease_id = lease.lease_id
 			AND workload_slot.slot_id = lease.slot_id
 	`, state.ClusterID).Scan(
+		&snapshot.LiveNodeUpdateHeld,
 		&snapshot.ClusterUsedCPU, &snapshot.ClusterUsedMemory,
 		&snapshot.ClusterActiveLeases, &snapshot.ClusterWorkloadCPU,
 		&snapshot.ClusterWorkloadMemory, &snapshot.ClusterWorkloadSlots,

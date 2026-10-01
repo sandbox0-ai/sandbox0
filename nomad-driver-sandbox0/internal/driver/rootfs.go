@@ -25,7 +25,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 )
 
-type RootFSRuntime = nomadruntime.Runtime
+// Node-owned metadata is part of the driver's required storage contract.
+// Embedding this interface must retain capabilities through custody wrappers.
+type RootFSRuntime interface {
+	nomadruntime.Runtime
+	rootFSRuntimeInfoProvider
+}
 type RootFSConsumerRequest = nomadruntime.ConsumerRequest
 type RootFSConsumerLease = nomadruntime.ConsumerLease
 type crashTaskObservation = nomadruntime.CrashTaskObservation

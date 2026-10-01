@@ -77,10 +77,18 @@ const (
 
 // Service is the HA-primary-scoped Nomad node runtime owned by ctld.
 type Service struct {
-	config      Config
-	nomadConfig NomadAllocationConfig
-	logger      *zap.Logger
-	ready       atomic.Bool
+	config       Config
+	nomadConfig  NomadAllocationConfig
+	logger       *zap.Logger
+	ready        atomic.Bool
+	liveMu       sync.Mutex
+	liveRuntime  *rootfsRuntime
+	liveCancel   context.CancelFunc
+	liveStopped  chan struct{}
+	liveDecision chan bool
+	keepRuntime  atomic.Bool
+	liveImport   *LiveRuntimeHandoff
+	liveGuard    *LiveWriterGuard
 }
 
 // NewService validates a ctld Nomad runtime without opening its exclusive
@@ -104,18 +112,23 @@ func (s *Service) Ready() bool {
 // Run owns the complete privileged runtime until the ctld primary context is
 // canceled. RPC health controls readiness, but only confirmed runtime exit is
 // terminal; an unresponsive owner must not trigger overlapping HA promotion.
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) runOnce(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("ctld Nomad runtime service is nil")
 	}
 	serviceCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	s.liveMu.Lock()
+	s.liveCancel = cancel
+	s.liveStopped = make(chan struct{})
+	s.liveMu.Unlock()
+	defer func() { s.liveMu.Lock(); close(s.liveStopped); s.liveMu.Unlock() }()
 	s.ready.Store(false)
 	defer s.ready.Store(false)
 
 	runErrors := make(chan error, 1)
 	go func() {
-		runErrors <- run(serviceCtx, s.config, s.nomadConfig, s.logger)
+		runErrors <- run(serviceCtx, s.config, s.nomadConfig, s.logger, s)
 	}()
 	client, err := NewClient(s.config.SocketPath)
 	if err != nil {
@@ -489,6 +502,7 @@ func run(
 	config Config,
 	nomadConfig NomadAllocationConfig,
 	zapLogger *zap.Logger,
+	liveServices ...*Service,
 ) error {
 	config.ApplyDefaults()
 	if err := config.Validate(); err != nil {
@@ -556,11 +570,36 @@ func run(
 	if _, err := journal.Prune(time.Now()); err != nil {
 		return fmt.Errorf("prune runtime slot journal: %w", err)
 	}
-	runtime, err := newRuntime(ctx, &config, logger.Named("runtime"))
+	var liveService *Service
+	if len(liveServices) > 0 {
+		liveService = liveServices[0]
+	}
+	var runtime *rootfsRuntime
+	if liveService != nil {
+		liveService.liveMu.Lock()
+		runtime = liveService.liveRuntime
+		liveService.liveMu.Unlock()
+	}
+	if runtime == nil {
+		if liveService != nil {
+			runtime, err = newRuntime(ctx, &config, logger.Named("runtime"), liveService.liveImport)
+		} else {
+			runtime, err = newRuntime(ctx, &config, logger.Named("runtime"))
+		}
+	}
 	if err != nil {
 		return err
 	}
-	defer runtime.Close()
+	if liveService != nil {
+		liveService.liveMu.Lock()
+		liveService.liveRuntime = runtime
+		liveService.liveMu.Unlock()
+	}
+	defer func() {
+		if liveService == nil || !liveService.keepRuntime.Load() {
+			_ = runtime.Close()
+		}
+	}()
 	unregisterCacheMetrics, err := registerReadCacheMetrics(prometheus.DefaultRegisterer, runtime.sessions.ReadCacheStats)
 	if err != nil {
 		return fmt.Errorf("register node RootFS cache metrics: %w", err)
@@ -607,6 +646,11 @@ func run(
 	}
 	daemon.migrationContext = daemonCtx
 	daemon.registrationAuthority = registrationAuthority
+	if liveService != nil {
+		if err := liveService.rebindWriterRenewals(daemonCtx, runtime, daemon.writerLeaseLost); err != nil {
+			return err
+		}
+	}
 	if config.MigrationPeerAddress != "" {
 		peer, err := daemon.startMigrationPeer(daemonCtx, config.MigrationPeerAddress)
 		if err != nil {

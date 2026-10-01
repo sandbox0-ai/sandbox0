@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadcni"
+	"gopkg.in/yaml.v3"
 )
 
 const maxRuntimeConfigArchiveBytes = 8 << 20
@@ -187,6 +188,23 @@ func (r *RuntimeConfigTemplate) Render(identity RuntimeConfigIdentity) ([]byte, 
 			// Adjacent closing braces are valid in compact JSON CNI objects.
 			if bytes.Contains(contents, []byte("{{")) {
 				return nil, fmt.Errorf("rendered node runtime config %s retains a template marker", file.name)
+			}
+		}
+		if file.name == "etc/sandbox0/ctld.yaml" {
+			// Enrollment renders a fresh, not-yet-admitted node. Opt it into
+			// process-independent kernel NBD ownership before its first guest.
+			// Existing hosts are converted only by the idle bootstrap rollout.
+			var cfg map[string]any
+			if err := yaml.Unmarshal(contents, &cfg); err != nil {
+				return nil, fmt.Errorf("parse fresh ctld configuration: %w", err)
+			}
+			if runtime, ok := cfg["nomad_runtime"].(map[string]any); ok && runtime["enabled"] == true {
+				runtime["transferable_nbd"] = true
+				var err error
+				contents, err = yaml.Marshal(cfg)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		if file.name == "opt/cni/config/10-sandbox0.conflist" {

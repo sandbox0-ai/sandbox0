@@ -38,6 +38,7 @@ type LinuxRuntimeConfig struct {
 	ReadyTimeout    time.Duration
 	MaxRequestBytes uint32
 	SysBlockRoot    string
+	TransferableNBD bool
 }
 
 // LinuxRuntime owns a bounded pool of pre-created /dev/nbd devices. The node
@@ -149,7 +150,74 @@ func (r *LinuxRuntime) AttachDevice(
 	return rootfsblock.StartKernelNBD(lifetime, readyContext, backend, rootfsblock.KernelNBDOptions{
 		DevicePath: devicePath, RequestTimeout: r.config.RequestTimeout, ReadyTimeout: r.config.ReadyTimeout,
 		MaxRequestBytes: r.config.MaxRequestBytes, SysBlockRoot: r.sysBlockRoot,
+		Transferable: r.config.TransferableNBD,
 	})
+}
+
+func (r *LinuxRuntime) AdoptLiveDevice(ctx context.Context, path, allocation, xfsRoot, mergedRoot string, socket *os.File, backend rootfsblock.WritableBlockDevice) (Device, error) {
+	if err := r.ValidateLiveDevice(path, allocation, xfsRoot, mergedRoot, backend.Size()); err != nil {
+		return nil, err
+	}
+	return rootfsblock.AdoptKernelNBD(ctx, path, socket, backend)
+}
+
+// ValidateLiveDevice checks a prospective owner without consuming NBD requests
+// or changing any kernel attachment or mount.
+func (r *LinuxRuntime) ValidateLiveDevice(path, allocation, xfsRoot, mergedRoot string, size int64) error {
+	if !r.config.TransferableNBD {
+		return fmt.Errorf("transferable NBD is disabled")
+	}
+	if err := r.AdoptDeviceReservation(path, allocation); err != nil {
+		return err
+	}
+	return r.validateLiveMounts(path, xfsRoot, mergedRoot, size)
+}
+
+func (r *LinuxRuntime) validateLiveMounts(path, xfsRoot, mergedRoot string, size int64) error {
+	for _, root := range []string{xfsRoot, mergedRoot} {
+		if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
+			return fmt.Errorf("invalid live RootFS mount path")
+		}
+	}
+	device, err := os.Stat(path)
+	if err != nil || device.Mode()&os.ModeDevice == 0 || device.Mode()&os.ModeCharDevice != 0 {
+		return fmt.Errorf("live RootFS device is absent: %w", err)
+	}
+	sectors, err := os.ReadFile(filepath.Join(r.sysBlockRoot, filepath.Base(path), "size"))
+	if err != nil {
+		return err
+	}
+	count, err := strconv.ParseInt(strings.TrimSpace(string(sectors)), 10, 64)
+	if err != nil || count != size/rootfsblock.NBDDeviceSectorSize || size%rootfsblock.NBDDeviceSectorSize != 0 {
+		return fmt.Errorf("live RootFS device geometry changed")
+	}
+	entries, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		return err
+	}
+	xfs, merged := false, false
+	for _, entry := range entries {
+		if filepath.Clean(entry.Mountpoint) == filepath.Clean(xfsRoot) {
+			source, err := os.Stat(entry.Source)
+			xfs = err == nil && os.SameFile(device, source) && entry.FSType == "xfs"
+		}
+		if filepath.Clean(entry.Mountpoint) == filepath.Clean(mergedRoot) {
+			// Require the original overlay to still reference the same writable
+			// XFS tree, rather than accepting any overlay at this path.
+			options := strings.Split(entry.VFSOptions, ",")
+			lower, upper, work := false, false, false
+			for _, option := range options {
+				lower = lower || option == "lowerdir="+filepath.Join(xfsRoot, "lower")
+				upper = upper || option == "upperdir="+filepath.Join(xfsRoot, "upper")
+				work = work || option == "workdir="+filepath.Join(xfsRoot, "work")
+			}
+			merged = entry.FSType == "overlay" && lower && upper && work
+		}
+	}
+	if !xfs || !merged {
+		return fmt.Errorf("live RootFS lost its exact XFS or overlay mount")
+	}
+	return nil
 }
 
 // RecoverOrphanDevice disconnects an exact kernel NBD attachment whose

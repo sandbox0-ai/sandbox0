@@ -66,6 +66,7 @@ type CtldNomadRuntimeConfig struct {
 	MaxNodeDirtyTailBytes           int64    `yaml:"max_node_dirty_tail_bytes" json:"-"`
 	DirtyTailRetirementReserveBytes int64    `yaml:"dirty_tail_retirement_reserve_bytes" json:"-"`
 	NBDDevices                      []string `yaml:"nbd_devices" json:"-"`
+	TransferableNBD                 bool     `yaml:"transferable_nbd" json:"-"`
 	RuntimeSlotJournalPath          string   `yaml:"runtime_slot_journal_path" json:"-"`
 	MigrationStagingBytes           int64    `yaml:"migration_staging_bytes" json:"-"`
 	MigrationPeerAddress            string   `yaml:"migration_peer_address" json:"-"`

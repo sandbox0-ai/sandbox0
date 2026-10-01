@@ -67,6 +67,7 @@ type WritableBlockDevice interface {
 type NBDTransmissionServer struct {
 	Backend         WritableBlockDevice
 	MaxRequestBytes uint32
+	Handoff         *NBDTransmissionControl
 	// OnBackendError observes the original storage error before it is reduced
 	// to an NBD errno. Calls are serialized, but concurrent read errors may be
 	// observed out of wire order. It must not block the transmission loop.
@@ -79,6 +80,12 @@ type NBDTransmissionServer struct {
 func (s NBDTransmissionServer) Serve(ctx context.Context, connection net.Conn) error {
 	if s.Backend == nil || connection == nil {
 		return fmt.Errorf("NBD backend and connection are required")
+	}
+	if s.Handoff != nil {
+		if err := s.Handoff.bind(connection); err != nil {
+			return err
+		}
+		defer s.Handoff.stop()
 	}
 	maximum := s.MaxRequestBytes
 	if maximum == 0 {
@@ -94,13 +101,27 @@ func (s NBDTransmissionServer) Serve(ctx context.Context, connection net.Conn) e
 		onBackendError: s.OnBackendError,
 		ctx:            runCtx, fail: cancel, readSlots: make(chan struct{}, nbdMaxConcurrentReads),
 		readBytes: semaphore.NewWeighted(int64(maximum) * nbdReadBufferSlots),
+		handoff:   s.Handoff,
 	}
 	stop := context.AfterFunc(runCtx, func() { _ = connection.Close() })
 	defer stop()
 	var err error
 	for {
+		if s.Handoff != nil {
+			if boundaryErr := s.Handoff.boundary(runCtx, server.reads.Wait); boundaryErr != nil {
+				if errors.Is(boundaryErr, ErrNBDHandoff) {
+					stop()
+					return ErrNBDHandoff
+				}
+				err = boundaryErr
+				break
+			}
+		}
 		var disconnect bool
 		disconnect, err = server.serveOne()
+		if errors.Is(err, errNBDPauseBoundary) {
+			continue
+		}
 		if err != nil || disconnect {
 			break
 		}
@@ -131,6 +152,7 @@ func (s NBDTransmissionServer) Serve(ctx context.Context, connection net.Conn) e
 }
 
 type nbdTransmission struct {
+	handoff        *NBDTransmissionControl
 	backend        WritableBlockDevice
 	connection     net.Conn
 	maximum        uint32
@@ -152,7 +174,11 @@ type nbdRequest struct {
 }
 
 func (s *nbdTransmission) serveOne() (bool, error) {
-	request, err := readNBDRequest(s.connection)
+	reader := io.Reader(s.connection)
+	if s.handoff != nil {
+		reader = nbdHandoffHeaderReader{s.ctx, s.handoff}
+	}
+	request, err := readNBDRequest(reader)
 	if err != nil {
 		if errors.Is(err, errNBDRequestMagic) {
 			// A malformed header is still an ordering barrier. Transport errors

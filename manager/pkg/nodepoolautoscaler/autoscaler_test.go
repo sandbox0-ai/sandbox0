@@ -130,6 +130,33 @@ func TestIdleCapacityFitsFixedNode(t *testing.T) {
 	require.Empty(t, cloud.sets)
 }
 
+func TestLiveNodeUpdateHoldsAllProviderMutationDespiteHiddenFixedCapacity(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{desired: 2}
+	store.snapshot.LiveNodeUpdateHeld = true
+	store.snapshot.DemandCPUMillicores = 9_000_000
+	decision, err := testWorker(t, store, cloud).Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "live_node_update_held", decision.Action)
+	require.Zero(t, cloud.reads)
+	require.Empty(t, cloud.sets)
+	require.Empty(t, cloud.protection)
+	require.Empty(t, store.updates)
+	require.Empty(t, store.consolidationCalls)
+}
+
+func TestLiveNodeUpdateAppearingInScaleOutConfirmationCancelsDecision(t *testing.T) {
+	store, cloud := &fakeStore{}, &fakeCloud{}
+	before := &sandboxstore.RuntimeNodePoolSnapshot{ClusterFixedUsableSlots: 8, DemandCPUMillicores: 9_000_000}
+	after := *before
+	after.LiveNodeUpdateHeld = true
+	after.ClusterFixedUsableSlots = 0
+	store.nextSnapshots = []*sandboxstore.RuntimeNodePoolSnapshot{before, &after}
+	decision, err := testWorker(t, store, cloud).Reconcile(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "scale_out_snapshot_changed", decision.Action)
+	require.Empty(t, cloud.sets)
+}
+
 func TestDemandScalesOutImmediatelyAndCapsAt299(t *testing.T) {
 	store, cloud := &fakeStore{}, &fakeCloud{}
 	store.snapshot.ClusterFixedUsableSlots = 8

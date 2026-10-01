@@ -148,6 +148,7 @@ func (s *Store) PublishPlanned(ctx context.Context, expected Binding, plan Local
 	if err := s.putImmutable(ctx, manifestKey(plan.Reference.BindingDigest), payload); err != nil {
 		return Reference{}, fmt.Errorf("publish planned checkpoint manifest: %w", err)
 	}
+	s.retainPublishedImage(ctx, plan.Reference, manifest, payload, root)
 	return plan.Reference, nil
 }
 

@@ -77,10 +77,13 @@ func (c *verifiedImageCache) close() {
 	}
 }
 
-// Close releases disposable image watches. It does not close regional storage
-// or the caller-owned shared chunk cache.
+// Close releases image watches and retained-cache handles. Cached files remain
+// disposable across restart. Regional storage and shared chunk cache stay open.
 func (s *Store) Close() {
 	if s != nil {
 		s.verifiedImages.close()
+		if c := s.retainedCache(); c != nil {
+			c.close()
+		}
 	}
 }

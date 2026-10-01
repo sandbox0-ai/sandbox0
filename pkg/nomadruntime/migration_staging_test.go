@@ -1,6 +1,8 @@
 package nomadruntime
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +12,49 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
+
+type retainedEvictingTestRuntime struct {
+	nodeRuntimeBackend
+	evict func(context.Context) error
+}
+
+func (r retainedEvictingTestRuntime) EvictRetainedImages(ctx context.Context) error {
+	return r.evict(ctx)
+}
+
+func TestMigrationStagingEvictsOnlyDisposableImagesBeforeRetryingQuota(t *testing.T) {
+	for _, budget := range []bool{false, true} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			calls, evictions := 0, 0
+			d := &nodeRuntime{journal: &runtimeSlotJournal{migrationRoot: "/staging"}}
+			d.runtime = retainedEvictingTestRuntime{evict: func(context.Context) error { evictions++; return nil }}
+			admit := func(string) error {
+				calls++
+				if calls == 1 {
+					return errdefs.ErrResourceExhausted
+				}
+				return nil
+			}
+			d.migrationStaging = testMigrationStagingGuard{admit: admit, budget: func(root string, bytes int64, inodes uint64) error {
+				require.EqualValues(t, 4096, bytes)
+				require.EqualValues(t, 2, inodes)
+				return admit(root)
+			}}
+			var err error
+			if budget {
+				err = d.checkMigrationStagingBudget(4096, 2)
+			} else {
+				err = d.checkMigrationStaging(true)
+			}
+			require.NoError(t, err)
+			require.Equal(t, 2, calls)
+			require.Equal(t, 1, evictions)
+			d.migrationStaging = testMigrationStagingGuard{admit: func(string) error { return errdefs.ErrPermissionDenied }}
+			require.ErrorIs(t, d.checkMigrationStaging(true), errdefs.ErrPermissionDenied)
+			require.Equal(t, 1, evictions, "quota/ownership failures must not be disguised as cache pressure")
+		})
+	}
+}
 
 type testMigrationStagingGuard struct {
 	verify func(string) error

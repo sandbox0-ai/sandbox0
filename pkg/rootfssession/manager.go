@@ -284,6 +284,8 @@ type DirtyTailPressureSession struct {
 // daemon must fence before crash-abandoning a writer. LeaseID changes whenever
 // a restarted plugin re-adopts the same immutable runtime paths.
 type ConsumerRegistration struct {
+	RenewalProtocol    int    `json:"renewal_protocol,omitempty"`
+	OwnerProcess       string `json:"owner_process,omitempty"`
 	LeaseID            string `json:"lease_id"`
 	ActiveKey          string `json:"active_key"`
 	ContainerID        string `json:"container_id"`
@@ -325,6 +327,7 @@ type Manager struct {
 	recoveryParents       map[string]struct{}
 	quietExternal         map[string]time.Time
 	closing               bool
+	handoff               bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -1095,6 +1098,9 @@ func recoverySessionFromRecord(key string, current record, live bool) (RecoveryS
 // Validate checks a durable consumer record and returns its wall-clock lease
 // deadline. The daemon, not the task plugin, chooses and enforces this value.
 func (c ConsumerRegistration) Validate() (time.Time, error) {
+	if c.RenewalProtocol < 0 || c.RenewalProtocol > 1 || (c.RenewalProtocol == 1 && c.OwnerProcess == "") {
+		return time.Time{}, fmt.Errorf("invalid consumer renewal protocol or owner process")
+	}
 	for name, value := range map[string]string{
 		"lease_id": c.LeaseID, "active_key": c.ActiveKey, "container_id": c.ContainerID,
 		"stable_mount": c.StableMount, "host_mount_namespace": c.HostMountNamespace,
@@ -1130,6 +1136,19 @@ func (c ConsumerRegistration) Validate() (time.Time, error) {
 // a ready physical session. Re-registration may rotate only LeaseID and its
 // deadline; immutable runtime paths cannot be replaced under the same writer.
 func (m *Manager) RegisterConsumer(parent string, identity rootfshandoff.Identity, consumer ConsumerRegistration) error {
+	return m.registerConsumer(parent, identity, consumer, "")
+}
+
+// AdoptConsumer rotates the exact previous lease under the session lock. A
+// concurrent adopter cannot invalidate a successor which already took over.
+func (m *Manager) AdoptConsumer(parent string, identity rootfshandoff.Identity, consumer ConsumerRegistration, previousLease string) error {
+	if previousLease == "" {
+		return fmt.Errorf("previous consumer lease is required: %w", errdefs.ErrInvalidArgument)
+	}
+	return m.registerConsumer(parent, identity, consumer, previousLease)
+}
+
+func (m *Manager) registerConsumer(parent string, identity rootfshandoff.Identity, consumer ConsumerRegistration, previousLease string) error {
 	consumer.LeaseID = strings.TrimSpace(consumer.LeaseID)
 	consumer.ActiveKey = strings.TrimSpace(consumer.ActiveKey)
 	consumer.ContainerID = strings.TrimSpace(consumer.ContainerID)
@@ -1167,6 +1186,13 @@ func (m *Manager) RegisterConsumer(parent string, identity rootfshandoff.Identit
 		current.Consumer.NetworkChain != consumer.NetworkChain) {
 		return fmt.Errorf("RootFS session is bound to another host runtime consumer: %w", errdefs.ErrAlreadyExists)
 	}
+	if previousLease != "" {
+		if current.Consumer == nil || current.Consumer.RenewalProtocol != 1 || consumer.RenewalProtocol != 1 || current.Consumer.LeaseID != previousLease {
+			return fmt.Errorf("RootFS consumer adoption lost its previous lease: %w", errdefs.ErrFailedPrecondition)
+		}
+	} else if current.Consumer != nil && current.Consumer.RenewalProtocol == 1 {
+		return fmt.Errorf("existing live consumer requires explicit adoption: %w", errdefs.ErrFailedPrecondition)
+	}
 	current.Consumer = &consumer
 	return m.save(current)
 }
@@ -1187,6 +1213,10 @@ func (m *Manager) RenewConsumer(parent string, identity rootfshandoff.Identity, 
 	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch || current.Consumer == nil ||
 		current.Consumer.LeaseID != leaseID || (current.State != stateReady && current.State != stateMigration) {
 		return fmt.Errorf("RootFS consumer lease does not match the ready writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	deadline, err := current.Consumer.Validate()
+	if err != nil || !time.Now().Before(deadline) {
+		return fmt.Errorf("RootFS consumer lease has expired: %w", errdefs.ErrFailedPrecondition)
 	}
 	current.Consumer.LeaseExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
 	return m.save(current)
@@ -2304,6 +2334,10 @@ func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) err
 }
 
 func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
+	return m.reopenBranchWithIndex(current, nil)
+}
+
+func (m *Manager) reopenBranchWithIndex(current record, index *os.File) (*rootfsblock.Branch, error) {
 	descriptor, err := rootfsblock.DecodeDescriptor(current.BaseDescriptor)
 	if err != nil {
 		return nil, fmt.Errorf("decode session base generation: %w", err)
@@ -2312,11 +2346,13 @@ func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open session base generation: %w", err)
 	}
+	options := m.sessionBranchOptions(current.Parent)
+	options.LiveIndex = index
 	branch, err := rootfsblock.OpenBranchWithOptions(current.BranchPath, rootfsblock.BranchIdentity{
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
-	}, reader, m.sessionBranchOptions(current.Parent))
+	}, reader, options)
 	if err != nil {
 		return nil, fmt.Errorf("reopen session branch: %w", err)
 	}

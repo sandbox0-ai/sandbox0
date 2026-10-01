@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/procdassets"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
@@ -41,6 +42,9 @@ var (
 	networkRuntimeConfigPath = strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH"))
 	runtimeSlotNetworkSocket = "/host-run/sandbox0/ctld-runtime-slot-network.sock"
 	runtimeSlotNetNSRoot     = "/host-run/netns"
+	liveUpdateFrom           string
+	liveUpdateID             string
+	printLiveCapabilities    bool
 )
 
 const (
@@ -74,6 +78,9 @@ func main() {
 	flag.StringVar(&networkRuntimeConfigPath, "ctld-networking-config-path", strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH")), "ctld network runtime config path")
 	flag.StringVar(&runtimeSlotNetworkSocket, "runtime-slot-network-socket", "/host-run/sandbox0/ctld-runtime-slot-network.sock", "host-visible root-only runtime-slot network control socket")
 	flag.StringVar(&runtimeSlotNetNSRoot, "runtime-slot-netns-root", "/host-run/netns", "ctld mount of the host Nomad network namespace root")
+	flag.StringVar(&liveUpdateFrom, "live-update-from", "", "root-only source live update socket; requires live-update-id")
+	flag.StringVar(&liveUpdateID, "live-update-id", "", "immutable local live update operation ID")
+	flag.BoolVar(&printLiveCapabilities, "live-update-capabilities", false, "print live update protocol capability and exit")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -84,6 +91,10 @@ func main() {
 }
 
 func run() error {
+	if printLiveCapabilities {
+		fmt.Println(`{"protocol":1,"transferable_nbd":true,"proxy_drain":true}`)
+		return nil
+	}
 	if printProcdDigest {
 		value, err := procdassets.Digest()
 		if err != nil {
@@ -148,6 +159,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	candidate, err := receiveLiveUpdate(ctx, coordinator, cfg, networkConfig)
+	if err != nil {
+		return fmt.Errorf("receive live node update: %w", err)
+	}
+	if candidate != nil {
+		defer candidate.runtime.Guard.Close()
+		defer candidate.closeCopies()
+	}
 	haMetricsServer, err := ctldha.StartMetricsServer(ctx, haMetricsAddr, coordinator, nodeName, haSlot)
 	if err != nil {
 		return err
@@ -162,11 +181,11 @@ func run() error {
 	}
 	defer probeServer.Close()
 	if haMetricsServer == nil {
-		return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn)
+		return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn, candidate)
 	}
 	primaryErrors := make(chan error, 1)
 	go func() {
-		primaryErrors <- runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn)
+		primaryErrors <- runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, primaryFn, candidate)
 	}()
 	select {
 	case err := <-primaryErrors:
@@ -185,15 +204,37 @@ func runHAPrimary(
 	setReady func(bool),
 	networkFactory primaryServiceFactory,
 	runPrimaryFn primaryRunner,
+	imported ...*liveCandidate,
 ) error {
-	lease, err := coordinator.WaitForPrimary(ctx)
+	var candidate *liveCandidate
+	if len(imported) > 0 {
+		candidate = imported[0]
+	}
+	var lease *ctldha.PrimaryLease
+	var err error
+	if candidate != nil {
+		lease = candidate.lease
+	} else {
+		lease, err = coordinator.WaitForPrimary(ctx)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
 	}
-	runErr := runPrimaryFn(ctx, primaryRunOptions{setReady: setReady, networkFactory: networkFactory})
+	runErr := runPrimaryFn(ctx, primaryRunOptions{setReady: setReady, networkFactory: networkFactory, lease: lease, liveCandidate: candidate})
+	if errors.Is(runErr, errPrimaryShutdownIncomplete) {
+		retainPrimaryLeaseUntilExit(lease)
+		return runErr
+	}
+	var transferred *liveTransferred
+	if errors.As(runErr, &transferred) {
+		if err := lease.Relinquish(); err != nil {
+			return err
+		}
+		return transferred.drain.Wait(ctx)
+	}
 	// A timed-out privileged service may still own NBD, mount, Bolt, or network
 	// resources. Keep the flock open until the process exits so the standby
 	// cannot overlap ownership.
@@ -218,6 +259,8 @@ type primaryRunOptions struct {
 	networkFactory      primaryServiceFactory
 	nomadRuntimeFactory nomadRuntimeFactory
 	ctldConfig          *config.CtldConfig
+	lease               *ctldha.PrimaryLease
+	liveCandidate       *liveCandidate
 }
 
 type healthController struct {
@@ -259,10 +302,21 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	defer flushCtldObjectStoreRequestMetering(objectStoreMeter, logger)
 
 	serviceErrors := make(chan error, 1)
+	transferred := false
+	networkCtx, networkCancel := context.WithCancel(parent)
+	defer func() {
+		if !transferred {
+			networkCancel()
+		}
+	}()
 	var networkHandle, nomadHandle *primaryServiceHandle
 	healthy := func() bool { return ctx.Err() == nil }
 	ready := func() bool {
-		return healthy() && networkHandle != nil && networkHandle.Ready() && nomadHandle != nil && nomadHandle.Ready()
+		value := healthy() && networkHandle != nil && networkHandle.Ready() && nomadHandle != nil && nomadHandle.Ready()
+		if value && options.liveCandidate != nil {
+			options.liveCandidate.closeCopies()
+		}
+		return value
 	}
 	httpServer := newHTTPServer(httpAddr, healthController{ready: ready, healthy: healthy})
 	httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(logger))(httpServer.Handler)
@@ -272,19 +326,45 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		return fmt.Errorf("listen for ctld HTTP server: %w", err)
 	}
 	defer httpListener.Close()
+	liveServer, liveRequests, err := startLiveUpdateServer(ctx, options.lease)
+	if err != nil {
+		return err
+	}
+	if liveServer != nil {
+		defer liveServer.Close()
+	}
 
 	networkService, err := options.networkFactory()
 	if err != nil || networkService == nil {
 		return fmt.Errorf("initialize ctld network runtime: %w", errors.Join(err, nilServiceError(networkService)))
 	}
-	networkHandle = startPrimaryService(ctx, networkService)
+	if options.liveCandidate != nil {
+		service, ok := networkService.(*networkRuntimeService)
+		if !ok {
+			return fmt.Errorf("network service cannot import live update")
+		}
+		if err := service.daemon.ImportLiveListeners(options.liveCandidate.networkFiles); err != nil {
+			return err
+		}
+	}
+	networkHandle = startPrimaryService(networkCtx, networkService)
 	log.Printf("ctld primary started network runtime")
 
 	nomadService, err := options.nomadRuntimeFactory(logger)
 	if err != nil || nomadService == nil {
 		cancel()
+		networkCancel()
 		shutdownErr := waitPrimaryService(networkHandle, networkRuntimeShutdownTimeout)
 		return errors.Join(fmt.Errorf("initialize ctld Nomad runtime: %w", errors.Join(err, nilServiceError(nomadService))), shutdownErr)
+	}
+	if options.liveCandidate != nil {
+		service, ok := nomadService.(*nomadruntime.Service)
+		if !ok {
+			return fmt.Errorf("nomad service cannot import live update")
+		}
+		if err := service.ImportLiveUpdate(&options.liveCandidate.runtime); err != nil {
+			return err
+		}
 	}
 	nomadHandle = startPrimaryService(ctx, nomadService)
 	log.Printf("ctld primary started Nomad runtime")
@@ -305,20 +385,38 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 
 	var runErr error
 	networkFailed, nomadFailed := false, false
-	select {
-	case <-parent.Done():
-		log.Printf("ctld primary shutting down: %v", parent.Err())
-	case runErr = <-serviceErrors:
-	case serviceErr := <-networkHandle.Errors():
-		if err, failed := networkRuntimeExitError(parent.Err(), serviceErr); failed {
-			networkFailed, runErr = true, err
+	for {
+		select {
+		case <-parent.Done():
+			log.Printf("ctld primary shutting down: %v", parent.Err())
+		case runErr = <-serviceErrors:
+		case serviceErr := <-networkHandle.Errors():
+			if err, failed := networkRuntimeExitError(parent.Err(), serviceErr); failed {
+				networkFailed, runErr = true, err
+			}
+		case serviceErr := <-nomadHandle.Errors():
+			if err, failed := primaryServiceExitError("Nomad runtime", parent.Err(), serviceErr); failed {
+				nomadFailed, runErr = true, err
+			}
+		case connection := <-liveRequests:
+			result, committed, updateErr := executeLiveUpdate(ctx, connection, options, networkService, nomadService, httpServer, liveServer)
+			if !committed && !errors.Is(updateErr, errPrimaryShutdownIncomplete) {
+				log.Printf("ctld live update preparation rejected: %v", updateErr)
+				continue
+			}
+			if committed {
+				transferred = true
+				runErr = &liveTransferred{drain: networkHandle, operation: result}
+			} else {
+				runErr = updateErr
+			}
 		}
-	case serviceErr := <-nomadHandle.Errors():
-		if err, failed := primaryServiceExitError("Nomad runtime", parent.Err(), serviceErr); failed {
-			nomadFailed, runErr = true, err
-		}
+		break
 	}
 	cancel()
+	if !transferred {
+		networkCancel()
+	}
 	if options.setReady != nil {
 		options.setReady(false)
 	}
@@ -329,11 +427,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	runErr = errors.Join(runErr, httpServer.Shutdown(httpCtx))
 	httpCancel()
-	if !networkFailed {
+	if !networkFailed && !transferred {
 		runErr = errors.Join(runErr, waitPrimaryService(networkHandle, networkRuntimeShutdownTimeout))
 	}
 	if !nomadFailed {
-		runErr = errors.Join(runErr, waitPrimaryService(nomadHandle, nomadRuntimeShutdownTimeout))
+		waitErr := waitPrimaryService(nomadHandle, nomadRuntimeShutdownTimeout)
+		if !transferred || !errors.Is(waitErr, nomadruntime.ErrLiveUpdateTransferred) {
+			runErr = errors.Join(runErr, waitErr)
+		}
 	}
 	return runErr
 }

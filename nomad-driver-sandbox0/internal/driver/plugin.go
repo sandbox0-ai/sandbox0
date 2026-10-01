@@ -584,6 +584,10 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		recovered.stopExitWatch()
 		return err
 	}
+	if recovered.recoveredConsumerLease != nil {
+		recovered.startConsumerRenewal(*recovered.stage, *recovered.recoveredConsumerLease)
+		recovered.recoveredConsumerLease = nil
+	}
 	p.tasks.Set(state.TaskConfig.ID, recovered)
 	if lifecycle != nil {
 		go lifecycle.runHeartbeat(p.ctx, recovered.done, observation, recovered.runtimeSlotHeartbeatLost)

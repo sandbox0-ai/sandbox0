@@ -18,6 +18,42 @@ func TestRuntimeNodePoolWarmingFenceAndSnapshotIntegration(t *testing.T) {
 	}
 }
 
+func TestLiveNodeFenceWaitsForInFlightProviderDecisionIntegration(t *testing.T) {
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	release, err := store.LockRuntimeNodePoolMutations(t.Context(), "nomad")
+	require.NoError(t, err)
+	defer release()
+	started, finished := make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := pool.Exec(t.Context(), `BEGIN;
+			SELECT pg_advisory_xact_lock(hashtextextended('sandbox0-live-node-update:nomad', 0));
+			INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason)
+			VALUES('nomad','fixture-node','fixture-uid','draining','audited-runtime-rollout:live-node-update:fixture');
+			COMMIT`)
+		finished <- err
+	}()
+	<-started
+	select {
+	case err := <-finished:
+		t.Fatalf("fence installed while provider decision was still running: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-finished:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider decision release did not unblock fence")
+	}
+	_, err = store.EnsureRuntimeNodePoolState(t.Context(), "fixture-pool", "nomad")
+	require.NoError(t, err)
+	snapshot, err := store.GetRuntimeNodePoolSnapshot(t.Context(), "fixture-pool")
+	require.NoError(t, err)
+	require.True(t, snapshot.LiveNodeUpdateHeld)
+}
+
 func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
 	t.Helper()
 	ctx := context.Background()
@@ -78,6 +114,15 @@ func testRuntimeNodePoolWarmingFenceAndSnapshot(t *testing.T, warmSlots int) {
 	require.EqualValues(t, 14000, snapshot.ClusterFixedPhysicalCPU)
 	require.EqualValues(t, 56<<30, snapshot.ClusterFixedPhysicalMemory)
 	require.Len(t, snapshot.PlacementNodes, 1)
+	_, err = pool.Exec(ctx, `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason)
+		VALUES('nomad','fixed-node','fixed-uid','draining','audited-runtime-rollout:live-node-update:fixture')`)
+	require.NoError(t, err)
+	held, err := store.GetRuntimeNodePoolSnapshot(ctx, "elastic")
+	require.NoError(t, err)
+	require.True(t, held.LiveNodeUpdateHeld)
+	require.Zero(t, held.ClusterFixedUsableSlots)
+	_, err = pool.Exec(ctx, `DELETE FROM manager.runtime_node_fences WHERE cluster_id='nomad' AND node_id='fixed-node'`)
+	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `UPDATE manager.runtime_node_capacities
 		SET admission_cpu_millicores=64000, admission_memory_bytes=75161927680
 		WHERE node_id='fixed-node'`)

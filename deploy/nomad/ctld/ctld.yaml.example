@@ -12,6 +12,9 @@ rootfs_object_storage:
 
 nomad_runtime:
   enabled: true
+  # Enable before the first guest. Occupied ioctl NBD owners cannot be
+  # converted in place; defer the first transition until the node is idle.
+  transferable_nbd: true
   socket_path: /run/sandbox0/ctld-nomad-runtime.sock
   runsc_path: /usr/local/bin/runsc
   runsc_root: /run/sandbox0/runsc

@@ -45,6 +45,9 @@ const (
 var nbdDeviceName = regexp.MustCompile(`^nbd[0-9]+$`)
 
 type KernelNBDOptions struct {
+	// Transferable uses kernel-managed netlink attachment, without a
+	// process-owned NBD_DO_IT waiter. There is no ioctl fallback.
+	Transferable    bool
 	DevicePath      string
 	RequestTimeout  time.Duration
 	ReadyTimeout    time.Duration
@@ -56,6 +59,9 @@ type KernelNBDOptions struct {
 // device. The caller owns exclusive device allocation and must keep this
 // object alive until every filesystem and runtime reference is gone.
 type KernelNBDDevice struct {
+	handoff    *NBDTransmissionControl
+	netlink    bool
+	detached   atomic.Bool
 	path       string
 	file       *os.File
 	connection net.Conn
@@ -70,6 +76,9 @@ type KernelNBDDevice struct {
 }
 
 func StartKernelNBD(lifetime, readyContext context.Context, backend WritableBlockDevice, options KernelNBDOptions) (*KernelNBDDevice, error) {
+	if options.Transferable {
+		return startTransferableKernelNBD(lifetime, readyContext, backend, options)
+	}
 	if backend == nil {
 		return nil, fmt.Errorf("NBD backend is required")
 	}
@@ -277,7 +286,14 @@ func (d *KernelNBDDevice) Wait() error {
 func (d *KernelNBDDevice) Close() error {
 	d.closeOnce.Do(func() {
 		d.closing.Store(true)
-		disconnectErr := ignoreNBDStopped(ioctlSetInt(d.file, nbdDisconnect, 0))
+		var disconnectErr error
+		if !d.detached.Load() {
+			if d.netlink {
+				disconnectErr = disconnectNetlinkNBD(d.path)
+			} else {
+				disconnectErr = ignoreNBDStopped(ioctlSetInt(d.file, nbdDisconnect, 0))
+			}
+		}
 		d.cancel()
 		connectionErr := ignoreNBDServerStopped(d.connection.Close())
 		runErr := d.Wait()

@@ -53,6 +53,7 @@ type Config struct {
 	RootFSMaxNodeDirtyTailBytes           int64
 	RootFSDirtyTailRetirementReserveBytes int64
 	RootFSNBDDevices                      []string
+	RootFSTransferableNBD                 bool
 	RootFSReadCacheBytes                  int64
 	RootFSReadCacheDirectory              string
 	RootFSReadDiskCacheBytes              int64

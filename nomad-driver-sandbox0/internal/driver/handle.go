@@ -35,6 +35,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/procdartifact"
+	"github.com/sandbox0-ai/sandbox0/pkg/processidentity"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -157,15 +158,16 @@ type taskHandle struct {
 
 	done chan struct{}
 
-	controlOnce      sync.Once
-	controlServer    *http.Server
-	controlReady     chan struct{}
-	controlReadyErr  error
-	controlReadyOnce sync.Once
-	leaseFenceOnce   sync.Once
-	consumerCancel   context.CancelFunc
-	waitCancel       context.CancelFunc
-	runtimeSlot      *runtimeSlotLifecycle
+	controlOnce            sync.Once
+	controlServer          *http.Server
+	controlReady           chan struct{}
+	controlReadyErr        error
+	controlReadyOnce       sync.Once
+	leaseFenceOnce         sync.Once
+	consumerCancel         context.CancelFunc
+	recoveredConsumerLease *RootFSConsumerLease
+	waitCancel             context.CancelFunc
+	runtimeSlot            *runtimeSlotLifecycle
 }
 
 type claimAttempt struct {
@@ -714,9 +716,23 @@ func (h *taskHandle) executeClaim(
 			return h.poisonClaimLaunch(fmt.Errorf("read host mount namespace: %w", err), false)
 		}
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		info, infoErr := loadRootFSRuntimeInfo(registerCtx, h.rootfs)
+		if infoErr != nil {
+			registerCancel()
+			return h.poisonClaimLaunch(fmt.Errorf("read RootFS consumer capabilities: %w", infoErr), false)
+		}
 		consumer := RootFSConsumerRequest{
 			ActiveKey: h.taskConfig.ID, ContainerID: h.containerID,
 			StableMount: h.rootMount, HostMountNamespace: hostMountNamespace,
+		}
+		if info.LiveUpdateProtocol == 1 {
+			consumer.RenewalProtocol = 1
+			owner, err := processidentity.Current()
+			if err != nil {
+				registerCancel()
+				return h.poisonClaimLaunch(err, false)
+			}
+			consumer.OwnerProcess = owner
 		}
 		if h.netnsPath() != "" && durableStage.ExpectedPolicyToken.NetNSIdentity != "" {
 			consumer.NetNSPath = h.netnsPath()
@@ -1264,15 +1280,25 @@ func (h *taskHandle) startConsumerRenewal(stage rootfshandoff.StageRequest, leas
 	h.mu.Unlock()
 	go func() {
 		current := lease
+		retrying := false
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			remaining := time.Until(current.ExpiresAt)
 			if remaining <= 0 {
 				h.handleWriterLeaseLoss(errors.New("RootFS consumer lease expired"))
 				return
 			}
 			delay := remaining / 3
+			if retrying {
+				delay = time.Second
+			}
 			if delay < time.Second {
 				delay = time.Second
+			}
+			if delay > remaining {
+				delay = remaining
 			}
 			timer := time.NewTimer(delay)
 			select {
@@ -1281,16 +1307,35 @@ func (h *taskHandle) startConsumerRenewal(stage rootfshandoff.StageRequest, leas
 				return
 			case <-timer.C:
 			}
-			renewCtx, renewCancel := context.WithTimeout(ctx, 5*time.Second)
+			deadline := time.Now().Add(5 * time.Second)
+			if current.ExpiresAt.Before(deadline) {
+				deadline = current.ExpiresAt
+			}
+			renewCtx, renewCancel := context.WithDeadline(ctx, deadline)
 			next, err := h.rootfs.RenewConsumer(renewCtx, stage, current)
 			renewCancel()
-			if err != nil {
-				h.handleWriterLeaseLoss(fmt.Errorf("renew RootFS consumer lease: %w", err))
+			if ctx.Err() != nil {
 				return
 			}
+			if err == nil && (!time.Now().Before(current.ExpiresAt) || next.LeaseID != current.LeaseID || !next.ExpiresAt.After(time.Now())) {
+				err = fmt.Errorf("RootFS consumer renewal lost continuous lease proof: %w", errdefs.ErrFailedPrecondition)
+			}
+			if err != nil {
+				if consumerRenewalIsTerminal(err) || !time.Now().Before(current.ExpiresAt) {
+					h.handleWriterLeaseLoss(fmt.Errorf("renew RootFS consumer lease: %w", err))
+					return
+				}
+				retrying = true
+				continue
+			}
+			retrying = false
 			current = next
 		}
 	}()
+}
+
+func consumerRenewalIsTerminal(err error) bool {
+	return errdefs.IsPermissionDenied(err) || errdefs.IsNotFound(err) || errdefs.IsFailedPrecondition(err) || errdefs.IsInvalidArgument(err)
 }
 
 func (h *taskHandle) stopConsumerRenewal() {
@@ -1401,6 +1446,10 @@ func (h *taskHandle) Recover(state PersistedState) error {
 		return err
 	}
 	if state.RootMounted && h.stage != nil {
+		adopted, err := h.recoverLiveRootFS()
+		if err != nil || adopted {
+			return err
+		}
 		return h.recoverCrashedRootFS()
 	}
 

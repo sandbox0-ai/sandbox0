@@ -53,7 +53,10 @@ func startPrimaryService(ctx context.Context, service primaryService) *primarySe
 			err = nil
 		}
 		if err == nil && ctx.Err() == nil {
-			err = fmt.Errorf("service stopped unexpectedly")
+			draining, ok := service.(interface{ Draining() bool })
+			if !ok || !draining.Draining() {
+				err = fmt.Errorf("service stopped unexpectedly")
+			}
 		}
 		handle.mu.Lock()
 		handle.err = err
@@ -153,6 +156,8 @@ type networkRuntimeService struct {
 	logger        *zap.Logger
 	observability *observability.Provider
 }
+
+func (s *networkRuntimeService) Draining() bool { return s != nil && s.daemon.Draining() }
 
 func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetworkRuntimeConfig, error) {
 	cfg, err := apiconfig.LoadNetworkRuntimeConfigFromPath(configPath)

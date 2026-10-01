@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -374,21 +375,45 @@ func serveNodeRuntime(
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return fmt.Errorf("secure ctld Nomad runtime socket: %w", err)
 	}
+	var admission sync.Mutex
+	var handlers sync.WaitGroup
+	accepting := true
+	handler := nodeRuntimeRPCHandler(runtime, onWriterLeaseLost, health, cleaner)
 	server := &http.Server{
-		Handler:           nodeRuntimeRPCHandler(runtime, onWriterLeaseLost, health, cleaner),
+		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			admission.Lock()
+			if !accepting {
+				admission.Unlock()
+				http.Error(writer, "runtime control is quiescing", http.StatusServiceUnavailable)
+				return
+			}
+			handlers.Add(1)
+			admission.Unlock()
+			defer handlers.Done()
+			handler.ServeHTTP(writer, request)
+		}),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
+		admission.Lock()
+		accepting = false
+		admission.Unlock()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
 			_ = server.Close()
 		}
+		handlers.Wait()
 	}()
 	err = server.Serve(listener)
+	if ctx.Err() != nil {
+		<-shutdownDone
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -451,6 +476,16 @@ func nodeRuntimeRPCHandler(
 	})
 	handle("/v1/sessions/consumer/register", func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
 		lease, err := runtime.RegisterConsumer(ctx, request.Stage, request.Consumer)
+		return nodeRuntimeRPCResponse{Lease: lease}, err
+	})
+	handle("/v1/sessions/consumer/adopt", func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {
+		adopter, ok := runtime.(interface {
+			AdoptLiveConsumer(context.Context, rootfshandoff.StageRequest, ConsumerRequest) (ConsumerLease, error)
+		})
+		if !ok {
+			return nodeRuntimeRPCResponse{}, errdefs.ErrFailedPrecondition
+		}
+		lease, err := adopter.AdoptLiveConsumer(ctx, request.Stage, request.Consumer)
 		return nodeRuntimeRPCResponse{Lease: lease}, err
 	})
 	handle("/v1/sessions/consumer/renew", func(ctx context.Context, request nodeRuntimeRPCRequest) (nodeRuntimeRPCResponse, error) {

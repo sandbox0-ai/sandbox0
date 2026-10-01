@@ -33,6 +33,17 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	switch request.URL.Path {
+	case "/internal/live-policy-snapshot":
+		if request.Method != http.MethodGet {
+			writeError(writer, errdefs.ErrInvalidArgument)
+			return
+		}
+		sandboxes, _, err := h.registry.Snapshot()
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		writeJSON(writer, sandboxes)
 	case protocol.RuntimeSlotNetworkHealthPath:
 		if request.Method != http.MethodGet {
 			writer.Header().Set("Allow", http.MethodGet)

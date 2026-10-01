@@ -25,6 +25,7 @@ const (
 	RoleStarting Role = "starting"
 	RolePrimary  Role = "primary"
 	RoleStandby  Role = "standby"
+	RoleDraining Role = "draining"
 )
 
 type State struct {

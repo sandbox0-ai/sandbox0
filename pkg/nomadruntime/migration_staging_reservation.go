@@ -278,7 +278,7 @@ func (r runtimeSlotJournalRecord) retainsMigrationCountAdmission() bool {
 func (j *runtimeSlotJournal) checkMigrationStagingPool(bucket *bolt.Bucket, ownSlot string) error {
 	retained := 0
 	err := bucket.ForEach(func(key, payload []byte) error {
-		record, excluded, err := j.migrationPoolScanRecord(payload)
+		record, excluded, err := j.migrationPoolScanRecord(key, payload)
 		if err != nil || excluded {
 			return err
 		}
@@ -375,8 +375,8 @@ func (j *runtimeSlotJournal) checkMigrationStagingWrite(bucket *bolt.Bucket, rec
 		}
 		return j.checkMigrationStagingPool(bucket, record.Registration.SlotID)
 	}
-	return bucket.ForEach(func(_, payload []byte) error {
-		other, excluded, err := j.migrationPoolScanRecord(payload)
+	return bucket.ForEach(func(key, payload []byte) error {
+		other, excluded, err := j.migrationPoolScanRecord(key, payload)
 		if err != nil || excluded {
 			return err
 		}

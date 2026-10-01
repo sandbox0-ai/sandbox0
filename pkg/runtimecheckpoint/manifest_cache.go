@@ -9,8 +9,8 @@ const (
 
 // manifestCache retains only manifests read from regional storage and checked
 // against an exact committed reference. It is not publication or execution
-// authority. In particular, peer plans cannot populate it, and VerifyLocal
-// still reads and hashes every local image chunk on every invocation.
+// authority. In particular, peer plans cannot populate it. Cached manifests
+// alone never authorize skipping verification of local image contents.
 //
 // Immutable strings prevent a caller from modifying cached metadata. FIFO
 // eviction bounds both payload bytes and entry count independently of node

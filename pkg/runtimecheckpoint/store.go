@@ -46,10 +46,11 @@ func (r Reference) ValidateFor(binding Binding) error {
 }
 
 type Store struct {
-	objects   objectstore.ContextConditionalStore
-	maxBytes  int64
-	manifests manifestCache
-	chunks    ChunkCache
+	objects        objectstore.ContextConditionalStore
+	maxBytes       int64
+	manifests      manifestCache
+	chunks         ChunkCache
+	verifiedImages verifiedImageCache
 }
 
 // ChunkCache is disposable node-local storage for verified immutable image
@@ -184,7 +185,14 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 			return cloned, err
 		}
 	}
-	result, err := materializeImage(ctx, manifest, directory, admit, downloadConcurrency, cloneChunk, func(ctx context.Context, chunk Chunk) ([]byte, error) {
+	guard := newImageVerificationGuard()
+	retained := false
+	defer func() {
+		if !retained {
+			guard.close()
+		}
+	}()
+	result, err := materializeImageWithVerification(ctx, manifest, directory, admit, downloadConcurrency, cloneChunk, guard, func(ctx context.Context, chunk Chunk) ([]byte, error) {
 		if s.chunks != nil {
 			if payload, ok := s.chunks.GetCheckpointChunk(chunk.Digest, chunk.Size); ok {
 				cacheChunks.Add(1)
@@ -203,6 +211,16 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 		}
 		return payload, err
 	})
+	if err == nil && guard != nil {
+		root, openErr := openPrivateDirectory(directory)
+		if openErr == nil {
+			if guard.finish(root, manifest) {
+				s.verifiedImages.put(ref, directory, guard)
+				retained = true
+			}
+			_ = root.Close()
+		}
+	}
 	return result, DownloadStats{cacheChunks.Load(), cacheBytes.Load(), clonedChunks.Load(), clonedBytes.Load(), regionalChunks.Load(), regionalBytes.Load()}, err
 }
 
@@ -210,6 +228,12 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 // file creation, chunk verification and crash-durable completion boundary.
 func materializeImage(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error, concurrency int,
 	cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error),
+	readChunk func(context.Context, Chunk) ([]byte, error)) (Manifest, error) {
+	return materializeImageWithVerification(ctx, manifest, directory, admit, concurrency, cloneChunk, nil, readChunk)
+}
+
+func materializeImageWithVerification(ctx context.Context, manifest Manifest, directory string, admit func(int64, uint64) error, concurrency int,
+	cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error), guard *imageVerificationGuard,
 	readChunk func(context.Context, Chunk) ([]byte, error)) (Manifest, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return Manifest{}, fmt.Errorf("checkpoint destination must be an absolute canonical path")
@@ -238,7 +262,7 @@ func materializeImage(ctx context.Context, manifest Manifest, directory string, 
 	}
 	defer root.Close()
 	for _, file := range manifest.Files {
-		if err := materializeFile(ctx, root, file, concurrency, cloneChunk, readChunk); err != nil {
+		if err := materializeFile(ctx, root, file, concurrency, cloneChunk, readChunk, guard.seal); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -262,11 +286,12 @@ func materializeImage(ctx context.Context, manifest Manifest, directory string, 
 	return manifest, nil
 }
 
-// VerifyLocal rechecks exact file inventory and every immutable chunk before a
+// VerifyLocal rechecks exact file inventory before a
 // recovered destination may reuse an image. Journal existence is not evidence
 // that staging survived a disk failure or that its contents remain unchanged.
-// Reuse the bounded publication scanner so large images do not serialize their
-// independent hash checks on the restore admission path.
+// A just-materialized image can consume one process-local kernel-guarded proof
+// instead of rereading cold cloned extents. Changed files, eviction, unsupported
+// kernels and process restart fall back to hashing every immutable chunk.
 func (s *Store) VerifyLocal(ctx context.Context, expected Binding, ref Reference, directory string) (Manifest, error) {
 	manifest, err := s.loadManifest(ctx, expected, ref)
 	if err != nil {
@@ -288,6 +313,17 @@ func (s *Store) VerifyLocal(ctx context.Context, expected Binding, ref Reference
 		if files[i].Path != file.Path || files[i].Size != file.Size {
 			return Manifest{}, fmt.Errorf("checkpoint file identity changed")
 		}
+	}
+	if guard := s.verifiedImages.take(ref, directory); guard != nil {
+		defer guard.close()
+		if guard.valid(root, manifest) {
+			if err := ctx.Err(); err != nil {
+				return Manifest{}, err
+			}
+			return manifest, nil
+		}
+	}
+	for _, file := range manifest.Files {
 		if _, err := scanImageFile(ctx, root, file, nil); err != nil {
 			return Manifest{}, err
 		}
@@ -467,7 +503,7 @@ func scanImageFile(ctx context.Context, root *os.Root, file File, publish func(c
 
 func materializeFile(ctx context.Context, root *os.Root, file File, concurrency int,
 	cloneChunk func(context.Context, Chunk, *os.File, int64) (bool, error),
-	readChunk func(context.Context, Chunk) ([]byte, error)) error {
+	readChunk func(context.Context, Chunk) ([]byte, error), seal ...func(string, *os.File)) error {
 	if err := root.MkdirAll(path.Dir(file.Path), 0o700); err != nil {
 		return err
 	}
@@ -525,6 +561,9 @@ func materializeFile(ctx context.Context, root *os.Root, file File, concurrency 
 	}
 	if err := output.Sync(); err != nil {
 		return err
+	}
+	for _, completed := range seal {
+		completed(file.Path, output)
 	}
 	return output.Close()
 }

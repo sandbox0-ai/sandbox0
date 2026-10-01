@@ -563,14 +563,21 @@ func (s *Service) resumeNomadSandboxMode(ctx context.Context, sandboxID string, 
 // expectedOperation restricts background recovery to an already-admitted
 // lifecycle. A stale queue item cannot create a replacement resume.
 func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID string, memory bool, expectedOperation string) (*sandboxstore.SandboxRecord, *runtimeslotclaim.Result, error) {
-	if memory {
-		if _, ok := s.planner.(checkpointPlanner); !ok {
-			return nil, nil, fmt.Errorf("%w: memory resume planner is unavailable", service.ErrSandboxLifecycleUnavailable)
-		}
-	}
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" || len(sandboxID) > 512 {
 		return nil, nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	if memory {
+		next, handled, err := s.resolveCheckpointFallback(ctx, sandboxID, expectedOperation, "")
+		if err != nil {
+			return nil, nil, err
+		}
+		if handled {
+			if next == "" {
+				return nil, nil, errNomadCheckpointResumePending
+			}
+			return s.resumeNomadSandboxOperation(ctx, sandboxID, false, next)
+		}
 	}
 	startedAt := s.now().UTC()
 	record, err := s.store.GetSandbox(ctx, sandboxID)
@@ -592,6 +599,9 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		SandboxID: sandboxID, ExpectedTeamID: record.TeamID, Memory: memory,
 	})
 	if err != nil {
+		if memory && expectedOperation == "" && (errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained) || errors.Is(err, sandboxstore.ErrNomadCheckpointConflict)) {
+			return s.resumeNomadSandboxOperation(ctx, sandboxID, false, "")
+		}
 		return nil, nil, mapNomadResumeError("retry Nomad sandbox resume", sandboxID, err)
 	}
 	if expectedOperation != "" && (!found || candidate == nil || candidate.OperationID != expectedOperation) {
@@ -606,6 +616,9 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 			SandboxID: sandboxID, ExpectedTeamID: record.TeamID, Memory: memory, ActiveSandboxLimit: limit,
 		})
 		if err != nil {
+			if memory && expectedOperation == "" && (errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained) || errors.Is(err, sandboxstore.ErrNomadCheckpointConflict)) {
+				return s.resumeNomadSandboxOperation(ctx, sandboxID, false, "")
+			}
 			return nil, nil, mapNomadResumeError("request Nomad sandbox resume", sandboxID, err)
 		}
 	}
@@ -620,15 +633,22 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 	}
 
 	if memory {
-		if err := bindCheckpointResumePlan(candidate, &plan); err != nil {
-			// No restore command has been issued by this attempt. A mismatch
-			// between immutable capture authority and the current sandbox plan
-			// cannot heal on retry; close the exact lifecycle so it does not
-			// permanently block an explicit filesystem-only resume. The store
-			// still requires node image cancellation if an earlier attempt sent
-			// an image preparation command.
-			resumeErr := apierror.NewConflict("sandbox", sandboxID, err)
-			return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
+		bindErr := bindCheckpointResumePlan(candidate, &plan)
+		if _, ok := s.planner.(checkpointPlanner); !ok {
+			bindErr = fmt.Errorf("memory resume planner is unavailable")
+		}
+		if bindErr != nil {
+			next, handled, err := s.resolveCheckpointFallback(ctx, sandboxID, candidate.OperationID, bindErr.Error())
+			if err != nil {
+				return nil, nil, err
+			}
+			if handled {
+				if next == "" {
+					return nil, nil, errNomadCheckpointResumePending
+				}
+				return s.resumeNomadSandboxOperation(ctx, sandboxID, false, next)
+			}
+			return nil, nil, s.abortFailedNomadResume(ctx, candidate, apierror.NewConflict("sandbox", sandboxID, bindErr))
 		}
 	} else {
 		plan.request.RuntimeGeneration = candidate.RuntimeGeneration
@@ -665,8 +685,13 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 	if err != nil {
 		// A lost restore or handover reply may hide a running guest. Preserve
 		// memory custody for exact retry or physical failure resolution.
-		if !memory {
+		// A durable cold fallback can wait on capacity using the same
+		// operation. It must not create a new lifecycle on every worker pass.
+		if !memory && (expectedOperation == "" || !errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable)) {
 			err = s.abortFailedNomadResume(ctx, candidate, err)
+		}
+		if memory || expectedOperation != "" {
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, mapNomadResumeError("claim Nomad resume runtime slot", sandboxID, err))
 		}
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
 			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
@@ -678,13 +703,13 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		resumeErr := fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
 			service.ErrSandboxLifecycleUnavailable)
 		if memory {
-			return nil, nil, resumeErr
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, resumeErr)
 		}
 		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	if memory && (result.CommandProof.Validate() != nil || result.CommandProof.OperationID != candidate.OperationID ||
 		result.CommandProof.SlotID != result.Slot.ID || result.ProcdInstanceID != result.CommandProof.ProcdInstanceID) {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume requires exact command-ready proof"))
+		return nil, nil, errors.Join(errNomadCheckpointResumePending, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume requires exact command-ready proof")))
 	}
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
@@ -693,6 +718,9 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		ResourceLeaseDigest: append([]byte(nil), result.Slot.ResourceLeaseDigest...),
 	})
 	if err != nil {
+		if memory || expectedOperation != "" {
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err))
+		}
 		return nil, nil, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err)
 	}
 	if completed == nil || completed.ID != sandboxID ||
@@ -710,7 +738,7 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 	s.logger.Info("Resumed Nomad sandbox",
 		zap.String("sandboxID", sandboxID), zap.String("operationID", candidate.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Int64("runtimeGeneration", candidate.RuntimeGeneration),
-		zap.Duration("endToEndDuration", result.Duration),
+		zap.Duration("endToEndDuration", result.Duration), zap.Bool("restoredMemory", memory),
 	)
 	return completed, result, nil
 }

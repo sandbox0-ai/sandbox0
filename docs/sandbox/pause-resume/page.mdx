@@ -53,10 +53,11 @@ accept an optional JSON object:
 
 Omitting the body, using an empty object, or setting `memory: false` keeps the
 filesystem-only behavior. Choose memory on **both** pause and resume. An explicit
-memory resume requires a retained memory checkpoint matching the committed
-RootFS generation; a filesystem-only pause cannot later recover its discarded
-process memory. Unsupported or incompatible memory operations return an error
-without falling back to an entrypoint restart.
+memory resume prefers a retained checkpoint matching the committed RootFS
+generation. If memory is missing, incompatible, or cannot be restored, resume
+falls back to the committed RootFS and starts fresh processes. A filesystem-only
+pause cannot later recover discarded process memory. Memory capture failures
+still report an error; pause never claims to have retained memory it did not save.
 
 A successful memory pause retains supported guest processes, memory, PIDs,
 open files and runtime tmpfs state, together with the matching RootFS checkpoint.
@@ -120,7 +121,8 @@ The existing process, writer and resource lease stay owned by the running sandbo
 Once capture is authorized, this cancellation path is forbidden; an uncertain
 capture requires physical failure resolution. It never retries capture or reports
 successful memory retention. After exact source cleanup, the last committed
-RootFS remains available, but memory resume fails without a retained image.
+RootFS remains available, and a later memory resume uses filesystem-only
+recovery when no retained image exists.
 The public status is `failed` even though `paused` remains true for filesystem
 recovery. Memory pause wait helpers raise `SandboxLifecycleFailedError` instead
 of treating that recovery state as a successful pause.
@@ -130,19 +132,26 @@ cancellation before reclaiming the source's resources.
 After restore execution is authorized, a failed target is stopped and physically
 reclaimed before its resource lease is released. The failed attempt consumes its
 runtime generation while retaining the paused checkpoint and committed disk head.
-A later explicit `memory: true` resume creates a new attempt using that image;
-failure cleanup never silently starts a replacement. If restoring the parent of
-a running memory fork fails, retrying the fork reports that failure instead of
-recapturing the parent or creating another child.
-After cleanup, the public status is `failed`; memory resume wait helpers raise
-`SandboxLifecycleFailedError` for the failed generation.
+The accepted resume then automatically creates a filesystem-only replacement
+from the committed RootFS. Scheduling intent survives manager restarts, and no
+replacement can start until the failed target, writer and resource lease are
+physically reclaimed. If restoring the parent of a running memory fork fails,
+retrying the fork reports that failure instead of recapturing the parent or creating another child.
+While cleanup and fallback are pending, the public status remains `starting`.
+An explicit resume can return `resumed: false` to acknowledge this durable work;
+poll until `running`, or use the SDK resume wait helper. Fresh processes replace
+the captured processes after a filesystem-only fallback.
 
 An HTTP timeout or client disconnection does not cancel an accepted durable
 operation. Inspect the sandbox and retry the same memory mode; never retry with
 `memory: false` as an error-recovery shortcut.
 
 Memory capture must match the destination's runsc/platform/CPU and immutable
-runtime configuration. Changing configuration after capture can prevent restore.
+runtime configuration. Incompatible runtime or workload changes cause
+filesystem-only fallback.
+Upgrading the platform procd alone does not discard otherwise compatible memory;
+restored processes keep their captured daemon. Template upgrades do not replace
+the sandbox's immutable committed RootFS head.
 If webhooks are configured, capture requires a durable webhook outbox; in-flight
 delivery and its acknowledgement drain before capture. Restored sessions retain
 their captured process identity rather than starting a new recovery attempt.
@@ -150,8 +159,8 @@ their captured process identity rather than starting a new recovery attempt.
 With `auto_resume: true`, supported inbound access restores a retained memory
 checkpoint when the paused sandbox has one. If no memory checkpoint is retained,
 automatic wake-up uses filesystem-only resume. A failed or incompatible memory
-restore does not fall back to a cold start. An explicit `POST /resume` without
-`memory: true` retains its filesystem-only default.
+restore falls back to the committed RootFS after physical cleanup. An explicit
+`POST /resume` without `memory: true` retains its filesystem-only default.
 
 ## Filesystem Pause Transaction
 
@@ -221,7 +230,9 @@ Resume:
 5. starts stock runsc and procd; and
 6. commits `running` only after an authenticated first-command readiness proof.
 
-Resume returns only after the new command-ready binding commits. The new
+Filesystem-only resume returns after the new command-ready binding commits.
+A memory resume with pending cleanup and fallback can instead acknowledge the
+durable operation with `resumed: false`. The new
 `runtime_id` names a different physical allocation and `runtime_generation`
 increases by one.
 
@@ -284,7 +295,8 @@ callers never receive a mixed old/new runtime binding.
 
 `auto_resume` controls whether supported inbound access may wake a paused
 sandbox. The wake-up mode follows the paused sandbox's committed state: retained
-memory restores its processes, while filesystem-only pause starts a new runtime.
+memory restores its processes when compatible and otherwise starts fresh
+processes from the committed RootFS; filesystem-only pause starts a new runtime.
 It does not disable platform-initiated crash fencing.
 
 Common auto-resume entry points include sandbox runtime APIs, SSH, and

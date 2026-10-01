@@ -168,7 +168,22 @@ func TestNomadCheckpointRestoreFailureReusesMigrationCleanupAndRetainsImageInteg
 				life, err := f.store.GetLifecycleTxn(f.ctx, id)
 				require.NoError(t, err)
 				require.Equal(t, SandboxLifecyclePhaseAborted, life.Phase)
-				if mode == "issued" || mode == "consumed" {
+				switch mode {
+				case "consumed":
+					next, handled, err := NewPGSandboxStore(f.pool).ResolveNomadCheckpointResumeFallback(f.ctx, owner.ID, id, "", nil, true)
+					require.NoError(t, err)
+					require.True(t, handled)
+					require.NotEmpty(t, next)
+					cold, found, err := f.store.RetryNomadSandboxResume(f.ctx, &RetryNomadSandboxResumeRequest{SandboxID: owner.ID, ExpectedTeamID: owner.TeamID})
+					require.NoError(t, err)
+					require.True(t, found)
+					require.Nil(t, cold.Checkpoint)
+					require.Equal(t, owner.RuntimeGeneration+1, cold.RuntimeGeneration)
+					require.Equal(t, life.ExpectedGenerationID, cold.SourceGenerationID)
+					pending, err := f.store.NomadCheckpointResumeFallbackPending(f.ctx, owner.ID, cold.Record.RuntimeGeneration, cold.Record.LifecycleEpoch)
+					require.NoError(t, err)
+					require.True(t, pending)
+				case "issued":
 					next, err := f.store.RequestNomadSandboxResume(f.ctx, &RequestNomadSandboxResumeRequest{SandboxID: owner.ID, ExpectedTeamID: owner.TeamID, Memory: true})
 					require.NoError(t, err)
 					require.NotEqual(t, id, next.OperationID)
@@ -183,7 +198,7 @@ func TestNomadCheckpointRestoreFailureReusesMigrationCleanupAndRetainsImageInteg
 					require.NoError(t, err)
 					require.False(t, failed, "old failure must not hide the new explicit attempt")
 					completeCheckpointFailureRetry(t, f, next)
-				} else {
+				default:
 					require.Equal(t, SandboxDesiredStateTerminating, owner.DesiredState)
 				}
 				require.NoError(t, f.store.CommitNomadSandboxMigrationFailureCleanup(f.ctx, receipt.Request.Request, receipt.Request.Proof))

@@ -1990,7 +1990,7 @@ paths:
     post:
       tags: [sandboxes]
       summary: Resume a sandbox
-      description: The default starts a new process runtime from the committed RootFS. Set memory=true to restore a retained execution image. Missing or incompatible memory is an error; it never falls back to a filesystem-only resume. A disconnected request may continue through background recovery.
+      description: The default starts a new process runtime from the committed RootFS. Set memory=true to prefer a retained execution image. Missing or incompatible memory falls back to the committed RootFS. A failed memory target is physically reclaimed before a filesystem-only replacement starts. A response with resumed=false means durable fallback is pending; poll sandbox status until running. A disconnected request may continue through background recovery.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -6216,7 +6216,7 @@ components:
         memory:
           type: boolean
           default: false
-          description: Explicitly preserve or restore process memory and execution state. Omitted or false retains the existing filesystem-only behavior. Memory failures are reported without a cold fallback.
+          description: On pause, retain process memory and execution state; capture failures remain errors. On resume, prefer retained memory and fall back to the committed RootFS if memory is missing, incompatible, or cannot be restored. Omitted or false uses filesystem-only behavior.
     PauseSandboxResponse:
       type: object
       properties:
@@ -6242,6 +6242,7 @@ components:
           type: string
         resumed:
           type: boolean
+          description: True after a command-ready runtime has committed. False means an accepted durable resume is still pending (memory retry, cleanup, or RootFS fallback); poll sandbox status until running.
         restored_memory:
           type: string
       required: [sandbox_id, resumed]

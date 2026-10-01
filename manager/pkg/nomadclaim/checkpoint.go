@@ -10,9 +10,13 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/apierror"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"go.uber.org/zap"
 )
+
+var errNomadCheckpointResumePending = fmt.Errorf("%w: durable memory resume or RootFS fallback is pending", service.ErrSandboxLifecycleUnavailable)
 
 type checkpointPlanner interface {
 	ClaimCheckpoint(context.Context, runtimeslotclaim.Request, protocol.CheckpointRestoreAuthority) (*runtimeslotclaim.Result, error)
@@ -52,21 +56,59 @@ func (s *Service) PauseMemorySandboxAndWait(ctx context.Context, sandboxID strin
 // retained process image. The existing resume entry points keep cold defaults.
 func (s *Service) ResumeMemorySandboxAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
 	record, _, err := s.resumeNomadSandboxMode(ctx, sandboxID, true)
+	if errors.Is(err, errNomadCheckpointResumePending) || (err == nil && record == nil) {
+		return &managerapi.ResumeSandboxResponse{SandboxID: strings.TrimSpace(sandboxID), Resumed: false}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &managerapi.ResumeSandboxResponse{SandboxID: record.ID, Resumed: true}, nil
 }
 
-// ResumeSandboxAutomaticallyAndWait restores retained memory when this paused
-// sandbox owns a checkpoint. Only the proven absence of a checkpoint permits
-// the original filesystem resume path; restore failures never start cold.
+// ResumeSandboxAutomaticallyAndWait prefers retained execution state and uses
+// the committed RootFS when memory cannot be recovered.
 func (s *Service) ResumeSandboxAutomaticallyAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
-	response, err := s.ResumeMemorySandboxAndWait(ctx, sandboxID)
-	if errors.Is(err, sandboxstore.ErrNomadCheckpointNotRetained) {
-		return s.ResumeSandboxAndWait(ctx, sandboxID)
+	record, _, err := s.resumeNomadSandboxMode(ctx, sandboxID, true)
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	if record == nil {
+		return nil, errNomadCheckpointResumePending
+	}
+	return &managerapi.ResumeSandboxResponse{SandboxID: record.ID, Resumed: true}, nil
+}
+
+type checkpointFallbackStore interface {
+	ResolveNomadCheckpointResumeFallback(context.Context, string, string, string, *int64, bool) (string, bool, error)
+}
+
+func (s *Service) resolveCheckpointFallback(ctx context.Context, sandboxID, operation, reason string) (string, bool, error) {
+	store, ok := s.store.(checkpointFallbackStore)
+	if !ok {
+		return "", false, nil
+	}
+	next, handled, err := store.ResolveNomadCheckpointResumeFallback(ctx, sandboxID, operation, reason, nil, false)
+	if errors.Is(err, sandboxstore.ErrNomadCheckpointFallbackQuotaRequired) {
+		record, loadErr := s.store.GetSandbox(ctx, sandboxID)
+		if loadErr != nil {
+			return "", false, loadErr
+		}
+		if record == nil {
+			return "", false, apierror.NewNotFound("sandbox", sandboxID)
+		}
+		limit, limitErr := s.activeSandboxLimit(ctx, record.TeamID)
+		if limitErr != nil {
+			return "", false, limitErr
+		}
+		next, handled, err = store.ResolveNomadCheckpointResumeFallback(ctx, sandboxID, operation, reason, limit, true)
+	}
+	if reason != "" && err == nil {
+		s.logger.Warn("Memory resume falling back to committed RootFS", zap.String("sandboxID", sandboxID), zap.String("operationID", operation), zap.String("reason", reason))
+	}
+	if err != nil {
+		return next, handled, mapNomadResumeError("resolve checkpoint RootFS fallback", sandboxID, err)
+	}
+	return next, handled, nil
 }
 
 // bindCheckpointResumePlan rejects configuration drift instead of silently
@@ -92,12 +134,12 @@ func bindCheckpointResumePlan(candidate *sandboxstore.NomadSandboxResumeCandidat
 		expected.EnvVars = maps.Clone(expected.EnvVars)
 		delete(expected.EnvVars, "NPM_CONFIG_REGISTRY")
 	}
-	// An importer upgrade changes only the executable selected for new claims.
-	// A retained process image must keep its captured executable; the worker
-	// verifies that exact digest in its immutable local procd cache.
-	if expected.Procd != nil && target.Procd != nil && expected.Procd.Protocol == target.Procd.Protocol {
+	// The restored guest already contains its captured daemon. A new platform
+	// daemon alone must not discard recoverable process memory.
+	if expected.Procd == nil || target.Procd == nil || expected.Procd.Protocol == target.Procd.Protocol {
 		expected.Procd = target.Procd
 	}
+
 	expectedRevision, err := expected.Revision()
 	if err != nil {
 		return err

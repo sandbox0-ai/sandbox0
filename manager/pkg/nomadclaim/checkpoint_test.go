@@ -273,8 +273,9 @@ func TestMemoryResumeServicePreservesUncertainExecutionForExactRetry(t *testing.
 			case "readiness":
 				p.missingProof = true
 			}
-			_, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
-			require.Error(t, err)
+			response, err := f.service.ResumeMemorySandboxAndWait(t.Context(), id)
+			require.NoError(t, err)
+			require.False(t, response.Resumed, "accepted work continues after an uncertain execution reply")
 			require.Empty(t, f.store.resumeAbortCalls)
 			require.True(t, f.store.resumeRequested)
 			first := p.authorities[0]

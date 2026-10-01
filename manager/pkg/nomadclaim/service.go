@@ -574,7 +574,7 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		}
 		if handled {
 			if next == "" {
-				return nil, nil, errNomadCheckpointFallbackPending
+				return nil, nil, errNomadCheckpointResumePending
 			}
 			return s.resumeNomadSandboxOperation(ctx, sandboxID, false, next)
 		}
@@ -644,7 +644,7 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 			}
 			if handled {
 				if next == "" {
-					return nil, nil, errNomadCheckpointFallbackPending
+					return nil, nil, errNomadCheckpointResumePending
 				}
 				return s.resumeNomadSandboxOperation(ctx, sandboxID, false, next)
 			}
@@ -690,6 +690,9 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		if !memory && (expectedOperation == "" || !errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable)) {
 			err = s.abortFailedNomadResume(ctx, candidate, err)
 		}
+		if memory || expectedOperation != "" {
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, mapNomadResumeError("claim Nomad resume runtime slot", sandboxID, err))
+		}
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
 			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
 		}
@@ -700,13 +703,13 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		resumeErr := fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
 			service.ErrSandboxLifecycleUnavailable)
 		if memory {
-			return nil, nil, resumeErr
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, resumeErr)
 		}
 		return nil, nil, s.abortFailedNomadResume(ctx, candidate, resumeErr)
 	}
 	if memory && (result.CommandProof.Validate() != nil || result.CommandProof.OperationID != candidate.OperationID ||
 		result.CommandProof.SlotID != result.Slot.ID || result.ProcdInstanceID != result.CommandProof.ProcdInstanceID) {
-		return nil, nil, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume requires exact command-ready proof"))
+		return nil, nil, errors.Join(errNomadCheckpointResumePending, apierror.NewConflict("sandbox", sandboxID, fmt.Errorf("memory resume requires exact command-ready proof")))
 	}
 	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
 		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
@@ -715,6 +718,9 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 		ResourceLeaseDigest: append([]byte(nil), result.Slot.ResourceLeaseDigest...),
 	})
 	if err != nil {
+		if memory || expectedOperation != "" {
+			return nil, nil, errors.Join(errNomadCheckpointResumePending, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err))
+		}
 		return nil, nil, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err)
 	}
 	if completed == nil || completed.ID != sandboxID ||

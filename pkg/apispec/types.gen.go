@@ -1828,7 +1828,7 @@ type RestoreSandboxRootFSResponse struct {
 type ResumeSandboxResponse struct {
 	RestoredMemory *string `json:"restored_memory,omitempty"`
 
-	// Resumed True after a command-ready runtime has committed. False means a durable RootFS fallback is still pending; poll sandbox status until running.
+	// Resumed True after a command-ready runtime has committed. False means an accepted durable resume is still pending (memory retry, cleanup, or RootFS fallback); poll sandbox status until running.
 	Resumed   bool   `json:"resumed"`
 	SandboxId string `json:"sandbox_id"`
 }

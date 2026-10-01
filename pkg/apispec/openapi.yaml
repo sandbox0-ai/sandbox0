@@ -6242,7 +6242,7 @@ components:
           type: string
         resumed:
           type: boolean
-          description: True after a command-ready runtime has committed. False means a durable RootFS fallback is still pending; poll sandbox status until running.
+          description: True after a command-ready runtime has committed. False means an accepted durable resume is still pending (memory retry, cleanup, or RootFS fallback); poll sandbox status until running.
         restored_memory:
           type: string
       required: [sandbox_id, resumed]

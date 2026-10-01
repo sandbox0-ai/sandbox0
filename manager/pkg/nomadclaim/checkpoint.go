@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var errNomadCheckpointFallbackPending = fmt.Errorf("%w: memory cleanup and RootFS resume are pending", service.ErrSandboxLifecycleUnavailable)
+var errNomadCheckpointResumePending = fmt.Errorf("%w: durable memory resume or RootFS fallback is pending", service.ErrSandboxLifecycleUnavailable)
 
 type checkpointPlanner interface {
 	ClaimCheckpoint(context.Context, runtimeslotclaim.Request, protocol.CheckpointRestoreAuthority) (*runtimeslotclaim.Result, error)
@@ -56,7 +56,7 @@ func (s *Service) PauseMemorySandboxAndWait(ctx context.Context, sandboxID strin
 // retained process image. The existing resume entry points keep cold defaults.
 func (s *Service) ResumeMemorySandboxAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
 	record, _, err := s.resumeNomadSandboxMode(ctx, sandboxID, true)
-	if errors.Is(err, errNomadCheckpointFallbackPending) || (err == nil && record == nil) {
+	if errors.Is(err, errNomadCheckpointResumePending) || (err == nil && record == nil) {
 		return &managerapi.ResumeSandboxResponse{SandboxID: strings.TrimSpace(sandboxID), Resumed: false}, nil
 	}
 	if err != nil {
@@ -73,7 +73,7 @@ func (s *Service) ResumeSandboxAutomaticallyAndWait(ctx context.Context, sandbox
 		return nil, err
 	}
 	if record == nil {
-		return nil, errNomadCheckpointFallbackPending
+		return nil, errNomadCheckpointResumePending
 	}
 	return &managerapi.ResumeSandboxResponse{SandboxID: record.ID, Resumed: true}, nil
 }

@@ -79,6 +79,23 @@ func (s *PGSandboxStore) ResolveNomadCheckpointResumeFallback(ctx context.Contex
 	if life.Phase == SandboxLifecyclePhaseCommitted {
 		return "", false, nil
 	}
+	if reason == "" && savedReason == "" && life.Phase != SandboxLifecyclePhaseAborted {
+		// CPU preflight can fail before image custody exists. Its disposable
+		// carrier retries must not extend an accepted memory attempt forever.
+		// Image preparation and authorized execution keep their existing exact
+		// lease deadlines and physical cancellation/failure protocols.
+		var preImageExpired bool
+		if err := tx.QueryRow(ctx, `SELECT f.created_at<=clock_timestamp()-INTERVAL '2 minutes'
+			AND NOT r.evidence ? 'image' AND NOT r.evidence ? 'restore'
+			FROM manager.sandbox_runtime_resume_fallbacks f
+			JOIN manager.sandbox_runtime_checkpoint_restores r ON r.operation_id=f.operation_id
+			WHERE f.operation_id=$1`, source).Scan(&preImageExpired); err != nil {
+			return "", false, err
+		}
+		if preImageExpired {
+			reason = "memory restore could not complete pre-image admission within two minutes"
+		}
+	}
 	if reason != "" && savedReason == "" {
 		if _, err := tx.Exec(ctx, `UPDATE manager.sandbox_runtime_resume_fallbacks SET reason=$2 WHERE operation_id=$1`, source, reason); err != nil {
 			return "", false, err

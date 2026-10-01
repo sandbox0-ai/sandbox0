@@ -738,7 +738,7 @@ func (s *Service) resumeNomadSandboxOperation(ctx context.Context, sandboxID str
 	s.logger.Info("Resumed Nomad sandbox",
 		zap.String("sandboxID", sandboxID), zap.String("operationID", candidate.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Int64("runtimeGeneration", candidate.RuntimeGeneration),
-		zap.Duration("endToEndDuration", result.Duration),
+		zap.Duration("endToEndDuration", result.Duration), zap.Bool("restoredMemory", memory),
 	)
 	return completed, result, nil
 }

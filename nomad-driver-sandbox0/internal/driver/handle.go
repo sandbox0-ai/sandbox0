@@ -681,6 +681,9 @@ func (h *taskHandle) executeClaim(
 		if err != nil {
 			return h.poisonClaimLaunch(err, false)
 		}
+		if err := restoreClaimBundleMounts(h.bundleDir, imageDirectory); err != nil {
+			return h.poisonClaimLaunch(err, false)
+		}
 	} else if durableStage != nil {
 		attachCtx, attachCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		stepStarted = time.Now()

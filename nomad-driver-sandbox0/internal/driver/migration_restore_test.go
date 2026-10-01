@@ -2,8 +2,12 @@ package driver
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
@@ -193,6 +198,14 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool, check
 	require.NoError(t, claim.ValidateRegional())
 	runner := &restoreRunsc{migrationRunsc: &migrationRunsc{fakeRunsc: fixture.runner, executable: launch.ExecutableDigest, cpuObservation: launch.Observation}}
 	custodian := &restoreCustodian{RootFSRuntime: fixture.rootfs, custody: nomadruntime.MigrationDestinationCustody{Request: image, RequestDigest: imageDigest, ImageDirectory: t.TempDir(), Prepared: &prepared}}
+	// Fake custody still contains the stock runsc metadata required before
+	// launch. Missing metadata must never silently use a new driver's mounts.
+	require.NoError(t, handle.writeClaimBundle(source, resources))
+	payload, err := os.ReadFile(filepath.Join(handle.bundleDir, "config.json"))
+	require.NoError(t, err)
+	var captured specs.Spec
+	require.NoError(t, json.Unmarshal(payload, &captured))
+	writeRestoreMountFixture(t, custodian.custody.ImageDirectory, captured)
 	handle.runner, handle.rootfs = runner, custodian
 	restoreDigest, err := restore.Digest()
 	require.NoError(t, err)
@@ -215,6 +228,43 @@ func migrationRestoreHandleCPUFixture(t *testing.T, retainCPUHistory bool, check
 		handle.mu.Unlock()
 	})
 	return handle, claim, runner, custodian, fixture
+}
+
+func writeRestoreMountFixture(t *testing.T, directory string, spec specs.Spec) {
+	t.Helper()
+	containers, err := json.Marshal(map[string]specs.Spec{"__no_name_0": spec})
+	require.NoError(t, err)
+	metadata, err := json.Marshal(map[string]string{"container_specs": string(containers)})
+	require.NoError(t, err)
+	header := make([]byte, 16)
+	copy(header, "gVisorSF")
+	binary.BigEndian.PutUint64(header[8:], uint64(len(metadata)))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "checkpoint.img"), append(header, metadata...), 0600))
+}
+
+func TestCheckpointRestoreDoesNotInjectNewNodeCAMount(t *testing.T) {
+	handle, claim, runner, _, _ := migrationRestoreHandleCPUFixture(t, true, runtimecontrol.CheckpointResume)
+	handle.networkMITMCAFile = "/destination/network-ca.crt"
+	require.NoError(t, handle.Claim(claim))
+	payload, err := os.ReadFile(filepath.Join(handle.bundleDir, "config.json"))
+	require.NoError(t, err)
+	var spec specs.Spec
+	require.NoError(t, json.Unmarshal(payload, &spec))
+	for _, mount := range spec.Mounts {
+		require.NotEqual(t, networkMITMCADestination, mount.Destination)
+		require.NotEqual(t, "/run/sandbox0/networking/mitm-ca.crt", mount.Destination)
+	}
+	require.Contains(t, runner.callsSnapshot(), "restore")
+	require.NotContains(t, runner.callsSnapshot(), "start")
+}
+
+func TestCheckpointRestoreMissingMountMetadataNeverLaunches(t *testing.T) {
+	handle, claim, runner, custodian, _ := migrationRestoreHandleFixture(t)
+	require.NoError(t, os.Remove(filepath.Join(custodian.custody.ImageDirectory, "checkpoint.img")))
+	require.ErrorContains(t, handle.Claim(claim), "restore captured OCI mounts")
+	require.NotContains(t, runner.callsSnapshot(), "create")
+	require.NotContains(t, runner.callsSnapshot(), "restore")
+	require.NotContains(t, runner.callsSnapshot(), "start")
 }
 
 func TestMigrationRestoreClaimExecutesOnceAndNeverStartsEntrypoint(t *testing.T) {

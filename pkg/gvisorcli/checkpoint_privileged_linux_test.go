@@ -148,6 +148,26 @@ func TestPrivilegedExecutionCheckpoint(t *testing.T) {
 			copied := filepath.Join(root, "restored-image")
 			_, err = store.Download(ctx, binding, ref, copied)
 			require.NoError(t, err)
+			// Reproduce a driver upgrade that adds a node-provided CA bind.
+			// The uncorrected destination must fail stock runsc's validation;
+			// the same immutable old image restores with its captured topology.
+			ca := filepath.Join(root, "node-ca.crt")
+			require.NoError(t, os.WriteFile(ca, []byte("isolated public CA fixture"), 0600))
+			spec.Mounts = append(spec.Mounts, specs.Mount{
+				Destination: "/run/sandbox0/networking/mitm-ca.crt", Type: "bind", Source: ca,
+				Options: []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+			})
+			payload, err = json.Marshal(spec)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), payload, 0600))
+			incompatible := makeRunner("incompatible")
+			require.NoError(t, incompatible.Create(ctx, bundle, "incompatible"))
+			require.ErrorContains(t, incompatible.Restore(ctx, "incompatible", copied), "Mounts")
+			require.NoError(t, incompatible.Delete(ctx, "incompatible", true))
+			require.NoError(t, RestoreCheckpointMounts(copied, &spec))
+			payload, err = json.Marshal(spec)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), payload, 0600))
 			require.NoError(t, target.Create(ctx, bundle, "target"))
 			require.NoError(t, target.Restore(ctx, "target", copied))
 			after := waitCheckpointEvidence(t, ctx, evidence, cut.Counter+2)

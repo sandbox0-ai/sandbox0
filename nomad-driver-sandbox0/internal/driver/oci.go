@@ -272,3 +272,26 @@ func writeBundle(bundleDir string, spec specs.Spec) error {
 	}
 	return nil
 }
+
+// The normal bundle already owns destination-only host sources and disk-backed
+// /tmp. Restore changes only its mounts, using the verified capture's topology;
+// running PrepareEphemeralTmp again would overwrite the saved /tmp structure.
+func restoreClaimBundleMounts(bundleDir, imageDirectory string) error {
+	configPath := filepath.Join(bundleDir, "config.json")
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read restore OCI bundle: %w", err)
+	}
+	var spec specs.Spec
+	if err := json.Unmarshal(payload, &spec); err != nil {
+		return fmt.Errorf("decode restore OCI bundle: %w", err)
+	}
+	if err := gvisorcli.RestoreCheckpointMounts(imageDirectory, &spec); err != nil {
+		return fmt.Errorf("restore captured OCI mounts: %w", err)
+	}
+	payload, err = json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, payload, 0o644)
+}

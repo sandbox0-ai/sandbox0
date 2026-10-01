@@ -207,9 +207,9 @@ func (r *NomadSandboxReader) projectActive(
 	}
 	if projected.Status == managerapi.SandboxStatusFailed {
 		if store, ok := r.store.(interface {
-			NomadCheckpointPausePending(context.Context, string, int64, int64) (bool, error)
+			NomadSandboxPausePending(context.Context, string, int64, int64) (bool, error)
 		}); ok {
-			pending, err := store.NomadCheckpointPausePending(ctx, record.ID, record.RuntimeGeneration, record.LifecycleEpoch)
+			pending, err := store.NomadSandboxPausePending(ctx, record.ID, record.RuntimeGeneration, record.LifecycleEpoch)
 			if err != nil {
 				return nil, fmt.Errorf("get checkpoint pause projection: %w", err)
 			}

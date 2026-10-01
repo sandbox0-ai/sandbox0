@@ -159,19 +159,18 @@ func (s *PGSandboxStore) NomadCheckpointResumeFallbackPending(ctx context.Contex
 	return pending, err
 }
 
-// NomadCheckpointPausePending recognizes successful capture custody while the
+// NomadSandboxPausePending recognizes a durable pause while the
 // source exits, including a committed pause observed through an older active
 // owner snapshot. Physically resolved capture failures remain terminal errors.
-func (s *PGSandboxStore) NomadCheckpointPausePending(ctx context.Context, sandbox string, generation, epoch int64) (bool, error) {
+func (s *PGSandboxStore) NomadSandboxPausePending(ctx context.Context, sandbox string, generation, epoch int64) (bool, error) {
 	var pending bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS (
-  SELECT 1 FROM manager.sandbox_runtime_checkpoints c
-  JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=c.operation_id
+  SELECT 1 FROM manager.sandbox_lifecycle_txns l
+  LEFT JOIN manager.sandbox_runtime_checkpoints c ON c.operation_id=l.txn_id
   JOIN manager.sandboxes s ON s.sandbox_id=l.sandbox_id
   WHERE l.sandbox_id=$1 AND l.from_generation=$2 AND l.epoch=$3 AND l.kind='pause'
   AND l.phase IN ('preparing','barriered','publishing','committing','committed')
-  AND NOT c.evidence ? 'capture_failure' AND NOT c.evidence ? 'cancel_authorized'
-  AND (c.evidence->>'capture_authorized'='true' OR l.phase='committed')
+  AND (c.operation_id IS NULL OR (NOT c.evidence ? 'capture_failure' AND NOT c.evidence ? 'cancel_authorized'))
   AND s.runtime_generation=$2 AND s.lifecycle_epoch=$3 AND s.deleted_at IS NULL
   AND s.desired_state IN ('active','paused')
  )`, sandbox, generation, epoch).Scan(&pending)

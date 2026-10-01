@@ -211,7 +211,7 @@ type pendingCheckpointPauseProjectionStore struct {
 	pending bool
 }
 
-func (s *pendingCheckpointPauseProjectionStore) NomadCheckpointPausePending(_ context.Context, _ string, _, _ int64) (bool, error) {
+func (s *pendingCheckpointPauseProjectionStore) NomadSandboxPausePending(_ context.Context, _ string, _, _ int64) (bool, error) {
 	return s.pending, nil
 }
 func TestNomadSandboxReaderKeepsCapturedPauseStartingWhileSourceExits(t *testing.T) {

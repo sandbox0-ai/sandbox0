@@ -96,24 +96,63 @@ func TestAdoptionScanExclusionsDoNotHideNewReceiptWork(t *testing.T) {
 
 func TestJournalScanExclusionsRemainBoundedAndIndependent(t *testing.T) {
 	var cache, other journalScanExclusions
-	first, found := cache.contains([]byte("first"))
+	slot := []byte("first-slot")
+	first, found := cache.contains(slot, []byte("first"))
 	require.False(t, found)
-	cache.remember(first)
-	_, found = other.contains([]byte("first"))
+	cache.remember(slot, first)
+	_, found = other.contains(slot, []byte("first"))
 	require.False(t, found, "another scanner or reopened journal starts without exclusions")
 	var workers sync.WaitGroup
 	for worker := range 8 {
 		workers.Go(func() {
-			for i := range journalScanExclusionLimit {
-				key, _ := cache.contains([]byte(fmt.Sprintf("%d-%d", worker, i)))
-				cache.remember(key)
+			for i := range journalScanExclusionLimit / 8 {
+				slot := []byte(fmt.Sprintf("%d-%d", worker, i))
+				key, _ := cache.contains(slot, slot)
+				cache.remember(slot, key)
 			}
 		})
 	}
 	workers.Wait()
 	require.Len(t, cache.keys, journalScanExclusionLimit)
-	_, found = cache.contains([]byte("first"))
-	require.False(t, found, "eviction requires full validation on the next scan")
+	_, found = cache.contains(slot, []byte("first"))
+	require.True(t, found, "sequential overflow must not evict all previously admitted records")
+	changed, found := cache.contains(slot, []byte("changed"))
+	require.False(t, found)
+	cache.remember(slot, changed)
+	_, found = cache.contains(slot, []byte("changed"))
+	require.True(t, found, "a slot update replaces its fingerprint even at capacity")
+	cache.forget(slot)
+	_, found = cache.contains(slot, []byte("changed"))
+	require.False(t, found)
+	require.Len(t, cache.keys, journalScanExclusionLimit-1)
+}
+
+func TestMigrationPoolScanExclusionsWarmBeyondFormerRingSize(t *testing.T) {
+	j, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "slots.db"), time.Hour)
+	require.NoError(t, err)
+	defer j.Close()
+	for index := range 1024 {
+		require.NoError(t, j.Register(testRuntimeSlotJournalRegistration(t, fmt.Sprintf("scan-%04d", index))))
+	}
+	for pass := range 3 {
+		excluded := 0
+		require.NoError(t, j.db.View(func(tx *bolt.Tx) error {
+			bucket, err := runtimeSlotJournalBucketFrom(tx)
+			if err != nil {
+				return err
+			}
+			return bucket.ForEach(func(key, payload []byte) error {
+				_, skip, err := j.migrationPoolScanRecord(key, payload)
+				if skip {
+					excluded++
+				}
+				return err
+			})
+		}))
+		if pass > 0 {
+			require.Equal(t, 1024, excluded, "every unchanged irrelevant record must stay warm across full scans")
+		}
+	}
 }
 
 func TestMigrationPoolScanExclusionsObserveNewReservationAndRelease(t *testing.T) {

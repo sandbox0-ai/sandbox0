@@ -994,6 +994,9 @@ func (r *rootfsRuntime) awaitRegionalCrashFence(
 }
 
 func (r *rootfsRuntime) Close() error {
+	if r != nil && r.checkpoints != nil {
+		r.checkpoints.Close()
+	}
 	if r == nil || r.sessions == nil {
 		return nil
 	}

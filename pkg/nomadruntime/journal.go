@@ -377,7 +377,7 @@ func (j *runtimeSlotJournal) Prune(now time.Time) (int, error) {
 			if err != nil {
 				return fmt.Errorf("decode runtime slot journal %q: %w", key, err)
 			}
-			j.rememberMigrationPoolExclusion(sha256.Sum256(payload), record)
+			j.rememberMigrationPoolExclusion(key, sha256.Sum256(payload), record)
 			if record.Proof == nil || record.CompletedAt == "" {
 				return nil
 			}
@@ -410,6 +410,9 @@ func (j *runtimeSlotJournal) Prune(now time.Time) (int, error) {
 			if err := bucket.Delete(key); err != nil {
 				return err
 			}
+			j.registrationScanExclusions.forget(key)
+			j.stagingScanExclusions.forget(key)
+			j.adoptionScanExclusions.forget(key)
 			deleted++
 		}
 		return nil

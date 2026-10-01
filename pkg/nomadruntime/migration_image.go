@@ -318,8 +318,8 @@ func (j *runtimeSlotJournal) recordMigrationDestination(request protocol.Migrati
 				return err
 			}
 			retained := 0
-			if err := bucket.ForEach(func(_, payload []byte) error {
-				record, excluded, err := j.migrationPoolScanRecord(payload)
+			if err := bucket.ForEach(func(key, payload []byte) error {
+				record, excluded, err := j.migrationPoolScanRecord(key, payload)
 				if err != nil || excluded {
 					return err
 				}

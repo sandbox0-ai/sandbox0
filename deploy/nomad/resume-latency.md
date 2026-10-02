@@ -88,6 +88,40 @@ TMPDIR=/short/private/xfs SANDBOX0_RESUME_LATENCY_TEST=1 \
 go test ./pkg/runtimecheckpoint ./pkg/nomadruntime -race -count=1
 ```
 
+`TestPrivilegedRetainedCheckpointRestore` uses the implemented Store cache and
+staged publisher, rather than the earlier manual-hardlink prototype. It creates
+its own 4-GiB loop image, requires loop direct I/O, mounts XFS with enforced
+project quotas, and checks the qualified stock-runsc release and binary digest.
+Install `xfsprogs` and `util-linux` on an isolated root-capable Linux test host.
+The complete qualified runsc bundle must be installed, including its adjacent
+`gvisor-bin` directory. Build the guest test payload statically:
+
+```sh
+CGO_ENABLED=0 go test -c -o /tmp/retained-checkpoint.test ./pkg/gvisorcli
+sudo env SANDBOX0_RUN_RETAINED_RESTORE=1 /tmp/retained-checkpoint.test \
+  -test.run '^TestPrivilegedRetainedCheckpointRestore$' -test.v -test.timeout=15m
+```
+
+It runs three alternating pairs of verified chunk-clone and retained-inode
+restores against the same 512-MiB random-memory checkpoint. Source files and
+Store handles are removed before restore, proving that retained entries survive
+capture cleanup and service restart. `mincore` checks that baseline page-file
+inodes start cold and retained inodes are resident. Each restored guest answers
+a fresh full-memory challenge and preserves its token, PID, counter, open unlinked
+file offset, tmpfs contents and CPU features. Finally, it proves that retained
+images consume actual project quota and eviction restores admission headroom.
+Logs separate preparation, admission verification, runsc restore, first response
+and challenged memory validation. The PR stock-runsc job invokes this test after
+installing the qualified runtime and XFS tools. These timings exclude the full
+regional/Sandpi HTTP path; remote API acceptance is still required before rollout.
+
+Run `TestCheckpointRestorePrefersCaptureNodeWithoutBlockingFallbackIntegration`
+only against a dedicated disposable PostgreSQL database. The repository's test
+fixture drops the `manager` schema; never point it at a production or shared
+application database. `INTEGRATION_DATABASE_URL` must name that isolated database.
+The test checks original-node preference, draining/capacity/locked-slot fallback
+and exact retry placement.
+
 An isolated 16-vCPU/64-GiB Linux/XFS direct-I/O test on 2026-10-01 measured
 restore admission's repeated content verification at 3.095437, 2.793897 and
 2.768614 seconds before the fix, versus 0.000244, 0.000214 and 0.000200 seconds

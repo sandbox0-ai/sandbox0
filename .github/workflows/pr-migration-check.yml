@@ -130,3 +130,9 @@ jobs:
           sudo apt-get install -y xfsprogs
           go test -c -race -o "$RUNNER_TEMP/staging.test" ./pkg/migrationstaging
           sudo env SANDBOX0_RUN_PRIVILEGED_STAGING_QUOTA=1 "$RUNNER_TEMP/staging.test" -test.v -test.timeout=5m
+
+      - name: Verify retained-inode restore and kernel quota reclamation
+        shell: bash
+        run: |
+          sudo env SANDBOX0_RUN_RETAINED_RESTORE=1 "$RUNNER_TEMP/checkpoint.test" \
+            -test.run '^TestPrivilegedRetainedCheckpointRestore$' -test.v -test.timeout=15m

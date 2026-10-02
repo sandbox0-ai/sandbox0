@@ -153,6 +153,12 @@ type AcquireRuntimeSlotRequest struct {
 	// MemoryRestore requests an image budget; persisted restore authority must match.
 	MemoryRestore bool
 	Resources     protocol.RuntimeResourceRequest
+
+	// Derived only from validated regional checkpoint evidence at admission.
+	// Locality is an ordering hint, never a placement or retry requirement.
+	preferredCheckpointNodeID     string
+	preferredCheckpointNodeUID    string
+	preferredCheckpointNodeBootID string
 }
 
 type BindRuntimeSlotWriterGrantRequest struct {
@@ -458,8 +464,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 	})
 }
 
-// AcquireRuntimeSlot reserves the oldest live compatible slot with
-// FOR UPDATE SKIP LOCKED. An operation ID retry returns its original slot.
+// AcquireRuntimeSlot reserves a live compatible slot with FOR UPDATE SKIP
+// LOCKED. Memory restores prefer the capture node, then ordinary FIFO. An
+// operation ID retry returns its original slot regardless of cache locality.
 func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *AcquireRuntimeSlotRequest) (*RuntimeSlot, error) {
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	if err != nil {
@@ -690,12 +697,14 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 								AND lease.lease_state = 'active'
 						), 0)
 				)
-			ORDER BY fastpath_ready_at, slot_id
+			ORDER BY (node_id=$14 AND node_uid=$15 AND node_boot_id=$16) DESC,
+				fastpath_ready_at, slot_id
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
 			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination,
-			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID))
+			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID,
+			request.preferredCheckpointNodeID, request.preferredCheckpointNodeUID, request.preferredCheckpointNodeBootID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}
@@ -1584,6 +1593,11 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 		return nil, fmt.Errorf("acquire runtime slot request is required")
 	}
 	normalized := *request
+	// Do not accept a caller-provided cache placement hint. Memory admission
+	// reconstructs it from the persisted, finalized capture for this restore.
+	normalized.preferredCheckpointNodeID = ""
+	normalized.preferredCheckpointNodeUID = ""
+	normalized.preferredCheckpointNodeBootID = ""
 	if (normalized.TargetNodeID == "") != (normalized.TargetNodeUID == "") ||
 		(normalized.TargetNodeID == "") != (normalized.TargetNodeBootID == "") {
 		return nil, fmt.Errorf("target node requires ID, UID and boot ID together")

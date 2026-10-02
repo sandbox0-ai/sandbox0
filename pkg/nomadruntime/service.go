@@ -44,6 +44,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecheckpoint"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 )
@@ -636,6 +637,20 @@ func run(
 			logger.Error("migration staging quota unavailable; new migration writes disabled", "error", err)
 		} else {
 			daemon.migrationStaging = guard
+			// Retention stays on the capture filesystem and inside the same
+			// enforced XFS project. It may consume at most one eighth of staging;
+			// pending lifecycle custody always takes precedence over this hint.
+			limits := runtimecheckpoint.RetainedImageLimits{
+				Directory: filepath.Join(journal.migrationRoot, "retained-images"),
+				Bytes:     min(int64(4<<30), config.MigrationStagingBytes/8),
+				Inodes:    min(uint64(1024), config.MigrationStagingInodes/8),
+				Entries:   8, Lifetime: 24 * time.Hour,
+			}
+			if runtime.checkpoints != nil && limits.Bytes >= 1<<20 && limits.Inodes >= 4 {
+				if err := runtime.checkpoints.ConfigureRetainedImages(limits); err != nil {
+					logger.Info("complete checkpoint cache unavailable; existing restore path retained", "error", err)
+				}
+			}
 		}
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)

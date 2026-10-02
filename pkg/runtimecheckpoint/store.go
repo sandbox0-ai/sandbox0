@@ -51,6 +51,8 @@ type Store struct {
 	manifests      manifestCache
 	chunks         ChunkCache
 	verifiedImages verifiedImageCache
+	retainedMu     sync.Mutex
+	retainedImages *retainedImageCache
 }
 
 // ChunkCache is disposable node-local storage for verified immutable image
@@ -72,6 +74,8 @@ type ChunkCloner interface {
 // DownloadStats accounts for verified image chunks; manifest reads are small
 // and remain regional. Counts belong to one transfer, not a shared node delta.
 type DownloadStats struct {
+	RetainedImage  bool
+	RetainedBytes  int64
 	CacheChunks    int64
 	CacheBytes     int64
 	ClonedChunks   int64
@@ -133,7 +137,9 @@ func (s *Store) Publish(ctx context.Context, binding Binding, directory string) 
 	if err := s.putImmutable(ctx, manifestKey(bindingDigest), payload); err != nil {
 		return Reference{}, fmt.Errorf("publish checkpoint manifest: %w", err)
 	}
-	return Reference{BindingDigest: bindingDigest, ManifestDigest: digest.FromBytes(payload).String()}, nil
+	ref := Reference{BindingDigest: bindingDigest, ManifestDigest: digest.FromBytes(payload).String()}
+	s.retainPublishedImage(ctx, ref, manifest, payload, root)
+	return ref, nil
 }
 
 // Download verifies the regionally committed reference and exact expected
@@ -166,6 +172,15 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 	manifest, err := s.loadManifest(ctx, expected, ref)
 	if err != nil {
 		return Manifest{}, DownloadStats{}, err
+	}
+	if hit, err := s.downloadRetainedImage(ctx, ref, manifest, directory, admit); err != nil {
+		return Manifest{}, DownloadStats{}, err
+	} else if hit {
+		var bytes int64
+		for _, file := range manifest.Files {
+			bytes += file.Size
+		}
+		return manifest, DownloadStats{RetainedImage: true, RetainedBytes: bytes}, nil
 	}
 	prefix, err := manifest.chunkPrefix()
 	if err != nil {
@@ -221,7 +236,7 @@ func (s *Store) download(ctx context.Context, expected Binding, ref Reference, d
 			_ = root.Close()
 		}
 	}
-	return result, DownloadStats{cacheChunks.Load(), cacheBytes.Load(), clonedChunks.Load(), clonedBytes.Load(), regionalChunks.Load(), regionalBytes.Load()}, err
+	return result, DownloadStats{CacheChunks: cacheChunks.Load(), CacheBytes: cacheBytes.Load(), ClonedChunks: clonedChunks.Load(), ClonedBytes: clonedBytes.Load(), RegionalChunks: regionalChunks.Load(), RegionalBytes: regionalBytes.Load()}, err
 }
 
 // Both regional downloads and peer streams use the same admission, private

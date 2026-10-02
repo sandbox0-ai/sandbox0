@@ -17,6 +17,23 @@ RUN pnpm install --frozen-lockfile \
 RUN printf '\nallowUnusedPatches: true\n' >> pnpm-workspace.yaml \
   && pnpm deploy --legacy --filter @zcode/cli --prod /opt/zcode
 
+# The Kimi npm CLI is a single bundle and does not expose its native SDK.
+# Build the upstream SDK and loop exports from the matching reviewed release.
+FROM node:24.21.0-bookworm AS kimi-sdk-build
+ARG KIMI_COMMIT=21406fb4c805cc8c715e6d1f16ad3fb5f25f4fe3
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/kimi
+RUN git clone --filter=blob:none https://github.com/MoonshotAI/kimi-code.git . \
+  && git checkout --detach "$KIMI_COMMIT" \
+  && test "$(git rev-parse HEAD)" = "$KIMI_COMMIT" \
+  && corepack enable \
+  && corepack prepare pnpm@10.33.0 --activate
+COPY manager/procd/coding-agents/build-kimi-sdk.mjs ./build-kimi-sdk.mjs
+RUN pnpm install --frozen-lockfile --ignore-scripts \
+  && node build-kimi-sdk.mjs \
+  && cp LICENSE sdk-host/dist/LICENSE
+
 # Sandbox0 coding-agent template.
 # This image intentionally does NOT define an ENTRYPOINT/CMD. The platform
 # injects and starts procd, then Session Supervisor owns each coding agent.
@@ -48,13 +65,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_MCP_SANDBOX=false \
     SANDPI_BROWSER_USER=sandbox-browser
 
-# ZCode requires Node.js 24.14+. Keep the other pinned agents on the same
+# The native SDKs require Node.js 24.15+. Keep the pinned agents on the same
 # supported runtime and fail if the distribution resolves an older release.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server tint2 feh wmctrl \
   && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
-  && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 14)) process.exit(1)' \
+  && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 15)) process.exit(1)' \
   && useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash "$SANDPI_BROWSER_USER" \
   && rm -rf /var/lib/apt/lists/*
 
@@ -76,6 +93,7 @@ COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/packag
 COPY manager/procd/coding-agents/THIRD_PARTY.md ./
 COPY manager/procd/coding-agents/inventory.mjs ./
 COPY --from=zcode-build /opt/zcode /opt/zcode
+COPY --from=kimi-sdk-build /src/kimi/sdk-host/dist /opt/kimi-sdk
 
 RUN npm ci --omit=dev \
   && for agent in codex claude opencode pi kimi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
@@ -87,6 +105,7 @@ RUN npm ci --omit=dev \
   && opencode --version \
   && pi --version \
   && kimi --version \
+  && node --input-type=module -e 'import { cliVersion } from "/opt/kimi-sdk/index.mjs"; import { createRequire } from "node:module"; const require = createRequire(import.meta.url); if (require("@moonshot-ai/kimi-code/package.json").version !== cliVersion) throw new Error("Kimi CLI/SDK version mismatch")' \
   && zcode --version \
   && playwright-cli --version \
   && node inventory.mjs > harness-inventory.json \

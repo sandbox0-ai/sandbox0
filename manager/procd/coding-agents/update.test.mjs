@@ -28,15 +28,16 @@ if (process.argv[2] === 'view') {
   }) };
 }
 
-test('updates every exact pin and license inventory and refreshes lock without scripts', t => {
+test('updates unpaired exact pins and preserves the reviewed Kimi CLI/SDK pair', t => {
   const { directory, run } = fixture(t);
+  const original = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
   const result = run();
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
   const inventory = readFileSync(join(directory, 'THIRD_PARTY.md'), 'utf8');
   for (const [name, version] of Object.entries(manifest.dependencies)) {
-    assert.equal(version, '9.8.7');
-    assert.ok(inventory.includes(`| \`${name}\` | \`9.8.7\` |`));
+    assert.equal(version, name === '@moonshot-ai/kimi-code' ? original.dependencies[name] : '9.8.7');
+    assert.ok(inventory.includes(`| \`${name}\` | \`${version}\` |`));
   }
   assert.ok(inventory.includes('| `ttyd` | `1.7.7` | MIT |'));
   const args = JSON.parse(readFileSync(join(directory, 'install-args.json'), 'utf8'));

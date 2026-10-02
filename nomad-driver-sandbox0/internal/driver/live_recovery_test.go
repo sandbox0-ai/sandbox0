@@ -10,6 +10,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
@@ -55,6 +56,77 @@ type liveTestRootFS struct {
 	adoptErr error
 	adopted  chan RootFSConsumerRequest
 	renew    func(context.Context, RootFSConsumerLease) (RootFSConsumerLease, error)
+}
+
+type liveRestoreCustodian struct {
+	*restoreCustodian
+	adoptErr error
+	infoErr  error
+	adopted  chan RootFSConsumerRequest
+}
+
+func (r *liveRestoreCustodian) RuntimeInfo(ctx context.Context) (nomadruntime.RuntimeInfo, error) {
+	info, err := r.RootFSRuntime.(rootFSRuntimeInfoProvider).RuntimeInfo(ctx)
+	info.LiveUpdateProtocol = 1
+	if r.infoErr != nil {
+		return info, r.infoErr
+	}
+	return info, err
+}
+
+func (r *liveRestoreCustodian) AdoptLiveConsumer(_ context.Context, _ rootfshandoff.StageRequest, request RootFSConsumerRequest) (RootFSConsumerLease, error) {
+	r.adopted <- request
+	return RootFSConsumerLease{LeaseID: "restored-successor", ExpiresAt: time.Now().Add(time.Minute)}, r.adoptErr
+}
+
+func TestLiveRecoveryOfAdoptedMemoryRestoreNeverCleansRunningGuest(t *testing.T) {
+	for _, scenario := range []string{"success", "owner unavailable", "identity changed", "adoption rejected"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, claim, runner, custodian, fixture := migrationRestoreHandleFixture(t)
+			require.NoError(t, h.Claim(claim))
+			proof := commandReadyProof(fixture, *claim.Stage)
+			proof.ProcdInstanceID = claim.MigrationRestore.Image.Publication.Capture.Request.ProcdInstanceID
+			require.NoError(t, h.CommandReady(CommandReadyRequest{Proof: proof}))
+			h.stopExitWatch()
+			h.stopConsumerRenewal()
+			runtime := &liveRestoreCustodian{restoreCustodian: custodian, adopted: make(chan RootFSConsumerRequest, 1)}
+			identity := RunscState{ID: h.containerID, Status: "running", Bundle: h.bundleDir, PID: 123}
+			switch scenario {
+			case "owner unavailable":
+				runtime.infoErr = errdefs.ErrUnavailable
+			case "identity changed":
+				identity.ID = "foreign"
+			case "adoption rejected":
+				runtime.adoptErr = errdefs.ErrFailedPrecondition
+			}
+			h.rootfs = runtime
+			h.runner = liveTestRunsc{runner.fakeRunsc, identity}
+			state := h.PersistedState()
+			// Durable adopted custody must override even Nomad's stale warm
+			// handle; neither recovery failure nor that stale handle may kill.
+			state.Claim, state.RootMounted = nil, false
+			h.claim, h.stage, h.rootMounted = nil, nil, false
+			handled, err := h.recoverMigrationRestore(state)
+			require.True(t, handled)
+			if scenario == "success" {
+				require.NoError(t, err)
+				require.Equal(t, phaseActive, h.phase)
+				require.NotNil(t, h.recoveredConsumerLease)
+				request := <-runtime.adopted
+				require.Equal(t, h.taskConfig.ID, request.ActiveKey)
+				require.Equal(t, h.containerID, request.ContainerID)
+				require.NotEmpty(t, request.OwnerProcess)
+				h.stopExitWatch()
+			} else {
+				require.Error(t, err)
+			}
+			require.NotContains(t, runner.callsSnapshot(), "kill:KILL")
+			require.NotContains(t, runner.callsSnapshot(), "delete:force")
+			require.NotContains(t, runner.callsSnapshot(), "start")
+			require.Equal(t, 1, countMigrationCall(runner.callsSnapshot(), "restore"))
+			require.Equal(t, 1, countMigrationCall(runner.callsSnapshot(), "create"))
+		})
+	}
 }
 
 func (r *liveTestRootFS) AdoptLiveConsumer(_ context.Context, _ rootfshandoff.StageRequest, request RootFSConsumerRequest) (RootFSConsumerLease, error) {

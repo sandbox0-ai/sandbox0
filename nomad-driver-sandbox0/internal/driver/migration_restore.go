@@ -284,6 +284,12 @@ func (h *taskHandle) recoverMigrationRestore(state PersistedState) (bool, error)
 		if handled, err := h.recoverMigrationCapture(state); handled || err != nil {
 			return true, errors.Join(persistErr, err)
 		}
+		// An adopted memory restore is an ordinary active consumer. Planned
+		// live publication must recover its proven running guest just as a
+		// cold-started consumer does, rather than entering crash cleanup.
+		if adopted, err := h.recoverLiveRootFS(); adopted || err != nil {
+			return true, errors.Join(persistErr, err)
+		}
 		return true, errors.Join(persistErr, h.recoverCrashedRootFS())
 	}
 	// ctld custody survives a stale Nomad handle. Missing local metadata must

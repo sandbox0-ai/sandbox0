@@ -236,7 +236,11 @@ func TestPrivilegedRetainedCheckpointRestore(t *testing.T) {
 	// must charge the kernel quota, and eviction must return usable capacity.
 	require.ErrorIs(t, guard.AdmitBudget(staging, 7<<28, 8), errdefs.ErrResourceExhausted)
 	require.NoError(t, store.EvictRetainedImages(ctx))
-	require.NoError(t, guard.AdmitBudget(staging, 7<<28, 8))
+	// XFS can defer inode inactivation after the final unlink/close. Observe
+	// actual kernel accounting on retry; never assume unlink resets the quota.
+	require.Eventually(t, func() bool {
+		return guard.AdmitBudget(staging, 7<<28, 8) == nil
+	}, 10*time.Second, 50*time.Millisecond)
 }
 
 func retainedProbeResidency(t *testing.T, name string) (resident, pages int) {

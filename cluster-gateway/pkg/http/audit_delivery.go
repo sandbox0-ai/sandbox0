@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +22,7 @@ import (
 
 const (
 	auditReplayInterval        = time.Second
+	auditReplayMaxBackoff      = 30 * time.Second
 	auditReplayBatchSize       = 500
 	auditCanonicalBatchWindow  = 2 * time.Millisecond
 	auditCanonicalWriterSlots  = 4
@@ -102,7 +103,7 @@ func newAuditDelivery(
 		canonicalSlot:   make(chan struct{}, auditCanonicalWriterSlots),
 		canonicalCalls:  make(map[string]*auditCanonicalCall),
 	}
-	if _, err := delivery.loadLocked(); err != nil {
+	if err := delivery.scanSpoolLocked(0, nil); err != nil {
 		return nil, err
 	}
 	return delivery, nil
@@ -381,7 +382,8 @@ func (d *auditDelivery) dispatchCanonicalBatch(
 
 			deliveryCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
 			defer cancel()
-			return d.deliverCanonicalBatch(deliveryCtx, batch, source)
+			results, _ := d.deliverCanonicalBatch(deliveryCtx, batch, source)
+			return results
 		}()
 
 		// Publish completion only after the batch has released every shared
@@ -396,7 +398,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 	ctx context.Context,
 	batch []*auditCanonicalCall,
 	source string,
-) []error {
+) ([]error, error) {
 	results := make([]error, len(batch))
 	pendingIndexes := make([]int, 0, len(batch))
 	events := make([]sandboxobservability.Event, 0, len(batch))
@@ -409,7 +411,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 			for index := range results {
 				results[index] = pendingErr
 			}
-			return results
+			return results, nil
 		}
 		if !isPending {
 			continue
@@ -419,7 +421,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 	}
 	d.mu.Unlock()
 	if len(events) == 0 {
-		return results
+		return results, nil
 	}
 
 	insertStarted := time.Now()
@@ -435,8 +437,10 @@ func (d *auditDelivery) deliverCanonicalBatch(
 			zap.Int("batch_size", len(events)),
 			zap.Error(insertErr),
 		)
-		d.signalReplay()
-		return results
+		if source != "replay" {
+			d.signalReplay()
+		}
+		return results, nil
 	}
 
 	cleanupStarted := time.Now()
@@ -450,7 +454,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 			zap.Error(cleanupErr),
 		)
 	}
-	return results
+	return results, cleanupErr
 }
 
 func (d *auditDelivery) signalReplay() {
@@ -485,12 +489,35 @@ func (d *auditDelivery) releaseCanonicalSlot() {
 func (d *auditDelivery) runReplay(ctx context.Context) {
 	ticker := time.NewTicker(auditReplayInterval)
 	defer ticker.Stop()
+	backoff := auditReplayInterval
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		replayCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
-		err := d.replay(replayCtx)
+		delivered, err := d.replayBatch(replayCtx)
 		cancel()
-		if err != nil && ctx.Err() == nil {
-			d.logger.Error("Failed to replay sandbox audit buffer", zap.Error(err))
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.Error("Failed to replay sandbox audit buffer",
+				zap.Error(err), zap.Duration("retry_after", backoff))
+			// Wakes from foreground failures and new durable events must not
+			// bypass the cooldown. ClickHouse needs room to recover; retaining
+			// a wake in the bounded channel preserves notification on recovery.
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			backoff = min(backoff*2, auditReplayMaxBackoff)
+			continue
+		}
+		if delivered {
+			backoff = auditReplayInterval
 		}
 		select {
 		case <-ctx.Done():
@@ -502,22 +529,28 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
+	_, err := d.replayBatch(ctx)
+	return err
+}
+
+// A deferred replay is not evidence that canonical storage recovered.
+func (d *auditDelivery) replayBatch(ctx context.Context) (bool, error) {
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return nil
+		return false, nil
 	}
 	if !d.replayMu.TryLock() {
-		return nil
+		return false, nil
 	}
 	defer d.replayMu.Unlock()
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return nil
+		return false, nil
 	}
 
 	d.mu.Lock()
 	events, err := d.loadBatchLocked(auditReplayBatchSize)
 	d.mu.Unlock()
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Replay claims the same per-event delivery ownership as foreground
 	// requests. A duplicate joins its existing acknowledgement; unrelated
@@ -529,16 +562,16 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 		}
 	}
 	if len(batch) == 0 {
-		return nil
+		return false, nil
 	}
 	slotStarted := time.Now()
 	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		d.observeStage("replay", "slot_wait", slotStarted, err)
 		d.failCanonicalBatch(batch, err)
-		return err
+		return false, err
 	}
 	d.observeStage("replay", "slot_wait", slotStarted, nil)
-	results := func() []error {
+	results, cleanupErr := func() ([]error, error) {
 		defer d.releaseCanonicalSlot()
 		d.observeInFlightDelta(1)
 		defer d.observeInFlightDelta(-1)
@@ -546,11 +579,21 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 	}()
 	for index, call := range batch {
 		d.completeCanonicalCall(call, results[index])
+		// One storage failure is shared by all pending events. Joining it
+		// once per event amplifies a single failure into a huge log message.
+		if err == nil && results[index] != nil {
+			err = results[index]
+		}
 	}
-	if len(events) == auditReplayBatchSize {
+	// Cleanup failure must pace retries too, while completed canonical calls
+	// retain their successful ACK. A read-only spool must not busy-loop inserts.
+	if err == nil {
+		err = cleanupErr
+	}
+	if err == nil && len(events) == auditReplayBatchSize {
 		d.signalReplay()
 	}
-	return errors.Join(results...)
+	return err == nil, err
 }
 
 func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {
@@ -633,44 +676,72 @@ func (d *auditDelivery) loadLocked() ([]sandboxobservability.Event, error) {
 }
 
 func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event, error) {
-	entries, err := os.ReadDir(d.dir)
-	if err != nil {
-		return nil, fmt.Errorf("read audit spool: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-	events := make([]sandboxobservability.Event, 0, len(names))
-	for _, name := range names {
-		if limit > 0 && len(events) >= limit {
-			break
-		}
-		payload, err := os.ReadFile(filepath.Join(d.dir, name))
-		if err != nil {
-			return nil, err
-		}
-		var event sandboxobservability.Event
-		if err := json.Unmarshal(payload, &event); err != nil || strings.TrimSpace(event.EventID) == "" {
-			return nil, fmt.Errorf("corrupt audit spool record %s", name)
-		}
-		if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
-			return nil, fmt.Errorf("invalid audit spool event %s: %w", name, err)
-		}
-		if name != event.EventID+".json" {
-			return nil, fmt.Errorf("corrupt audit spool identity %s", name)
-		}
-		if len(d.verificationKey) == ed25519.PublicKeySize {
-			if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
-				return nil, fmt.Errorf("invalid audit spool integrity %s: %w", name, err)
-			}
-		}
+	// A bounded replay must not allocate for the entire outage backlog.
+	events := make([]sandboxobservability.Event, 0, max(0, limit))
+	err := d.scanSpoolLocked(limit, func(event sandboxobservability.Event) {
 		events = append(events, event)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return events, nil
+}
+
+// Startup validates every record without retaining every event. Replay reads
+// directory entries incrementally and stops at its batch limit; UUID ordering
+// is not delivery ordering, and per-event canonical ownership still deduplicates
+// foreground requests. Only acknowledged records are removed.
+func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservability.Event)) error {
+	directory, err := os.Open(d.dir)
+	if err != nil {
+		return fmt.Errorf("read audit spool: %w", err)
+	}
+	defer directory.Close()
+	count := 0
+	for {
+		entries, readErr := directory.ReadDir(128)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read audit spool: %w", readErr)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("unsafe audit spool record %s", name)
+			}
+			payload, err := os.ReadFile(filepath.Join(d.dir, name))
+			if err != nil {
+				return err
+			}
+			var event sandboxobservability.Event
+			if err := json.Unmarshal(payload, &event); err != nil || strings.TrimSpace(event.EventID) == "" {
+				return fmt.Errorf("corrupt audit spool record %s", name)
+			}
+			if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+				return fmt.Errorf("invalid audit spool event %s: %w", name, err)
+			}
+			if name != event.EventID+".json" {
+				return fmt.Errorf("corrupt audit spool identity %s", name)
+			}
+			if len(d.verificationKey) == ed25519.PublicKeySize {
+				if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
+					return fmt.Errorf("invalid audit spool integrity %s: %w", name, err)
+				}
+			}
+			if visit != nil {
+				visit(event)
+			}
+			count++
+			if limit > 0 && count >= limit {
+				return nil
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
 }
 
 func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {

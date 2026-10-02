@@ -67,6 +67,10 @@ func TestCodingAgentImageIncludesKimiAndZCode(t *testing.T) {
 		"setup_24.x",
 		"ZCODE_COMMIT=328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f",
 		"pnpm --filter @zcode/cli... build",
+		"KIMI_COMMIT=21406fb4c805cc8c715e6d1f16ad3fb5f25f4fe3",
+		"node build-kimi-sdk.mjs",
+		"COPY --from=kimi-sdk-build /src/kimi/sdk-host/dist /opt/kimi-sdk",
+		"Kimi CLI/SDK version mismatch",
 		"kimi --version",
 		"zcode --version",
 	} {

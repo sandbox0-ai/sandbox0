@@ -4,9 +4,12 @@ import { fileURLToPath } from 'node:url';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
 const manifest = JSON.parse(readFileSync(`${directory}/package.json`, 'utf8'));
-// Resolve every direct dependency before changing files. Only stable npm latest
+// Resolve unpaired dependencies before changing files. Only stable npm latest
 // versions are accepted; npm ci in both image builds verifies the resulting lock.
 for (const name of Object.keys(manifest.dependencies)) {
+  // This CLI must match the reviewed native SDK source in the Dockerfile.
+  // Move both pins together after validating native SDK compatibility.
+  if (name === '@moonshot-ai/kimi-code') continue;
   const version = JSON.parse(execFileSync('npm', ['view', `${name}@latest`, 'version', '--json'], {
     cwd: directory, encoding: 'utf8', timeout: 120_000,
   }));

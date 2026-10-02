@@ -495,7 +495,7 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 			return
 		}
 		replayCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
-		err := d.replay(replayCtx)
+		delivered, err := d.replayBatch(replayCtx)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -516,7 +516,9 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 			backoff = min(backoff*2, auditReplayMaxBackoff)
 			continue
 		}
-		backoff = auditReplayInterval
+		if delivered {
+			backoff = auditReplayInterval
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -527,22 +529,28 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
+	_, err := d.replayBatch(ctx)
+	return err
+}
+
+// A deferred replay is not evidence that canonical storage recovered.
+func (d *auditDelivery) replayBatch(ctx context.Context) (bool, error) {
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return nil
+		return false, nil
 	}
 	if !d.replayMu.TryLock() {
-		return nil
+		return false, nil
 	}
 	defer d.replayMu.Unlock()
 	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return nil
+		return false, nil
 	}
 
 	d.mu.Lock()
 	events, err := d.loadBatchLocked(auditReplayBatchSize)
 	d.mu.Unlock()
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Replay claims the same per-event delivery ownership as foreground
 	// requests. A duplicate joins its existing acknowledgement; unrelated
@@ -554,13 +562,13 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 		}
 	}
 	if len(batch) == 0 {
-		return nil
+		return false, nil
 	}
 	slotStarted := time.Now()
 	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		d.observeStage("replay", "slot_wait", slotStarted, err)
 		d.failCanonicalBatch(batch, err)
-		return err
+		return false, err
 	}
 	d.observeStage("replay", "slot_wait", slotStarted, nil)
 	results, cleanupErr := func() ([]error, error) {
@@ -585,7 +593,7 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 	if err == nil && len(events) == auditReplayBatchSize {
 		d.signalReplay()
 	}
-	return err
+	return err == nil, err
 }
 
 func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {

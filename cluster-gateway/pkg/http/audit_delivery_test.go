@@ -901,3 +901,45 @@ func TestAuditDeliveryReplayCleanupFailurePreservesCanonicalACK(t *testing.T) {
 		t.Fatal("canonical acknowledgement was not completed")
 	}
 }
+
+func TestAuditDeliveryReplayDeferralDoesNotResetBackoff(t *testing.T) {
+	dir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		writer := &auditDeliveryWriter{err: errors.New("canonical storage unavailable")}
+		delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); delivery.runReplay(ctx) }()
+		defer func() { cancel(); <-done }()
+		attempts := func(want int) {
+			t.Helper()
+			synctest.Wait()
+			writer.mu.Lock()
+			got := writer.attempts
+			writer.mu.Unlock()
+			if got != want {
+				t.Fatalf("insert attempts = %d, want %d", got, want)
+			}
+		}
+		attempts(1)
+		time.Sleep(time.Second)
+		attempts(2)
+		delivery.foregroundCalls.Store(1)
+		time.Sleep(2 * time.Second)
+		attempts(2)
+		delivery.foregroundCalls.Store(0)
+		delivery.signalReplay()
+		attempts(3)
+		// Busy foreground work did not ACK anything: the next delay remains 4s.
+		time.Sleep(4*time.Second - time.Millisecond)
+		attempts(3)
+		time.Sleep(time.Millisecond)
+		attempts(4)
+	})
+}

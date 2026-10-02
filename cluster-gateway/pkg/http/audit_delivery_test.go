@@ -3,11 +3,14 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,6 +55,7 @@ type auditDeliveryWriter struct {
 	mu       sync.Mutex
 	events   []sandboxobservability.Event
 	batches  [][]sandboxobservability.Event
+	attempts int
 	err      error
 	started  chan struct{}
 	block    chan struct{}
@@ -70,6 +74,7 @@ func (w *auditDeliveryWriter) InsertEvents(_ context.Context, events []sandboxob
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.attempts++
 	if w.err != nil {
 		return w.err
 	}
@@ -724,5 +729,175 @@ func replaceAuditSpoolDirectoryWithFile(t *testing.T, dir string) {
 	}
 	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dir, err)
+	}
+}
+
+// A full failed batch used to signal itself immediately. Foreground failures
+// and new arrivals also send wakes; none may defeat a failed replay's cooldown.
+func TestAuditDeliveryReplayBackoffAndRecovery(t *testing.T) {
+	dir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		writer := &auditDeliveryWriter{err: errors.New("memory limit exceeded")}
+		delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range auditReplayBatchSize + 1 {
+			if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); delivery.runReplay(ctx) }()
+		defer func() { cancel(); <-done }()
+		attempts := func(want int) {
+			t.Helper()
+			synctest.Wait()
+			writer.mu.Lock()
+			got := writer.attempts
+			writer.mu.Unlock()
+			if got != want {
+				t.Fatalf("insert attempts = %d, want %d", got, want)
+			}
+		}
+		attempts(1)
+		for i, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+			for range 10 {
+				delivery.signalReplay()
+			}
+			time.Sleep(delay - time.Millisecond)
+			attempts(i + 1)
+			time.Sleep(time.Millisecond)
+			attempts(i + 2)
+		}
+		delivery.mu.Lock()
+		buffered, loadErr := delivery.loadLocked()
+		delivery.mu.Unlock()
+		if loadErr != nil || len(buffered) != auditReplayBatchSize+1 {
+			t.Fatalf("buffered = %d, error = %v", len(buffered), loadErr)
+		}
+		writer.mu.Lock()
+		writer.err = nil
+		writer.mu.Unlock()
+		time.Sleep(auditReplayMaxBackoff)
+		// Both batches drain immediately after recovery, with no interval between.
+		attempts(10)
+		delivery.mu.Lock()
+		buffered, loadErr = delivery.loadLocked()
+		delivery.mu.Unlock()
+		if loadErr != nil || len(buffered) != 0 {
+			t.Fatalf("buffer after recovery = %d, error = %v", len(buffered), loadErr)
+		}
+		// A new outage starts again at one second, rather than the old 30s delay.
+		writer.mu.Lock()
+		writer.err = errors.New("storage unavailable again")
+		writer.mu.Unlock()
+		if err := delivery.EnqueueDurable(ctx, testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+			t.Fatal(err)
+		}
+		attempts(11)
+		time.Sleep(time.Second)
+		attempts(12)
+		cancel()
+		<-done
+		time.Sleep(time.Minute)
+		attempts(12)
+	})
+}
+
+func TestAuditDeliveryStartupValidatesBeyondReplayBatch(t *testing.T) {
+	dir := t.TempDir()
+	delivery, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), auditDeliveryTestSigningKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range auditReplayBatchSize + 1 {
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Startup must still inspect the whole backlog, even though replay streams
+	// a bounded prefix instead of materializing all directory entries/events.
+	if _, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), auditDeliveryTestSigningKey.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, uuid.NewString()+".json"), []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), nil); err == nil {
+		t.Fatal("startup accepted corrupt backlog")
+	}
+}
+
+func TestAuditDeliveryRejectsSymlinkSpoolRecord(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "record")
+	event := testAuditDeliveryEvent(t, uuid.NewString())
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, event.EventID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), nil); err == nil {
+		t.Fatal("startup accepted symlink spool record")
+	}
+}
+
+func TestAuditDeliveryReplayReportsSharedStorageFailureOnce(t *testing.T) {
+	writer := &auditDeliveryWriter{err: errors.New("canonical memory limit exceeded")}
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = delivery.replay(context.Background())
+	if !errors.Is(err, errAuditDeliveryPending) || strings.Count(err.Error(), "canonical memory limit exceeded") != 1 {
+		t.Fatalf("replay error duplicated the shared failure: %v", err)
+	}
+}
+
+func TestAuditDeliveryReplayCleanupFailurePreservesCanonicalACK(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testAuditDeliveryEvent(t, uuid.NewString())
+	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	var joined *auditCanonicalCall
+	writer.onInsert = func() {
+		call, leader := delivery.joinCanonicalCall(event)
+		if leader {
+			t.Error("canonical duplicate did not join replay")
+		}
+		joined = call
+		replaceAuditSpoolDirectoryWithFile(t, dir)
+	}
+	if err := delivery.replay(context.Background()); err == nil {
+		t.Fatal("replay must back off after cleanup failure")
+	}
+	if joined == nil {
+		t.Fatal("no canonical acknowledgement")
+	}
+	select {
+	case <-joined.done:
+		if joined.err != nil {
+			t.Fatalf("canonical ACK downgraded by cleanup failure: %v", joined.err)
+		}
+	default:
+		t.Fatal("canonical acknowledgement was not completed")
 	}
 }

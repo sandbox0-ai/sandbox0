@@ -1,0 +1,82 @@
+{
+  "tested_commit": "a9943858",
+  "workflow_run": "https://github.com/sandbox0-ai/sandbox0/actions/runs/36956283454",
+  "test": "TestPrivilegedRetainedCheckpointRestore",
+  "environment": "Isolated Ubuntu 24.04 GitHub-hosted Linux runner; private direct-I/O XFS loop; enforced project quota; qualified stock runsc release-20260914.0",
+  "guest_random_memory_bytes": 536870912,
+  "scope": "Image preparation through first guest response; excludes regional/Sandpi HTTP and scheduling. Full memory challenges and process continuity passed separately after each first response.",
+  "samples": [
+    {
+      "round": 0,
+      "retained": false,
+      "image_bytes": 540150349,
+      "resident_pages": 0,
+      "total_pages": 131829,
+      "preparation_us": 4006290,
+      "admission_verification_us": 325,
+      "runsc_restore_us": 1068053,
+      "prepare_to_ready_us": 5123806,
+      "prepare_to_verified_us": 5484564
+    },
+    {
+      "round": 0,
+      "retained": true,
+      "image_bytes": 540150349,
+      "resident_pages": 131829,
+      "total_pages": 131829,
+      "preparation_us": 130528,
+      "admission_verification_us": 356,
+      "runsc_restore_us": 409941,
+      "prepare_to_ready_us": 593634,
+      "prepare_to_verified_us": 974413
+    },
+    {
+      "round": 1,
+      "retained": true,
+      "image_bytes": 540150349,
+      "resident_pages": 131829,
+      "total_pages": 131829,
+      "preparation_us": 208126,
+      "admission_verification_us": 3900,
+      "runsc_restore_us": 368657,
+      "prepare_to_ready_us": 632250,
+      "prepare_to_verified_us": 1012992
+    },
+    {
+      "round": 1,
+      "retained": false,
+      "image_bytes": 540150349,
+      "resident_pages": 0,
+      "total_pages": 131829,
+      "preparation_us": 350683,
+      "admission_verification_us": 302,
+      "runsc_restore_us": 1036186,
+      "prepare_to_ready_us": 1436836,
+      "prepare_to_verified_us": 1817715
+    },
+    {
+      "round": 2,
+      "retained": false,
+      "image_bytes": 540150349,
+      "resident_pages": 0,
+      "total_pages": 131829,
+      "preparation_us": 352816,
+      "admission_verification_us": 277,
+      "runsc_restore_us": 1043261,
+      "prepare_to_ready_us": 1445864,
+      "prepare_to_verified_us": 1826713
+    },
+    {
+      "round": 2,
+      "retained": true,
+      "image_bytes": 540150349,
+      "resident_pages": 131829,
+      "total_pages": 131829,
+      "preparation_us": 95869,
+      "admission_verification_us": 296,
+      "runsc_restore_us": 378245,
+      "prepare_to_ready_us": 525444,
+      "prepare_to_verified_us": 926357
+    }
+  ]
+}

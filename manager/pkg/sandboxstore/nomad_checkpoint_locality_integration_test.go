@@ -24,7 +24,9 @@ func TestCheckpointRestorePrefersCaptureNodeWithoutBlockingFallbackIntegration(t
                     VALUES($1,$2,$3,'draining','locality test')`, local.ClusterID, local.NodeID, local.NodeUID)
 				require.NoError(t, err)
 			case "capacity":
-				_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_capacities SET admission_cpu_millicores=1
+				// Admission budgets must be at least physical capacity. Keep
+				// both valid, but below this restore's 1,000-millicore request.
+				_, err = f.pool.Exec(f.ctx, `UPDATE manager.runtime_node_capacities SET cpu_millicores=500, admission_cpu_millicores=500
                     WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3`, local.ClusterID, local.NodeID, local.NodeUID)
 				require.NoError(t, err)
 			case "locked":

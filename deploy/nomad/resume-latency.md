@@ -19,7 +19,7 @@ stock runsc restore checks. Disposable local caches reduce repeated work:
   and durable journal receipts cannot populate this proof. Timers, eviction and
   Store shutdown close unused watches.
 
-## Complete image retention (implementation, pending remote acceptance)
+## Complete image retention
 
 After immutable regional publication, the capture custodian may retain the
 complete private image using hard links under `migration-images/retained-images`.
@@ -68,10 +68,9 @@ Local unit coverage checks capture cleanup/restart inode identity, all publicati
 paths, corruption and symlink fallback, regional authority, admission, existing
 destination custody, expiry, eviction and overlapping Store instances. Database
 integration coverage exercises preference plus draining, insufficient capacity
-and locked-slot fallback. Linux quota/stock-runsc performance and process
-continuity remain acceptance work on an isolated remote environment before
-deployment; no end-to-end latency improvement is claimed for this implementation
-until that test completes.
+and locked-slot fallback. The isolated Linux quota/stock-runsc acceptance
+below measures restore performance and verifies process continuity; full
+regional/Sandpi wake latency remains a separate rollout-canary measurement.
 
 ## Isolated reproduction
 
@@ -113,7 +112,7 @@ images consume actual project quota and eviction restores admission headroom.
 Logs separate preparation, admission verification, runsc restore, first response
 and challenged memory validation. The PR stock-runsc job invokes this test after
 installing the qualified runtime and XFS tools. These timings exclude the full
-regional/Sandpi HTTP path; remote API acceptance is still required before rollout.
+regional/Sandpi HTTP path; they do not establish production end-to-end latency.
 
 Run `TestCheckpointRestorePrefersCaptureNodeWithoutBlockingFallbackIntegration`
 only against a dedicated disposable PostgreSQL database. The repository's test
@@ -134,3 +133,30 @@ its second sequential scan. The keyed cache excludes all 1,024. Other tests
 cover changed/corrupted records, newly active staging, cache capacity, file
 corruption/replacement, restored timestamps, missing watches, restart, expiry
 and single-use consumption.
+
+## Retained-image remote acceptance (2026-10-02)
+
+The implemented cache passed the isolated stock-runsc test on an Ubuntu 24.04
+GitHub-hosted Linux runner. A 512-MiB random-memory guest produced a
+540,150,349-byte complete image. All six restored guests passed full-memory
+challenges, PID/token/counter continuity, tmpfs, open-unlinked FD offset and CPU
+feature checks. Retained cache entries survived source cleanup and Store restart,
+and actual XFS project-quota rejection and eviction recovery passed.
+
+| Alternating pair | Chunk-clone prepare to first response | Retained-inode prepare to first response |
+| --- | --- | --- |
+| 0 | 5.123806 s | 0.593634 s |
+| 1 | 1.436836 s | 0.632250 s |
+| 2 | 1.445864 s | 0.525444 s |
+
+The median fell from 1.445864 to 0.593634 seconds (58.9%). The first baseline
+sample includes initial chunk-cache reads and is retained in the evidence.
+Baseline page-image inodes had zero resident pages before restore; retained
+inodes had all 131,829 pages resident. runsc restore alone was 1.036–1.068
+seconds for baseline and 0.369–0.410 seconds for retention. Complete hashing
+remained enabled. These three pairs demonstrate the mechanism on this test
+host, not a production percentile or complete Sandpi wake SLO.
+
+[Machine-readable samples](testdata/retained-restore-20261002.json) record
+the tested commit, isolated environment, stage timings and
+[remote workflow evidence](https://github.com/sandbox0-ai/sandbox0/actions/runs/36956283454).

@@ -251,6 +251,9 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	if err != nil {
 		return nil, err
 	}
+	if downloadStats.RetainedImage {
+		transport = "retained-image"
+	}
 	if err := manifest.Validate(runtimecheckpoint.MaxImageBytes); err != nil || manifest.Binding != request.Receipt.Binding {
 		return nil, errdefs.ErrFailedPrecondition
 	}
@@ -267,6 +270,7 @@ func (d *nodeRuntime) prepareMigrationImage(ctx context.Context, request protoco
 	d.logMigrationTiming(request.OperationID(), "image-preparation", transferStarted,
 		"transport", transport, "image_bytes", result.TotalBytes,
 		"cache_chunks", downloadStats.CacheChunks, "cache_bytes", downloadStats.CacheBytes,
+		"retained_image_bytes", downloadStats.RetainedBytes,
 		"cloned_chunks", downloadStats.ClonedChunks, "cloned_bytes", downloadStats.ClonedBytes,
 		"regional_chunks", downloadStats.RegionalChunks, "regional_bytes", downloadStats.RegionalBytes)
 	return &result, nil

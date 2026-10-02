@@ -105,5 +105,6 @@ func (s *CaptureStager) PublishPlanned(ctx context.Context, binding Binding, pla
 	if err := s.store.putImmutable(ctx, manifestKey(plan.Reference.BindingDigest), payload); err != nil {
 		return Reference{}, fmt.Errorf("publish staged checkpoint manifest: %w", err)
 	}
+	s.store.retainPublishedImage(ctx, plan.Reference, manifest, payload, root)
 	return plan.Reference, nil
 }

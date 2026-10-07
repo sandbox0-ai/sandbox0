@@ -87,6 +87,33 @@ func TestReserveSandboxClaimAllowsRetryWithoutAnotherQuotaSlot(t *testing.T) {
 	require.Equal(t, int64(1), current)
 }
 
+func TestReserveSandboxClaimOperationConflictRollsBackSandboxAndQuota(t *testing.T) {
+	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
+	ctx := t.Context()
+	limit := int64(1)
+	_, err := store.ReserveSandboxClaim(ctx, &ReserveSandboxClaimRequest{
+		Record:      rootFSTestSandboxRecord("operation-owner", "team-owner"),
+		OperationID: "shared-operation", LeaseTTL: time.Minute, ActiveSandboxLimit: &limit,
+	})
+	require.NoError(t, err)
+	request := &ReserveSandboxClaimRequest{
+		Record:      rootFSTestSandboxRecord("operation-conflict", "team-conflict"),
+		OperationID: "shared-operation", LeaseTTL: time.Minute, ActiveSandboxLimit: &limit,
+	}
+	_, err = store.ReserveSandboxClaim(ctx, request)
+	require.ErrorIs(t, err, ErrSandboxClaimReservationConflict)
+	conflict, err := store.GetSandbox(ctx, request.Record.ID)
+	require.NoError(t, err)
+	require.Nil(t, conflict, "claim insertion failure must roll back the sandbox insertion")
+	count, err := store.CountActiveSandboxes(ctx, request.Record.TeamID)
+	require.NoError(t, err)
+	require.Zero(t, count, "a failed reservation must not consume team quota")
+	request.OperationID = "distinct-operation"
+	reserved, err := store.ReserveSandboxClaim(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, request.Record.ID, reserved.ID)
+}
+
 func TestReserveSandboxClaimBindsRotatesAndCleansCredentialProjectionIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

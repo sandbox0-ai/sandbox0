@@ -716,7 +716,13 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 		var capacityCPU, capacityMemory int64
 		var physicalCPU, physicalMemory int64
 		var cpusetCPUs, cpusetMems string
-		err = tx.QueryRow(ctx, `
+		var resizing bool
+		var usedCPU, usedMemory int64
+		// Pipeline separate statements, rather than combining these checks into
+		// the capacity-lock query. Under READ COMMITTED the lease/resize reads
+		// need fresh snapshots after a preceding capacity holder commits.
+		batch := &pgx.Batch{}
+		batch.Queue(`
 			SELECT cpu_millicores, memory_bytes,
 				COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
 				COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes), cpuset_cpus, cpuset_mems
@@ -724,33 +730,42 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND heartbeat_expires_at > NOW()
 			FOR UPDATE
-		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(
-			&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
 		// Recheck after acquiring the capacity lock: resize preparation uses the
 		// same lock and may have committed while this claim waited for it.
-		var resizing bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
-			WHERE cluster_id=$1 AND node_id=$2 AND pending AND NOT ($3=ANY(retained_allocations)))`, slot.ClusterID, slot.NodeID, slot.AllocationID).Scan(&resizing); err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
-		if resizing {
-			continue
-		}
-		var usedCPU, usedMemory int64
-		if err := tx.QueryRow(ctx, `
+		batch.Queue(`SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
+			WHERE cluster_id=$1 AND node_id=$2 AND pending AND NOT ($3=ANY(retained_allocations)))`, slot.ClusterID, slot.NodeID, slot.AllocationID)
+		batch.Queue(`
 			SELECT COALESCE(SUM(cpu_millicores), 0), COALESCE(SUM(memory_bytes), 0)
 			FROM manager.runtime_resource_leases
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND lease_state = 'active'
-		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(&usedCPU, &usedMemory); err != nil {
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
+		results := tx.SendBatch(ctx, batch)
+		err = results.QueryRow().Scan(&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems)
+		if err != nil {
+			closeErr := results.Close()
+			if closeErr != nil {
+				return nil, protocol.RuntimeResourceLease{}, nil, closeErr
+			}
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
 			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.QueryRow().Scan(&resizing); err != nil {
+			_ = results.Close()
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.QueryRow().Scan(&usedCPU, &usedMemory); err != nil {
+			_ = results.Close()
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.Close(); err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if resizing {
+			continue
 		}
 		if physicalCPU < request.Resources.CPUMillicores || physicalMemory < request.Resources.MemoryBytes ||
 			capacityCPU-usedCPU < request.Resources.CPUMillicores ||

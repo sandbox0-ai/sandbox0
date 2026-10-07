@@ -92,13 +92,14 @@ WORKDIR /opt/coding-agents
 COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/package-lock.json ./
 COPY manager/procd/coding-agents/THIRD_PARTY.md ./
 COPY manager/procd/coding-agents/inventory.mjs ./
+COPY manager/procd/coding-agents/install-chrome-stable.sh ./
 COPY --from=zcode-build /opt/zcode /opt/zcode
 COPY --from=kimi-sdk-build /src/kimi/sdk-host/dist /opt/kimi-sdk
 
 RUN npm ci --omit=dev \
   && for agent in codex claude opencode pi kimi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
   && ln -sf /opt/zcode/dist/zcode.cjs /usr/local/bin/zcode \
-  && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0 ./node_modules/.bin/playwright install chromium --with-deps --no-shell \
+  && bash install-chrome-stable.sh \
   && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/skills/playwright-cli/SKILL.md \
   && codex --version \
   && claude --version \
@@ -110,12 +111,6 @@ RUN npm ci --omit=dev \
   && playwright-cli --version \
   && node inventory.mjs > harness-inventory.json \
   && npm cache clean --force
-
-# Keep Chromium's process sandbox for the non-root desktop browser.
-RUN chrome_sandbox="$(find /opt/ms-playwright -type f -path '*/chrome-linux*/chrome_sandbox' | head -n 1)" \
-  && test -n "$chrome_sandbox" \
-  && chown root:root "$chrome_sandbox" \
-  && chmod 4755 "$chrome_sandbox"
 
 RUN mkdir -p /workspace
 

@@ -271,6 +271,7 @@ cloud node ceilings apply. For example:
     carrier_pool:
         prewarm_windows:
             - name: one-time-agent-batch
+              cache_template: coding-agent
               start: "2026-10-01T09:50:00Z"
               end: "2026-10-01T10:10:00Z"
               slots: 100
@@ -293,6 +294,15 @@ The controller evaluates current windows during its existing reconcile loop;
 there is no separate scheduling service or catch-up queue. A restart within an
 active window resumes renewal. Missed windows are skipped, and overlapping
 occurrences of one plan renew the same demand without multiplying its quantity.
+
+`cache_template` selects the template whose immutable RootFS and first command
+are warmed on each newly admitted elastic node. It defaults to `default` for
+existing configurations. Select the template used by the planned workload;
+warming a different template does not prepare its image or executable pages.
+The warmer creates a real sandbox, runs `node -v`, deletes it, and waits for
+carrier recovery before recording success. Changes to the selected template,
+its artifact, or the node boot identity trigger a new warmup. Each window still
+records its capacity demand once, independently of its cache template.
 
 
 Each entry describes spare capacity for that many requests of the given shape;

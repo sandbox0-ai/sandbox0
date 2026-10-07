@@ -88,6 +88,7 @@ type ManagerConfig struct {
 
 // CarrierPrewarmWindow declares either an absolute or a UTC cron demand window.
 type CarrierPrewarmWindow struct {
+	CacheTemplate string    `yaml:"cache_template" json:"-"`
 	Name          string    `yaml:"name" json:"-"`
 	Start         time.Time `yaml:"start" json:"-"`
 	End           time.Time `yaml:"end" json:"-"`

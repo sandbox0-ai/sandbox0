@@ -94,23 +94,6 @@ func (w *Worker) Reconcile(ctx context.Context) error {
 	if len(windows) == 0 {
 		return nil
 	}
-	tpl, err := w.templates.GetTemplateForTeam(ctx, teamID, "default")
-	if err != nil {
-		return err
-	}
-	if tpl == nil || !tpl.ReadyForClaim() {
-		return errors.New("default prewarm template is not ready")
-	}
-	artifact, err := json.Marshal(struct {
-		Spec          any
-		RootFS        any
-		Compatibility string
-	}{tpl.Spec, tpl.RootFS, w.compatibility})
-	if err != nil {
-		return err
-	}
-	hash := sha256.Sum256(artifact)
-	templateDigest := "sha256:" + hex.EncodeToString(hash[:])
 	nodes, err := w.store.ListRuntimeCarrierNodes(ctx, w.clusterID)
 	if err != nil {
 		return err
@@ -123,6 +106,28 @@ func (w *Worker) Reconcile(ctx context.Context) error {
 		if window.SecurityClass != "privileged" {
 			continue
 		}
+		templateID := window.CacheTemplate
+		if templateID == "" {
+			templateID = "default"
+		}
+		tpl, err := w.templates.GetTemplateForTeam(ctx, teamID, templateID)
+		if err != nil {
+			return err
+		}
+		if tpl == nil || !tpl.ReadyForClaim() {
+			return fmt.Errorf("prewarm template %q is not ready", templateID)
+		}
+		artifact, err := json.Marshal(struct {
+			Template      string
+			Spec          any
+			RootFS        any
+			Compatibility string
+		}{templateID, tpl.Spec, tpl.RootFS, w.compatibility})
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256(artifact)
+		templateDigest := "sha256:" + hex.EncodeToString(hash[:])
 		for _, node := range nodes {
 			readyBefore := node.ReadyByCompatibility[w.compatibility]
 			if !elastic[node.NodeUID] || node.Retiring || node.Pending || node.StaleIdentity || readyBefore < 1 {
@@ -137,7 +142,7 @@ func (w *Worker) Reconcile(ctx context.Context) error {
 			if !acquired {
 				continue
 			}
-			if err := w.warm(ctx, key, node, readyBefore, attempt, previous); err != nil {
+			if err := w.warm(ctx, key, templateID, node, readyBefore, attempt, previous); err != nil {
 				return err
 			}
 			return nil
@@ -163,11 +168,11 @@ func (w *Worker) cleanup(ctx context.Context, sandboxID string) error {
 }
 
 func (w *Worker) warm(parent context.Context, key sandboxstore.RuntimeNodeCachePrewarmKey,
-	node sandboxstore.RuntimeCarrierNode, readyBefore, attempt, previous int) (resultErr error) {
+	templateID string, node sandboxstore.RuntimeCarrierNode, readyBefore, attempt, previous int) (resultErr error) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	op := operationID(key, attempt)
-	sandboxID, err := naming.SandboxNameForOperation(w.clusterID, "default", op)
+	sandboxID, err := naming.SandboxNameForOperation(w.clusterID, templateID, op)
 	if err != nil {
 		return err
 	}
@@ -184,7 +189,7 @@ func (w *Worker) warm(parent context.Context, key sandboxstore.RuntimeNodeCacheP
 		}
 	}()
 	if previous > 0 {
-		oldID, err := naming.SandboxNameForOperation(w.clusterID, "default", operationID(key, previous))
+		oldID, err := naming.SandboxNameForOperation(w.clusterID, templateID, operationID(key, previous))
 		if err != nil {
 			return err
 		}
@@ -208,7 +213,7 @@ func (w *Worker) warm(parent context.Context, key sandboxstore.RuntimeNodeCacheP
 	}
 	hardTTL := int32(300)
 	ttl := int32(300)
-	response, err := w.claimer.ClaimSandbox(ctx, &service.ClaimRequest{TeamID: teamID, Template: "default", OperationID: op,
+	response, err := w.claimer.ClaimSandbox(ctx, &service.ClaimRequest{TeamID: teamID, Template: templateID, OperationID: op,
 		TargetNode: &service.ClaimNodeTarget{NodeID: node.NodeID, NodeUID: node.NodeUID, NodeBootID: node.NodeBootID},
 		Config:     &sandboxstore.SandboxConfig{TTL: &ttl, HardTTL: &hardTTL}})
 	if err != nil {
@@ -240,7 +245,7 @@ func (w *Worker) warm(parent context.Context, key sandboxstore.RuntimeNodeCacheP
 		}
 		if restored {
 			w.logger.Info("Runtime node cache prewarm completed", zap.String("node_id", node.NodeID), zap.String("node_uid", node.NodeUID),
-				zap.String("window", key.WindowName), zap.Int("ready_carriers", readyBefore))
+				zap.String("window", key.WindowName), zap.String("template", templateID), zap.Int("ready_carriers", readyBefore))
 			return nil
 		}
 		select {

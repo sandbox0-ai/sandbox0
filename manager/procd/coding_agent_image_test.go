@@ -25,12 +25,26 @@ func TestCodingAgentImageIncludesSharedHeadedBrowser(t *testing.T) {
 	}
 
 	for _, expected := range []string{
-		"playwright install chromium --with-deps --no-shell",
+		"bash install-chrome-stable.sh",
 		"openbox", "tigervnc-standalone-server", "SANDPI_BROWSER_USER",
-		"chrome_sandbox", "chmod 4755",
 	} {
 		if !strings.Contains(contents, expected) {
 			t.Fatalf("coding-agent Dockerfile does not contain %q", expected)
+		}
+	}
+	if strings.Contains(contents, "playwright install chromium") {
+		t.Fatal("coding-agent image must use Chrome Stable instead of Playwright's browser")
+	}
+	installer, err := os.ReadFile("coding-agents/install-chrome-stable.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"amd64|arm64", "google-chrome-stable_current_${arch}.deb",
+		"google-chrome-stable --version", "4755 root:root",
+	} {
+		if !strings.Contains(string(installer), expected) {
+			t.Fatalf("Chrome Stable installer does not contain %q", expected)
 		}
 	}
 }

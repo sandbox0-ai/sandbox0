@@ -26,13 +26,13 @@ writes, directory listings, or long-running command contexts.
 
 ## Shared Browser
 
-The template includes Chromium, Playwright CLI, TigerVNC, Openbox, and a
+The template includes Google Chrome Stable, Playwright CLI, TigerVNC, Openbox, and a
 WebSocket bridge dependency. These are installed at build time; claiming a
 sandbox does not start a desktop or download a browser. Applications such as
 Sandpi start the desktop on demand and expose an authenticated viewer.
 
 Run the headed browser as the dedicated `sandbox-browser` user, retaining
-Chromium's process sandbox. A human viewer and Playwright CLI can share the
+Chrome's process sandbox. A human viewer and Playwright CLI can share the
 same browser through a loopback CDP endpoint. Keep the browser profile on the
 persistent RootFS and restrict the desktop ingress to authorized viewers;
 never publish CDP directly. Pause/resume preserves profile files. A
@@ -49,6 +49,10 @@ The `Update Coding Agent Template` workflow refreshes the npm `latest` stable
 versions of Codex, Claude Code, OpenCode, Pi, and Playwright CLI every three UTC
 days. A daily schedule checks UTC epoch days, so the interval does not reset at
 month boundaries. Maintainers can also run it manually.
+
+Chrome Stable is installed from Google's official package for each native
+architecture during the image build. Playwright CLI attaches to the running
+browser through CDP instead of downloading its own browser executable.
 
 The workflow records exact dependency versions, the lockfile, and the package
 inventory in a shared build artifact and release assets without bypassing main

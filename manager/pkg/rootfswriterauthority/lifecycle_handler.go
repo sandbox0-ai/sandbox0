@@ -133,8 +133,12 @@ func serveCrashAbandonComplete(
 		http.Error(writer, "crash proof does not match durable generation", http.StatusConflict)
 		return
 	}
-	record, err := store.GetSandbox(request.Context(), grant.SandboxID)
-	if err != nil || record.RuntimeID != proof.AllocationID {
+	// A failed initial claim has not published SandboxRecord.RuntimeID yet.
+	// Its consumed writer already binds the exact allocation and generation;
+	// the locked completion below validates the claim/slot cleanup fence and
+	// rejects a changed active runtime before retiring that writer.
+	if grant.RuntimeIncarnationID == "" || grant.RuntimeIncarnationID != proof.AllocationID ||
+		grant.RuntimeGeneration != proof.RuntimeGeneration {
 		http.Error(writer, "crash proof does not match Nomad allocation", http.StatusConflict)
 		return
 	}

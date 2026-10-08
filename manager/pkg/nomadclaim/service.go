@@ -1523,6 +1523,9 @@ func (s *Service) claimRecord(
 	}
 	if config.TTL == nil && s.defaultTTL > 0 {
 		seconds := int32(s.defaultTTL / time.Second)
+		if config.HardTTL != nil && *config.HardTTL > 0 && seconds > *config.HardTTL {
+			seconds = *config.HardTTL
+		}
 		config.TTL = &seconds
 	}
 	record := &sandboxstore.SandboxRecord{

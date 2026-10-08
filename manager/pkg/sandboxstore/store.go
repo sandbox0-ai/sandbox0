@@ -161,9 +161,10 @@ type SandboxStoreTx interface {
 }
 
 type PGSandboxStore struct {
-	pool                   *pgxpool.Pool
-	claimAdmissionTurns    claimAdmissionTurns
-	runtimeClaimAdmissions chan struct{}
+	pool                    *pgxpool.Pool
+	claimAdmissionTurns     claimAdmissionTurns
+	runtimeClaimAdmissions  chan struct{}
+	claimReservationBatches claimReservationBatches
 }
 
 func NewPGSandboxStore(pool *pgxpool.Pool) *PGSandboxStore {

@@ -156,7 +156,7 @@ func (s *PGSandboxStore) RetrySandboxClaim(ctx context.Context, request *RetrySa
 // ReserveSandboxClaim serializes claims per team and creates the logical
 // sandbox and its retry lease in the same transaction as active-sandbox quota
 // admission. A simultaneous exact retry renews the winner's existing lease.
-func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
+func (s *PGSandboxStore) reserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}
@@ -221,17 +221,7 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	// team's quota lock. The claim depends on inserted, so an ID conflict cannot
 	// leave an orphan claim or silently attach it to somebody else's sandbox.
 	args = append(args, operationID, SandboxRuntimeClaimPhaseClaiming, leaseTTL.Milliseconds(), bindingDigest)
-	reserved, err := scanSandboxRecord(tx.QueryRow(ctx, `
-		WITH inserted AS (`+sandboxRecordInsertSQL+`
-			ON CONFLICT (sandbox_id) DO NOTHING RETURNING `+sandboxRecordColumns+`
-		), claimed AS (
-			INSERT INTO manager.sandbox_runtime_claims (
-				sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
-			) SELECT sandbox_id, $24, $25, NOW() + ($26 * INTERVAL '1 millisecond'), $27
-			FROM inserted RETURNING sandbox_id
-		)
-		SELECT inserted.* FROM inserted JOIN claimed USING (sandbox_id)
-	`, args...))
+	reserved, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxClaimReservationInsertSQL(), args...))
 	if err != nil {
 		return nil, mapSandboxClaimConflict("insert sandbox claim reservation", err)
 	}
@@ -247,6 +237,20 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 		return nil, fmt.Errorf("commit sandbox claim reservation: %w", err)
 	}
 	return reserved, nil
+}
+
+func sandboxClaimReservationInsertSQL() string {
+	return `
+		WITH inserted AS (` + sandboxRecordInsertSQL + `
+			ON CONFLICT (sandbox_id) DO NOTHING RETURNING ` + sandboxRecordColumns + `
+		), claimed AS (
+			INSERT INTO manager.sandbox_runtime_claims (
+				sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
+			) SELECT sandbox_id, $24, $25, NOW() + ($26 * INTERVAL '1 millisecond'), $27
+			FROM inserted RETURNING sandbox_id
+		)
+		SELECT inserted.* FROM inserted JOIN claimed USING (sandbox_id)
+	`
 }
 
 // lockActiveSandboxQuotaTeam establishes one lock order for initial claims and

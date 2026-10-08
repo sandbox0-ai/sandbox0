@@ -88,6 +88,9 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningFork(
 		return nil, fmt.Errorf("begin Nomad running-fork request tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveSandboxQuotaTeam(ctx, tx, normalized.ExpectedTeamID); err != nil {
+		return nil, err
+	}
 
 	source, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SourceSandboxID)
 	if err != nil {
@@ -164,6 +167,10 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningFork(
 		return nil, fmt.Errorf("%w: target hard TTL has expired", ErrNomadSandboxForkConflict)
 	}
 	placeholderLifecycle.ExpectedGenerationID = preflight.SourceGenerationID
+
+	if err := checkPausedSandboxAdmissionTx(ctx, tx, normalized.ExpectedTeamID); err != nil {
+		return nil, err
+	}
 
 	args, err := sandboxRecordInsertArgs(normalized.Target)
 	if err != nil {

@@ -194,6 +194,10 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 		return existing, nil
 	}
 
+	if err := checkPausedSandboxAdmissionTx(ctx, tx, record.TeamID); err != nil {
+		return nil, err
+	}
+
 	if request.ActiveSandboxLimit != nil {
 		current, err := countActiveSandboxQuotaReservations(ctx, tx, record.TeamID)
 		if err != nil {

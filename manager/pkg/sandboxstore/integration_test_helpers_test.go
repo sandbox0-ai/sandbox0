@@ -14,6 +14,7 @@ import (
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,10 @@ func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := newSandboxStoreIntegrationDatabase(t)
 	prepareSandboxStoreCredentialSchema(t, pool)
+	_, err := pool.Exec(t.Context(), "DROP SCHEMA IF EXISTS quota CASCADE")
+	require.NoError(t, err)
+	require.NoError(t, quota.RunMigrations(t.Context(), pool, noopSandboxStoreMigrateLogger{}))
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS quota CASCADE") })
 	require.NoError(t, RunSandboxStoreMigrations(context.Background(), pool, noopSandboxStoreMigrateLogger{}))
 	return pool
 }

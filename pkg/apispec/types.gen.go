@@ -196,6 +196,7 @@ const (
 	ApiRequests         QuotaDimension = "api_requests"
 	NetworkEgressBytes  QuotaDimension = "network_egress_bytes"
 	NetworkIngressBytes QuotaDimension = "network_ingress_bytes"
+	PausedSandboxes     QuotaDimension = "paused_sandboxes"
 	SandboxClaims       QuotaDimension = "sandbox_claims"
 )
 

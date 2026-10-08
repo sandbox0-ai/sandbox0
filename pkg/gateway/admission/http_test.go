@@ -300,8 +300,8 @@ func TestStartsUsage(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/templates/", want: true},
 		{method: http.MethodPost, path: "/api/v1/templates/from-sandbox", want: true},
 		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/resume", want: true},
-		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/fork", want: true},
-		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/snapshots", want: true},
+		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/fork", want: false},
+		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/snapshots", want: false},
 		{method: http.MethodPost, path: "/api/v1/sandboxes//resume", want: false},
 		{method: http.MethodPost, path: "/api/v1/sandboxes/sb-1/pause", want: false},
 		{method: http.MethodDelete, path: "/api/v1/sandboxes/sb-1", want: false},
@@ -309,6 +309,24 @@ func TestStartsUsage(t *testing.T) {
 	for _, tt := range tests {
 		if got := StartsUsage(tt.method, tt.path); got != tt.want {
 			t.Errorf("StartsUsage(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestRestrictedBalanceAllowsFreeRetentionOperations(t *testing.T) {
+	authCtx := &authn.AuthContext{TeamID: testTeamID}
+	reader := &fakeStore{found: true, record: Record{State: StateRestricted}}
+	for _, action := range []string{"pause", "fork", "snapshots"} {
+		path := "/api/v1/sandboxes/sb-1/" + action
+		recorder := serveUsageWithRequirement(t, http.MethodPost, path, path, authCtx, reader, true)
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("%s: status %d, want free operation allowed", action, recorder.Code)
+		}
+	}
+	for _, path := range []string{"/api/v1/sandboxes", "/api/v1/sandboxes/sb-1/resume"} {
+		recorder := serveUsageWithRequirement(t, http.MethodPost, path, path, authCtx, reader, true)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s: status %d, want paid compute blocked", path, recorder.Code)
 		}
 	}
 }

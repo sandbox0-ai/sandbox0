@@ -96,11 +96,11 @@ func assertRetiredQuotaDimensionsRejected(t *testing.T, ctx context.Context, poo
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM quota.team_quota_limits
-			 WHERE dimension NOT IN ('active_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
+			 WHERE dimension NOT IN ('active_sandboxes', 'paused_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
 		  + (SELECT COUNT(*) FROM quota.region_quota_limits
-			 WHERE dimension NOT IN ('active_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
+			 WHERE dimension NOT IN ('active_sandboxes', 'paused_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
 		  + (SELECT COUNT(*) FROM quota.region_quota_bootstrap
-			 WHERE dimension NOT IN ('active_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
+			 WHERE dimension NOT IN ('active_sandboxes', 'paused_sandboxes', 'sandbox_claims', 'api_requests', 'network_egress_bytes', 'network_ingress_bytes'))
 	`).Scan(&unsupportedRows); err != nil {
 		t.Fatalf("count unsupported quota dimensions: %v", err)
 	}

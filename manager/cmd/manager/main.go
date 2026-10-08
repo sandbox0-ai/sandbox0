@@ -680,7 +680,7 @@ func buildQuotaRepository(ctx context.Context, pool *pgxpool.Pool, cfg *config.M
 }
 
 func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
-	if cfg == nil || len(cfg.DefaultTeamQuotas) == 0 {
+	if cfg == nil {
 		return nil
 	}
 	limits := make([]quota.DefaultLimit, 0, len(cfg.DefaultTeamQuotas))
@@ -701,6 +701,17 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 			IntervalMS: intervalMS,
 			BurstValue: burstValue,
 		})
+	}
+	// Retained sandbox capacity defaults to 2,000; an explicit regional entry
+	// replaces this default, and team policies still take precedence.
+	pausedConfigured := false
+	for _, limit := range limits {
+		if limit.Dimension == quota.DimensionPausedSandboxes {
+			pausedConfigured = true
+		}
+	}
+	if !pausedConfigured {
+		limits = append(limits, quota.DefaultLimit{Dimension: quota.DimensionPausedSandboxes, LimitValue: quota.DefaultPausedSandboxes})
 	}
 	return limits
 }

@@ -456,6 +456,8 @@ func nomadForkExplicitTTLMatches(request *service.ForkSandboxConfig, stored *san
 
 func mapNomadForkError(operation, sandboxID string, err error) error {
 	switch {
+	case errors.Is(err, sandboxstore.ErrPausedSandboxQuotaExceeded):
+		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
 		return apierror.NewNotFound("sandbox", sandboxID)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxForkConflict),

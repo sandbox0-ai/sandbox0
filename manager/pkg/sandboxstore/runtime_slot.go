@@ -465,8 +465,9 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 }
 
 // AcquireRuntimeSlot reserves a live compatible slot with FOR UPDATE SKIP
-// LOCKED. Memory restores prefer the capture node, then ordinary FIFO. An
-// operation ID retry returns its original slot regardless of cache locality.
+// LOCKED. Memory restores prefer the capture node. Other candidates use a
+// stable per-operation node ordering, then FIFO within each node, to spread
+// bursts across independent capacity locks. A retry retains its original slot.
 func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *AcquireRuntimeSlotRequest) (*RuntimeSlot, error) {
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	if err != nil {
@@ -698,13 +699,15 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 						), 0)
 				)
 			ORDER BY (node_id=$14 AND node_uid=$15 AND node_boot_id=$16) DESC,
+				hashtextextended($17 || node_uid, 0),
 				fastpath_ready_at, slot_id
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
 			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination,
 			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID,
-			request.preferredCheckpointNodeID, request.preferredCheckpointNodeUID, request.preferredCheckpointNodeBootID))
+			request.preferredCheckpointNodeID, request.preferredCheckpointNodeUID, request.preferredCheckpointNodeBootID,
+			request.OperationID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}

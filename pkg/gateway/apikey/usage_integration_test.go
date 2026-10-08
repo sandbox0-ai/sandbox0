@@ -30,18 +30,24 @@ func TestConcurrentAPIKeyValidationPreservesUsageCountsWhileUsageRowLocked(t *te
 	start := time.Now()
 	var workers sync.WaitGroup
 	results := make(chan error, attempts)
-	for range attempts {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			_, err := repo.ValidateAPIKey(ctx, raw)
-			results <- err
-		}()
-	}
-	workers.Wait()
-	close(results)
-	for err := range results {
-		require.NoError(t, err)
+	for wave := range 2 {
+		for range attempts / 2 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				_, err := repo.ValidateAPIKey(ctx, raw)
+				results <- err
+			}()
+		}
+		workers.Wait()
+		for range attempts / 2 {
+			require.NoError(t, <-results)
+		}
+		if wave == 0 {
+			// Let the first wave's asynchronous writes reach the held row.
+			// A later command's authentication must still be able to read it.
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 	// Display telemetry may wait for a locked key row; authenticated reads
 	// must still finish using the remaining connections in this four-slot pool.

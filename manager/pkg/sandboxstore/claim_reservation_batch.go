@@ -207,6 +207,9 @@ func (s *PGSandboxStore) reserveFreshSandboxClaimBatch(calls []*claimReservation
 	if existing {
 		return nil, fmt.Errorf("individual retry required")
 	}
+	if err := checkPausedSandboxAdmissionTx(ctx, tx, team); err != nil {
+		return nil, err
+	}
 	var current int64
 	if limited {
 		current, err = countActiveSandboxQuotaReservations(ctx, tx, team)

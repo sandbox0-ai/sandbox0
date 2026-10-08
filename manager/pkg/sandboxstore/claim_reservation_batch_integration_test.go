@@ -224,3 +224,57 @@ func TestReserveSandboxClaimBatchAllCanceledReleasesConnectionIntegration(t *tes
 	}
 	require.Eventually(t, func() bool { return pool.Stat().AcquiredConns() == 1 }, time.Second, 5*time.Millisecond)
 }
+
+func TestReserveSandboxClaimBatchHonorsPausedRetentionAndAcceptedRetryIntegration(t *testing.T) {
+	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))
+	accepted := batchTestRequest("accepted-before-limit", "retention-team")
+	_, err := store.ReserveSandboxClaim(t.Context(), accepted)
+	require.NoError(t, err)
+	paused := rootFSTestSandboxRecord("retained", "retention-team")
+	paused.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(t.Context(), paused))
+	setPausedQuota(t, store, "retention-team", 1)
+	// A fully fresh batch must pass the same paused-state admission guard
+	// as a single request while holding PostgreSQL's team lock.
+	fresh := []*claimReservationCall{
+		{ctx: t.Context(), request: batchTestRequest("fresh-1", "retention-team")},
+		{ctx: t.Context(), request: batchTestRequest("fresh-2", "retention-team")},
+	}
+	_, err = store.reserveFreshSandboxClaimBatch(fresh)
+	require.ErrorIs(t, err, ErrPausedSandboxQuotaExceeded)
+	for _, call := range fresh {
+		record, err := store.GetSandbox(t.Context(), call.request.Record.ID)
+		require.NoError(t, err)
+		require.Nil(t, record)
+	}
+	requests := append([]*ReserveSandboxClaimRequest{accepted}, fresh[0].request, fresh[1].request)
+	start := make(chan struct{})
+	type result struct {
+		index int
+		err   error
+	}
+	results := make(chan result, len(requests))
+	for i, request := range requests {
+		go func() {
+			<-start
+			_, err := store.ReserveSandboxClaim(t.Context(), request)
+			results <- result{i, err}
+		}()
+	}
+	close(start)
+	for range requests {
+		r := <-results
+		if r.index == 0 {
+			require.NoError(t, r.err, "accepted retry remains available at the retention limit")
+		} else {
+			require.ErrorIs(t, r.err, ErrPausedSandboxQuotaExceeded)
+		}
+	}
+	setPausedQuota(t, store, "retention-team", 2)
+	resultsAfterOverride, err := store.reserveFreshSandboxClaimBatch(fresh)
+	require.NoError(t, err)
+	for _, r := range resultsAfterOverride {
+		require.NoError(t, r.err)
+		require.NotNil(t, r.record)
+	}
+}

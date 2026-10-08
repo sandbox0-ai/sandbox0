@@ -161,7 +161,7 @@ func StartsUsage(method, routePattern string) bool {
 			"/api/v1/templates/from-sandbox":
 			return true
 		}
-		if hasResourceAction(routePattern, "/api/v1/sandboxes/", "resume", "fork", "snapshots") {
+		if hasResourceAction(routePattern, "/api/v1/sandboxes/", "resume") {
 			return true
 		}
 		return false

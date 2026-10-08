@@ -47,6 +47,8 @@ jobs:
         with:
           go-version: '1.25.5'
           cache: true
+      - name: Verify quota migrations and policy authority
+        run: go test -race -count=1 -timeout=5m ./pkg/quota
       - name: Verify PostgreSQL migration authority and recovery
         shell: bash
         run: |

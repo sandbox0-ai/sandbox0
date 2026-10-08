@@ -924,7 +924,7 @@ func mapNomadResumeError(operation, sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
 		return apierror.NewNotFound("sandbox", sandboxID)
-	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
+	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded), errors.Is(err, sandboxstore.ErrPausedSandboxQuotaExceeded):
 		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxResumeConflict),
 		errors.Is(err, sandboxstore.ErrNomadCheckpointConflict),
@@ -1588,7 +1588,7 @@ func (s *Service) ensureClaimRecord(
 
 func mapClaimReservationError(operation string, err error) error {
 	switch {
-	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
+	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded), errors.Is(err, sandboxstore.ErrPausedSandboxQuotaExceeded):
 		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
 	case errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrSandboxClaimCleanupPending):

@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestDimensionsContainsFiveManagedKeys(t *testing.T) {
+func TestDimensionsContainsSixManagedKeys(t *testing.T) {
 	got := Dimensions()
-	if len(got) != 5 {
-		t.Fatalf("Dimensions() len = %d, want 5: %v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("Dimensions() len = %d, want 6: %v", len(got), got)
 	}
 	for _, dimension := range got {
 		if !KnownDimension(dimension) {

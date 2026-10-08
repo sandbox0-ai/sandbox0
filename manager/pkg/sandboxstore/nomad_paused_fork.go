@@ -29,6 +29,9 @@ func (s *PGSandboxStore) ForkNomadPausedSandbox(
 		return nil, fmt.Errorf("begin Nomad paused-fork tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveSandboxQuotaTeam(ctx, tx, normalized.ExpectedTeamID); err != nil {
+		return nil, err
+	}
 
 	target, err := forkNomadPausedSandboxTx(ctx, tx, normalized)
 	if err != nil {
@@ -93,6 +96,20 @@ func forkNomadPausedSandboxTx(ctx context.Context, tx pgx.Tx, normalized *NomadS
 	if !normalized.Target.HardExpiresAt.IsZero() &&
 		!normalized.Target.HardExpiresAt.After(authorityNow) {
 		return nil, fmt.Errorf("%w: target hard TTL has expired", ErrNomadSandboxForkConflict)
+	}
+
+	var reserved bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM manager.sandbox_runtime_running_memory_forks
+		WHERE operation_id=$1 AND source_sandbox_id=$2 AND target_sandbox_id=$3
+		AND target_record_digest=$4
+	)`, normalized.OperationID, source.ID, normalized.Target.ID, normalized.TargetRecordDigest).Scan(&reserved); err != nil {
+		return nil, err
+	}
+	if !reserved {
+		if err := checkPausedSandboxAdmissionTx(ctx, tx, normalized.ExpectedTeamID); err != nil {
+			return nil, err
+		}
 	}
 
 	args, err := sandboxRecordInsertArgs(normalized.Target)

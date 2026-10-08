@@ -47,6 +47,9 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningMemoryFork(ctx context.Contex
 	if err := lockRuntimeSlotClaimOperation(ctx, tx, normalized.OperationID); err != nil {
 		return nil, err
 	}
+	if err := lockActiveSandboxQuotaTeam(ctx, tx, normalized.ExpectedTeamID); err != nil {
+		return nil, err
+	}
 	source, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SourceSandboxID)
 	if err != nil {
 		return nil, err
@@ -63,6 +66,9 @@ func (s *PGSandboxStore) RequestNomadSandboxRunningMemoryFork(ctx context.Contex
 			return nil, ErrNomadCheckpointConflict
 		}
 		return existing, tx.Commit(ctx)
+	}
+	if err := checkPausedSandboxAdmissionTx(ctx, tx, normalized.ExpectedTeamID); err != nil {
+		return nil, err
 	}
 	if !nomadForkTargetDerivedFromSource(source, normalized.Target) {
 		return nil, ErrNomadCheckpointConflict

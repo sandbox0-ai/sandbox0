@@ -14,6 +14,7 @@ import (
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,6 +86,10 @@ func newSandboxStoreIntegrationDatabase(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(pool.Close)
 	_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS manager CASCADE")
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS manager CASCADE") })
+	_, err = pool.Exec(t.Context(), "DROP SCHEMA IF EXISTS quota CASCADE")
+	require.NoError(t, err)
+	require.NoError(t, quota.RunMigrations(t.Context(), pool, noopSandboxStoreMigrateLogger{}))
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS quota CASCADE") })
 	return pool
 }
 

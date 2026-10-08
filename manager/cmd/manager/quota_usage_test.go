@@ -20,6 +20,11 @@ func (c *managerQuotaActiveCounter) CountActiveSandboxes(context.Context, string
 	return c.current, c.err
 }
 
+func (c *managerQuotaActiveCounter) CountPausedSandboxes(context.Context, string) (int64, error) {
+	c.calls++
+	return c.current, c.err
+}
+
 type managerQuotaMeteringStore struct {
 	current   int64
 	dimension quota.Dimension

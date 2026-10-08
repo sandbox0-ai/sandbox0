@@ -8,7 +8,8 @@ PostgreSQL policy overrides the regional default for the same dimension.
 
 | Dimension | Kind | Unit | Enforcement |
 | --- | --- | --- | --- |
-| `active_sandboxes` | capacity | count | Sandbox claim transaction |
+| `active_sandboxes` | capacity | count | Sandbox claim/resume transaction |
+| `paused_sandboxes` | capacity | count | New sandbox claim/fork transaction |
 | `sandbox_claims` | rate | claims | External claim request |
 | `api_requests` | rate | requests | External regional/full-mode gateway request |
 | `network_egress_bytes` | rate | bytes | ctld network runtime |
@@ -34,6 +35,8 @@ Configure manager directly with `default_team_quotas`:
 default_team_quotas:
     - dimension: active_sandboxes
       limit_value: 100
+    - dimension: paused_sandboxes
+      limit_value: 2000
     - dimension: sandbox_claims
       limit_value: 5
       interval_ms: 1000
@@ -63,6 +66,30 @@ are separate lifecycle operations. `api_requests` is charged once at the
 external gateway; an internally authenticated regional-to-cluster hop must not
 charge it again.
 
+## Paused Sandbox Retention
+
+`paused_sandboxes` defaults to 2,000 per team when omitted from manager's
+regional configuration. An explicit regional entry replaces this default;
+team-specific policies take precedence. The limit is a soft admission guardrail:
+when current usage reaches the limit, new sandbox claims and forks return
+`429 quota_exceeded`. Pause, resume, and delete remain available. Existing
+compute can therefore pause beyond the limit, including TTL and billing pauses,
+without data deletion or being forced to continue running. Resume still requires
+active capacity and, on Cloud, available compute credit. Paused capacity is
+released when resume commits or the sandbox leaves the paused state for deletion.
+
+Usage is read from the regional PostgreSQL lifecycle authority, including
+pending running-memory-fork child reservations. Concurrent forks serialize on
+the same team admission lock as claims and resumes. Accepted retries do not
+consume another slot. A memory fork reserves its child before capture, so later
+quota changes cannot strand the parent's restore during capture handoff.
+
+Sandbox0 Cloud charges only running compute. RootFS, snapshots, and retained
+memory checkpoints are free; internal storage and request metering remains for
+cost attribution. Customers can request free quota increases through Dashboard
+or contact@sandbox0.ai. Operators apply approved overrides through the existing
+internal team quota API. Existing excess retained sandboxes are preserved.
+
 ## Other Limits
 
 These controls are intentionally separate from Team Quota:
@@ -76,7 +103,7 @@ These controls are intentionally separate from Team Quota:
 
 ## Inspect Quotas
 
-Use `GET /api/v1/quotas` for all five dimensions or
+Use `GET /api/v1/quotas` for all six dimensions or
 `GET /api/v1/quotas/{'{dimension}'}` for one.
 
 Capacity status includes `current` and `remaining`. Rate status includes

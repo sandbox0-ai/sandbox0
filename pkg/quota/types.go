@@ -5,10 +5,14 @@ import (
 	"fmt"
 )
 
+// DefaultPausedSandboxes is the regional retained-sandbox admission guardrail.
+const DefaultPausedSandboxes int64 = 2000
+
 type Dimension string
 
 const (
 	DimensionActiveSandboxes Dimension = "active_sandboxes"
+	DimensionPausedSandboxes Dimension = "paused_sandboxes"
 	DimensionSandboxClaims   Dimension = "sandbox_claims"
 	DimensionAPIRequests     Dimension = "api_requests"
 	DimensionNetworkEgress   Dimension = "network_egress_bytes"
@@ -17,6 +21,7 @@ const (
 
 var dimensions = []Dimension{
 	DimensionActiveSandboxes,
+	DimensionPausedSandboxes,
 	DimensionSandboxClaims,
 	DimensionAPIRequests,
 	DimensionNetworkEgress,
@@ -30,7 +35,7 @@ func Dimensions() []Dimension {
 
 func KnownDimension(d Dimension) bool {
 	switch d {
-	case DimensionActiveSandboxes,
+	case DimensionActiveSandboxes, DimensionPausedSandboxes,
 		DimensionSandboxClaims,
 		DimensionAPIRequests,
 		DimensionNetworkEgress,
@@ -51,7 +56,7 @@ const (
 // KindForDimension returns the admission model used by a quota dimension.
 func KindForDimension(d Dimension) Kind {
 	switch d {
-	case DimensionActiveSandboxes:
+	case DimensionActiveSandboxes, DimensionPausedSandboxes:
 		return KindCapacity
 	case DimensionSandboxClaims,
 		DimensionAPIRequests,
@@ -146,7 +151,7 @@ func NewStatus(teamID string, dimension Dimension, policy *Policy, current int64
 // UnitForDimension returns the unit used by limit and usage values for a quota dimension.
 func UnitForDimension(d Dimension) string {
 	switch d {
-	case DimensionActiveSandboxes:
+	case DimensionActiveSandboxes, DimensionPausedSandboxes:
 		return "count"
 	case DimensionSandboxClaims:
 		return "claims"

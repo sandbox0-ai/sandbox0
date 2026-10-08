@@ -177,6 +177,12 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	bindings := credentialbinding.CloneStore(request.CredentialBindings)
 	bindingDigest := credentialbinding.DigestStore(bindings)
 
+	releaseTurn, err := s.claimAdmissionTurns.acquire(ctx, record.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseTurn()
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin sandbox claim reservation tx: %w", err)

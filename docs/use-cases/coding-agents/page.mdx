@@ -26,10 +26,16 @@ writes, directory listings, or long-running command contexts.
 
 ## Shared Browser
 
-The template includes Google Chrome Stable, Playwright CLI, TigerVNC, Openbox, and a
-WebSocket bridge dependency. These are installed at build time; claiming a
-sandbox does not start a desktop or download a browser. Applications such as
-Sandpi start the desktop on demand and expose an authenticated viewer.
+The template includes `sandbox0-browser`, Google Chrome Stable, Playwright CLI,
+TigerVNC, Openbox, and a built-in noVNC viewer. Start the helper in a supervised
+session and open a Private Preview for port `6080` to share the browser with a
+human. Dependencies are installed at image build time; claiming a sandbox does
+not start the desktop. Applications such as Sandpi use the same helper with
+their own authenticated viewer.
+
+See [Shared Browser](/docs/sandbox/use-cases/shared-browser) for the Quickstart
+and how it differs from Steel Browser. Existing sandboxes need an explicit
+upgrade if `sandbox0-browser` is not installed.
 
 Run the headed browser as the dedicated `sandbox-browser` user, retaining
 Chrome's process sandbox. A human viewer and Playwright CLI can share the

@@ -4,6 +4,10 @@ Run a browser automation API inside a Sandbox0 sandbox when you want CDP, browse
 
 The builtin `browser` template uses the upstream Steel Browser image. It stores Chrome profile data under `/browser/profile` and downloads under `/files` on the sandbox writable rootfs.
 
+For a human and an agent sharing the same native browser desktop, see
+[Shared Browser](/docs/sandbox/use-cases/shared-browser). That guide uses the
+`coding-agent` template’s built-in viewer; this guide uses Steel’s session API.
+
 ## Create The Service
 
 Claim the builtin `browser` template and expose Steel Browser as a `cmd` Sandbox Service. The service command runs the Steel image entrypoint directly; no wrapper image or script is required.

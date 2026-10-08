@@ -359,6 +359,15 @@ func (s *Server) proxySandboxPreview(c *gin.Context, sandbox *mgr.Sandbox, recor
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox runtime is unavailable")
 		return
 	}
+	// Intermediate gateways and WebSocket proxying can rewrite Request.Host.
+	// Derive the public origin from the authorized grant and configured domain,
+	// rather than trusting request headers or observing a mutated request.
+	previewURL, err := s.previewTargetURL(record.SandboxID, record.Port, "")
+	if err != nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "preview domain is unavailable")
+		return
+	}
+	previewOrigin := previewURL.Scheme + "://" + previewURL.Host
 	token, err := s.internalAuthGen.Generate("procd", record.TeamID, record.UserID, internalauth.GenerateOptions{
 		SandboxID:   record.SandboxID,
 		Permissions: []string{previewProxyPermission},
@@ -374,7 +383,7 @@ func (s *Server) proxySandboxPreview(c *gin.Context, sandbox *mgr.Sandbox, recor
 	modifier := func(request *http.Request) {
 		request.Header.Set(internalauth.TeamIDHeader, record.TeamID)
 		request.Header.Set(internalauth.DefaultTokenHeader, token)
-		request.Header.Set("X-Sandbox0-Preview-Origin", "https://"+c.Request.Host)
+		request.Header.Set("X-Sandbox0-Preview-Origin", previewOrigin)
 		removeRequestCookie(request, previewCookieName)
 	}
 	router, err := proxy.NewRouter(procdURL.String(), s.logger, s.cfg.ProxyTimeout.Duration, proxy.WithRequestModifier(modifier), proxy.WithHTTPClient(s.outboundHTTPClient()))

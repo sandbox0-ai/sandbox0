@@ -1,0 +1,8 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #151515; color: #eee; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100dvh; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; padding: .75rem 1rem; border-bottom: 1px solid #444; }
+#status { flex: 1; font-size: .85rem; color: #bbb; }
+button { border: 1px solid #777; border-radius: .3rem; background: #272727; color: inherit; padding: .4rem .75rem; cursor: pointer; }
+button:focus-visible { outline: 2px solid #f97316; outline-offset: 3px; }
+#desktop { min-height: 0; flex: 1; overflow: hidden; }

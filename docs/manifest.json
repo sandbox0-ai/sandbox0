@@ -130,6 +130,10 @@
           "title": "Hosting Hermes"
         },
         {
+          "slug": "shared-browser",
+          "title": "Shared Browser"
+        },
+        {
           "slug": "steel-browser",
           "title": "Steel Browser",
           "aliases": [

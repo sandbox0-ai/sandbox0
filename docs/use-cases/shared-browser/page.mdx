@@ -1,0 +1,277 @@
+# Shared Browser
+
+Share one headed Chromium-based browser (Chrome Stable) between a human and a coding agent inside a Sandbox0
+sandbox. Both use the same tabs and login state, and can inspect applications
+served on sandbox loopback ports.
+
+The `coding-agent` template includes `sandbox0-browser`: a foreground command
+that starts Chromium, its desktop, and a built-in web viewer. Open the viewer
+through a Private Preview and attach the agent through local CDP. No additional
+template, desktop script, or frontend is required.
+
+## Quickstart
+
+Use a `coding-agent` image containing `sandbox0-browser`. Existing sandboxes
+retain their installed files when a template changes; check availability with
+`sandbox0-browser --version` inside the sandbox. If the command is missing,
+use an updated template for a new sandbox or explicitly upgrade the old RootFS.
+See [Coding Agents](/docs/sandbox/use-cases/coding-agents#template-updates).
+
+Install the JavaScript SDK and save the following as `browser.mjs`:
+
+```bash
+npm install sandbox0@^0.10.1
+```
+
+```javascript
+import { Client } from "sandbox0";
+import { setTimeout as sleep } from "node:timers/promises";
+
+const client = new Client({
+    token: process.env.SANDBOX0_API_KEY,
+    baseUrl: process.env.SANDBOX0_API_URL,
+});
+const sandbox = await client.sandboxes.claim("coding-agent", {
+    ttl: 3600,
+    hardTtl: 7200,
+    resources: { memory: "2Gi" },
+});
+
+try {
+    const session = await sandbox.createSession({
+        command: ["sandbox0-browser"],
+        cwd: "/workspace",
+        readiness: {
+            type: "output",
+            output: "Browser ready:",
+            timeoutMs: 60000,
+        },
+        lifecycle: {
+            restart: { policy: "on_failure" },
+            runtimeRecovery: "restart",
+        },
+    }, { idempotencyKey: "shared-browser" });
+
+    let ready = false;
+    for (let attempt = 0; attempt < 75; attempt++) {
+        const current = await sandbox.getSession(session.id);
+        if (current.phase === "running") {
+            ready = true;
+            break;
+        }
+        if (["failed", "exited", "stopped", "suspended"].includes(current.phase)) {
+            throw new Error(`Browser session ended: ${current.phase}`);
+        }
+        await sleep(1000);
+    }
+    if (!ready) throw new Error("Browser readiness timed out");
+
+    const preview = await sandbox.createPreview({
+        port: 6080,
+        protocol: "http",
+        path: "/",
+        ttlSeconds: 900,
+    });
+    console.log("Sandbox:", sandbox.id);
+    console.log("Browser session:", session.id);
+    console.log("Preview grant:", preview.id);
+    console.log("Open this one-time link in your browser:", preview.url);
+} catch (error) {
+    await client.sandboxes.delete(sandbox.id);
+    throw error;
+}
+```
+
+Set `SANDBOX0_API_KEY` and `SANDBOX0_API_URL` for your deployment, then run
+`node browser.mjs`. Open the printed link in your browser to see and control
+Chromium. Keep this link private and do not fetch it from your backend first:
+it contains a one-time credential that the browser exchanges for a preview
+cookie. The SDK/API key stays in your backend or local script.
+
+The supervised session keeps running after this script exits. A Private Preview
+expires independently; renew it before expiration or create a new grant to open
+another viewer. See [Private Previews](/docs/sandbox/previews) for renewal,
+revocation, and runtime generation behavior.
+
+To stop the browser, call
+`sandbox.setSessionDesiredState(sessionId, "stopped")`. To remove the test
+sandbox and its RootFS, call `client.sandboxes.delete(sandboxId)`.
+
+## Use An Existing Sandbox
+
+Run the helper in a supervised session rather than an interactive terminal:
+
+```bash
+s0 sandbox session create "$SANDBOX_ID" \
+    --restart on_failure --runtime-recovery restart \
+    --readiness output --ready-output 'Browser ready:' \
+    --ready-timeout-ms 60000 -- sandbox0-browser
+```
+
+Wait until the session is `running`, then create a Private Preview for port
+`6080` as above or with the HTTP API:
+
+```bash
+curl -X POST "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/previews" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"port":6080,"protocol":"http","path":"/","ttl_seconds":900}'
+```
+
+Open `data.url` in your browser. Creating a preview does not start the browser
+process. Run only one shared browser per sandbox; starting a second helper fails
+instead of taking over an active profile.
+
+## Attach The Agent
+
+With the browser ready, run these commands inside the same sandbox:
+
+```bash
+playwright-cli attach --cdp=http://127.0.0.1:9222
+playwright-cli tab-list
+playwright-cli snapshot
+```
+
+Read the installed CLI's version-matched Agent Skill before using automation
+commands. `attach` reuses the existing browser and tabs. A separately launched
+browser or isolated context does not share the same interaction. See the
+[upstream Playwright CLI guide](https://github.com/microsoft/playwright-cli).
+
+The human can sign in through the viewer and let the agent continue in the same
+browser. Coordinate before navigating, typing, or closing tabs: sharing a
+browser does not serialize human and agent input. When the agent finishes, use
+`playwright-cli detach` to leave Chromium running. Closing the viewer also leaves
+the browser running.
+
+## Defaults And Configuration
+
+| Setting | Default |
+|---------|---------|
+| Viewer HTTP and WebSocket | `127.0.0.1:6080`, page `/`, WebSocket `/vnc` |
+| Readiness endpoint | `GET /healthz`, available after desktop and CDP readiness |
+| Agent CDP | `http://127.0.0.1:9222` |
+| Desktop VNC | `127.0.0.1:5900` |
+| Persistent browser profile | `/workspace/.browser/profile` |
+| Persistent downloads | `/workspace/browser-downloads` |
+| Browser user | `sandbox-browser`, with Chromium's process sandbox enabled |
+| Initial desktop size | `1440x900` |
+
+Use `sandbox0-browser --help` for command options. For example:
+
+```bash
+sandbox0-browser --profile /workspace/my-browser/profile \
+    --downloads /workspace/my-browser/downloads --size 1920x1080
+```
+
+Profile and download paths must be separate canonical directories under
+`/workspace`, with no symbolic-link ancestors. The helper prepares directory
+permissions, serializes startup, and recovers stale Chromium singleton links
+only after checking that the profile has no active browser process. Stopping
+the helper stops its desktop, window manager, Chromium, and viewer together.
+
+The viewer is bundled with the image; browser and desktop dependencies are
+installed at build time. Claiming a sandbox does not automatically start them.
+The helper has no independent authentication: keep its default loopback bind
+and use Private Preview, or protect every published route with service auth.
+CDP and VNC remain on loopback and are not exposed by the viewer.
+
+## Preview Local Web Applications
+
+Open `http://127.0.0.1:3000` in the shared Chromium to inspect a development
+server in the same sandbox. Here, `localhost` refers to the sandbox. Your device
+connects to the viewer while the remote browser connects to the web app, so you
+do not need to publish each development server.
+
+For a direct link rendered in the human's own browser, use a
+[Private Preview](/docs/sandbox/previews) of the application's port.
+
+## Integrate Into Your Application
+
+Applications such as [Sandpi](https://sandpi.ai) can use the same helper with
+an existing noVNC frontend and an authenticated backend proxy. Register a
+command-backed [Sandbox Service](/docs/sandbox/services) that exposes only the
+VNC bridge to your backend:
+
+```yaml
+services:
+    - id: shared-browser
+      port: 6080
+      runtime:
+          type: cmd
+          command: [sandbox0-browser, --host, 0.0.0.0]
+          cwd: /workspace
+      ingress:
+          public: true
+          routes:
+              - id: viewer
+                path_prefix: /vnc
+                methods: [GET]
+                auth:
+                    mode: header
+                    header_name: X-Browser-Proxy
+                    header_value_sha256: <sha256-of-backend-route-token>
+                resume: true
+```
+
+The helper uses `SANDBOX0_SERVICE_PORT` when a service injects it. It opens the
+viewer listener only after the desktop and CDP are ready, so the default TCP
+service readiness check covers browser startup. Include all services you want
+to retain when updating the service list: `PUT /services` replaces the list.
+
+Your backend authorizes access to the sandbox and relays the frontend's
+WebSocket to the service's `public_url` plus `/vnc`, using `wss` and the configured
+auth header. Browser clients cannot set that header directly. Keep the route
+token and deployment API key in the backend. Enable sandbox `auto_resume` and
+route `resume` when viewing should wake a paused sandbox.
+
+Sandpi uses this command when available, retaining its existing profile at
+`/workspace/.sandpi/browser/profile`. Older Sandpi environments retain the legacy
+launcher until their RootFS is upgraded.
+
+## Shared Browser Or Steel Browser?
+
+| Dimension | Shared Browser | Steel Browser |
+|-----------|----------------|---------------|
+| Workflow | Human and agent share a headed browser | Clients request browser automation sessions |
+| Template | `coding-agent`, with `sandbox0-browser` | `browser`, with upstream Steel |
+| Control | Attach agent through sandbox-local CDP | Steel session API returns a CDP WebSocket URL |
+| Human interface | Bundled noVNC desktop or your own viewer | Steel live view, session viewer, and DevTools URLs |
+| Setup | Start helper and create a Private Preview | Integrate Steel's session API and protect its routes |
+
+Steel also provides live-view capabilities. Choose the integration model that
+fits your application; see [Hosting Steel Browser](/docs/sandbox/use-cases/steel-browser).
+The existing `browser` template and browser documentation alias continue to
+refer to Steel.
+
+## Persistence And Recovery
+
+| State | Recovery behavior |
+|-------|-------------------|
+| Committed profile files, cookies, and local storage | Restored with RootFS; websites may still expire login sessions |
+| Downloads | Restored with RootFS |
+| Browser and desktop processes | Restarted after filesystem-only recovery by the session/service; supported memory checkpoint/restore can retain execution state |
+| Viewer and CDP connections | Reconnect after resume or transport failure |
+| Live tabs and in-memory page state | Not guaranteed by RootFS recovery or Chromium session restore |
+| Private Preview grants | Recreate after runtime replacement; renew before expiration |
+
+See [Pause And Resume](/docs/sandbox/pause-resume) for memory checkpoint support
+and compatibility. Profile persistence does not guarantee continuation of an
+in-flight browser operation. Reattach the agent when its CDP connection is lost.
+
+RootFS snapshots and forks include profile files, which can contain authenticated
+sessions. Anyone with workspace access can access those files; grant access to
+copies accordingly.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Private Previews" href="/docs/sandbox/previews" cta="Continue">
+    Renew or revoke access to the built-in viewer.
+  </Card>
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Integrate protected viewer ingress and startup on first access.
+  </Card>
+  <Card title="Steel Browser" href="/docs/sandbox/use-cases/steel-browser" cta="Compare">
+    Host an API for browser automation sessions.
+  </Card>
+</CardGroup>

@@ -161,15 +161,20 @@ type SandboxStoreTx interface {
 }
 
 type PGSandboxStore struct {
-	pool                *pgxpool.Pool
-	claimAdmissionTurns claimAdmissionTurns
+	pool                   *pgxpool.Pool
+	claimAdmissionTurns    claimAdmissionTurns
+	runtimeClaimAdmissions chan struct{}
 }
 
 func NewPGSandboxStore(pool *pgxpool.Pool) *PGSandboxStore {
 	if pool == nil {
 		return nil
 	}
-	return &PGSandboxStore{pool: pool}
+	// Slot acquisition may wait on node-capacity locks. Keep those waiters from
+	// consuming the entire shared pool: launched slots still need connections
+	// for writer, starting, command-ready and cleanup transactions.
+	concurrency := max(int32(1), min(int32(32), pool.Config().MaxConns/4))
+	return &PGSandboxStore{pool: pool, runtimeClaimAdmissions: make(chan struct{}, concurrency)}
 }
 
 type sandboxStoreLogger interface {

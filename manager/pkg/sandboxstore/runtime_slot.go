@@ -473,6 +473,17 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if err != nil {
 		return nil, err
 	}
+	// Wait outside the database pool. This only bounds local transactions;
+	// PostgreSQL retains all operation, sandbox and node-capacity authority.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.runtimeClaimAdmissions <- struct{}{}:
+		defer func() { <-s.runtimeClaimAdmissions }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err

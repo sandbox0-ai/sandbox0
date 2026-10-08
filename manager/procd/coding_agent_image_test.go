@@ -26,7 +26,9 @@ func TestCodingAgentImageIncludesSharedHeadedBrowser(t *testing.T) {
 
 	for _, expected := range []string{
 		"bash install-chrome-stable.sh",
-		"openbox", "tigervnc-standalone-server", "SANDPI_BROWSER_USER",
+		"openbox", "tigervnc-standalone-server", "SANDBOX0_BROWSER_USER",
+		"/usr/local/bin/sandbox0-browser", "NOVNC_SHA256", "sha256sum -c -",
+		"/opt/sandbox0-browser/novnc/core/rfb.js", "sandbox0-browser --help",
 	} {
 		if !strings.Contains(contents, expected) {
 			t.Fatalf("coding-agent Dockerfile does not contain %q", expected)

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+browser_root="${SANDBOX0_BROWSER_ROOT:-/opt/sandbox0-browser}"
+if [[ "${1:-}" == --help || "${1:-}" == --version ]]; then
+  exec node "$browser_root/browser.cjs" "$@"
+fi
+
+# The lock is ephemeral and held for the complete desktop lifetime. Child
+# processes cannot keep it alive after the supervisor has finished cleanup.
+exec flock --nonblock --no-fork /tmp/sandbox0-browser.lock \
+  node "$browser_root/browser.cjs" "$@"

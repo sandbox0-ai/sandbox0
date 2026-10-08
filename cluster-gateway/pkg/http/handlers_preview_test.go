@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
@@ -50,6 +51,23 @@ func TestPreviewBootstrapAndPrivateProxy(t *testing.T) {
 		}
 		if _, err := r.Cookie(previewCookieName); err == nil {
 			t.Error("preview authorization cookie leaked to procd")
+		}
+		if websocket.IsWebSocketUpgrade(r) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			connection, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer connection.Close()
+			kind, message, err := connection.ReadMessage()
+			if err == nil {
+				err = connection.WriteMessage(kind, message)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+			return
 		}
 		_, _ = w.Write([]byte("private preview"))
 	}))
@@ -138,6 +156,33 @@ func TestPreviewBootstrapAndPrivateProxy(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(body)); got != "private preview" {
 		t.Fatalf("preview body = %q", got)
+	}
+
+	for _, requestHost := range []string{host, "cluster-gateway.internal"} {
+		t.Run("websocket origin through "+requestHost, func(t *testing.T) {
+			headers := http.Header{
+				"Host":                      []string{requestHost},
+				"Cookie":                    []string{cookies[0].String()},
+				"Origin":                    []string{"https://" + host},
+				"X-Sandbox0-Preview-Origin": []string{"https://untrusted.example"},
+			}
+			if requestHost != host {
+				headers.Set("X-Sandbox-ID", "sb-demo")
+				headers.Set("X-Exposure-Port", "3000")
+			}
+			connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/dashboard?q=1", headers)
+			if err != nil {
+				t.Fatalf("preview WebSocket: %v (response: %v)", err, response)
+			}
+			defer connection.Close()
+			if err := connection.WriteMessage(websocket.BinaryMessage, []byte("RFB")); err != nil {
+				t.Fatal(err)
+			}
+			kind, message, err := connection.ReadMessage()
+			if err != nil || kind != websocket.BinaryMessage || string(message) != "RFB" {
+				t.Fatalf("preview WebSocket echo = %d %q, %v", kind, message, err)
+			}
+		})
 	}
 }
 

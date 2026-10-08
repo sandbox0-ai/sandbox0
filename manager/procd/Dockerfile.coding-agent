@@ -47,6 +47,8 @@ COPY --chmod=0755 manager/procd/sandbox0-dockerd-entrypoint /usr/local/bin/sandb
 # give it a default: that would override BuildKit during native arm64 builds.
 ARG TARGETARCH
 ARG TTYD_VERSION=1.7.7
+ARG NOVNC_VERSION=1.5.0
+ARG NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a
 
 # The headed browser is shared by VNC viewers and local CDP automation.
 # It starts on demand; no browser process is part of a warm carrier.
@@ -63,7 +65,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_MCP_BROWSER=chromium \
     PLAYWRIGHT_MCP_ISOLATED=false \
     PLAYWRIGHT_MCP_SANDBOX=false \
-    SANDPI_BROWSER_USER=sandbox-browser
+    SANDBOX0_BROWSER_USER=sandbox-browser
 
 # The native SDKs require Node.js 24.15+. Keep the pinned agents on the same
 # supported runtime and fail if the distribution resolves an older release.
@@ -72,7 +74,7 @@ RUN apt-get update \
   && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 15)) process.exit(1)' \
-  && useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash "$SANDPI_BROWSER_USER" \
+  && useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash "$SANDBOX0_BROWSER_USER" \
   && rm -rf /var/lib/apt/lists/*
 
 # ttyd is included as an explicitly launched diagnostic/compatibility surface.
@@ -113,6 +115,21 @@ RUN npm ci --omit=dev \
   && npm cache clean --force
 
 RUN mkdir -p /workspace
+
+# Browser runtime and viewer are shared by standalone clients and applications.
+# noVNC is installed once at build time, with its upstream license files retained.
+COPY manager/procd/shared-browser/ /opt/sandbox0-browser/
+COPY --chmod=0755 manager/procd/shared-browser/sandbox0-browser /usr/local/bin/sandbox0-browser
+RUN curl -fsSL "https://codeload.github.com/novnc/noVNC/tar.gz/refs/tags/v${NOVNC_VERSION}" -o /tmp/novnc.tar.gz \
+  && echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c - \
+  && mkdir -p /opt/sandbox0-browser/novnc \
+  && tar -xzf /tmp/novnc.tar.gz --strip-components=1 -C /opt/sandbox0-browser/novnc \
+  && rm /tmp/novnc.tar.gz \
+  && test -f /opt/sandbox0-browser/novnc/core/rfb.js \
+  && test -f /opt/sandbox0-browser/novnc/LICENSE.txt \
+  && node --check /opt/sandbox0-browser/browser.cjs \
+  && NODE_PATH=/opt/coding-agents/node_modules node --test /opt/sandbox0-browser/browser.test.cjs \
+  && sandbox0-browser --help
 
 ENV HOME=/workspace
 

@@ -632,16 +632,6 @@ func selectRuntimeSlotResourceLease(
 	tx pgx.Tx,
 	request *AcquireRuntimeSlotRequest,
 ) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
-	// Fresh ordinary claims first try independent, unlocked capacity rows.
-	// When every suitable node is busy, retain the normal blocking path;
-	// temporary contention must not become a false capacity-unavailable error.
-	// Memory restores keep their capture-node preference and exact-node rules.
-	if !request.MemoryRestore && request.TargetNodeID == "" {
-		slot, lease, digest, err := selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx, tx, request, "", "", []string{}, false, true)
-		if !errors.Is(err, ErrRuntimeSlotUnavailable) {
-			return slot, lease, digest, err
-		}
-	}
 	return selectRuntimeSlotResourceLeaseOutsideNode(ctx, tx, request, "", "")
 }
 
@@ -658,12 +648,6 @@ func selectRuntimeSlotResourceLeaseOutsideNode(
 // prevent automatic moves from queuing onto an occupied exclusive staging pool.
 func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
 	excludedNodeID, excludedNodeUID string, excludedNodes []string, requireFixedDestination bool) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
-	return selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx, tx, request, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination, false)
-}
-
-func selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx context.Context, tx pgx.Tx, request *AcquireRuntimeSlotRequest,
-	excludedNodeID, excludedNodeUID string, excludedNodes []string, requireFixedDestination, skipBusyCapacity bool) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
-	excludedNodes = append([]string{}, excludedNodes...)
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
@@ -752,7 +736,7 @@ func selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx context.Context, tx pgx.
 		// the capacity-lock query. Under READ COMMITTED the lease/resize reads
 		// need fresh snapshots after a preceding capacity holder commits.
 		batch := &pgx.Batch{}
-		capacityLockSQL := `
+		batch.Queue(`
 			SELECT cpu_millicores, memory_bytes,
 				COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
 				COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes), cpuset_cpus, cpuset_mems
@@ -760,11 +744,7 @@ func selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx context.Context, tx pgx.
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND heartbeat_expires_at > NOW()
 			FOR UPDATE
-		`
-		if skipBusyCapacity {
-			capacityLockSQL += ` SKIP LOCKED`
-		}
-		batch.Queue(capacityLockSQL, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
 		// Recheck after acquiring the capacity lock: resize preparation uses the
 		// same lock and may have committed while this claim waited for it.
 		batch.Queue(`SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
@@ -783,11 +763,6 @@ func selectRuntimeSlotResourceLeaseWithCapacitySkip(ctx context.Context, tx pgx.
 				return nil, protocol.RuntimeResourceLease{}, nil, closeErr
 			}
 			if errors.Is(err, pgx.ErrNoRows) {
-				// Skip all carriers on the busy incarnation before selecting
-				// another node. Capacity is re-read under its row lock below.
-				if skipBusyCapacity {
-					excludedNodes = append(excludedNodes, slot.NodeUID)
-				}
 				continue
 			}
 			return nil, protocol.RuntimeResourceLease{}, nil, err

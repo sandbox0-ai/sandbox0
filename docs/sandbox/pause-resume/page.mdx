@@ -162,6 +162,24 @@ automatic wake-up uses filesystem-only resume. A failed or incompatible memory
 restore falls back to the committed RootFS after physical cleanup. An explicit
 `POST /resume` without `memory: true` retains its filesystem-only default.
 
+## Pause And Resume As RootFS Grows
+
+Long-running agents accumulate dependencies, code, and data in their writable
+RootFS. Sandbox0 separates that durable filesystem from runtime compute so
+later pause/resume operations do not need to copy the complete accumulated
+workspace.
+
+Pause seals and publishes the writable branch's changes, reusing unchanged
+blocks from the committed generation. Resume attaches the latest committed
+generation and fetches stored blocks on demand as the runtime reads them,
+without downloading the entire RootFS before execution starts.
+
+The design avoids work proportional to total RootFS bytes on every pause and
+resume. It does not guarantee fixed latency: unpublished writes, metadata,
+cache state, object-store access, and the runtime's read working set still
+affect the operation. Explicit memory checkpoint and restore additionally
+depend on the size of retained execution state.
+
 ## Filesystem Pause Transaction
 
 <Endpoint method="POST">

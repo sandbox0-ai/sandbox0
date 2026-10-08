@@ -1,13 +1,15 @@
 # Get Started
 
-Sandbox0 provides isolated execution environments for AI agents with a persistent sandbox root filesystem across pause/resume, named rootfs snapshots, session state maintenance, and fast warm claims. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, and credentials.
+Sandbox0 is a long-running agent sandbox with a durable writable RootFS. As agents install dependencies, edit code, and accumulate data, incremental checkpoints and on-demand resume avoid copying the entire growing filesystem during pause/resume. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, and credentials.
 
 ## What is Sandbox0?
 
-Sandbox0 is an enterprise-grade AI Agent Sandbox platform that enables you to:
+Sandbox0 gives long-running AI agents an isolated workspace that enables you to:
 
 - **Run code securely** in isolated environments with full process control
+- **Run for as long as needed** with `ttl=0` and `hard_ttl=0`, or set your own pause and deletion policies
 - **Persist sandbox files** across pause/resume with rootfs checkpoints tied to the sandbox identity
+- **Keep growing workspaces reusable** with incremental block-COW checkpoints and demand reads on resume
 - **Version and fan out durable state** with rootfs snapshots, restore, and forks
 - **Control network access** with fine-grained policies
 - **Scale efficiently** with one resource-neutral warm-carrier pool and

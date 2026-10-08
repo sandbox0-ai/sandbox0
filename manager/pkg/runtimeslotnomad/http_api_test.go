@@ -47,6 +47,7 @@ func (r staticResolver) ClientEndpoint(context.Context, string, string) (Endpoin
 
 type nomadTestServerState struct {
 	mu              sync.Mutex
+	connections     map[string]struct{}
 	token           string
 	desiredStatus   string
 	serverPresent   bool
@@ -248,6 +249,10 @@ func newNomadMTLSTestServer(
 		}
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		if state.connections == nil {
+			state.connections = make(map[string]struct{})
+		}
+		state.connections[request.RemoteAddr] = struct{}{}
 		if request.Header.Get("X-Nomad-Token") != state.token {
 			http.Error(writer, "permission denied", http.StatusForbidden)
 			return

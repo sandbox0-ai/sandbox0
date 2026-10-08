@@ -54,6 +54,7 @@ type EndpointResolver interface {
 // allocation-filesystem/GC endpoints over mutually authenticated TLS.
 type HTTPAPI struct {
 	resolver EndpointResolver
+	clients  nomadHTTPClients
 }
 
 var _ API = (*HTTPAPI)(nil)
@@ -77,7 +78,7 @@ func (a *HTTPAPI) ServerAllocation(
 	if err != nil {
 		return nil, err
 	}
-	client, baseURL, err := newNomadHTTPClient(endpoint)
+	client, baseURL, err := a.nomadHTTPClient(endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +118,7 @@ func (a *HTTPAPI) ClientAllocationPresent(
 	}
 	query := namespaceQuery(target.AllocationNamespace)
 	query.Set("path", "alloc/")
-	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodGet,
+	status, payload, err := a.exchangeNomad(ctx, endpoint, http.MethodGet,
 		clientAllocationFSStatPath(target.AllocationID), query, false)
 	if err != nil {
 		return false, err
@@ -150,7 +151,7 @@ func (a *HTTPAPI) StopAllocation(
 	query.Set("idempotency_token", operationID)
 	query.Set("no_shutdown_delay", "true")
 	query.Set("reschedule", "false")
-	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodPost,
+	status, payload, err := a.exchangeNomad(ctx, endpoint, http.MethodPost,
 		allocationPath(target.AllocationID)+"/stop", query, false)
 	if err != nil {
 		return err
@@ -185,7 +186,7 @@ func (a *HTTPAPI) EvaluateTerminalAllocation(
 	if err != nil {
 		return err
 	}
-	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodPost,
+	status, payload, err := a.exchangeNomad(ctx, endpoint, http.MethodPost,
 		"/v1/job/"+url.PathEscape(allocation.JobID)+"/evaluate", namespaceQuery(target.AllocationNamespace), true)
 	if err != nil {
 		return err
@@ -211,7 +212,7 @@ func (a *HTTPAPI) GarbageCollectAllocation(
 	if err != nil {
 		return err
 	}
-	status, payload, err := exchangeNomad(ctx, endpoint, http.MethodGet,
+	status, payload, err := a.exchangeNomad(ctx, endpoint, http.MethodGet,
 		clientAllocationPath(target.AllocationID, "gc"), namespaceQuery(target.AllocationNamespace), false)
 	if err != nil {
 		return err
@@ -306,14 +307,14 @@ func (e Endpoint) validate() error {
 	return nil
 }
 
-func exchangeNomad(
+func (a *HTTPAPI) exchangeNomad(
 	ctx context.Context,
 	endpoint Endpoint,
 	method, escapedPath string,
 	query url.Values,
 	readSuccessBody bool,
 ) (int, []byte, error) {
-	client, baseURL, err := newNomadHTTPClient(endpoint)
+	client, baseURL, err := a.nomadHTTPClient(endpoint)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -342,6 +343,13 @@ func exchangeNomad(
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 == 2 && !readSuccessBody {
+		// Successful mutation responses may contain a small JSON receipt. Drain
+		// only the bounded response so an authenticated connection can be reused.
+		if n, err := io.Copy(io.Discard, io.LimitReader(response.Body, maxNomadResponseBytes+1)); err != nil {
+			return 0, nil, fmt.Errorf("read Nomad mutation response: %w: %w", err, errdefs.ErrUnavailable)
+		} else if n > maxNomadResponseBytes {
+			return 0, nil, fmt.Errorf("Nomad mutation response exceeds limit: %w", errdefs.ErrUnavailable)
+		}
 		return response.StatusCode, nil, nil
 	}
 	limit := int64(maxNomadErrorBytes)
@@ -358,20 +366,16 @@ func exchangeNomad(
 	return response.StatusCode, payload, nil
 }
 
-func newNomadHTTPClient(endpoint Endpoint) (*http.Client, *url.URL, error) {
+func newNomadHTTPClient(endpoint Endpoint, caPEM, certificatePEM, keyPEM []byte) (*http.Client, *url.URL, error) {
 	baseURL, err := url.Parse(endpoint.BaseURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse Nomad endpoint URL: %w: %w", err, errdefs.ErrInvalidArgument)
-	}
-	caPEM, err := os.ReadFile(endpoint.CAFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read Nomad endpoint CA: %w: %w", err, errdefs.ErrUnavailable)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, nil, fmt.Errorf("nomad endpoint CA has no certificates: %w", errdefs.ErrInvalidArgument)
 	}
-	certificate, err := tls.LoadX509KeyPair(endpoint.ClientCertFile, endpoint.ClientKeyFile)
+	certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Nomad client identity: %w: %w", err, errdefs.ErrUnavailable)
 	}
@@ -392,7 +396,9 @@ func newNomadHTTPClient(endpoint Endpoint) (*http.Client, *url.URL, error) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.DisableKeepAlives = true
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 30 * time.Second
 	transport.TLSClientConfig = tlsConfig
 	timeout := endpoint.Timeout
 	if timeout == 0 {

@@ -10,12 +10,15 @@
 
 # Sandbox0
 
-**Persistent, encrypted sandboxes for long-running AI agents, scheduled by Nomad and isolated by gVisor.**
+**The long-running agent sandbox. Durable writable RootFS, incremental checkpoints, and on-demand resume, scheduled by Nomad and isolated by gVisor.**
 
-Sandbox0 is an open-source runtime for platforms that need to execute untrusted
-code without treating every workspace as disposable. A physical runtime
-allocation is replaceable; the sandbox identity and writable RootFS are
-durable.
+Sandbox0 is an open-source sandbox runtime for long-running AI agents. As an
+agent installs dependencies, edits code, and accumulates data, its writable
+RootFS keeps that work across runtime generations. Pause and resume are
+designed to avoid work proportional to the accumulated RootFS size: checkpoints
+publish changes, and resume reads stored blocks on demand instead of copying
+the entire filesystem. The sandbox identity and committed files remain durable
+when compute is released and later replaced.
 
 Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates,
 credentials, and team-scoped API keys.
@@ -27,12 +30,31 @@ credentials, and team-scoped API keys.
 
 | Differentiator | What it means |
 | --- | --- |
+| **Built for growing agent workspaces** | Durable writable RootFS keeps dependencies, repositories, and outputs across runs. Incremental block-COW checkpoints and demand reads avoid full-RootFS copies during pause/resume. |
 | **Storage and compute are separated** | Writable RootFS generations are application-encrypted and stored in S3-compatible object storage. Compute nodes keep disposable caches, not the durable source of truth. |
 | **The sandbox lifetime is policy-controlled** | `ttl` and `hard_ttl` default to `0` (disabled). Pause idle compute and later resume the same sandbox identity, or keep it running. |
 | **Optional memory checkpoints** | Explicit experimental `memory: true` pause and resume can retain supported processes and memory alongside the writable RootFS. Memory fork creates a paused child that can continue the captured processes. The default pause remains filesystem-only. |
 | **gVisor isolation** | Stock `runsc` provides a per-sandbox application-kernel boundary on dedicated Nomad client nodes. |
 | **One resource-neutral warm pool** | Warm Nomad carrier allocations are compatible by immutable runtime properties, not CPU or memory size. Claim-time CPU and memory are leased atomically from node capacity. |
 | **Durable environment reuse** | Snapshot, restore, fork, and template-from-sandbox use immutable block-COW RootFS generations rather than republishing mutable workspace state as an image. |
+
+## A Growing RootFS Without Full-Copy Pause/Resume
+
+A long-running agent's filesystem grows as it works. That accumulated state
+should not make every later pause or resume transfer the entire workspace.
+
+- **Pause incrementally:** publish the writable branch's changes while reusing
+  unchanged blocks from the committed RootFS generation.
+- **Resume on demand:** attach the committed generation on fresh compute and
+  fetch the blocks the workload reads, without downloading the entire RootFS
+  before execution can start.
+- **Keep the same sandbox:** installed tools, dependencies, files, and progress
+  remain available across successful checkpoints and runtime generations.
+
+This removes the full-filesystem copy from the lifecycle path. Actual latency
+still depends on unpublished writes, metadata, cache state, object-store access,
+and the workload's read working set. Optional memory checkpoint and restore
+also depend on the execution-state size.
 
 ## Quickstart
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,6 +78,9 @@ func NormalizeScope(scope string) (string, bool) {
 type Repository struct {
 	pool                       *pgxpool.Pool
 	requireLocalTeamOnValidate bool
+	usageMu                    sync.Mutex
+	usagePending               map[string]apiKeyUsage
+	usageRunning               bool
 }
 
 // RepositoryOption configures an API key repository.
@@ -281,13 +285,7 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 		return nil, ErrExpiredKey
 	}
 
-	go func() {
-		_, _ = r.pool.Exec(context.Background(), `
-			UPDATE api_keys
-			SET last_used_at = NOW(), usage_count = usage_count + 1
-			WHERE id = $1
-		`, key.ID)
-	}()
+	r.recordUsage(key.ID)
 
 	return &key, nil
 }

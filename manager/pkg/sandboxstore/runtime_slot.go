@@ -368,6 +368,28 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 	if err != nil {
 		return nil, err
 	}
+	// Warm and command-ready slots need only one atomic write. PostgreSQL
+	// rechecks the state and immutable caller identity after taking the row
+	// lock, so a concurrent fence cannot be undone by a waiting heartbeat.
+	// Claiming/starting slots keep the locked claim-expiry validation below.
+	slot, err := scanRuntimeSlot(s.pool.QueryRow(ctx, `
+		WITH heartbeat AS (
+			UPDATE manager.runtime_slots
+			SET heartbeat_expires_at = NOW() + ($5 * INTERVAL '1 millisecond'), updated_at = NOW()
+			WHERE slot_id = $1 AND allocation_id = $2 AND node_uid = $3 AND node_boot_id = $4
+				AND state IN ('registered', 'fastpath_ready', 'active')
+			RETURNING *
+		)
+	`+runtimeSlotSelectFromSQL("heartbeat"), normalized.SlotID, normalized.AllocationID,
+		normalized.NodeUID, normalized.NodeBootID, normalized.TTL.Milliseconds()))
+	if err == nil {
+		return slot, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, mapRuntimeSlotConflict("heartbeat runtime slot", err)
+	}
+	// The original locked path retains exact rejection classification and
+	// handles a claim that became command-ready while the update waited.
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
 		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
 			return nil, fmt.Errorf("%w: heartbeat caller does not match slot incarnation", ErrRuntimeSlotConflict)
@@ -1998,6 +2020,11 @@ func mapRuntimeSlotConflict(operation string, err error) error {
 }
 
 func runtimeSlotSelectSQL() string {
+	return runtimeSlotSelectFromSQL("manager.runtime_slots")
+}
+
+// source is an internal SQL relation name, never request-provided text.
+func runtimeSlotSelectFromSQL(source string) string {
 	return `
 		SELECT
 			slot_id, cluster_id, allocation_id, allocation_namespace,
@@ -2028,7 +2055,7 @@ func runtimeSlotSelectSQL() string {
 			resource_lease.resource_lease_digest, resource_lease.resource_lease_state,
 			resource_lease.resource_released_at,
 			NOW()
-		FROM manager.runtime_slots AS runtime_slots
+		FROM ` + source + ` AS runtime_slots
 		LEFT JOIN LATERAL (
 			SELECT lease_id AS resource_lease_id,
 				operation_id AS resource_operation_id,

@@ -653,6 +653,9 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 		// Compute the selection hint once per node, rather than twice for every
 		// carrier. This snapshot grants no capacity: the locked checks below use
 		// fresh snapshots before issuing the resource lease.
+		// Keep the fixed ready-state predicate literal as well as parameterized:
+		// PostgreSQL generic plans can then use the partial ready-slot index
+		// instead of scanning historical terminal allocations.
 		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, `
 			WITH capacity_candidates AS MATERIALIZED (
 				SELECT capacity.cluster_id, capacity.node_id, capacity.node_uid, capacity.node_boot_id
@@ -671,7 +674,7 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 					AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE(used.used_memory, 0)
 			)
 		`+runtimeSlotSelectSQL()+`
-				WHERE state = $1
+				WHERE state = $1 AND state = 'fastpath_ready'
 					AND NOT carrier_retired
 					AND heartbeat_expires_at > NOW()
 					AND compatibility_digest = $2

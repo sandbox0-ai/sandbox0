@@ -650,7 +650,27 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 	excludedNodeID, excludedNodeUID string, excludedNodes []string, requireFixedDestination bool) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
-		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
+		// Compute the selection hint once per node, rather than twice for every
+		// carrier. This snapshot grants no capacity: the locked checks below use
+		// fresh snapshots before issuing the resource lease.
+		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, `
+			WITH capacity_candidates AS MATERIALIZED (
+				SELECT capacity.cluster_id, capacity.node_id, capacity.node_uid, capacity.node_boot_id
+				FROM manager.runtime_node_capacities AS capacity
+				LEFT JOIN LATERAL (
+					SELECT SUM(lease.cpu_millicores) AS used_cpu, SUM(lease.memory_bytes) AS used_memory
+					FROM manager.runtime_resource_leases AS lease
+					WHERE lease.cluster_id = capacity.cluster_id AND lease.node_id = capacity.node_id
+						AND lease.node_uid = capacity.node_uid AND lease.node_boot_id = capacity.node_boot_id
+						AND lease.lease_state = 'active'
+				) AS used ON TRUE
+				WHERE capacity.heartbeat_expires_at > NOW()
+					AND ($3 = '' OR capacity.cluster_id = $3)
+					AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
+					AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE(used.used_cpu, 0)
+					AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE(used.used_memory, 0)
+			)
+		`+runtimeSlotSelectSQL()+`
 				WHERE state = $1
 					AND NOT carrier_retired
 					AND heartbeat_expires_at > NOW()
@@ -683,31 +703,11 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 					)
 					AND EXISTS (
 					SELECT 1
-					FROM manager.runtime_node_capacities AS capacity
-					WHERE capacity.cluster_id = runtime_slots.cluster_id
-						AND capacity.node_id = runtime_slots.node_id
-						AND capacity.node_uid = runtime_slots.node_uid
-						AND capacity.node_boot_id = runtime_slots.node_boot_id
-						AND capacity.heartbeat_expires_at > NOW()
-						AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
-						AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE((
-							SELECT SUM(lease.cpu_millicores)
-							FROM manager.runtime_resource_leases AS lease
-							WHERE lease.cluster_id = capacity.cluster_id
-								AND lease.node_id = capacity.node_id
-								AND lease.node_uid = capacity.node_uid
-								AND lease.node_boot_id = capacity.node_boot_id
-								AND lease.lease_state = 'active'
-						), 0)
-						AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE((
-							SELECT SUM(lease.memory_bytes)
-							FROM manager.runtime_resource_leases AS lease
-							WHERE lease.cluster_id = capacity.cluster_id
-								AND lease.node_id = capacity.node_id
-								AND lease.node_uid = capacity.node_uid
-								AND lease.node_boot_id = capacity.node_boot_id
-								AND lease.lease_state = 'active'
-						), 0)
+					FROM capacity_candidates AS capacity
+						WHERE capacity.cluster_id = runtime_slots.cluster_id
+							AND capacity.node_id = runtime_slots.node_id
+							AND capacity.node_uid = runtime_slots.node_uid
+							AND capacity.node_boot_id = runtime_slots.node_boot_id
 				)
 			ORDER BY (node_id=$14 AND node_uid=$15 AND node_boot_id=$16) DESC,
 				hashtextextended($17 || node_uid, 0),

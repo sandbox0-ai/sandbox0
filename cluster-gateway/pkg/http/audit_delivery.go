@@ -383,6 +383,22 @@ func (d *auditDelivery) dispatchCanonicalBatch(
 		return
 	}
 	d.observeStage(source, "slot_wait", slotStarted, nil)
+	// Slot pressure is already paid by this batch. Include events that arrived
+	// while waiting instead of starting another small object-store INSERT for
+	// them. Only the foreground consumer may drain this queue; replay retains
+	// its separately selected event ownership and the same writer limit.
+	if source == "foreground" {
+	drain:
+		for len(batch) < auditReplayBatchSize {
+			select {
+			case call := <-d.canonicalQueue:
+				d.observeQueueDelta(-1)
+				batch = append(batch, call)
+			default:
+				break drain
+			}
+		}
+	}
 
 	go func() {
 		results := func() []error {

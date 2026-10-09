@@ -465,12 +465,24 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 }
 
 // AcquireRuntimeSlot reserves a live compatible slot with FOR UPDATE SKIP
-// LOCKED. Memory restores prefer the capture node, then ordinary FIFO. An
-// operation ID retry returns its original slot regardless of cache locality.
+// LOCKED. Memory restores prefer the capture node. Other candidates use a
+// stable per-operation node ordering, then FIFO within each node, to spread
+// bursts across independent capacity locks. A retry retains its original slot.
 func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *AcquireRuntimeSlotRequest) (*RuntimeSlot, error) {
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	if err != nil {
 		return nil, err
+	}
+	// Wait outside the database pool. This only bounds local transactions;
+	// PostgreSQL retains all operation, sandbox and node-capacity authority.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.runtimeClaimAdmissions <- struct{}{}:
+		defer func() { <-s.runtimeClaimAdmissions }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -638,8 +650,31 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 	excludedNodeID, excludedNodeUID string, excludedNodes []string, requireFixedDestination bool) (*RuntimeSlot, protocol.RuntimeResourceLease, []byte, error) {
 	excludedSlots := make([]string, 0, 8)
 	for attempts := 0; attempts < maxRuntimeSlotCapacityCandidates; attempts++ {
-		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-				WHERE state = $1
+		// Compute the selection hint once per node, rather than twice for every
+		// carrier. This snapshot grants no capacity: the locked checks below use
+		// fresh snapshots before issuing the resource lease.
+		// Keep the fixed ready-state predicate literal as well as parameterized:
+		// PostgreSQL generic plans can then use the partial ready-slot index
+		// instead of scanning historical terminal allocations.
+		slot, err := scanRuntimeSlot(tx.QueryRow(ctx, `
+			WITH capacity_candidates AS MATERIALIZED (
+				SELECT capacity.cluster_id, capacity.node_id, capacity.node_uid, capacity.node_boot_id
+				FROM manager.runtime_node_capacities AS capacity
+				LEFT JOIN LATERAL (
+					SELECT SUM(lease.cpu_millicores) AS used_cpu, SUM(lease.memory_bytes) AS used_memory
+					FROM manager.runtime_resource_leases AS lease
+					WHERE lease.cluster_id = capacity.cluster_id AND lease.node_id = capacity.node_id
+						AND lease.node_uid = capacity.node_uid AND lease.node_boot_id = capacity.node_boot_id
+						AND lease.lease_state = 'active'
+				) AS used ON TRUE
+				WHERE capacity.heartbeat_expires_at > NOW()
+					AND ($3 = '' OR capacity.cluster_id = $3)
+					AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
+					AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE(used.used_cpu, 0)
+					AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE(used.used_memory, 0)
+			)
+		`+runtimeSlotSelectSQL()+`
+				WHERE state = $1 AND state = 'fastpath_ready'
 					AND NOT carrier_retired
 					AND heartbeat_expires_at > NOW()
 					AND compatibility_digest = $2
@@ -671,40 +706,22 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 					)
 					AND EXISTS (
 					SELECT 1
-					FROM manager.runtime_node_capacities AS capacity
-					WHERE capacity.cluster_id = runtime_slots.cluster_id
-						AND capacity.node_id = runtime_slots.node_id
-						AND capacity.node_uid = runtime_slots.node_uid
-						AND capacity.node_boot_id = runtime_slots.node_boot_id
-						AND capacity.heartbeat_expires_at > NOW()
-						AND capacity.cpu_millicores >= $4 AND capacity.memory_bytes >= $5
-						AND COALESCE(NULLIF(capacity.admission_cpu_millicores, 0), capacity.cpu_millicores) >= $4 + COALESCE((
-							SELECT SUM(lease.cpu_millicores)
-							FROM manager.runtime_resource_leases AS lease
-							WHERE lease.cluster_id = capacity.cluster_id
-								AND lease.node_id = capacity.node_id
-								AND lease.node_uid = capacity.node_uid
-								AND lease.node_boot_id = capacity.node_boot_id
-								AND lease.lease_state = 'active'
-						), 0)
-						AND COALESCE(NULLIF(capacity.admission_memory_bytes, 0), capacity.memory_bytes) >= $5 + COALESCE((
-							SELECT SUM(lease.memory_bytes)
-							FROM manager.runtime_resource_leases AS lease
-							WHERE lease.cluster_id = capacity.cluster_id
-								AND lease.node_id = capacity.node_id
-								AND lease.node_uid = capacity.node_uid
-								AND lease.node_boot_id = capacity.node_boot_id
-								AND lease.lease_state = 'active'
-						), 0)
+					FROM capacity_candidates AS capacity
+						WHERE capacity.cluster_id = runtime_slots.cluster_id
+							AND capacity.node_id = runtime_slots.node_id
+							AND capacity.node_uid = runtime_slots.node_uid
+							AND capacity.node_boot_id = runtime_slots.node_boot_id
 				)
 			ORDER BY (node_id=$14 AND node_uid=$15 AND node_boot_id=$16) DESC,
+				hashtextextended($17 || node_uid, 0),
 				fastpath_ready_at, slot_id
 			FOR UPDATE OF runtime_slots SKIP LOCKED
 			LIMIT 1
 		`, RuntimeSlotStateFastpathReady, request.CompatibilityDigest, request.ClusterID,
 			request.Resources.CPUMillicores, request.Resources.MemoryBytes, excludedSlots, excludedNodeID, excludedNodeUID, excludedNodes, requireFixedDestination,
 			request.TargetNodeID, request.TargetNodeUID, request.TargetNodeBootID,
-			request.preferredCheckpointNodeID, request.preferredCheckpointNodeUID, request.preferredCheckpointNodeBootID))
+			request.preferredCheckpointNodeID, request.preferredCheckpointNodeUID, request.preferredCheckpointNodeBootID,
+			request.OperationID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, protocol.RuntimeResourceLease{}, nil, ErrRuntimeSlotUnavailable
 		}
@@ -716,7 +733,13 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 		var capacityCPU, capacityMemory int64
 		var physicalCPU, physicalMemory int64
 		var cpusetCPUs, cpusetMems string
-		err = tx.QueryRow(ctx, `
+		var resizing bool
+		var usedCPU, usedMemory int64
+		// Pipeline separate statements, rather than combining these checks into
+		// the capacity-lock query. Under READ COMMITTED the lease/resize reads
+		// need fresh snapshots after a preceding capacity holder commits.
+		batch := &pgx.Batch{}
+		batch.Queue(`
 			SELECT cpu_millicores, memory_bytes,
 				COALESCE(NULLIF(admission_cpu_millicores, 0), cpu_millicores),
 				COALESCE(NULLIF(admission_memory_bytes, 0), memory_bytes), cpuset_cpus, cpuset_mems
@@ -724,33 +747,42 @@ func selectRuntimeSlotResourceLeaseExcludingNodes(ctx context.Context, tx pgx.Tx
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND heartbeat_expires_at > NOW()
 			FOR UPDATE
-		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(
-			&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
 		// Recheck after acquiring the capacity lock: resize preparation uses the
 		// same lock and may have committed while this claim waited for it.
-		var resizing bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
-			WHERE cluster_id=$1 AND node_id=$2 AND pending AND NOT ($3=ANY(retained_allocations)))`, slot.ClusterID, slot.NodeID, slot.AllocationID).Scan(&resizing); err != nil {
-			return nil, protocol.RuntimeResourceLease{}, nil, err
-		}
-		if resizing {
-			continue
-		}
-		var usedCPU, usedMemory int64
-		if err := tx.QueryRow(ctx, `
+		batch.Queue(`SELECT EXISTS (SELECT 1 FROM manager.runtime_carrier_resizes
+			WHERE cluster_id=$1 AND node_id=$2 AND pending AND NOT ($3=ANY(retained_allocations)))`, slot.ClusterID, slot.NodeID, slot.AllocationID)
+		batch.Queue(`
 			SELECT COALESCE(SUM(cpu_millicores), 0), COALESCE(SUM(memory_bytes), 0)
 			FROM manager.runtime_resource_leases
 			WHERE cluster_id = $1 AND node_id = $2 AND node_uid = $3 AND node_boot_id = $4
 				AND lease_state = 'active'
-		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID).Scan(&usedCPU, &usedMemory); err != nil {
+		`, slot.ClusterID, slot.NodeID, slot.NodeUID, slot.NodeBootID)
+		results := tx.SendBatch(ctx, batch)
+		err = results.QueryRow().Scan(&physicalCPU, &physicalMemory, &capacityCPU, &capacityMemory, &cpusetCPUs, &cpusetMems)
+		if err != nil {
+			closeErr := results.Close()
+			if closeErr != nil {
+				return nil, protocol.RuntimeResourceLease{}, nil, closeErr
+			}
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
 			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.QueryRow().Scan(&resizing); err != nil {
+			_ = results.Close()
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.QueryRow().Scan(&usedCPU, &usedMemory); err != nil {
+			_ = results.Close()
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if err = results.Close(); err != nil {
+			return nil, protocol.RuntimeResourceLease{}, nil, err
+		}
+		if resizing {
+			continue
 		}
 		if physicalCPU < request.Resources.CPUMillicores || physicalMemory < request.Resources.MemoryBytes ||
 			capacityCPU-usedCPU < request.Resources.CPUMillicores ||

@@ -19,6 +19,7 @@ package gvisorcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -77,30 +78,70 @@ func isolatedRunscExec(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := isolateAndPruneRootFSMounts(filepath.Clean(root), keep, readMountTable); err != nil {
+		return err
+	}
+	// Resolve and exec the same canonical runsc, including its unchanged argv.
+	return unix.Exec(binary, append([]string{binary}, args[3:]...), os.Environ())
+}
+
+// A host cleanup can remove a mountpoint's directory after this launcher has
+// copied the mount namespace. ENOENT does not prove that the copied mount was
+// detached: executing runsc from that namespace could retain its superblock.
+// Abandon the entire copy and retry from the current host namespace instead.
+// No runsc command has executed, and each attempt still prunes every unrelated
+// mount. Real unmount errors and repeated churn retain the fail-closed behavior.
+func isolateAndPruneRootFSMounts(root string, keep []string, readTable func() ([]byte, error)) error {
 	runtime.LockOSThread()
+	// Success intentionally retains this locked thread until exec. On error,
+	// the reexec launcher exits; it must not return this private namespace to a
+	// reusable Go runtime thread.
+	host, err := unix.Open("/proc/self/ns/mnt", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open host mount namespace: %w", err)
+	}
+	defer unix.Close(host)
+	const maxAttempts = 8
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt != 0 {
+			if err := unix.Setns(host, unix.CLONE_NEWNS); err != nil {
+				return fmt.Errorf("restore host namespace before fresh isolation: %w", err)
+			}
+		}
+		if err := isolateAndPruneMountAttempt(root, keep, readTable); err != nil {
+			if errors.Is(err, unix.ENOENT) && attempt+1 < maxAttempts {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	panic("unreachable mount isolation attempt")
+}
+
+func isolateAndPruneMountAttempt(root string, keep []string, readTable func() ([]byte, error)) error {
 	// Go may share fs_struct across threads; unshare it before changing this
 	// locked thread's namespace. No work is performed on the parent namespace.
-	if err = unix.Unshare(unix.CLONE_FS | unix.CLONE_NEWNS); err != nil {
+	if err := unix.Unshare(unix.CLONE_FS | unix.CLONE_NEWNS); err != nil {
 		return fmt.Errorf("isolate runsc mounts: %w", err)
 	}
-	if err = unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make runsc mounts private: %w", err)
 	}
-	data, err := readMountTable()
+	data, err := readTable()
 	if err != nil {
 		return err
 	}
-	paths, err := rootFSPrunePaths(data, filepath.Clean(root), keep)
+	paths, err := rootFSPrunePaths(data, root, keep)
 	if err != nil {
 		return err
 	}
 	for _, path := range paths {
-		if err = unix.Unmount(path, 0); err != nil {
+		if err := unix.Unmount(path, 0); err != nil {
 			return fmt.Errorf("prune unrelated RootFS mount %s: %w", path, err)
 		}
 	}
-	// Resolve and exec the same canonical runsc, including its unchanged argv.
-	return unix.Exec(binary, append([]string{binary}, args[3:]...), os.Environ())
+	return nil
 }
 
 func bundleMountPaths(bundle string) ([]string, error) {

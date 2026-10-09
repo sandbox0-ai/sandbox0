@@ -1070,6 +1070,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 }
 
 func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimRequest, legacy *sandboxstore.SandboxRecord) (*service.ClaimResponse, error) {
+	serviceStarted := time.Now()
 	if request == nil {
 		return nil, fmt.Errorf("%w: claim request is required", service.ErrInvalidClaimRequest)
 	}
@@ -1170,12 +1171,17 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, runtimeClass, resourceRequest, now)
+	reservationStarted := time.Now()
 	if err := s.ensureClaimRecord(ctx, record, req.OperationID, storeBindings); err != nil {
 		return nil, err
 	}
+	reservationDuration := time.Since(reservationStarted)
+	rootFSStarted := time.Now()
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {
 		return nil, err
 	}
+	rootFSInitializationDuration := time.Since(rootFSStarted)
+	prePlannerDuration := time.Since(serviceStarted)
 
 	target := &service.ClaimNodeTarget{}
 	if req.TargetNode != nil {
@@ -1199,6 +1205,7 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 	if result == nil || result.Slot == nil {
 		return nil, fmt.Errorf("nomad slot planner returned no runtime binding")
 	}
+	completionStarted := time.Now()
 	_, err = s.store.CompleteSandboxClaim(ctx, &sandboxstore.CompleteSandboxClaimRequest{
 		SandboxID: sandboxID, OperationID: req.OperationID, SlotID: result.Slot.ID,
 		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
@@ -1215,6 +1222,11 @@ func (s *Service) claimSandbox(ctx context.Context, request *service.ClaimReques
 	claimLogFields := []zap.Field{
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
 		zap.String("slotID", result.Slot.ID), zap.Duration("endToEndDuration", result.Duration),
+		zap.Duration("serviceDuration", time.Since(serviceStarted)),
+		zap.Duration("prePlannerDuration", prePlannerDuration),
+		zap.Duration("reservationDuration", reservationDuration),
+		zap.Duration("rootFSInitializationDuration", rootFSInitializationDuration),
+		zap.Duration("completionDuration", time.Since(completionStarted)),
 		zap.Array("claimPhases", claimPhaseLogs(result.Phases)),
 	}
 	if timing := result.NodeClaimTiming; timing != nil {
@@ -1523,6 +1535,9 @@ func (s *Service) claimRecord(
 	}
 	if config.TTL == nil && s.defaultTTL > 0 {
 		seconds := int32(s.defaultTTL / time.Second)
+		if config.HardTTL != nil && *config.HardTTL > 0 && seconds > *config.HardTTL {
+			seconds = *config.HardTTL
+		}
 		config.TTL = &seconds
 	}
 	record := &sandboxstore.SandboxRecord{

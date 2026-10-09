@@ -156,7 +156,7 @@ func (s *PGSandboxStore) RetrySandboxClaim(ctx context.Context, request *RetrySa
 // ReserveSandboxClaim serializes claims per team and creates the logical
 // sandbox and its retry lease in the same transaction as active-sandbox quota
 // admission. A simultaneous exact retry renews the winner's existing lease.
-func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
+func (s *PGSandboxStore) reserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}
@@ -176,6 +176,12 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	}
 	bindings := credentialbinding.CloneStore(request.CredentialBindings)
 	bindingDigest := credentialbinding.DigestStore(bindings)
+
+	releaseTurn, err := s.claimAdmissionTurns.acquire(ctx, record.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseTurn()
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -210,39 +216,41 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 		}
 	}
 
-	tag, err := tx.Exec(ctx, sandboxRecordInsertSQL+` ON CONFLICT (sandbox_id) DO NOTHING`, args...)
+	// The inserted row is already locked by this transaction. Return it through
+	// the claim insert instead of making two more round trips while holding the
+	// team's quota lock. The claim depends on inserted, so an ID conflict cannot
+	// leave an orphan claim or silently attach it to somebody else's sandbox.
+	args = append(args, operationID, SandboxRuntimeClaimPhaseClaiming, leaseTTL.Milliseconds(), bindingDigest)
+	reserved, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxClaimReservationInsertSQL(), args...))
 	if err != nil {
-		return nil, fmt.Errorf("insert sandbox claim reservation: %w", err)
+		return nil, mapSandboxClaimConflict("insert sandbox claim reservation", err)
 	}
-	if tag.RowsAffected() != 1 {
+	if reserved == nil {
 		return nil, fmt.Errorf("%w: sandbox ID %s was concurrently reserved", ErrSandboxClaimReservationConflict, record.ID)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO manager.sandbox_runtime_claims (
-			sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
-		) VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 millisecond'), $5)
-	`, record.ID, operationID, SandboxRuntimeClaimPhaseClaiming, leaseTTL.Milliseconds(), bindingDigest); err != nil {
-		return nil, mapSandboxClaimConflict("insert sandbox runtime claim", err)
 	}
 	if _, err := egressauthstore.ReplaceCurrentBindingsTx(
 		ctx, tx, record.TeamID, record.ID, bindings, time.Time{},
 	); err != nil {
 		return nil, fmt.Errorf("materialize sandbox claim credential bindings: %w", err)
 	}
-	reserved, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxRecordSelectSQL()+`
-		WHERE sandbox_id = $1
-		FOR UPDATE
-	`, record.ID))
-	if err != nil {
-		return nil, fmt.Errorf("load inserted sandbox claim reservation: %w", err)
-	}
-	if reserved == nil {
-		return nil, fmt.Errorf("inserted sandbox claim reservation disappeared")
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit sandbox claim reservation: %w", err)
 	}
 	return reserved, nil
+}
+
+func sandboxClaimReservationInsertSQL() string {
+	return `
+		WITH inserted AS (` + sandboxRecordInsertSQL + `
+			ON CONFLICT (sandbox_id) DO NOTHING RETURNING ` + sandboxRecordColumns + `
+		), claimed AS (
+			INSERT INTO manager.sandbox_runtime_claims (
+				sandbox_id, operation_id, phase, lease_expires_at, credential_binding_digest
+			) SELECT sandbox_id, $24, $25, NOW() + ($26 * INTERVAL '1 millisecond'), $27
+			FROM inserted RETURNING sandbox_id
+		)
+		SELECT inserted.* FROM inserted JOIN claimed USING (sandbox_id)
+	`
 }
 
 // lockActiveSandboxQuotaTeam establishes one lock order for initial claims and

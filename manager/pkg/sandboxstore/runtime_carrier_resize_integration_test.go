@@ -2,11 +2,13 @@ package sandboxstore
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +40,50 @@ func carrierBaseline() []string {
 		g = append(g, fmt.Sprintf("warm-%d", i))
 	}
 	return g
+}
+
+func TestRuntimeSlotCapacityReadsLeasesCommittedWhileWaitingIntegration(t *testing.T) {
+	s, request, n := carrierResizeFixture(t)
+	ctx := t.Context()
+	holder, err := s.pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.Background()) })
+	var holderPID int
+	require.NoError(t, holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID))
+	_, err = holder.Exec(ctx, `SELECT 1 FROM manager.runtime_node_capacities
+		WHERE cluster_id=$1 AND node_id=$2 FOR UPDATE`, n.ClusterID, n.NodeID)
+	require.NoError(t, err)
+	// Reserve the other slot first so the waiter selects carrier-slot-a and
+	// blocks on capacity before a new lease is committed by its current owner.
+	_, err = holder.Exec(ctx, `SELECT 1 FROM manager.runtime_slots WHERE slot_id='carrier-slot-b' FOR UPDATE`)
+	require.NoError(t, err)
+	result := make(chan error, 1)
+	go func() {
+		_, acquireErr := s.AcquireRuntimeSlot(ctx, request)
+		result <- acquireErr
+	}()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%runtime_node_capacities%')`, holderPID).Scan(&waiting)
+		return err == nil && waiting
+	}, 5*time.Second, 10*time.Millisecond)
+	resources := request.Resources
+	resources.CPUMillicores, resources.MemoryBytes = 8_000, 16<<30
+	lease, err := protocol.NewRuntimeResourceLease("capacity-holder", "holder-claim", "carrier-slot-b",
+		n.ClusterID, n.NodeID, n.NodeUID, n.NodeBootID, resources, "0-7", "0")
+	require.NoError(t, err)
+	require.NoError(t, insertRuntimeResourceLease(ctx, holder, lease, bytes.Repeat([]byte{7}, 32)))
+	require.NoError(t, holder.Commit(ctx))
+	select {
+	case acquireErr := <-result:
+		require.ErrorIs(t, acquireErr, ErrRuntimeSlotUnavailable)
+	case <-time.After(5 * time.Second):
+		t.Fatal("capacity waiter did not finish")
+	}
+	var leases int
+	require.NoError(t, s.pool.QueryRow(ctx, `SELECT count(*) FROM manager.runtime_resource_leases`).Scan(&leases))
+	require.Equal(t, 1, leases, "a waiter must not admit capacity using its pre-lock snapshot")
 }
 
 func TestPrivilegedOnlyCarrierResizeRetiresToTwoAnchorsIntegration(t *testing.T) {

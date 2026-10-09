@@ -15,7 +15,7 @@ func TestCheckpointRestorePrefersCaptureNodeWithoutBlockingFallbackIntegration(t
 				SandboxID: f.sandboxID, ExpectedTeamID: "team-slot", Memory: true})
 			require.NoError(t, err)
 			// The other node's slot is older: locality must take priority over
-			// ordinary FIFO, while retaining every existing admission predicate.
+			// node spreading, while retaining every existing admission predicate.
 			other := migrationReadyTarget(t, f, "cache-other-"+condition, "b")
 			local := migrationReadyTarget(t, f, "cache-local-"+condition, "a")
 			switch condition {

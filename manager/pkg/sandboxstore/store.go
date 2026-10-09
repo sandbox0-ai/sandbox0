@@ -161,14 +161,21 @@ type SandboxStoreTx interface {
 }
 
 type PGSandboxStore struct {
-	pool *pgxpool.Pool
+	pool                    *pgxpool.Pool
+	claimAdmissionTurns     claimAdmissionTurns
+	runtimeClaimAdmissions  chan struct{}
+	claimReservationBatches claimReservationBatches
 }
 
 func NewPGSandboxStore(pool *pgxpool.Pool) *PGSandboxStore {
 	if pool == nil {
 		return nil
 	}
-	return &PGSandboxStore{pool: pool}
+	// Slot acquisition may wait on node-capacity locks. Keep those waiters from
+	// consuming the entire shared pool: launched slots still need connections
+	// for writer, starting, command-ready and cleanup transactions.
+	concurrency := max(int32(1), min(int32(32), pool.Config().MaxConns/4))
+	return &PGSandboxStore{pool: pool, runtimeClaimAdmissions: make(chan struct{}, concurrency)}
 }
 
 type sandboxStoreLogger interface {
@@ -1422,14 +1429,14 @@ func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord
 	return upsertSandboxRecord(ctx, t.tx, record)
 }
 
-func sandboxRecordSelectSQL() string {
-	return `
-		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
+const sandboxRecordColumns = `sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, desired_state, config, template_spec,
 			runtime_id, runtime_namespace, runtime_generation, lifecycle_epoch,
 			owner_kind, resource_millicpu, resource_memory_mib, hot_claim_completed_at,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
-		FROM manager.sandboxes`
+			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at`
+
+func sandboxRecordSelectSQL() string {
+	return `SELECT ` + sandboxRecordColumns + ` FROM manager.sandboxes`
 }
 
 func lifecycleTxnSelectSQL() string {

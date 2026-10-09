@@ -2,6 +2,7 @@ package carrierpool
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,4 +192,27 @@ func TestCronPrewarmRenewalUsesOneBoundedDemandAndStopsAtExpiry(t *testing.T) {
 	require.Len(t, s.records, 2)
 	require.Equal(t, s.records[0].OperationID, s.records[1].OperationID)
 	require.Equal(t, 100, s.records[1].Slots)
+}
+
+func TestPrewarmCacheTemplateConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+		want string
+		fail bool
+	}{
+		{name: "default", want: "default"}, {name: "explicit", id: "coding-agent", want: "coding-agent"},
+		{name: "whitespace", id: " coding-agent", fail: true}, {name: "too long", id: strings.Repeat("a", 256), fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := PrewarmWindow{CacheTemplate: tc.id, Start: time.Now(), End: time.Now().Add(time.Minute)}
+			err := w.compile()
+			if tc.fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.want, w.CacheTemplate)
+			}
+		})
+	}
 }

@@ -151,9 +151,24 @@ func TestNomadMigrationEvacuationExcludesBusyDestinationIntegration(t *testing.T
 	migrationReadyTarget(t, first, "d", "d")
 	fenceMigrationSource(t, first, "draining")
 	fenceMigrationSource(t, second, "draining")
+	// Keep the first destination deterministic without relying on the slot
+	// selector's node ordering. After its reservation, node-d becomes eligible
+	// while node-b still has another ready carrier that must be excluded.
+	_, err := pool.Exec(first.ctx, `INSERT INTO manager.runtime_node_fences(cluster_id,node_id,node_uid,state,reason)
+ SELECT cluster_id,node_id,node_uid,'warming','busy-destination-test' FROM manager.runtime_slots
+ WHERE node_uid='node-d'`)
+	require.NoError(t, err)
 	advanced, err := first.store.ReserveNomadMigrationEvacuation(first.ctx, first.sandboxID)
 	require.NoError(t, err)
 	require.True(t, advanced)
+	var firstUID string
+	require.NoError(t, pool.QueryRow(first.ctx, `SELECT r.node_uid FROM manager.sandbox_runtime_migrations m
+ JOIN manager.sandbox_lifecycle_txns l ON l.txn_id=m.operation_id JOIN manager.runtime_slots r ON r.slot_id=m.target_slot_id
+ WHERE l.sandbox_id=$1`, first.sandboxID).Scan(&firstUID))
+	require.Equal(t, "node-b", firstUID)
+	_, err = pool.Exec(first.ctx, `DELETE FROM manager.runtime_node_fences
+ WHERE node_uid='node-d' AND reason='busy-destination-test'`)
+	require.NoError(t, err)
 	advanced, err = second.store.ReserveNomadMigrationEvacuation(second.ctx, second.sandboxID)
 	require.NoError(t, err)
 	require.True(t, advanced)

@@ -25,7 +25,7 @@ func (a *HTTPAPI) RefillFailedCarriers(ctx context.Context, clusterID, after str
 	if endpoint.ClusterID != clusterID || endpoint.NodeID != "" {
 		return 0, after, fmt.Errorf("carrier refill server identity mismatch")
 	}
-	client, baseURL, err := newNomadHTTPClient(endpoint)
+	client, baseURL, err := a.nomadHTTPClient(endpoint)
 	if err != nil {
 		return 0, after, err
 	}

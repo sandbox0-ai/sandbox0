@@ -18,6 +18,7 @@ type demandStore interface {
 // PrewarmWindow describes operator-planned spare capacity, not a reservation or
 // an exception to team quotas. Missed occurrences never trigger catch-up work.
 type PrewarmWindow struct {
+	CacheTemplate              string
 	Name                       string
 	Start, End                 time.Time
 	Cron                       string
@@ -29,6 +30,12 @@ type PrewarmWindow struct {
 }
 
 func (w *PrewarmWindow) compile() error {
+	if w.CacheTemplate == "" {
+		w.CacheTemplate = "default"
+	}
+	if w.CacheTemplate != strings.TrimSpace(w.CacheTemplate) || len(w.CacheTemplate) > 255 {
+		return fmt.Errorf("prewarm cache template must be canonical and at most 255 bytes")
+	}
 	if w.Cron == "" {
 		if w.Duration != 0 || w.Start.IsZero() || !w.End.After(w.Start) || w.End.Sub(w.Start) > 24*time.Hour {
 			return fmt.Errorf("absolute prewarm requires start/end within 24 hours")

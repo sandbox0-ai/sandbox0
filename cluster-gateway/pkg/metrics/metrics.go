@@ -12,6 +12,7 @@ type ClusterGatewayMetrics struct {
 	AuditCanonicalQueueDepth   prometheus.Gauge
 	AuditCanonicalInFlight     prometheus.Gauge
 	AuditCanonicalBatchSize    *prometheus.HistogramVec
+	AuditSpoolBatchSize        *prometheus.HistogramVec
 }
 
 // NewClusterGateway registers and returns cluster-gateway metrics.
@@ -44,5 +45,10 @@ func NewClusterGateway(registry prometheus.Registerer) *ClusterGatewayMetrics {
 			Help:    "Number of audit events in each canonical backend insert",
 			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 500},
 		}, []string{"source", "result"}),
+		AuditSpoolBatchSize: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "cluster_gateway_audit_spool_batch_size",
+			Help:    "Number of events sharing each durable spool directory sync",
+			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 500},
+		}, []string{"result"}),
 	}
 }

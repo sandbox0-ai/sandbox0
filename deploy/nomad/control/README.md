@@ -43,6 +43,22 @@ execution and PostgreSQL lock waiting. The `acquired_connections` gauge reaching
 identify whether those connections are occupied by serial quota or node-capacity
 transactions. Increasing the pool limit alone does not remove those locks.
 
+Lifecycle history reads use the `(sandbox_id, epoch, txn_id)` index, including
+completed transitions consumed by the metering projector. Its Goose migration
+builds the index concurrently outside a transaction so lifecycle writes remain
+available. An interrupted build can leave an invalid index; inspect `pg_index`
+and the migration version before recovery. The migration deliberately fails on
+an existing index rather than silently accepting an invalid build. A binary
+rollback can retain this additive index.
+
+The cluster gateway batches audit spool custody with bounded parallel file
+syncs and one directory sync per batch. Records retain the signed per-event
+JSON format for restart and rollback compatibility. Mutation attempts and
+results still wait for canonical storage ACKs. Compare
+`cluster_gateway_audit_spool_batch_size`, canonical batch size and delivery
+stage timings to verify that bursts reduce small backend inserts; spool file
+and directory sync timings are nested within the request's spool-write stage.
+
 ## Sandbox CPU floor
 
 New sandbox resource leases use at least 500 millicores, including claims from

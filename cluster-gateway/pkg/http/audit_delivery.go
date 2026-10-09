@@ -27,6 +27,7 @@ const (
 	auditCanonicalBatchWindow  = 2 * time.Millisecond
 	auditCanonicalWriterSlots  = 4
 	auditCanonicalRequestQueue = 2048
+	auditSpoolWriterSlots      = 8
 )
 
 var (
@@ -56,6 +57,12 @@ type auditDelivery struct {
 	verificationKey ed25519.PublicKey
 	metrics         *obsmetrics.ClusterGatewayMetrics
 	mu              sync.Mutex
+	spoolQueue      chan *auditSpoolCall
+	spoolStarted    atomic.Bool
+	spoolSubmitMu   sync.Mutex
+	spoolStopped    bool
+	spoolCtx        context.Context
+	syncDir         func(string) error
 	once            sync.Once
 	started         atomic.Bool
 	wake            chan struct{}
@@ -102,6 +109,8 @@ func newAuditDelivery(
 		canonicalQueue:  make(chan *auditCanonicalCall, auditCanonicalRequestQueue),
 		canonicalSlot:   make(chan struct{}, auditCanonicalWriterSlots),
 		canonicalCalls:  make(map[string]*auditCanonicalCall),
+		spoolQueue:      make(chan *auditSpoolCall, auditCanonicalRequestQueue),
+		syncDir:         syncAuditDirectory,
 	}
 	if err := delivery.scanSpoolLocked(0, nil); err != nil {
 		return nil, err
@@ -114,7 +123,10 @@ func (d *auditDelivery) Start(ctx context.Context) {
 		return
 	}
 	d.once.Do(func() {
+		d.spoolCtx = ctx
+		d.spoolStarted.Store(true)
 		d.started.Store(true)
+		go d.runSpoolBatches(ctx)
 		go d.runCanonicalBatches(ctx)
 		go d.runReplay(ctx)
 	})
@@ -202,9 +214,7 @@ func (d *auditDelivery) spoolOrCanonical(
 		return false, fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
 	}
 	spoolStarted := time.Now()
-	d.mu.Lock()
-	spoolErr := d.putLocked(event)
-	d.mu.Unlock()
+	spoolErr := d.spoolEvent(ctx, event)
 	d.observeStage(mode, "spool_write", spoolStarted, spoolErr)
 	if spoolErr == nil {
 		return true, nil
@@ -611,28 +621,25 @@ func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {
 	}
 }
 
-func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
+func (d *auditDelivery) prepareSpoolEvent(event sandboxobservability.Event) ([]byte, error) {
 	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
-		return fmt.Errorf("audit event is invalid: %w", err)
+		return nil, fmt.Errorf("audit event is invalid: %w", err)
 	}
 	if len(d.verificationKey) == ed25519.PublicKeySize {
 		if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
-			return fmt.Errorf("audit event integrity is invalid: %w", err)
+			return nil, fmt.Errorf("audit event integrity is invalid: %w", err)
 		}
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("marshal audit event: %w", err)
+		return nil, fmt.Errorf("marshal audit event: %w", err)
 	}
-	path := d.path(event.EventID)
-	if existing, readErr := os.ReadFile(path); readErr == nil {
-		if string(existing) != string(payload) {
-			return fmt.Errorf("audit event_id collision")
-		}
-		return nil
-	} else if !os.IsNotExist(readErr) {
-		return auditSpoolWriteError("read existing record", readErr)
-	}
+	return payload, nil
+}
+
+// Each record keeps the existing signed-event format. Its contents must be
+// synced before rename; the batch shares only the final directory barrier.
+func (d *auditDelivery) writeSpoolRecord(eventID string, payload []byte) error {
 	tmp, err := os.CreateTemp(d.dir, ".audit-*.tmp")
 	if err != nil {
 		return auditSpoolWriteError("create temp file", err)
@@ -651,17 +658,17 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if _, err := tmp.Write(payload); err != nil {
 		return auditSpoolWriteError("write temp file", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		return auditSpoolWriteError("fsync temp file", err)
+	fileSyncStarted := time.Now()
+	fileSyncErr := tmp.Sync()
+	d.observeStage("spool", "file_sync", fileSyncStarted, fileSyncErr)
+	if fileSyncErr != nil {
+		return auditSpoolWriteError("fsync temp file", fileSyncErr)
 	}
 	if err := tmp.Close(); err != nil {
 		return auditSpoolWriteError("close temp file", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := os.Rename(tmpPath, d.path(eventID)); err != nil {
 		return auditSpoolWriteError("commit record", err)
-	}
-	if err := syncAuditDirectory(d.dir); err != nil {
-		return auditSpoolWriteError("fsync directory", err)
 	}
 	committed = true
 	return nil
@@ -753,7 +760,7 @@ func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) e
 			return err
 		}
 	}
-	return syncAuditDirectory(d.dir)
+	return d.syncDir(d.dir)
 }
 
 func (d *auditDelivery) observeStage(mode, stage string, started time.Time, err error) {

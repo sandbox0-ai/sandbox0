@@ -3,6 +3,7 @@ package sandboxstore
 import (
 	"context"
 	"fmt"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"time"
 )
 
@@ -12,6 +13,7 @@ const migrationDrainChannel = "sandbox0_runtime_migration_drain"
 // or disconnected. LISTEN is committed before the initial wake, closing the
 // subscription/read race. Reconnects must rescan too: NOTIFY is only a hint.
 func (s *PGSandboxStore) WatchNomadMigrationDrains(ctx context.Context, wake func()) error {
+	ctx = dbpool.WithOperation(ctx, "migration_listener")
 	if s == nil || s.pool == nil || wake == nil {
 		return fmt.Errorf("migration drain listener requires a store and wake callback")
 	}

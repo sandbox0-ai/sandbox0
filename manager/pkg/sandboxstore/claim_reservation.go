@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 )
 
 const (
@@ -157,6 +158,7 @@ func (s *PGSandboxStore) RetrySandboxClaim(ctx context.Context, request *RetrySa
 // sandbox and its retry lease in the same transaction as active-sandbox quota
 // admission. A simultaneous exact retry renews the winner's existing lease.
 func (s *PGSandboxStore) reserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
+	ctx = dbpool.WithOperation(ctx, "claim_reserve")
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}

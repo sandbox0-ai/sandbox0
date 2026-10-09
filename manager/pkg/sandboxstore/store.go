@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/deletionwebhook"
 	storemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 )
@@ -161,10 +162,24 @@ type SandboxStoreTx interface {
 }
 
 type PGSandboxStore struct {
-	pool                    *pgxpool.Pool
-	claimAdmissionTurns     claimAdmissionTurns
-	runtimeClaimAdmissions  chan struct{}
-	claimReservationBatches claimReservationBatches
+	pool                     *pgxpool.Pool
+	claimAdmissionTurns      claimAdmissionTurns
+	runtimeClaimAdmissions   chan struct{}
+	claimReservationBatches  claimReservationBatches
+	runtimeAdmissionObserver RuntimeClaimAdmissionObserver
+}
+
+// RuntimeClaimAdmissionObserver measures the local queue independently of PG.
+// Configure it before starting store users; it never participates in admission.
+type RuntimeClaimAdmissionObserver interface {
+	RuntimeClaimAdmissionStarted()
+	RuntimeClaimAdmissionFinished(time.Duration, bool)
+}
+
+func (s *PGSandboxStore) SetRuntimeClaimAdmissionObserver(observer RuntimeClaimAdmissionObserver) {
+	if s != nil {
+		s.runtimeAdmissionObserver = observer
+	}
 }
 
 func NewPGSandboxStore(pool *pgxpool.Pool) *PGSandboxStore {
@@ -279,6 +294,7 @@ func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 }
 
 func (s *PGSandboxStore) GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error) {
+	ctx = dbpool.WithOperation(ctx, "get_sandbox")
 	if s == nil || s.pool == nil {
 		return nil, nil
 	}

@@ -198,6 +198,7 @@ const (
 	NetworkIngressBytes QuotaDimension = "network_ingress_bytes"
 	PausedSandboxes     QuotaDimension = "paused_sandboxes"
 	SandboxClaims       QuotaDimension = "sandbox_claims"
+	SnapshotsPerSandbox QuotaDimension = "snapshots_per_sandbox"
 )
 
 // Defines values for REPLReadyMode.
@@ -1672,7 +1673,10 @@ type ProtocolRule struct {
 // ProtocolRuleProtocol defines model for ProtocolRuleProtocol.
 type ProtocolRuleProtocol string
 
-// QuotaDimension defines model for QuotaDimension.
+// QuotaDimension snapshots_per_sandbox limits retained public snapshots independently on
+// each sandbox (default 10). Excess snapshots are automatically removed,
+// oldest first. Its capacity current value is the highest snapshot count
+// on any sandbox in the team, rather than the team's total snapshot count.
 type QuotaDimension string
 
 // REPLConfig defines model for REPLConfig.
@@ -3233,8 +3237,13 @@ type TeamMember struct {
 
 // TeamQuota defines model for TeamQuota.
 type TeamQuota struct {
-	BurstValue *int64          `json:"burst_value"`
-	Current    *int64          `json:"current"`
+	BurstValue *int64 `json:"burst_value"`
+	Current    *int64 `json:"current"`
+
+	// Dimension snapshots_per_sandbox limits retained public snapshots independently on
+	// each sandbox (default 10). Excess snapshots are automatically removed,
+	// oldest first. Its capacity current value is the highest snapshot count
+	// on any sandbox in the team, rather than the team's total snapshot count.
 	Dimension  QuotaDimension  `json:"dimension"`
 	IntervalMs *int64          `json:"interval_ms"`
 	Kind       TeamQuotaKind   `json:"kind"`

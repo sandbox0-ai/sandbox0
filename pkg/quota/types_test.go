@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestDimensionsContainsSixManagedKeys(t *testing.T) {
+func TestDimensionsContainsSevenManagedKeys(t *testing.T) {
 	got := Dimensions()
-	if len(got) != 6 {
-		t.Fatalf("Dimensions() len = %d, want 6: %v", len(got), got)
+	if len(got) != 7 {
+		t.Fatalf("Dimensions() len = %d, want 7: %v", len(got), got)
 	}
 	for _, dimension := range got {
 		if !KnownDimension(dimension) {
@@ -23,6 +23,18 @@ func TestDimensionsContainsSixManagedKeys(t *testing.T) {
 	}
 	if KindForDimension(DimensionSandboxClaims) != KindRate || UnitForDimension(DimensionSandboxClaims) != "claims" {
 		t.Fatal("sandbox_claims is not a claims rate quota")
+	}
+}
+
+func TestSnapshotRetentionPolicyRequiresPositiveCapacity(t *testing.T) {
+	if err := ValidatePolicyValues(DimensionSnapshotsPerSandbox, 10, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePolicyValues(DimensionSnapshotsPerSandbox, 0, 0, 0); err == nil {
+		t.Fatal("snapshot retention quota accepted zero retained snapshots")
+	}
+	if KindForDimension(DimensionSnapshotsPerSandbox) != KindCapacity {
+		t.Fatal("snapshot retention is not a capacity policy")
 	}
 }
 

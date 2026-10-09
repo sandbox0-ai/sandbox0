@@ -695,3 +695,17 @@ For coding-agent and test-generation workflows, a common pattern is:
     Use rootfs snapshots and claim-time snapshot IDs as lightweight custom rootfs state.
   </Card>
 </CardGroup>
+
+## Snapshot retention quota
+
+Each sandbox retains at most 10 public RootFS snapshots by default. Creating
+another snapshot automatically removes the oldest excess snapshots while keeping
+the new one. This applies to both running and paused sandboxes. Operators can
+change the regional default or a team's `snapshots_per_sandbox` quota (minimum 1).
+Reduced quotas and existing excess snapshots are reconciled by background
+maintenance. Internal template-build captures are excluded.
+
+Automatically removed snapshots no longer appear in snapshot lists and cannot be
+used for a new restore or claim. Sandboxes and templates already derived from a
+snapshot retain their own references; shared blocks remain until no owner needs
+them. Physical storage reclamation happens asynchronously through RootFS GC.

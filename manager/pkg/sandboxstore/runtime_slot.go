@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -469,6 +470,7 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 // stable per-operation node ordering, then FIFO within each node, to spread
 // bursts across independent capacity locks. A retry retains its original slot.
 func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *AcquireRuntimeSlotRequest) (*RuntimeSlot, error) {
+	ctx = dbpool.WithOperation(ctx, "slot_acquire")
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	if err != nil {
 		return nil, err
@@ -478,10 +480,20 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	admissionStarted := time.Now()
+	if s.runtimeAdmissionObserver != nil {
+		s.runtimeAdmissionObserver.RuntimeClaimAdmissionStarted()
+	}
 	select {
 	case s.runtimeClaimAdmissions <- struct{}{}:
+		if s.runtimeAdmissionObserver != nil {
+			s.runtimeAdmissionObserver.RuntimeClaimAdmissionFinished(time.Since(admissionStarted), false)
+		}
 		defer func() { <-s.runtimeClaimAdmissions }()
 	case <-ctx.Done():
+		if s.runtimeAdmissionObserver != nil {
+			s.runtimeAdmissionObserver.RuntimeClaimAdmissionFinished(time.Since(admissionStarted), true)
+		}
 		return nil, ctx.Err()
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -945,6 +957,7 @@ func (s *PGSandboxStore) IssueAndBindRuntimeSlotWriterGrant(
 	issue *IssueRootFSWriterGrantRequest,
 	bind *BindRuntimeSlotWriterGrantRequest,
 ) (*IssueAndBindRuntimeSlotWriterGrantResult, error) {
+	ctx = dbpool.WithOperation(ctx, "writer_bind")
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}
@@ -1037,6 +1050,7 @@ func bindRuntimeSlotWriterGrant(
 // StartRuntimeSlot records the exact post-bind, post-policy launch attempt. It
 // requires a consumed writer grant, so an issued token alone cannot start D.
 func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRuntimeSlotRequest) (*RuntimeSlot, error) {
+	ctx = dbpool.WithOperation(ctx, "slot_start")
 	normalized, err := normalizeStartRuntimeSlotRequest(request)
 	if err != nil {
 		return nil, err
@@ -1124,6 +1138,7 @@ func startRuntimeSlotTransition(ctx context.Context, tx pgx.Tx, slot *RuntimeSlo
 // MarkRuntimeSlotCommandReady is the slot-registry endpoint of the complete
 // claim timer: runsc has started and the exact procd instance accepts commands.
 func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, request *MarkRuntimeSlotCommandReadyRequest) (*RuntimeSlot, error) {
+	ctx = dbpool.WithOperation(ctx, "command_ready")
 	normalized, err := normalizeMarkRuntimeSlotCommandReadyRequest(request)
 	if err != nil {
 		return nil, err

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialbinding"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 )
 
 type claimReservationBatches struct {
@@ -31,6 +32,7 @@ type claimReservationResult struct {
 // under one durable team-quota transaction. Retries and credential bindings use
 // the existing individual path. No caller receives a record before commit.
 func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *ReserveSandboxClaimRequest) (*SandboxRecord, error) {
+	ctx = dbpool.WithOperation(ctx, "claim_reserve")
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}

@@ -86,6 +86,7 @@ func main() {
 	if cfg.DatabaseURL == "" {
 		logger.Fatal("DATABASE_URL is required")
 	}
+	databaseDiagnostics := obsmetrics.NewDatabaseDiagnostics(obsProvider.MetricsRegistryOrNil())
 	pool, err := initDatabase(
 		ctx,
 		cfg.DatabaseURL,
@@ -94,6 +95,7 @@ func main() {
 		true,
 		logger,
 		obsProvider,
+		databaseDiagnostics,
 	)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
@@ -147,6 +149,7 @@ func main() {
 	}
 
 	sandboxStore := sandboxstore.NewPGSandboxStore(pool)
+	sandboxStore.SetRuntimeClaimAdmissionObserver(databaseDiagnostics)
 	carrierPool, err := configureCarrierPool(cfg, sandboxStore)
 	if err != nil {
 		logger.Fatal("Failed to configure adaptive carrier pool", zap.Error(err))
@@ -854,9 +857,16 @@ func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *
 }
 
 // initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, requirePrimary bool, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, requirePrimary bool, logger *zap.Logger, obsProvider *observability.Provider, diagnostics *obsmetrics.DatabaseDiagnostics) (*pgxpool.Pool, error) {
 	options := managerDatabaseOptions(databaseURL, maxConns, minConns, requirePrimary)
-	options.ConfigModifier = obsProvider.Pgx.ConfigModifier()
+	options.ConfigModifier = func(config *pgxpool.Config) error {
+		obsProvider.Pgx.ConfigurePool(config)
+		diagnostics.ConfigurePool(config)
+		if config.ConnConfig.RuntimeParams["application_name"] == "" {
+			config.ConnConfig.RuntimeParams["application_name"] = "sandbox0-manager"
+		}
+		return nil
+	}
 	pool, err := dbpool.New(ctx, options)
 	if err != nil {
 		return nil, err

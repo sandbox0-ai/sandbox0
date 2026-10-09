@@ -106,6 +106,7 @@ type RollbackRootFSHeadRequest struct {
 type RootFSGarbageCollectionResult struct {
 	DeletedObjectKeys  []string
 	ExpiredSnapshots   int
+	PrunedSnapshots    int
 	DeletedFilesystems int
 	DeletedGenerations int
 }
@@ -270,7 +271,7 @@ func createRootFSSnapshot(ctx context.Context, db rootFSStoreDB, req *CreateRoot
 				head_generation_id, name, description, created_at, expires_at
 			)
 			SELECT $2, filesystem_id, team_id, $1, head_generation_id,
-				$3, $4, NOW(), $5
+				$3, $4, clock_timestamp(), $5
 			FROM source
 			RETURNING snapshot_id, filesystem_id, team_id, source_sandbox_id,
 				head_generation_id, name, description, created_at, expires_at
@@ -288,6 +289,11 @@ func createRootFSSnapshot(ctx context.Context, db rootFSStoreDB, req *CreateRoot
 	}
 	if err != nil {
 		return nil, fmt.Errorf("create rootfs snapshot: %w", err)
+	}
+	if !strings.HasPrefix(snapshotID, "template-build-") {
+		if _, err := pruneRootFSSnapshots(ctx, db, snapshot.TeamID, sandboxID, snapshotID, 0); err != nil {
+			return nil, err
+		}
 	}
 	return snapshot, nil
 }
@@ -886,6 +892,10 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	if err != nil {
 		return nil, err
 	}
+	prunedSnapshots, err := s.PruneExcessRootFSSnapshots(ctx, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := s.deleteTerminalRootFSHeadRollbacks(ctx, teamID, limit); err != nil {
 		return nil, err
 	}
@@ -909,6 +919,7 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	result := &RootFSGarbageCollectionResult{
 		DeletedObjectKeys:  deletedObjectKeys,
 		ExpiredSnapshots:   expiredSnapshots,
+		PrunedSnapshots:    prunedSnapshots,
 		DeletedFilesystems: deletedRunningCaptures + deletedFilesystems,
 		DeletedGenerations: deletedGenerations,
 	}

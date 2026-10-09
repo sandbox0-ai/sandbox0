@@ -2048,11 +2048,14 @@ paths:
     post:
       tags: [sandbox-rootfs]
       summary: Create sandbox rootfs snapshot
-      description: |
+      description: |-
         Creates an immutable snapshot record from the source sandbox writable
         rootfs. A paused source is snapshotted from its current rootfs head. A
         running source is briefly barriered and checkpointed first; the source
         sandbox remains running after the snapshot operation completes.
+        Each sandbox retains at most its team's snapshots_per_sandbox quota
+        (default 10). Creating a snapshot automatically removes the oldest
+        excess public snapshots. Internal template-build snapshots are excluded.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -4024,9 +4027,15 @@ components:
               $ref: "#/components/schemas/UsageWindowPage"
     QuotaDimension:
       type: string
+      description: |-
+        snapshots_per_sandbox limits retained public snapshots independently on
+        each sandbox (default 10). Excess snapshots are automatically removed,
+        oldest first. Its capacity current value is the highest snapshot count
+        on any sandbox in the team, rather than the team's total snapshot count.
       enum:
         - active_sandboxes
         - paused_sandboxes
+        - snapshots_per_sandbox
         - sandbox_claims
         - api_requests
         - network_egress_bytes

@@ -25,6 +25,22 @@ func (c *managerQuotaActiveCounter) CountPausedSandboxes(context.Context, string
 	return c.current, c.err
 }
 
+func (c *managerQuotaActiveCounter) MaxSnapshotsPerSandbox(context.Context, string) (int64, error) {
+	c.calls++
+	return c.current, c.err
+}
+
+func TestManagerQuotaUsageReadsSnapshotOccupancyFromPostgres(t *testing.T) {
+	counter := &managerQuotaActiveCounter{current: 9}
+	metering := &managerQuotaMeteringStore{current: 99}
+	store := &managerQuotaUsageStore{activeSandboxes: counter, metering: metering}
+	current, err := store.CurrentUsage(t.Context(), "team-a", quota.DimensionSnapshotsPerSandbox)
+	require.NoError(t, err)
+	require.Equal(t, int64(9), current)
+	require.Equal(t, 1, counter.calls)
+	require.Zero(t, metering.calls)
+}
+
 type managerQuotaMeteringStore struct {
 	current   int64
 	dimension quota.Dimension

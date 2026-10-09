@@ -8,20 +8,25 @@ import (
 // DefaultPausedSandboxes is the regional retained-sandbox admission guardrail.
 const DefaultPausedSandboxes int64 = 2000
 
+// DefaultSnapshotsPerSandbox bounds retained public snapshots on each sandbox.
+const DefaultSnapshotsPerSandbox int64 = 10
+
 type Dimension string
 
 const (
-	DimensionActiveSandboxes Dimension = "active_sandboxes"
-	DimensionPausedSandboxes Dimension = "paused_sandboxes"
-	DimensionSandboxClaims   Dimension = "sandbox_claims"
-	DimensionAPIRequests     Dimension = "api_requests"
-	DimensionNetworkEgress   Dimension = "network_egress_bytes"
-	DimensionNetworkIngress  Dimension = "network_ingress_bytes"
+	DimensionActiveSandboxes     Dimension = "active_sandboxes"
+	DimensionPausedSandboxes     Dimension = "paused_sandboxes"
+	DimensionSnapshotsPerSandbox Dimension = "snapshots_per_sandbox"
+	DimensionSandboxClaims       Dimension = "sandbox_claims"
+	DimensionAPIRequests         Dimension = "api_requests"
+	DimensionNetworkEgress       Dimension = "network_egress_bytes"
+	DimensionNetworkIngress      Dimension = "network_ingress_bytes"
 )
 
 var dimensions = []Dimension{
 	DimensionActiveSandboxes,
 	DimensionPausedSandboxes,
+	DimensionSnapshotsPerSandbox,
 	DimensionSandboxClaims,
 	DimensionAPIRequests,
 	DimensionNetworkEgress,
@@ -35,7 +40,7 @@ func Dimensions() []Dimension {
 
 func KnownDimension(d Dimension) bool {
 	switch d {
-	case DimensionActiveSandboxes, DimensionPausedSandboxes,
+	case DimensionActiveSandboxes, DimensionPausedSandboxes, DimensionSnapshotsPerSandbox,
 		DimensionSandboxClaims,
 		DimensionAPIRequests,
 		DimensionNetworkEgress,
@@ -56,7 +61,7 @@ const (
 // KindForDimension returns the admission model used by a quota dimension.
 func KindForDimension(d Dimension) Kind {
 	switch d {
-	case DimensionActiveSandboxes, DimensionPausedSandboxes:
+	case DimensionActiveSandboxes, DimensionPausedSandboxes, DimensionSnapshotsPerSandbox:
 		return KindCapacity
 	case DimensionSandboxClaims,
 		DimensionAPIRequests,
@@ -151,7 +156,7 @@ func NewStatus(teamID string, dimension Dimension, policy *Policy, current int64
 // UnitForDimension returns the unit used by limit and usage values for a quota dimension.
 func UnitForDimension(d Dimension) string {
 	switch d {
-	case DimensionActiveSandboxes, DimensionPausedSandboxes:
+	case DimensionActiveSandboxes, DimensionPausedSandboxes, DimensionSnapshotsPerSandbox:
 		return "count"
 	case DimensionSandboxClaims:
 		return "claims"
@@ -171,6 +176,9 @@ func ValidatePolicyValues(dimension Dimension, limitValue, intervalMS, burstValu
 	}
 	if limitValue < 0 {
 		return fmt.Errorf("limit_value must be non-negative")
+	}
+	if dimension == DimensionSnapshotsPerSandbox && limitValue == 0 {
+		return fmt.Errorf("snapshots_per_sandbox limit_value must be positive")
 	}
 	switch KindForDimension(dimension) {
 	case KindCapacity:

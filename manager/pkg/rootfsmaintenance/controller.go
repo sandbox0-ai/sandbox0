@@ -167,7 +167,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 			}
 			break
 		}
-		if result == nil || (len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0 && result.DeletedGenerations == 0) {
+		if result == nil || (len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.PrunedSnapshots == 0 && result.DeletedFilesystems == 0 && result.DeletedGenerations == 0) {
 			break
 		}
 	}

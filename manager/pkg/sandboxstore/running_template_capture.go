@@ -110,7 +110,7 @@ func captureRunningRootFS(
 		INSERT INTO manager.rootfs_snapshots (
 			snapshot_id, filesystem_id, team_id, source_sandbox_id,
 			head_generation_id, name, description, created_at, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp(), $8)
 	`, intent.SnapshotID, intent.TargetFilesystemID, intent.TeamID,
 		intent.SourceSandboxID, intent.CheckpointGeneration,
 		intent.Name, intent.Description, nullableTime(intent.ExpiresAt)); err != nil {
@@ -139,6 +139,11 @@ func captureRunningRootFS(
 		ctx, intent.OperationID, intent.CheckpointGeneration,
 	); err != nil {
 		return nil, fmt.Errorf("commit running template capture lifecycle: %w", err)
+	}
+	if intent.CaptureKind == NomadRunningRootFSCaptureKindSnapshot {
+		if _, err := pruneRootFSSnapshots(ctx, tx, intent.TeamID, intent.SourceSandboxID, intent.SnapshotID, 0); err != nil {
+			return nil, err
+		}
 	}
 	return getRootFSFilesystemByID(ctx, tx, intent.TargetFilesystemID)
 }

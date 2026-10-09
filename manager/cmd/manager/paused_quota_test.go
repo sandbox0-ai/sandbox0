@@ -10,14 +10,27 @@ import (
 
 func TestDefaultPausedSandboxQuotaCanBeOverridden(t *testing.T) {
 	defaults := defaultTeamQuotaLimits(&config.ManagerConfig{})
-	require.Equal(t, []quota.DefaultLimit{{Dimension: quota.DimensionPausedSandboxes, LimitValue: 2000}}, defaults)
+	require.Equal(t, []quota.DefaultLimit{
+		{Dimension: quota.DimensionPausedSandboxes, LimitValue: 2000},
+		{Dimension: quota.DimensionSnapshotsPerSandbox, LimitValue: 10},
+	}, defaults)
 	configured := defaultTeamQuotaLimits(&config.ManagerConfig{DefaultTeamQuotas: []config.TeamQuotaLimitConfig{
 		{Dimension: "paused_sandboxes", LimitValue: 5000},
 		{Dimension: "active_sandboxes", LimitValue: 20},
 	}})
-	require.Len(t, configured, 2)
+	require.Len(t, configured, 3)
 	require.Equal(t, int64(5000), configured[0].LimitValue)
 	require.Nil(t, defaultTeamQuotaLimits(nil))
+}
+
+func TestDefaultSnapshotRetentionQuotaCanBeOverridden(t *testing.T) {
+	configured := defaultTeamQuotaLimits(&config.ManagerConfig{DefaultTeamQuotas: []config.TeamQuotaLimitConfig{
+		{Dimension: "snapshots_per_sandbox", LimitValue: 25},
+	}})
+	require.Equal(t, []quota.DefaultLimit{
+		{Dimension: quota.DimensionSnapshotsPerSandbox, LimitValue: 25},
+		{Dimension: quota.DimensionPausedSandboxes, LimitValue: 2000},
+	}, configured)
 }
 
 func TestManagerQuotaUsageReadsPausedCapacityFromPostgres(t *testing.T) {

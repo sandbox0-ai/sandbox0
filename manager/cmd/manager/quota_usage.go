@@ -10,6 +10,7 @@ import (
 type activeSandboxUsageCounter interface {
 	CountActiveSandboxes(context.Context, string) (int64, error)
 	CountPausedSandboxes(context.Context, string) (int64, error)
+	MaxSnapshotsPerSandbox(context.Context, string) (int64, error)
 }
 
 // managerQuotaUsageStore reads current active sandbox capacity from the
@@ -25,15 +26,18 @@ func (s *managerQuotaUsageStore) CurrentUsage(
 	teamID string,
 	dimension quota.Dimension,
 ) (int64, error) {
-	if dimension == quota.DimensionActiveSandboxes || dimension == quota.DimensionPausedSandboxes {
+	if dimension == quota.DimensionActiveSandboxes || dimension == quota.DimensionPausedSandboxes || dimension == quota.DimensionSnapshotsPerSandbox {
 		if s == nil || s.activeSandboxes == nil {
 			return 0, quota.ErrUsageStoreNotConfigured
 		}
 		var current int64
 		var err error
-		if dimension == quota.DimensionPausedSandboxes {
+		switch dimension {
+		case quota.DimensionSnapshotsPerSandbox:
+			current, err = s.activeSandboxes.MaxSnapshotsPerSandbox(ctx, teamID)
+		case quota.DimensionPausedSandboxes:
 			current, err = s.activeSandboxes.CountPausedSandboxes(ctx, teamID)
-		} else {
+		default:
 			current, err = s.activeSandboxes.CountActiveSandboxes(ctx, teamID)
 		}
 		if err != nil {

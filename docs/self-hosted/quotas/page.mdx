@@ -10,6 +10,7 @@ PostgreSQL policy overrides the regional default for the same dimension.
 | --- | --- | --- | --- |
 | `active_sandboxes` | capacity | count | Sandbox claim/resume transaction |
 | `paused_sandboxes` | capacity | count | New sandbox claim/fork transaction |
+| `snapshots_per_sandbox` | capacity | count | Snapshot publication transaction; oldest excess snapshots are removed |
 | `sandbox_claims` | rate | claims | External claim request |
 | `api_requests` | rate | requests | External regional/full-mode gateway request |
 | `network_egress_bytes` | rate | bytes | ctld network runtime |
@@ -37,6 +38,8 @@ default_team_quotas:
       limit_value: 100
     - dimension: paused_sandboxes
       limit_value: 2000
+    - dimension: snapshots_per_sandbox
+      limit_value: 10
     - dimension: sandbox_claims
       limit_value: 5
       interval_ms: 1000
@@ -90,6 +93,28 @@ cost attribution. Customers can request free quota increases through Dashboard
 or contact@sandbox0.ai. Operators apply approved overrides through the existing
 internal team quota API. Existing excess retained sandboxes are preserved.
 
+## Snapshot Retention
+
+`snapshots_per_sandbox` defaults to 10 public RootFS snapshots **per sandbox**.
+An explicit regional configuration changes the default; a team override changes
+the limit for each sandbox owned by that team. The value must be at least 1.
+Creating a new snapshot succeeds at the limit and atomically removes the oldest
+excess snapshots. The new snapshot is retained. Running and paused sources use
+the same retention policy, serialized on the source sandbox's PostgreSQL row.
+Internal `template-build-` captures follow the template build lifecycle and are
+excluded from this quota.
+
+The RootFS maintenance worker also removes existing excess snapshots and applies
+reduced quotas in bounded batches. Removal releases snapshot pins and published
+running-capture custody. Data still referenced by a restored sandbox, a fork,
+a template or another snapshot stays retained; physical objects are reclaimed
+asynchronously by the normal reference-aware GC.
+
+For this dimension, quota `current` is the highest public snapshot count on any
+sandbox in the team. `remaining` describes that fullest sandbox, rather than a
+shared team-wide snapshot pool. Expired snapshots are excluded from occupancy
+and follow the existing expiration cleanup.
+
 ## Other Limits
 
 These controls are intentionally separate from Team Quota:
@@ -103,7 +128,7 @@ These controls are intentionally separate from Team Quota:
 
 ## Inspect Quotas
 
-Use `GET /api/v1/quotas` for all six dimensions or
+Use `GET /api/v1/quotas` for all seven dimensions or
 `GET /api/v1/quotas/{'{dimension}'}` for one.
 
 Capacity status includes `current` and `remaining`. Rate status includes

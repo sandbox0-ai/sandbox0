@@ -713,6 +713,15 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 	if !pausedConfigured {
 		limits = append(limits, quota.DefaultLimit{Dimension: quota.DimensionPausedSandboxes, LimitValue: quota.DefaultPausedSandboxes})
 	}
+	snapshotsConfigured := false
+	for _, limit := range limits {
+		if limit.Dimension == quota.DimensionSnapshotsPerSandbox {
+			snapshotsConfigured = true
+		}
+	}
+	if !snapshotsConfigured {
+		limits = append(limits, quota.DefaultLimit{Dimension: quota.DimensionSnapshotsPerSandbox, LimitValue: quota.DefaultSnapshotsPerSandbox})
+	}
 	return limits
 }
 

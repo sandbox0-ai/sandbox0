@@ -348,7 +348,7 @@ func (a *HTTPAPI) exchangeNomad(
 		if n, err := io.Copy(io.Discard, io.LimitReader(response.Body, maxNomadResponseBytes+1)); err != nil {
 			return 0, nil, fmt.Errorf("read Nomad mutation response: %w: %w", err, errdefs.ErrUnavailable)
 		} else if n > maxNomadResponseBytes {
-			return 0, nil, fmt.Errorf("Nomad mutation response exceeds limit: %w", errdefs.ErrUnavailable)
+			return 0, nil, fmt.Errorf("nomad mutation response exceeds limit: %w", errdefs.ErrUnavailable)
 		}
 		return response.StatusCode, nil, nil
 	}

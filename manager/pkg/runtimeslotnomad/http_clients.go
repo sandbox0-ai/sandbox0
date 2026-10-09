@@ -104,7 +104,7 @@ func (t *nomadExpiringTransport) shortenExpiry(expires time.Time) {
 
 func (t *nomadExpiringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if time.Now().UnixNano() >= t.expiresAt.Load() {
-		return nil, fmt.Errorf("Nomad TLS transport expired: %w", errdefs.ErrUnavailable)
+		return nil, fmt.Errorf("nomad TLS transport expired: %w", errdefs.ErrUnavailable)
 	}
 	response, err := t.Transport.RoundTrip(request)
 	if err == nil && response.TLS != nil {

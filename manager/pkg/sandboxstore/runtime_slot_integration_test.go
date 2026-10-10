@@ -292,6 +292,81 @@ func TestRuntimeSlotConcurrentAcquireUsesDistinctReadySlotsIntegration(t *testin
 	require.NotEqual(t, results[0].ID, results[1].ID)
 }
 
+func TestRuntimeSlotHundredClaimsRemainDistinctIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	registration := runtimeSlotTestRegistration("unused", "unused")
+	compatibility := registration.CompatibilityDigest
+	_, err := store.RegisterRuntimeNodeCapacity(ctx, &RegisterRuntimeNodeCapacityRequest{
+		ClusterID: registration.ClusterID, NodeID: registration.NodeID, NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		CPUMillicores: 100_000, MemoryBytes: 100 << 30, CPUSetCPUs: "0-99", CPUSetMems: "0", TTL: 5 * time.Minute,
+	})
+	require.NoError(t, err)
+	for index := 0; index < 100; index++ {
+		registration := runtimeSlotTestRegistration(fmt.Sprintf("slot-%d", index), fmt.Sprintf("allocation-%d", index))
+		_, err := store.RegisterRuntimeSlot(ctx, registration)
+		require.NoError(t, err)
+		_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
+			SlotID: registration.SlotID, AllocationID: registration.AllocationID,
+			NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+			RuntimeReadyDigest: bytes.Repeat([]byte{byte(0x10 + index)}, 32),
+			NetworkReadyDigest: bytes.Repeat([]byte{byte(0x20 + index)}, 32),
+			StorageReadyDigest: bytes.Repeat([]byte{byte(0x30 + index)}, 32),
+			HeartbeatTTL:       time.Minute,
+		})
+		require.NoError(t, err)
+	}
+	type fixture struct {
+		sandboxID  string
+		filesystem *RootFSFilesystem
+		generation *RootFSGeneration
+	}
+	fixtures := make([]fixture, 100)
+	for index := range fixtures {
+		fixtures[index].sandboxID = fmt.Sprintf("sandbox-concurrent-%d", index)
+		fixtures[index].filesystem, fixtures[index].generation =
+			runtimeSlotTestGeneration(t, store, fixtures[index].sandboxID, fmt.Sprintf("operation-%d", index))
+	}
+
+	results := make([]*RuntimeSlot, 100)
+	errs := make([]error, 100)
+	var wg sync.WaitGroup
+	for index := range fixtures {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index], errs[index] = store.AcquireRuntimeSlot(ctx, &AcquireRuntimeSlotRequest{
+				OperationID: fmt.Sprintf("operation-%d", index), ClaimID: fmt.Sprintf("claim-%d", index),
+				SandboxID: fixtures[index].sandboxID, FilesystemID: fixtures[index].filesystem.ID,
+				SourceGenerationID:  fixtures[index].generation.ID,
+				CompatibilityDigest: compatibility, ClusterID: "cluster-a",
+				RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+				NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+				Resources: runtimeSlotTestResources(),
+			})
+		}(index)
+	}
+	wg.Wait()
+	seen := make(map[string]bool, len(results))
+	for index, result := range results {
+		require.NoError(t, errs[index])
+		require.False(t, seen[result.ID])
+		seen[result.ID] = true
+		durable, err := store.GetRuntimeSlot(ctx, result.ID)
+		require.NoError(t, err)
+		require.Equal(t, result.ResourceLease, durable.ResourceLease)
+		require.Equal(t, result.ResourceLeaseDigest, durable.ResourceLeaseDigest)
+	}
+	var leases int
+	var cpu, memory int64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), SUM(cpu_millicores), SUM(memory_bytes)
+		FROM manager.runtime_resource_leases WHERE lease_state='active'`).Scan(&leases, &cpu, &memory))
+	require.Equal(t, 100, leases)
+	require.Equal(t, int64(100_000), cpu)
+	require.Equal(t, int64(100<<30), memory)
+}
+
 func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

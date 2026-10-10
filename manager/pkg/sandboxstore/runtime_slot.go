@@ -570,11 +570,7 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if err != nil {
 		return nil, err
 	}
-	err = insertRuntimeResourceLease(ctx, tx, resourceLease, resourceLeaseDigest)
-	if err != nil {
-		return nil, mapRuntimeSlotConflict("insert runtime resource lease", err)
-	}
-	result, err := attachRuntimeSlotClaim(ctx, tx, slot, normalized, resourceLease.LeaseID)
+	result, err := reserveAndAttachRuntimeSlotClaim(ctx, tx, slot, normalized, resourceLease, resourceLeaseDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -619,7 +615,12 @@ func attachRuntimeSlotClaim(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot, r
 // insertRuntimeResourceLease records capacity in the shared ledger. The caller
 // must hold the selected slot and exact node-capacity row locks.
 func insertRuntimeResourceLease(ctx context.Context, tx pgx.Tx, resourceLease protocol.RuntimeResourceLease, resourceLeaseDigest []byte) error {
-	_, err := tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, runtimeResourceLeaseInsertSQL(), runtimeResourceLeaseInsertArgs(resourceLease, resourceLeaseDigest)...)
+	return err
+}
+
+func runtimeResourceLeaseInsertSQL() string {
+	return `
 		INSERT INTO manager.runtime_resource_leases (
 			lease_id, slot_id, operation_id, claim_id,
 			cluster_id, node_id, node_uid, node_boot_id,
@@ -630,13 +631,57 @@ func insertRuntimeResourceLease(ctx context.Context, tx pgx.Tx, resourceLease pr
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 		)
-	`, resourceLease.LeaseID, resourceLease.SlotID, resourceLease.OperationID, resourceLease.ClaimID,
+	`
+}
+
+func runtimeResourceLeaseInsertArgs(resourceLease protocol.RuntimeResourceLease, resourceLeaseDigest []byte) []any {
+	return []any{resourceLease.LeaseID, resourceLease.SlotID, resourceLease.OperationID, resourceLease.ClaimID,
 		resourceLease.ClusterID, resourceLease.NodeID, resourceLease.NodeUID, resourceLease.NodeBootID,
 		resourceLease.CPUMillicores, int64(resourceLease.CPUPeriodMicros), resourceLease.CPUQuotaMicros,
 		int64(resourceLease.CPUShares), int64(resourceLease.CPUWeight), resourceLease.CPUSetCPUs,
 		resourceLease.CPUSetMems, resourceLease.MemoryBytes, resourceLease.PIDsLimit,
-		resourceLease.CgroupName, resourceLeaseDigest, RuntimeResourceLeaseActive)
-	return err
+		resourceLease.CgroupName, resourceLeaseDigest, RuntimeResourceLeaseActive}
+}
+
+// reserveAndAttachRuntimeSlotClaim keeps the capacity lock until commit, but
+// issues the lease, binds the slot and reads both results in one statement.
+// Read the CTE RETURNING relations: base-table reads in this statement cannot
+// see its own data-modifying CTE writes. Capacity accounting remains a separate
+// statement with a fresh snapshot after acquiring the node-capacity lock.
+func reserveAndAttachRuntimeSlotClaim(ctx context.Context, tx pgx.Tx, slot *RuntimeSlot, request *AcquireRuntimeSlotRequest,
+	lease protocol.RuntimeResourceLease, digest []byte) (*RuntimeSlot, error) {
+	args := runtimeResourceLeaseInsertArgs(lease, digest)
+	args = append(args, RuntimeSlotStateClaiming, request.SandboxID, request.FilesystemID, request.SourceGenerationID,
+		request.ClusterID, request.ClaimTTL.Milliseconds(), request.RuntimeAssignmentRevision, request.NetworkPolicyDigest,
+		RuntimeSlotStateFastpathReady, nullableRuntimeClaimInput(request.RuntimeAssignmentPayload), nullableRuntimeClaimInput(request.NetworkPolicy))
+	result, err := scanRuntimeSlot(tx.QueryRow(ctx, `
+		WITH issued_lease AS (
+		`+runtimeResourceLeaseInsertSQL()+` RETURNING *
+		), claimed_slot AS (
+			UPDATE manager.runtime_slots AS runtime_slots
+			SET state = $21, revision = revision + 1,
+				claim_operation_id = issued_lease.operation_id, claim_id = issued_lease.claim_id, sandbox_id = $22,
+				filesystem_id = $23, source_generation_id = $24,
+				claim_cluster_filter = $25, claim_ttl_milliseconds = $26::bigint,
+				claim_runtime_assignment_revision = $27, claim_network_policy_digest = $28,
+				claim_lease_expires_at = NOW() + ($26::double precision * INTERVAL '1 millisecond'),
+				claimed_at = NOW(), updated_at = NOW(), resource_lease_id = issued_lease.lease_id,
+				claim_runtime_assignment = $30, claim_network_policy = $31
+			FROM issued_lease
+			WHERE runtime_slots.slot_id = issued_lease.slot_id AND state = $29 AND resource_lease_id IS NULL
+			RETURNING runtime_slots.*
+		)
+	`+runtimeSlotSelectFromSQL("claimed_slot", "issued_lease"), args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: selected runtime slot changed before resource lease attachment", ErrRuntimeSlotConflict)
+	}
+	if err != nil {
+		return nil, mapRuntimeSlotConflict("reserve and attach runtime slot claim", err)
+	}
+	if result.ID != slot.ID {
+		return nil, fmt.Errorf("%w: resource lease selected a different runtime slot", ErrRuntimeSlotConflict)
+	}
+	return result, nil
 }
 
 func selectRuntimeSlotResourceLease(
@@ -2013,6 +2058,11 @@ func mapRuntimeSlotConflict(operation string, err error) error {
 }
 
 func runtimeSlotSelectSQL() string {
+	return runtimeSlotSelectFromSQL("manager.runtime_slots", "manager.runtime_resource_leases")
+}
+
+// Relations are internal SQL constants, never request input.
+func runtimeSlotSelectFromSQL(slotRelation, leaseRelation string) string {
 	return `
 		SELECT
 			slot_id, cluster_id, allocation_id, allocation_namespace,
@@ -2043,7 +2093,7 @@ func runtimeSlotSelectSQL() string {
 			resource_lease.resource_lease_digest, resource_lease.resource_lease_state,
 			resource_lease.resource_released_at,
 			NOW()
-		FROM manager.runtime_slots AS runtime_slots
+		FROM ` + slotRelation + ` AS runtime_slots
 		LEFT JOIN LATERAL (
 			SELECT lease_id AS resource_lease_id,
 				operation_id AS resource_operation_id,
@@ -2058,7 +2108,7 @@ func runtimeSlotSelectSQL() string {
 				memory_bytes AS resource_memory_bytes, pids_limit AS resource_pids_limit,
 				cgroup_name AS resource_cgroup_name, lease_digest AS resource_lease_digest,
 				lease_state AS resource_lease_state, released_at AS resource_released_at
-			FROM manager.runtime_resource_leases
+			FROM ` + leaseRelation + `
 			WHERE lease_id = runtime_slots.resource_lease_id
 		) AS resource_lease ON TRUE`
 }

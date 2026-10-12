@@ -8,6 +8,8 @@ source_root="$(realpath "${1:?Verified runtime source directory required}")"
 [[ "$(node "$source_root/browser.cjs" --version)" == 'sandbox0-browser 2' ]]
 test -f "$source_root/novnc/core/rfb.js"
 test -f "$source_root/novnc/LICENSE.txt"
+test -f "$source_root/node_modules/ws/LICENSE"
+node -e 'if (typeof require(process.argv[1]).WebSocketServer !== "function") process.exit(1)' "$source_root/node_modules/ws"
 if [[ -d /opt/sandbox0-browser ]] && diff -qr "$source_root" /opt/sandbox0-browser >/dev/null; then
   install -m 0755 /opt/sandbox0-browser/sandbox0-browser /usr/local/bin/sandbox0-browser
   echo 'Exact browser runtime is already installed'
@@ -31,7 +33,9 @@ if ! command -v tint2 >/dev/null || ! command -v feh >/dev/null || ! command -v 
 fi
 command -v Xtigervnc >/dev/null
 command -v openbox >/dev/null
-getent passwd sandbox-browser >/dev/null
+if ! getent passwd sandbox-browser >/dev/null; then
+  useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash sandbox-browser
+fi
 if ! command -v google-chrome-stable >/dev/null; then
   timeout 600 bash "$source_root/install-chrome-stable.sh"
 fi
@@ -44,7 +48,12 @@ node --check "$staging/desktop.cjs"
 node --check "$staging/supervisor.cjs"
 backup="/opt/sandbox0-browser-before-v2"
 if [[ -e /opt/sandbox0-browser ]]; then
-  [[ ! -e "$backup" ]] || { echo 'Previous runtime backup exists; reconcile before retrying' >&2; exit 1; }
+  if [[ -e "$backup" ]]; then
+    [[ "$(node /opt/sandbox0-browser/browser.cjs --version)" == 'sandbox0-browser 2' ]] || { echo 'Previous runtime backup exists; reconcile before retrying' >&2; exit 1; }
+    # Preserve the original pre-v2 backup when installing a later v2 release.
+    backup="$(mktemp -d /opt/sandbox0-browser-before-upgrade.XXXXXX)"
+    rmdir "$backup"
+  fi
   mv /opt/sandbox0-browser "$backup"
 fi
 if ! mv "$staging" /opt/sandbox0-browser; then

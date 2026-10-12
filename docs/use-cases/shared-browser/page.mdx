@@ -253,8 +253,10 @@ Stop only the supervised Browser session/service, extract the verified archive
 into a separate staging directory, and run
 `bash /path/to/staged-runtime/upgrade-runtime.sh /path/to/staged-runtime` as
 sandbox root. The installer refuses occupied Browser ports, installs missing
-desktop packages, retains the previous runtime for recovery, and installs the
-shared launcher. Restart the Browser service and verify
+desktop packages, creates the template's browser user if absent, retains the
+previous runtime for recovery, and installs the shared launcher. The archive
+includes its WebSocket library, so it does not depend on that library being
+installed by a retained coding-agent image. Restart the Browser service and verify
 `sandbox0-browser --version`, the viewer, and your Agent's process continuity.
 The helper uses the existing profile when passed with `--profile`.
 

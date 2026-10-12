@@ -109,6 +109,15 @@ jobs:
           docker run --rm --cap-add=SYS_ADMIN --security-opt seccomp=unconfined "$IMAGE" bash -euc '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends scrot xdotool x11-xserver-utils
+            # Exercise a RootFS that predates the template browser helper, user
+            # and shared ws dependency. The verified archive must stand alone.
+            mkdir /tmp/browser-upgrade-source
+            cp -a /opt/sandbox0-browser/. /tmp/browser-upgrade-source/
+            rm -rf /opt/sandbox0-browser
+            rm /usr/local/bin/sandbox0-browser
+            userdel sandbox-browser
+            mv /opt/coding-agents/node_modules/ws /opt/coding-agents/node_modules/ws.before-upgrade
+            bash /tmp/browser-upgrade-source/upgrade-runtime.sh /tmp/browser-upgrade-source
             node /opt/sandbox0-browser/smoke-desktop.cjs
           '
 

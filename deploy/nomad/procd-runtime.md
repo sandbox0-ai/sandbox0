@@ -122,7 +122,13 @@ journals, so retention is not silently disabled. Errors are returned by the
 accessing operation and logged by the retention sweep. Closing an untouched
 journal does not trigger historical reads.
 
-Session control state accepts the original unversioned format and format 1.
+Session control state accepts the original unversioned format and formats 1 and 2.
+New state writes use format 2, which adds an incremental durable input-receipt
+sidecar. Input IDs and payload digests are synced before acknowledgement; typed
+bytes are not stored in that sidecar. Receipt persistence releases the output
+lock and avoids rewriting the complete session state for each key. Duplicate
+retries persist the same receipt without resending PTY bytes. Older executables
+reject format 2; rollback requires an executable that understands this format.
 Unknown versions fail activation before command readiness. Journal format checks
 remain unchanged. Binary rollback is allowed only while the selected executable
 supports the persisted state and journal formats; destructive format migrations

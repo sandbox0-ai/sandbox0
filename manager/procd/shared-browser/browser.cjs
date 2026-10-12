@@ -8,6 +8,8 @@ const http = require('node:http');
 const net = require('node:net');
 const { spawn, execFileSync } = require('node:child_process');
 const { setTimeout: delay } = require('node:timers/promises');
+const { CONTROL_PORT, prepareDesktop } = require('./desktop.cjs');
+const RUNTIME_VERSION = 2;
 
 const HELP = `Usage: sandbox0-browser [options]
 
@@ -19,6 +21,7 @@ The command stays in the foreground; run it in a supervised session or service.
   --profile PATH     Persistent profile under /workspace (default: /workspace/.browser/profile)
   --downloads PATH   Download directory under /workspace (default: /workspace/browser-downloads)
   --size WIDTHxHEIGHT  Initial desktop size (default: 1440x900)
+  --require-version VERSION  Refuse an incompatible browser runtime
   --help             Show this help
   --version          Show runtime version
 
@@ -47,14 +50,17 @@ function options(args, env = process.env) {
   };
   for (let index = 0; index < args.length; index++) {
     const key = { '--host': 'host', '--port': 'port', '--profile': 'profile',
-      '--downloads': 'downloads', '--size': 'size' }[args[index]];
+      '--downloads': 'downloads', '--size': 'size', '--require-version': 'requiredVersion' }[args[index]];
     if (!key || !args[index + 1]) throw new Error(`Unknown or incomplete option: ${args[index]}`);
     config[key] = args[++index];
   }
   if (!/^\d+$/.test(String(config.port)) || Number(config.port) < 1 || Number(config.port) > 65535 ||
-      [5900, 9222].includes(Number(config.port))) throw new Error('Invalid or reserved viewer port');
+      [5900, 9222, CONTROL_PORT].includes(Number(config.port))) throw new Error('Invalid or reserved viewer port');
   config.port = Number(config.port);
   if (!net.isIP(config.host)) throw new Error('--host must be an IP address');
+  if (config.requiredVersion !== undefined && config.requiredVersion !== String(RUNTIME_VERSION)) {
+    throw new Error(`Required browser runtime version does not match version ${RUNTIME_VERSION}`);
+  }
   const size = /^(\d{3,4})x(\d{3,4})$/.exec(config.size);
   if (!size || Number(size[1]) < 320 || Number(size[2]) < 240 ||
       Number(size[1]) > 4096 || Number(size[2]) > 4096) throw new Error('Invalid desktop size');
@@ -171,7 +177,7 @@ function viewerServer(config, library = wsLibrary()) {
         response.writeHead(400).end(); return;
       }
       let root, relative;
-      if (['/', '/viewer.js', '/viewer.css'].includes(pathname)) {
+      if (['/', '/viewer.js', '/viewer.css', '/desktop-rfb.js'].includes(pathname)) {
         root = __dirname;
         relative = pathname === '/' ? 'viewer.html' : pathname.slice(1);
       } else if (/^\/novnc\/(?:core|vendor)\/.+\.js$/.test(pathname)) {
@@ -286,10 +292,16 @@ function browserExecutable() {
 async function run(config) {
   if (process.platform !== 'linux' || process.getuid() !== 0) throw new Error('Run sandbox0-browser as the sandbox root user on Linux');
   if (!fs.existsSync(path.join(config.assets, 'core', 'rfb.js'))) throw new Error('The coding-agent image is missing the bundled viewer');
-  for (const port of [5900, 9222]) if (await tcpReady(port)) throw new Error(`Browser port ${port} is already in use`);
+  for (const port of [5900, 9222, CONTROL_PORT]) if (await tcpReady(port)) throw new Error(`Browser port ${port} is already in use`);
   prepareProfile(config);
   const logs = '/tmp/sandbox0-browser';
   ensureDirectory(logs);
+  const desktop = '/tmp/sandbox0-browser-desktop';
+  ensureDirectory(desktop);
+  fs.chmodSync(desktop, 0o755);
+  prepareDesktop(desktop);
+  execFileSync('chown', ['-R', `${config.browserUser}:${config.browserUser}`,
+    path.join(desktop, '.cache'), path.join(desktop, '.config')]);
   const processes = new Processes();
   let viewer;
   const stop = () => processes.controller.abort();
@@ -302,18 +314,24 @@ async function run(config) {
       '-UseBlacklist', '0', '-FrameRate', '30', '-AlwaysShared', '-AcceptSetDesktopSize', '-ac', '-nolisten', 'tcp'], env, path.join(logs, 'desktop.log'));
     const signal = processes.controller.signal;
     await waitReady(() => fs.existsSync('/tmp/.X11-unix/X99') && tcpReady(5900), signal, 'desktop');
-    processes.start('openbox', [], env, path.join(logs, 'window-manager.log'));
     const home = execFileSync('getent', ['passwd', config.browserUser], { encoding: 'utf8' }).trim().split(':')[5];
     if (!home) throw new Error('The coding-agent image is missing the browser user');
-    processes.start('setpriv', ['--reuid=' + config.browserUser, '--regid=' + config.browserUser, '--init-groups',
-      browserExecutable(), '--user-data-dir=' + config.profile, '--remote-debugging-address=127.0.0.1',
-      '--remote-debugging-port=9222', '--no-first-run', '--no-default-browser-check', '--password-store=basic',
-      '--disable-dev-shm-usage', '--start-maximized', '--restore-last-session'],
-    { ...env, HOME: home }, path.join(logs, 'chromium.log'));
-    await waitReady(async () => {
-      const response = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
-      return response.ok && typeof (await response.json()).webSocketDebuggerUrl === 'string';
-    }, signal, 'Chromium CDP');
+    const identity = ['--reuid=' + config.browserUser, '--regid=' + config.browserUser, '--init-groups'];
+    const desktopEnv = { ...env, HOME: desktop, XDG_DATA_HOME: path.join(desktop, '.local/share') };
+    processes.start('setpriv', [...identity, 'openbox', '--config-file', path.join(desktop, 'rc.xml')],
+      desktopEnv, path.join(logs, 'window-manager.log'));
+    await waitReady(() => {
+      execFileSync('wmctrl', ['-m'], { env, timeout: 1000 }); return true;
+    }, signal, 'window manager');
+    processes.start('setpriv', [...identity, 'tint2', '-c', path.join(desktop, 'panel.conf')],
+      desktopEnv, path.join(logs, 'panel.log'));
+    await waitReady(() => {
+      const area = execFileSync('xprop', ['-root', '_NET_WORKAREA'], { env, encoding: 'utf8', timeout: 1000 });
+      return area.includes(`, ${Number(config.size.split('x')[1]) - 52}`);
+    }, signal, 'desktop panel');
+    processes.start('setpriv', [...identity, process.execPath, path.join(__dirname, 'supervisor.cjs'),
+      browserExecutable(), config.profile, desktop], { ...env, HOME: home }, path.join(logs, 'chromium.log'));
+    await waitReady(() => tcpReady(CONTROL_PORT), signal, 'browser supervisor');
     signal.throwIfAborted();
     viewer = viewerServer(config);
     await new Promise((resolve, reject) => {
@@ -339,7 +357,7 @@ module.exports = { options, recoverProfile, profileIsRunning, originAllowed, vie
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === '--help') { process.stdout.write(HELP); }
-  else if (args.length === 1 && args[0] === '--version') { console.log('sandbox0-browser 1'); }
+  else if (args.length === 1 && args[0] === '--version') { console.log(`sandbox0-browser ${RUNTIME_VERSION}`); }
   else {
     Promise.resolve().then(() => run(options(args))).catch(error => {
       console.error(`sandbox0-browser: ${error.message}`);

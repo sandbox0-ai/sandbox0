@@ -70,7 +70,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # The native SDKs require Node.js 24.15+. Keep the pinned agents on the same
 # supported runtime and fail if the distribution resolves an older release.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server tint2 feh wmctrl \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server tint2 feh wmctrl x11-utils \
   && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 15)) process.exit(1)' \
@@ -119,6 +119,7 @@ RUN mkdir -p /workspace
 # Browser runtime and viewer are shared by standalone clients and applications.
 # noVNC is installed once at build time, with its upstream license files retained.
 COPY manager/procd/shared-browser/ /opt/sandbox0-browser/
+COPY manager/procd/coding-agents/install-chrome-stable.sh /opt/sandbox0-browser/install-chrome-stable.sh
 COPY --chmod=0755 manager/procd/shared-browser/sandbox0-browser /usr/local/bin/sandbox0-browser
 RUN curl -fsSL "https://codeload.github.com/novnc/noVNC/tar.gz/refs/tags/v${NOVNC_VERSION}" -o /tmp/novnc.tar.gz \
   && echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c - \
@@ -128,7 +129,7 @@ RUN curl -fsSL "https://codeload.github.com/novnc/noVNC/tar.gz/refs/tags/v${NOVN
   && test -f /opt/sandbox0-browser/novnc/core/rfb.js \
   && test -f /opt/sandbox0-browser/novnc/LICENSE.txt \
   && node --check /opt/sandbox0-browser/browser.cjs \
-  && NODE_PATH=/opt/coding-agents/node_modules node --test /opt/sandbox0-browser/browser.test.cjs \
+  && NODE_PATH=/opt/coding-agents/node_modules node --test /opt/sandbox0-browser/*.test.cjs \
   && sandbox0-browser --help
 
 ENV HOME=/workspace

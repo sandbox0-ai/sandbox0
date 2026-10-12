@@ -22,8 +22,10 @@ test('defaults keep viewer private and reject unsafe paths/ports', () => {
   assert.equal(defaults.port, 6080);
   assert.equal(defaults.profile, '/workspace/.browser/profile');
   assert.equal(options([], { SANDBOX0_SERVICE_PORT: '6081' }).port, 6081);
+  assert.equal(options(['--require-version', '2'], {}).requiredVersion, '2');
+  assert.throws(() => options(['--require-version', '1'], {}), /version does not match/);
   assert.equal(options(['--profile', '/workspace/.sandpi/browser/profile'], {}).profile, '/workspace/.sandpi/browser/profile');
-  for (const args of [['--port', '9222'], ['--port', '5900'], ['--port', '0'], ['--port', '6080;id'],
+  for (const args of [['--port', '9222'], ['--port', '5900'], ['--port', '9224'], ['--port', '0'], ['--port', '6080;id'],
     ['--profile', '/etc'], ['--profile', '/workspace/../etc/profile'], ['--size', '9999x9999']]) {
     assert.throws(() => options(args, {}));
   }
@@ -81,6 +83,7 @@ test('viewer serves its assets and relays binary RFB through preview-rewritten h
   assert.match(await index.text(), /Shared Browser/);
   assert.match(index.headers.get('content-security-policy'), /default-src 'self'/);
   assert.equal((await fetch(base + '/viewer.js')).status, 200);
+  assert.equal((await fetch(base + '/desktop-rfb.js')).status, 200);
   assert.equal((await fetch(base + '/novnc/core/rfb.js')).status, 200);
   assert.equal((await fetch(base + '/novnc/core/escape.js')).status, 404);
   assert.equal((await fetch(base + '/browser.cjs')).status, 404);

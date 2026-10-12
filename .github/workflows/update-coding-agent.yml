@@ -101,6 +101,31 @@ jobs:
           IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
         run: bash tools/docker-in-sandbox/ci-smoke.sh "$IMAGE"
 
+      - name: Verify the native shared browser desktop
+        timeout-minutes: 10
+        env:
+          IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+        run: |
+          docker run --rm --cap-add=SYS_ADMIN --security-opt seccomp=unconfined "$IMAGE" bash -euc '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends scrot xdotool x11-xserver-utils
+            node /opt/sandbox0-browser/smoke-desktop.cjs
+          '
+
+      - name: Export the verified browser runtime for retained RootFS upgrades
+        env:
+          IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network none "$IMAGE" tar --sort=name --mtime=@0 \
+            --owner=0 --group=0 --numeric-owner -C /opt/sandbox0-browser -cf - . \
+            | gzip -n > browser-runtime.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-runtime-${{ matrix.arch }}
+          path: browser-runtime.tar.gz
+          if-no-files-found: error
+
       - name: Extract the inventory from the built image
         env:
           IMAGE: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
@@ -145,6 +170,18 @@ jobs:
         run: |
           cmp inventory-amd64/harness-inventory.json inventory-arm64/harness-inventory.json
           cp inventory-amd64/harness-inventory.json harness-inventory.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: browser-runtime-amd64
+          path: browser-amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: browser-runtime-arm64
+          path: browser-arm64
+      - name: Verify architecture-independent browser runtime
+        run: |
+          cmp browser-amd64/browser-runtime.tar.gz browser-arm64/browser-runtime.tar.gz
+          cp browser-amd64/browser-runtime.tar.gz browser-runtime.tar.gz
       - name: Publish verified multi-architecture image and release receipt
         run: |
           set -euo pipefail
@@ -153,12 +190,14 @@ jobs:
           manifest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}')"
           digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
           inventory_sha="$(sha256sum harness-inventory.json | cut -d' ' -f1)"
+          browser_sha="$(sha256sum browser-runtime.tar.gz | cut -d' ' -f1)"
           jq -n --arg version "$VERSION" --arg source "$source" \
             --arg image "sandbox0ai/otemplates@${digest}" --arg commit "$SOURCE_COMMIT" \
             --arg inventorySha256 "$inventory_sha" \
-            '{version: $version, source: $source, image: $image, commit: $commit, dockerInDocker: 1, harnessInventorySha256: $inventorySha256}' > coding-agent-release.json
+            --arg browserRuntimeSha256 "$browser_sha" \
+            '{version: $version, source: $source, image: $image, commit: $commit, dockerInDocker: 1, harnessInventorySha256: $inventorySha256, browserRuntimeVersion: 2, browserRuntimeSha256: $browserRuntimeSha256}' > coding-agent-release.json
           # A release is the promotion signal. Partial/failed builds never reach infra.
-          gh release create "$VERSION" coding-agent-release.json harness-inventory.json \
+          gh release create "$VERSION" coding-agent-release.json harness-inventory.json browser-runtime.tar.gz \
             manager/procd/coding-agents/package.json \
             manager/procd/coding-agents/package-lock.json \
             manager/procd/coding-agents/THIRD_PARTY.md \

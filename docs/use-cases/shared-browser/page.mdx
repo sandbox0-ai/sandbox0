@@ -145,6 +145,16 @@ the browser running.
 
 ## Defaults And Configuration
 
+Runtime version 2 includes wallpaper, a bottom taskbar and browser launcher.
+Task buttons and the launcher restore minimized windows without duplicating
+them. Closing the final browser window keeps the desktop and viewer connected;
+the launcher reopens the same profile, retaining cookies. CDP is restarted
+without opening a window, so automation can reconnect after Chrome exits.
+Native maximize/restore and F11 fullscreen are available. Normal windows are
+fitted to the current work area after restoring or shrinking the desktop, and
+the taskbar reserves its space when windows are maximized. Small viewers scale
+a desktop of at least 640×480 while preserving their aspect ratio.
+
 | Setting | Default |
 |---------|---------|
 | Viewer HTTP and WebSocket | `127.0.0.1:6080`, page `/`, WebSocket `/vnc` |
@@ -155,6 +165,7 @@ the browser running.
 | Persistent downloads | `/workspace/browser-downloads` |
 | Browser user | `sandbox-browser`, with Chromium's process sandbox enabled |
 | Initial desktop size | `1440x900` |
+| Launcher control | `127.0.0.1:9224`, local `POST /open`, browser Origins rejected |
 
 Use `sandbox0-browser --help` for command options. For example:
 
@@ -224,9 +235,33 @@ auth header. Browser clients cannot set that header directly. Keep the route
 token and deployment API key in the backend. Enable sandbox `auto_resume` and
 route `resume` when viewing should wake a paused sandbox.
 
-Sandpi uses this command when available, retaining its existing profile at
-`/workspace/.sandpi/browser/profile`. Older Sandpi environments retain the legacy
-launcher until their RootFS is upgraded.
+Sandpi's unified runtime integration invokes this command directly, retaining
+its existing profile at `/workspace/.sandpi/browser/profile`. Upgrade retained
+Environment RootFS generations to runtime version 2 before deploying that
+integration. Applications must not assume a template promotion changes files
+already installed in an existing sandbox.
+
+### Upgrade An Existing RootFS
+
+Template releases with runtime version 2 include `browser-runtime.tar.gz` and
+its SHA-256 in `coding-agent-release.json`. The archive comes from the tested
+image and is identical across architectures. Applications can use it to upgrade
+only the browser runtime on an existing RootFS, preserving workspace, profile,
+and Agent processes.
+
+Stop only the supervised Browser session/service, extract the verified archive
+into a separate staging directory, and run
+`bash /path/to/staged-runtime/upgrade-runtime.sh /path/to/staged-runtime` as
+sandbox root. The installer refuses occupied Browser ports, installs missing
+desktop packages, retains the previous runtime for recovery, and installs the
+shared launcher. Restart the Browser service and verify
+`sandbox0-browser --version`, the viewer, and your Agent's process continuity.
+The helper uses the existing profile when passed with `--profile`.
+
+Archived snapshots retain their original binaries. Rerun this upgrade after
+restoring an old snapshot. Do not replace RootFS or use disk-only pause/resume
+to upgrade a live Environment. If network policy blocks package repositories,
+provision the required packages separately or arrange an explicit policy change.
 
 ## Shared Browser Or Steel Browser?
 

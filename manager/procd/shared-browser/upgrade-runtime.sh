@@ -48,7 +48,12 @@ node --check "$staging/desktop.cjs"
 node --check "$staging/supervisor.cjs"
 backup="/opt/sandbox0-browser-before-v2"
 if [[ -e /opt/sandbox0-browser ]]; then
-  [[ ! -e "$backup" ]] || { echo 'Previous runtime backup exists; reconcile before retrying' >&2; exit 1; }
+  if [[ -e "$backup" ]]; then
+    [[ "$(node /opt/sandbox0-browser/browser.cjs --version)" == 'sandbox0-browser 2' ]] || { echo 'Previous runtime backup exists; reconcile before retrying' >&2; exit 1; }
+    # Preserve the original pre-v2 backup when installing a later v2 release.
+    backup="$(mktemp -d /opt/sandbox0-browser-before-upgrade.XXXXXX)"
+    rmdir "$backup"
+  fi
   mv /opt/sandbox0-browser "$backup"
 fi
 if ! mv "$staging" /opt/sandbox0-browser; then

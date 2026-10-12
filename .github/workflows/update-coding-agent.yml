@@ -118,6 +118,13 @@ jobs:
             userdel sandbox-browser
             mv /opt/coding-agents/node_modules/ws /opt/coding-agents/node_modules/ws.before-upgrade
             bash /tmp/browser-upgrade-source/upgrade-runtime.sh /tmp/browser-upgrade-source
+            # A later v2 archive must also upgrade without overwriting the
+            # original pre-v2 recovery backup.
+            mkdir /opt/sandbox0-browser-before-v2
+            touch /opt/sandbox0-browser-before-v2/recovery-marker
+            rm -rf /opt/sandbox0-browser/node_modules/ws
+            bash /tmp/browser-upgrade-source/upgrade-runtime.sh /tmp/browser-upgrade-source
+            test -f /opt/sandbox0-browser-before-v2/recovery-marker
             node /opt/sandbox0-browser/smoke-desktop.cjs
           '
 

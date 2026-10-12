@@ -1,4 +1,4 @@
-import RFB from './novnc/core/rfb.js';
+import RFB from './desktop-rfb.js';
 
 const desktop = document.getElementById('desktop');
 const status = document.getElementById('status');

@@ -1,0 +1,33 @@
+name: Shared Browser runtime
+
+on:
+  pull_request:
+    paths:
+      - manager/procd/shared-browser/**
+      - manager/procd/coding-agents/package.json
+      - .github/workflows/shared-browser.yml
+  push:
+    branches: [main]
+    paths:
+      - manager/procd/shared-browser/**
+      - manager/procd/coding-agents/package.json
+      - .github/workflows/shared-browser.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test browser runtime and desktop supervision
+        run: |
+          set -euo pipefail
+          ws_version="$(node -p 'require("./manager/procd/coding-agents/package.json").dependencies.ws')"
+          npm install --prefix "$RUNNER_TEMP/browser-tests" --ignore-scripts --no-audit --no-fund "ws@$ws_version"
+          NODE_PATH="$RUNNER_TEMP/browser-tests/node_modules" node --test manager/procd/shared-browser/*.test.cjs
+          bash -n manager/procd/shared-browser/upgrade-runtime.sh

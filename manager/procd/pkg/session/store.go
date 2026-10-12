@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -18,7 +19,9 @@ const (
 
 // sessionStateFormatVersion is independent of the procd executable version.
 // Zero denotes the original compatible format; unknown versions fail closed.
-const sessionStateFormatVersion = 1
+// V2 stores hot-path input receipts in a bounded sidecar journal. Older procd
+// versions must reject the state rather than lose acknowledged dedup receipts.
+const sessionStateFormatVersion = 2
 
 type persistedSession struct {
 	FormatVersion int `json:"format_version,omitempty"`
@@ -29,7 +32,9 @@ type persistedSession struct {
 
 // FileStore persists session control state under a procd-owned state directory.
 type FileStore struct {
-	root string
+	root            string
+	inputJournalsMu sync.Mutex
+	inputJournals   map[string]*inputReceiptJournal
 }
 
 func NewFileStore(root string) (*FileStore, error) {
@@ -40,7 +45,7 @@ func NewFileStore(root string) (*FileStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create session state directory: %w", err)
 	}
-	return &FileStore{root: root}, nil
+	return &FileStore{root: root, inputJournals: make(map[string]*inputReceiptJournal)}, nil
 }
 
 func (s *FileStore) Load() ([]Session, error) {
@@ -72,6 +77,9 @@ func (s *FileStore) Load() ([]Session, error) {
 		}
 		stored.Spec = normalizeSpec(stored.Spec)
 		stored.Session.InputReceipts = append([]InputReceipt(nil), stored.InputReceipts...)
+		if err := s.loadInputReceipts(&stored.Session); err != nil {
+			return nil, fmt.Errorf("load session %s input receipts: %w", entry.Name(), err)
+		}
 		stored.Session.CreationKey = stored.CreationKey
 		sessions = append(sessions, stored.Session)
 	}
@@ -134,6 +142,9 @@ func (s *FileStore) ResetForSandbox(sandboxID string) error {
 	if err := writeFileAtomic(filepath.Join(s.root, sandboxIDFile), []byte(sandboxID+"\n"), 0o600); err != nil {
 		return fmt.Errorf("persist sandbox identity: %w", err)
 	}
+	s.inputJournalsMu.Lock()
+	s.inputJournals = make(map[string]*inputReceiptJournal)
+	s.inputJournalsMu.Unlock()
 	return nil
 }
 
@@ -191,6 +202,9 @@ func (s *FileStore) Delete(id string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("delete session state: %w", err)
 	}
+	s.inputJournalsMu.Lock()
+	delete(s.inputJournals, id)
+	s.inputJournalsMu.Unlock()
 	return nil
 }
 

@@ -33,12 +33,12 @@ feature is not deployed until the gates below have evidence attached.
    fencing races. The combined component gate below passed.
 2. Exercise growth and live reclaim through lifecycle barriers and owner loss;
    the combined scheduled-growth guest workload below passed.
-3. Verify the enabled live-reclaim path under real outage/pressure recovery
-   without process loss; the new node configuration is still disabled by default.
+3. Extend the injected S3 request-outage gate below to longer interruptions and
+   node-wide contention; the new node configuration is still disabled by default.
 4. Verify all lifecycle operations, GC and live ctld transfer with installed
    live bases and interrupted node operations.
-5. Regenerate affected public contracts/SDKs and update runtime, CLI, website,
-   and operator docs to describe initial size, growth ceiling, and durability.
+5. Deploy the regenerated contracts/SDK descriptions and synchronized runtime,
+   CLI, website and operator docs alongside the compatible runtime release.
 6. Use the isolated remote fixture for real NBD/XFS/runsc and PostgreSQL/
    object-storage acceptance. Retain sanitized evidence and remove resources.
 7. Merge passing changes, deploy manager before enabling node behavior, then
@@ -366,6 +366,44 @@ receipts were resolved, and installed sequence reached 153,359.
 This local boundary gate does not create or publish a regional fork target.
 Full fork/snapshot transaction, memory checkpoint, migration, outage and
 production gates remain required before deployment.
+
+## Injected S3 request-outage acceptance
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE=1` in 105.752 seconds. All reads/writes still use
+the real RustFS S3 backend; a loopback HTTP proxy returns S3-shaped `503`
+responses during the injected interruption. This simulates failed storage
+requests without stopping the isolated backend container or claiming a real
+provider outage.
+
+After the guest had written at least 80 MiB, every object-service request failed
+until at least one rejection and normal WAL admission pressure were observed.
+The test held that pressure for five additional seconds, checked that the
+regional writer remained consumed, then restored transport. The same guest
+retained its PID/token, heap marker, open-file inode and offset and completed all
+600 MiB. Every byte was checked; XFS reached 1,258,291,200 bytes. Peak sampled WAL
+payload was 41,750,528 bytes, below the 40 MiB transient allowance. Both injected
+lost receipts converged, installed sequence reached 154,349, and normal final
+retirement and object cleanup succeeded.
+
+Longer failures, provider-level disruption, multiple contending writers,
+node-loss recovery and full regional lifecycle/deployment gates remain open.
+
+## Public capacity description synchronization
+
+The public OpenAPI field keeps its existing name and shape. Its description now
+identifies initial XFS capacity, conditional automatic growth and retained
+geometry. Go, JavaScript and Python SDK copies were updated and regenerated with
+their existing pinned generators. Review showed only the generated capacity
+comments changed. Generated Go code compiled; JavaScript and website typechecks,
+Python compilation and quota checks, and website docs metadata/generation
+verification passed.
+
+SDK/runtime/CLI README files, public template and self-hosted configuration docs,
+website template labels and the infrastructure rollout plan describe the same
+contract. Website MDX registries, Markdown aliases and `llms.txt` are generated
+from the runtime docs at build time and are intentionally untracked. The feature
+remains opt-in and has not been merged or deployed by this acceptance record.
 
 ## Live publication ordering
 

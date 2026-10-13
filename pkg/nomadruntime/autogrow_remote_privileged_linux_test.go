@@ -113,7 +113,8 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	// A unique bucket keeps test cleanup independent of every other fixture.
 	bucket := "s0-autogrow-" + runID[:20]
 	t.Logf("isolated_object_bucket=%s", bucket)
-	objects, err := objectstore.Create(objectstore.Config{Type: objectstore.TypeS3, Bucket: bucket, Region: "us-east-1", Endpoint: os.Getenv("SANDBOX0_RUSTFS_ENDPOINT"),
+	endpoint, outage := autogrowObjectEndpoint(t, os.Getenv("SANDBOX0_RUSTFS_ENDPOINT"))
+	objects, err := objectstore.Create(objectstore.Config{Type: objectstore.TypeS3, Bucket: bucket, Region: "us-east-1", Endpoint: endpoint,
 		AccessKey: os.Getenv("SANDBOX0_RUSTFS_ACCESS_KEY"), SecretKey: os.Getenv("SANDBOX0_RUSTFS_SECRET_KEY")})
 	require.NoError(t, err)
 	require.NoError(t, objects.Create())
@@ -232,6 +233,7 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	var first, last autogrowGuestEvidence
 	peakWAL := int64(0)
 	freezeChecked := false
+	outageChecked := false
 	running := true
 	for running {
 		select {
@@ -256,6 +258,38 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 			require.Equal(t, first.PID, last.PID)
 			require.Equal(t, first.Inode, last.Inode)
 			require.Equal(t, int64(last.Chunks)<<20, last.Offset)
+			if outage != nil && !outageChecked && last.Chunks >= 80 {
+				func() {
+					outage.down.Store(true)
+					defer outage.down.Store(false)
+					// The proxy continues serving the real S3 backend before and
+					// after this interval. During it, every storage request fails.
+					require.Eventually(t, func() bool {
+						peakWAL = max(peakWAL, m.NodeDirtyTailUsage().UsedBytes)
+						pressure, err := m.DirtyTailPressureSessions()
+						require.NoError(t, err)
+						return outage.rejected.Load() > 0 && len(pressure) > 0
+					}, 25*time.Second, 20*time.Millisecond)
+					grant, err := store.GetRootFSWriterGrant(ctx, stage.Identity.WriterGrantID)
+					require.NoError(t, err)
+					require.Equal(t, sandboxstore.RootFSWriterGrantStateConsumed, grant.State,
+						"storage pressure must not retire the live writer")
+					blocked, err := os.ReadFile(filepath.Join(root, "evidence/state.json"))
+					require.NoError(t, err)
+					var proof autogrowGuestEvidence
+					require.NoError(t, json.Unmarshal(blocked, &proof))
+					require.Equal(t, first.Token, proof.Token)
+					require.Equal(t, first.PID, proof.PID)
+					timer := time.NewTimer(5 * time.Second)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						t.Fatal(ctx.Err())
+					}
+				}()
+				outageChecked = true
+			}
 			if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_FREEZE") == "1" && !freezeChecked && last.Chunks >= 100 {
 				// Stop and join the normal scheduler, leaving the same guest
 				// running until its normal WAL admission blocks. Only the freeze
@@ -307,6 +341,10 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_FREEZE") == "1" {
 		require.True(t, freezeChecked)
 	}
+	if outage != nil {
+		require.True(t, outageChecked)
+		require.Positive(t, outage.rejected.Load())
+	}
 	require.NoError(t, m.SettleLiveCommit(ctx, stage))
 	require.True(t, loss.publish.Load())
 	require.True(t, loss.install.Load())
@@ -338,5 +376,5 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	grant, err := store.GetRootFSWriterGrant(ctx, stage.Identity.WriterGrantID)
 	require.NoError(t, err)
 	require.Equal(t, sandboxstore.RootFSWriterGrantStateRetired, grant.State)
-	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true running_fork_freeze_checked=%t retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID, freezeChecked)
+	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true running_fork_freeze_checked=%t storage_outage_checked=%t retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID, freezeChecked, outageChecked)
 }

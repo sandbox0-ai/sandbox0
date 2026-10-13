@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -165,6 +167,34 @@ func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artif
 }
 
 type autogrowReplyLoss struct{ publish, install atomic.Bool }
+
+type autogrowObjectOutage struct {
+	down     atomic.Bool
+	rejected atomic.Int64
+}
+
+func autogrowObjectEndpoint(t *testing.T, endpoint string) (string, *autogrowObjectOutage) {
+	t.Helper()
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OUTAGE") != "1" {
+		return endpoint, nil
+	}
+	target, err := url.Parse(endpoint)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	outage := &autogrowObjectOutage{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if outage.down.Load() {
+			outage.rejected.Add(1)
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("<Error><Code>ServiceUnavailable</Code><Message>isolated storage outage</Message></Error>"))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL, outage
+}
 
 func autogrowRemoteAuthority(t *testing.T, root string, store *sandboxstore.PGSandboxStore) (*managerauthority.ManagerClient, *autogrowReplyLoss) {
 	t.Helper()

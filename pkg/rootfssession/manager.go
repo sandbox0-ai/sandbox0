@@ -334,6 +334,7 @@ type Manager struct {
 	rebaseEngine          RebaseEngine
 	rebaseAdmission       chan struct{}
 	rebaseWG              sync.WaitGroup
+	retainedRebases       map[string]*liveRebaseResources
 	pressureSignal        chan struct{}
 	recoveryMu            sync.RWMutex
 	recoveryParents       map[string]struct{}
@@ -437,6 +438,7 @@ func New(config Config) (*Manager, error) {
 		freezes: make(map[string]runningFreeze), growing: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
+		retainedRebases: make(map[string]*liveRebaseResources),
 		pressureSignal:  make(chan struct{}, 1),
 		recoveryParents: make(map[string]struct{}), quietExternal: make(map[string]time.Time),
 	}
@@ -2491,6 +2493,7 @@ func (m *Manager) Close() error {
 	for _, session := range live {
 		result = errors.Join(result, session.device.Close(), session.branch.Close())
 	}
+	result = errors.Join(result, m.closeRetainedRebaseBackends())
 	return errors.Join(result, m.readCache.Close(), m.db.Close())
 }
 

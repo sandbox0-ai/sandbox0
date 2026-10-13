@@ -549,6 +549,13 @@ func (m *Manager) cleanupRebaseRecord(
 	if current == nil {
 		return nil
 	}
+	m.mu.Lock()
+	if live == nil {
+		live = m.retainedRebases[current.OperationID]
+	} else {
+		m.retainedRebases[current.OperationID] = live
+	}
+	m.mu.Unlock()
 	var result error
 	result = errors.Join(result, m.unmountRebaseMounts(current, false))
 	result = errors.Join(result, m.closeRebaseDevicesAndBranches(ctx, current, live))
@@ -568,7 +575,45 @@ func (m *Manager) cleanupRebaseRecord(
 	}
 	current.Clean = true
 	current.Failure = ""
-	return m.saveRebase(*current)
+	if err := m.saveRebase(*current); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.retainedRebases, current.OperationID)
+	m.mu.Unlock()
+	return nil
+}
+
+// Shutdown releases process-owned handles without claiming mounted resources
+// have been detached. The unchanged journal permits the next owner to clean
+// them; ordinary cleanup retries keep these handles available until unmount.
+func (m *Manager) closeRetainedRebaseBackends() error {
+	m.mu.Lock()
+	operations := make([]string, 0, len(m.retainedRebases))
+	for operation := range m.retainedRebases {
+		operations = append(operations, operation)
+	}
+	m.mu.Unlock()
+	var result error
+	for _, operation := range operations {
+		unlock := m.lock("rebase:" + operation)
+		m.mu.Lock()
+		live := m.retainedRebases[operation]
+		m.mu.Unlock()
+		if live != nil {
+			for _, device := range live.devices {
+				result = errors.Join(result, device.Close())
+			}
+			if live.checkpoint != nil {
+				result = errors.Join(result, live.checkpoint.Close())
+			}
+			for _, branch := range live.branches {
+				result = errors.Join(result, branch.Close())
+			}
+		}
+		unlock()
+	}
+	return result
 }
 
 func (m *Manager) unmountRebaseMounts(current *rebaseRecord, syncTarget bool) error {
@@ -608,6 +653,13 @@ func (m *Manager) closeRebaseDevicesAndBranches(
 	var result error
 	for index := len(current.Resources) - 1; index >= 0; index-- {
 		resource := &current.Resources[index]
+		if resource.OverlayMountIntent || resource.XFSMountIntent {
+			// Keep the backend and its reservation until both mounts are
+			// detached. Closing first can strand mounted XFS and contradict
+			// the recovery journal when unmounting failed.
+			result = errors.Join(result, fmt.Errorf("retain mounted %s rebase device: %w", resource.Role, errdefs.ErrFailedPrecondition))
+			continue
+		}
 		deviceDetached := resource.DeviceClosed || resource.DevicePath == ""
 		if !resource.DeviceClosed && resource.DevicePath != "" {
 			var err error

@@ -155,7 +155,16 @@ NBD/XFS full-file hashes without source WAL/cache. The first real run passed
 growth, three transfers, running snapshot/fork, two cold hashes, original-process
 continuity, pause and restore, then failed rebase because its two-device fixture
 pool could not mount three roles. Its nonzero receipt is retained. The public
-fixture now reserves a third empty device; complete acceptance remains pending.
+fixture now reserves a third empty device. Its next real run passed the same
+preceding operations, then failed writing the grown 600 MiB file into rebase's
+initial 300 MiB target filesystem. Failed unmounting also exposed cleanup that
+closed still-mounted backends; the scene retains nine mounts and three NBD
+devices. Cleanup now retains backend/reservation ownership until mounts detach;
+an exact retry reuses those handles, while shutdown releases process handles
+without asserting physical absence. Regressions cover retry and restart;
+the complete session and Nomad-runtime race suites passed (75.17 and 123.31
+seconds). Target capacity and bounded rebase write/rotation integration
+still require a fix and complete rerun; public acceptance remains open.
 Structural compilation and skip checks are not acceptance evidence.
 Retained-memory and production occupied-worker drain qualification remain
 separate. See the infra fixture README for reproduction and provenance limits.

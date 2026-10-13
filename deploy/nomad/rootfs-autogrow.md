@@ -194,6 +194,26 @@ fresh-reader correctness, failed uploads, path/sequence validation and apply
 progress cancellation; actual Nomad/S3 public lifecycle acceptance remains
 required.
 
+The first staging-enabled real run still failed before returning rebase: the
+one-minute node-channel transport rotation canceled a longer worker operation,
+and its cleanup delayed reconnect beyond the manager's bounded grace. Rebase
+custody retained 371 objects (370 upload acknowledgements), totaling 768,260,279
+bytes; the 367 worker artifact samples peaked at 56,750,080 bytes. No tenant
+rebase head was published. The original growth, three transfers and preceding
+public operations passed again. The runner exited one after 391.03 seconds;
+its archive was retained, with mounts and NBD devices released.
+
+Paused-rebase execution now belongs to the agent lifetime and its dedicated
+timeout, while stream rotation still reloads credentials/capacity immediately.
+An exact request on a successor authenticated stream joins its existing job;
+request identity, payload and global execution concurrency remain bounded.
+Completed replies have bounded cardinality/retention and durable worker journals
+remain authoritative after eviction. Agent shutdown cancels and joins these
+jobs. A real TLS disconnect regression reproduced cancellation with the prior
+agent and passed with the fix, including exactly one execution; the complete
+node-channel/agent race suites passed. A full public lifecycle rerun is still
+required.
+
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
 `TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,

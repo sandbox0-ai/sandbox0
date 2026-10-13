@@ -22,7 +22,7 @@ type ApplyRequest struct {
 	// Progress runs on the apply goroutine between mutations and bounded data
 	// chunks. An operation owner can grow and checkpoint its private target;
 	// an error aborts this unpublished merge without changing either source.
-	Progress func(context.Context, uint64) error
+	Progress func(context.Context, uint64) error `json:"-"`
 }
 
 type ApplyIOStats struct {

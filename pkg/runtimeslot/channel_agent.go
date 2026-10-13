@@ -207,6 +207,10 @@ type NodeChannelAgent struct {
 	baseURL         *url.URL
 	agentInstanceID string
 	dialAddress     string
+	workMu          sync.Mutex
+	workPermit      chan struct{}
+	rebaseWork      map[string]*nodeChannelRebaseWork
+	rebaseWG        sync.WaitGroup
 }
 
 // NewNodeChannelAgent validates immutable channel policy.
@@ -350,6 +354,8 @@ func (a *NodeChannelAgent) Run(ctx context.Context) error {
 	if a == nil || a.baseURL == nil || a.config.Executor == nil {
 		return fmt.Errorf("node channel agent is not initialized: %w", errdefs.ErrUnavailable)
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer func() { cancel(); a.rebaseWG.Wait() }()
 	backoff := a.config.ReconnectMin
 	for {
 		connectedAt, err := a.runConnection(ctx)
@@ -473,8 +479,14 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
 	stop := make(chan struct{})
 	go func() {
+		rotation := time.NewTimer(time.Until(connectedAt.Add(a.config.ConnectionMaxAge)))
+		defer rotation.Stop()
 		select {
 		case <-ctx.Done():
+			cancelConnection()
+			_ = connection.Close()
+		case <-rotation.C:
+			cancelConnection()
 			_ = connection.Close()
 		case <-stop:
 		}
@@ -524,7 +536,30 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 		go func(command NodeChannelCommand) {
 			defer operations.Done()
 			defer func() { <-semaphore }()
-			result := a.execute(connectionCtx, command)
+			var result NodeChannelResult
+			if command.Kind == NodeChannelCommandPausedRebase {
+				work, err := a.retainedRebase(ctx, command)
+				if err != nil {
+					result = NodeChannelResult{Version: NodeChannelVersion, RequestID: command.RequestID, Kind: command.Kind,
+						Error: boundedNodeChannelError(err), ErrorClass: classifyNodeChannelError(err)}
+				} else {
+					select {
+					case <-work.done:
+						result = work.result
+					case <-connectionCtx.Done():
+						return
+					}
+				}
+			} else {
+				permit := a.nodeWorkPermit()
+				select {
+				case permit <- struct{}{}:
+				case <-connectionCtx.Done():
+					return
+				}
+				result = a.execute(connectionCtx, command)
+				<-permit
+			}
 			if err := result.ValidateFor(command); err != nil {
 				_ = connection.Close()
 				return

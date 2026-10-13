@@ -389,6 +389,29 @@ retirement and object cleanup succeeded.
 Longer failures, provider-level disruption, multiple contending writers,
 node-loss recovery and full regional lifecycle/deployment gates remain open.
 
+## Fresh session, cache and device recovery
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE=1` in 125.681 seconds. After normal
+authenticated retirement of the original writer, it closed the session manager
+and created a new Bolt journal, branch directory, empty read cache and separately
+reserved `/dev/nbd62`. The region issued and consumed a new writer grant at epoch
+2 against the final committed generation. The new session fetched that
+generation from real RustFS through the authenticated regional descriptor.
+
+A fresh stock-runsc guest read all 629,145,600 file bytes and checked every byte,
+including EOF. Mounted XFS retained its 1,258,291,200-byte size. The second writer
+then completed normal authenticated retirement and released its device. The
+original guest retained its PID/token, heap marker, inode and open offset during
+growth; its sampled peak WAL payload was 39,579,648 bytes, within the configured
+40 MiB transient allowance. Both lost acknowledgements converged.
+
+Set `SANDBOX0_PRIVILEGED_NBD_RESTORE_DEVICE` explicitly to an unused device
+different from `SANDBOX0_PRIVILEGED_NBD_DEVICE` when enabling this gate. This is
+fresh-session/cache/device recovery on the same isolated host after normal
+retirement. It does not establish crash abandonment, replacement-node recovery,
+full Nomad resume or memory-checkpoint continuity. Those gates remain open.
+
 ## Public capacity description synchronization
 
 The public OpenAPI field keeps its existing name and shape. Its description now

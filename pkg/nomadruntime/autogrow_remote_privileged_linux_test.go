@@ -46,7 +46,20 @@ static void die(const char *op) {
 static void all(int fd,const unsigned char *p,size_t n) {
  while(n) { ssize_t w=write(fd,p,n); if(w<=0) die("write"); p+=w; n-=w; }
 }
-int main(void) {
+static void verify(void) {
+ unsigned char *chunk=malloc(1048576); if(!chunk) die("verify-malloc");
+ int fd=open("/growing.bin",O_RDONLY); if(fd<0) die("verify-open");
+ for(int i=0;i<600;i++) {
+  size_t off=0;
+  while(off<1048576) { ssize_t n=read(fd,chunk+off,1048576-off); if(n<=0) die("verify-read"); off+=n; }
+  for(int j=0;j<1048576;j++) if(chunk[j]!=(unsigned char)(i%251)) { errno=EIO; die("verify-content"); }
+ }
+ unsigned char extra; if(read(fd,&extra,1)!=0) { errno=EIO; die("verify-size"); }
+ if(close(fd)) die("verify-close");
+ puts("verified_remote_rootfs_bytes=629145600");
+}
+int main(int argc,char **argv) {
+ if(argc==2&&!strcmp(argv[1],"verify")) { verify(); return 0; }
  unsigned char token[16]; if(getrandom(token,sizeof(token),0)!=sizeof(token)) die("token");
  char text[33]; for(int i=0;i<16;i++) sprintf(text+2*i,"%02x",token[i]);
  unsigned char *chunk=malloc(1048576),*marker=malloc(1048576); if(!chunk||!marker) die("malloc");
@@ -376,5 +389,11 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	grant, err := store.GetRootFSWriterGrant(ctx, stage.Identity.WriterGrantID)
 	require.NoError(t, err)
 	require.Equal(t, sandboxstore.RootFSWriterGrantStateRetired, grant.State)
-	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true running_fork_freeze_checked=%t storage_outage_checked=%t retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID, freezeChecked, outageChecked)
+	coldVerified := false
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE") == "1" {
+		require.NoError(t, m.Close())
+		autogrowVerifyColdRestore(t, ctx, root, conditional, store, client, stage)
+		coldVerified = true
+	}
+	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true running_fork_freeze_checked=%t storage_outage_checked=%t cold_restore_verified=%t retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID, freezeChecked, outageChecked, coldVerified)
 }

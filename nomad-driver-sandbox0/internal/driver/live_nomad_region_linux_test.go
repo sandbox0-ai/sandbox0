@@ -28,6 +28,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -61,7 +62,24 @@ func TestLiveNomadRegionalReceiptFixture(t *testing.T) {
 	require.Equal(t, int64(unix.XFS_SUPER_MAGIC), int64(stat.Type))
 	size := int64(stat.Blocks) * int64(stat.Bsize)
 	require.GreaterOrEqual(t, size, int64(1<<30), "XFS must grow beyond its initial 300 MiB")
-	require.LessOrEqual(t, size, int64(2*liveNomadGrowthFixtureMiB(t))<<20)
+	host, err := rootfssession.NewLinuxRuntime(rootfssession.LinuxRuntimeConfig{DevicePaths: []string{"/dev/nbd62", "/dev/nbd63"}})
+	require.NoError(t, err)
+	var usage rootfssession.XFSUsage
+	for _, device := range []string{"/dev/nbd62", "/dev/nbd63"} {
+		usage, err = host.InspectXFS(device, xfsMount)
+		if err == nil {
+			break
+		}
+	}
+	require.NoError(t, err, "inspect the exact fixture XFS/NBD mount")
+	// This append-only workload keeps allocated usage monotonic. Growth doubles
+	// geometry at 20% free or 64 MiB free, so capacity can exceed twice the file
+	// size (2 GiB already triggers the 2400 -> 4800 MiB step). Bound the actual
+	// geometry by that policy, including allocated image and XFS metadata.
+	used := usage.SizeBytes - usage.FreeBytes
+	require.Positive(t, used)
+	require.LessOrEqual(t, usage.SizeBytes, max(5*used/2, 2*used+(128<<20)))
+	require.LessOrEqual(t, usage.SizeBytes, descriptor.LogicalSizeBytes)
 	client, err := rootfsauthority.NewManagerClient(rootfsauthority.ManagerClientConfig{BaseURL: "https://s0-fixture.local:19445",
 		CAFile: filepath.Join(root, "pki/ca.pem"), ClientCertFile: filepath.Join(root, "pki/peer.pem"), ClientKeyFile: filepath.Join(root, "pki/peer-key.pem"),
 		TokenFile: filepath.Join(root, "token"), Timeout: 5 * time.Second})

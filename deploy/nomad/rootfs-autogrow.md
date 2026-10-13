@@ -683,7 +683,7 @@ stopped through normal fixture teardown. This qualifies real node integration
 and live ownership transfer; public manager lifecycle, memory checkpoint/resume,
 replacement-node crash recovery and production release provenance remain open.
 
-## Real object-service suspension: failed acceptance
+## Real object-service suspension: retained attempts
 
 The larger Nomad fixture can select 600 through 4096 MiB with
 `S0_NOMAD_LIVE_GROWTH_MIB`; its default remains 600. Infra's
@@ -706,8 +706,24 @@ The harness now checks the original allocations remain running before reading
 guest progress, so stale files cannot turn a dead process into a passing outage
 result. Failed journals, WALs, storage namespace and explicit nonzero runner
 receipt are retained on the disposable host. The independent timer and cleanup
-restored RustFS, and fixture services stopped. A successful full rerun remains
-required before this gate can qualify deployment.
+restored RustFS, and fixture services stopped.
+
+A subsequent attempt rebuilt ctld after verifying the complete Go source tree
+against the candidate commit. The original Nomad/procd guest recovered from the
+real service pause and verified every byte of its 2048 MiB file with unchanged
+process-state identity. Observed write backpressure lasted 31.31 seconds. The
+complete runner still exited nonzero before live transfers: its receipt test
+incorrectly capped XFS at twice the payload, while mounted data capacity reached
+4,966,055,936 bytes. The growth policy doubles geometry at 20% or 64 MiB free;
+the 2 GiB workload therefore reaches the 2400-to-4800 MiB step. The test now
+checks the exact mounted geometry against that policy and actual allocated
+usage. Artifact statistics are durably retained on failed attempts as well.
+
+This attempt establishes the service-pause recovery/content subcheck, not a
+complete passing outage/transfer/bounded-disk gate. Its nonzero receipt remains
+retained, and the initial status-137 cause is still unresolved. Rebuilding with
+a different binary digest alone does not establish a fix. A complete successful
+rerun remains required before this gate can qualify deployment.
 
 ## Expanded RootFS memory-checkpoint acceptance
 

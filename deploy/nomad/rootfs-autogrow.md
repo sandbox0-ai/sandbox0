@@ -478,6 +478,39 @@ Go test timeout. Optional `SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD` accepts duratio
 from five seconds to two minutes. Provider-level outages, node-wide contention,
 crash abandonment, full Nomad lifecycle and production rollout remain open.
 
+## Actual Nomad, procd and live-owner transfer acceptance
+
+The isolated systemd live-node fixture now has an explicit
+`S0_NOMAD_LIVE_REAL_ROOTFS=1` mode. Its production runtime-slot, RootFS writer,
+lifecycle and node-channel handlers use a fresh dedicated PostgreSQL database
+and a real RustFS S3 bucket. Import publication records real object custody and
+the embedded procd digest; OCI provenance and the certificate/node bindings
+remain fixture-specific.
+
+The gate passed after a real Nomad allocation, driver claim, authenticated procd
+readiness probe and regional command-ready commit. The same guest wrote and
+verified 600 MiB of random data through one retained file descriptor. XFS grew
+from its 300 MiB initial image to 1,191,182,336 bytes of statfs data capacity on
+the 64 TiB logical device. Three production Worker ownership-transfer cycles
+preserved the allocation, zero restart count, Nomad/Sentry PIDs, guest PID,
+heap, tmpfs, mmap and unlinked file offset. The first transfer also survived
+the injected driver-publication failure and completed its exact journal.
+
+Authenticated PostgreSQL observations before and after the cycles confirmed
+the original grant remained consumed, the original slot active and the
+filesystem's immutable initial generation unchanged. Installed sequence
+advanced from 157,890 before handoff to 159,102 after the third cycle. Across
+353 one-second samples, peak allocated worker WAL/read-cache/journal blocks
+were 54,788,096 bytes, below the fixture's 128 MiB assertion despite 600 MiB of
+guest data. This excludes the durable object backend, the temporary import
+image and the virtual mounted filesystem. It is sampled one-writer evidence.
+
+The fixture runner and provisioning/cleanup requirements are documented in
+the infra repository's `ali/nomad/tests/live_node/README.md`. Services and guests
+stopped through normal fixture teardown. This qualifies real node integration
+and live ownership transfer; public manager lifecycle, memory checkpoint/resume,
+replacement-node crash recovery and production release provenance remain open.
+
 ## Migration filesystem drain and live-WAL custody
 
 A stopped Sentry may leave buffered XFS writes larger than the retirement

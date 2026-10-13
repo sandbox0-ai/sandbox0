@@ -22,6 +22,8 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -39,8 +41,8 @@ func (s liveNomadObjectPublisher) PutImmutable(_ context.Context, key string, da
 
 // The external isolated fixture supplies real Nomad, ctld, stock runsc and
 // kernel NBD. This helper submits a real driver claim, never edits its state.
-// Regional authority and S3 are synthetic peers; their lease/fence semantics
-// have separate PostgreSQL and protocol tests.
+// The default uses synthetic regional authority and S3 peers. The explicit
+// real-rootfs mode uses production mTLS handlers, PostgreSQL and real S3.
 func TestLiveNomadClaimFixture(t *testing.T) {
 	root := os.Getenv("S0_NOMAD_LIVE_FIXTURE_ROOT")
 	if root == "" {
@@ -55,8 +57,17 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	var state PersistedState
 	require.NoError(t, json.Unmarshal(data, &state))
 	require.Equal(t, phaseWarm, state.Phase)
+	realRegion := os.Getenv("S0_NOMAD_LIVE_REAL_ROOTFS") == "1"
 	source := t.TempDir()
 	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	if realRegion {
+		writerToken := make([]byte, 32)
+		_, err := rand.Read(writerToken)
+		require.NoError(t, err)
+		stage.Identity.WriterGrantToken = hex.EncodeToString(writerToken)
+		stage.Identity.WriterGrantTokenDigest = rootfshandoff.WriterGrantTokenDigest(stage.Identity.WriterGrantToken)
+		token = stage.Identity.WriterGrantToken
+	}
 	nonce := sha256.Sum256([]byte(state.TaskConfig.ID))
 	suffix := hex.EncodeToString(nonce[:])
 	stage.Parent = "sha256:" + suffix
@@ -77,6 +88,10 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, err)
 	stage.ExpectedPolicyToken.SourceIP = ip
 	assignment := runtimeSlotAssignment()
+	if realRegion {
+		assignment.SandboxID, assignment.TeamID = stage.Identity.RootFSID, "live-nomad-team"
+		assignment.EnvVars[runtimecontrol.EnvSandboxID] = assignment.SandboxID
+	}
 	revision, err := assignment.Revision()
 	require.NoError(t, err)
 	resources, err := runtimeslot.NewRuntimeResourceLease("operation-1", "claim-1", state.TaskConfig.ID, "fixture-cluster",
@@ -89,7 +104,11 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	image, err := os.Create(filepath.Join(source, "real.xfs"))
 	require.NoError(t, err)
 	defer image.Close()
-	require.NoError(t, image.Truncate(512<<20))
+	initialBytes := int64(512 << 20)
+	if realRegion {
+		initialBytes = 300 << 20
+	}
+	require.NoError(t, image.Truncate(initialBytes))
 	output, err := exec.Command("mkfs.xfs", "-f", image.Name()).CombinedOutput()
 	require.NoError(t, err, "%s", output)
 	mount := filepath.Join(source, "mount")
@@ -105,6 +124,9 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/payload"), payload, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/live-fixture"), []byte("isolated-fixture"), 0600))
+	if realRegion {
+		require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/live-growth"), []byte("isolated-growth-fixture"), 0600))
+	}
 	procdPath, err := exec.Command(filepath.Join(root, "f/bin/ctld"), "--install-procd", "--procd-cache-dir="+filepath.Join(root, "f/procd")).Output()
 	require.NoError(t, err)
 	procd, err := os.ReadFile(strings.TrimSpace(string(procdPath)))
@@ -112,13 +134,18 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/procd"), procd, 0755))
 	output, err = exec.Command("umount", mount).CombinedOutput()
 	require.NoError(t, err, "%s", output)
-	built, err := rootfsblock.BuildMaterializedGeneration(t.Context(), image, 512<<20, liveNomadObjectPublisher(filepath.Join(root, "f/objects")), rootfsblock.BuildOptions{})
-	require.NoError(t, err)
-	stage.Generation.BaseBlockRoot, stage.Generation.CurrentBlockHead = built.Descriptor.MappingRoot.RootDigest, built.Descriptor.MappingRoot.RootDigest
-	stage.Generation.Descriptor = built.Payload
-	stage.Generation.BaseArtifactDigest = digest.FromBytes(built.Payload).String()
-	stage.Generation.GenerationID = "base-" + stage.Generation.BaseArtifactDigest
-	stage.InitialGeneration = stage.Generation.GenerationID
+	if realRegion {
+		artifact := liveNomadImportBase(t, image, procd, suffix)
+		liveNomadPrepareRegionalClaim(t, &stage, artifact, resources, revision)
+	} else {
+		built, err := rootfsblock.BuildMaterializedGeneration(t.Context(), image, initialBytes, liveNomadObjectPublisher(filepath.Join(root, "f/objects")), rootfsblock.BuildOptions{})
+		require.NoError(t, err)
+		stage.Generation.BaseBlockRoot, stage.Generation.CurrentBlockHead = built.Descriptor.MappingRoot.RootDigest, built.Descriptor.MappingRoot.RootDigest
+		stage.Generation.Descriptor = built.Payload
+		stage.Generation.BaseArtifactDigest = digest.FromBytes(built.Payload).String()
+		stage.Generation.GenerationID = "base-" + stage.Generation.BaseArtifactDigest
+		stage.InitialGeneration = stage.Generation.GenerationID
+	}
 	require.NoError(t, stage.Validate())
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f/claim-slot"), []byte(state.TaskConfig.ID), 0600))
 	request := ClaimRequest{OperationID: "operation-1", ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy, Runtime: assignment, Resources: resources}
@@ -133,6 +160,13 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
+	if realRegion {
+		liveNomadCommitCommandReady(t, state, stage)
+		liveNomadCompleteRegionalClaim(t, stage)
+		metadata, err := json.Marshal(stage.WithoutWriterGrantToken())
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "f/regional-stage.json"), metadata, 0600))
+	}
 	log, err := os.OpenFile(filepath.Join(root, "guest-payload.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	require.NoError(t, err)
 	defer log.Close()
@@ -165,6 +199,18 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 	require.NoError(t, mapping.Truncate(4096))
 	area, err := unix.Mmap(int(mapping.Fd()), 0, 4096, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	require.NoError(t, err)
+	_, growthErr := os.Stat("/live-growth")
+	var growing *os.File
+	var chunk []byte
+	var hashes [600][sha256.Size]byte
+	growthBytes := int64(0)
+	verified := false
+	if growthErr == nil {
+		growing, err = os.OpenFile("/growing.bin", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		require.NoError(t, err)
+		defer growing.Close()
+		chunk = make([]byte, 1<<20)
+	}
 	for count := uint64(1); ; count++ {
 		require.Equal(t, digest, sha256.Sum256(memory))
 		actual, err := os.ReadFile("/tmp/live-token")
@@ -177,7 +223,30 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 		require.NoError(t, err)
 		binary.LittleEndian.PutUint64(area, count)
 		require.NoError(t, unix.Msync(area, unix.MS_SYNC))
-		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area)})
+		if growing != nil && growthBytes < 600<<20 {
+			_, err := rand.Read(chunk)
+			require.NoError(t, err)
+			hashes[growthBytes>>20] = sha256.Sum256(chunk)
+			written, err := growing.Write(chunk)
+			require.NoError(t, err)
+			require.Equal(t, len(chunk), written)
+			require.NoError(t, growing.Sync())
+			growthBytes += int64(written)
+		}
+		if growing != nil && growthBytes == 600<<20 && !verified {
+			for index, expected := range hashes {
+				_, err := growing.ReadAt(chunk, int64(index)<<20)
+				require.NoError(t, err)
+				require.Equal(t, expected, sha256.Sum256(chunk), "growth chunk=%d", index)
+			}
+			verified = true
+		}
+		if growing != nil {
+			position, err := growing.Seek(0, io.SeekCurrent)
+			require.NoError(t, err)
+			require.Equal(t, growthBytes, position)
+		}
+		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area), "growth_bytes": growthBytes, "growth_verified": verified})
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile("/guest-state.tmp", data, 0600))
 		require.NoError(t, os.Rename("/guest-state.tmp", "/guest-state.json"))

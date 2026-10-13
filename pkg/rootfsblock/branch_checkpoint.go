@@ -33,6 +33,7 @@ type BranchCheckpoint struct {
 	latest   map[uint64]branchRecord
 	blocks   []uint64
 	closed   bool
+	owner    *Branch
 }
 
 // Checkpoint flushes and captures the exact current branch boundary. It does
@@ -50,9 +51,10 @@ func (b *Branch) Checkpoint() (*BranchCheckpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("duplicate branch journal for checkpoint: %w", err)
 	}
+	b.checkpoints++
 	return &BranchCheckpoint{
 		file: file, identity: b.identity, end: b.end, sequence: b.sequence,
-		count: b.records.count, chunks: b.records.snapshot(),
+		count: b.records.count, chunks: b.records.snapshot(), owner: b,
 	}, nil
 }
 
@@ -132,7 +134,11 @@ func (c *BranchCheckpoint) Close() error {
 	c.chunks = nil
 	c.latest = nil
 	c.blocks = nil
-	return c.file.Close()
+	err := c.file.Close()
+	c.owner.mu.Lock()
+	c.owner.checkpoints--
+	c.owner.mu.Unlock()
+	return err
 }
 
 func (c *BranchCheckpoint) prepareFinalIndexLocked() {

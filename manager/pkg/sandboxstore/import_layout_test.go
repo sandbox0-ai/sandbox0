@@ -14,9 +14,10 @@ func TestRootFSImportSelectAndReturningShareLayoutColumnOrder(t *testing.T) {
 	columns := rootFSImportOperationReturningColumns("")
 	require.Equal(t, "SELECT "+columns+" FROM manager.rootfs_import_operations ", rootFSImportOperationSelectSQL())
 	names := strings.Split(columns, ", ")
-	require.Len(t, names, 27)
+	require.Len(t, names, 28)
 	require.Equal(t, "data_layout_policy", names[14])
 	require.Equal(t, "mapping_group_policy", names[15])
+	require.Equal(t, "initial_filesystem_size_bytes", names[16])
 	aliased := strings.Split(rootFSImportOperationReturningColumns("operation"), ", ")
 	require.Len(t, aliased, len(names))
 	for index, name := range names {

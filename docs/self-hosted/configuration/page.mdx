@@ -167,8 +167,30 @@ All manager replicas run bounded template discovery and may run the importer.
 The discovery cursor is expendable; deterministic PostgreSQL import operations
 are the durable authority. PostgreSQL leases and conditional object publication
 provide active-active ownership and retry safety. The importer identity includes
-the image digest, OCI platform, block format, exact RootFS size, and pinned
+the image digest, OCI platform, block format, initial XFS capacity, immutable
+logical device capacity, and pinned
 `procd` protocol and digest.
+
+`rootfs_importer.sparse_device_size_bytes` separates the initial XFS capacity
+from the immutable device ceiling for new image imports. `0` keeps the previous
+fixed-size contract; `70368744177664` selects a 64-TiB sparse device. Configured
+ceilings must be 4096-byte aligned and between 1 TiB and 64 TiB. The template's
+`ephemeralStorage` remains the initial capacity. Formatting and scanning use
+only that initial image, with empty device address space remaining implicit.
+Both capacities participate in the deterministic operation and version-4 ready
+attestation. Image selection matches both; exact-digest selection retains
+committed geometry for captured templates, snapshots and resume.
+
+Enable sparse imports only after every regional manager and node has been
+upgraded with online growth and live commits and the acceptance gates in
+`deploy/nomad/rootfs-autogrow.md` have passed. Import geometry alone does not
+provide automatic growth or reclaim local journals. The node must submit
+incremental generations and safely rotate acknowledged WAL prefixes, retaining
+post-cut writes. Bound the host cache and WAL independently of accumulated data.
+Object-store outages apply write backpressure; a larger device cannot overcome
+an unavailable publication backend. Existing fixed-size generations remain
+unchanged by this setting, and reverting the setting does not reinterpret
+sparse artifacts. Schema rollback refuses to remove committed sparse geometry.
 
 Before changing `rootfs_importer.procd_path` and `procd_digest`, upgrade every
 manager to executable-filtered import leasing. Older workers can otherwise
@@ -180,9 +202,10 @@ artifact, provided its procd protocol remains compatible. Updating the importer
 digest does not rewrite existing sandbox generations or snapshots.
 
 `rootfs_importer.format_generation` selects the durable format for new image
-imports and image-based claims. Omitted or `0` selects format `1`; `2` opts into
-independently compressed, directly addressed data and mapping ranges. Other
-values are rejected. Discovery, durable operation reconstruction, and claim
+imports and image-based claims. Omitted or `0` selects format `2`, with
+independently compressed, directly addressed data and mapping ranges. Format `1`
+is retired and rejected; retained Format1 artifacts must have been migrated
+before this release. Other values are rejected. Discovery, durable operation reconstruction, and claim
 selection use the same format binding; there is no fallback to a different
 format when the requested artifact is not yet ready.
 
@@ -192,11 +215,10 @@ build default and does not filter compatible artifacts by their import geometry.
 
 | Import format | Default data range | Maximum data range |
 | --- | --- | --- |
-| `1` | 8 MiB | 8 MiB |
 | `2` | 64 KiB decoded | 64 KiB decoded |
 
 An explicit value must be a positive multiple of 4 KiB that evenly divides the
-default 64 MiB pack size. `1048576` selects 1 MiB ranges for format `1`, but is
+default 64 MiB pack size. Values above 64 KiB, such as `1048576`, are
 rejected for format `2`. These decoded/checksummed ranges are distinct from the
 16 KiB encryption frames of newly written objects.
 Smaller ranges reduce overfetch for sparse demand, but can increase object GET

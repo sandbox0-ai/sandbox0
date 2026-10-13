@@ -30,6 +30,23 @@ var errMaterializedSeekUnsupported = errors.New("materialized file hole discover
 func BuildMaterializedFileGeneration(ctx context.Context, file *os.File, logicalSize int64,
 	publisher ImmutableObjectPublisher, options BuildOptions, layout *DataRangeLayout,
 ) (result BuildResult, resultErr error) {
+	return buildMaterializedFileGeneration(ctx, file, logicalSize, publisher, options, layout, false)
+}
+
+// BuildMaterializedSparseFileGeneration publishes an exclusively owned image
+// into larger sparse device address space. Only the file's exact bytes are
+// scanned; the tail is implicit zero. The layout binds the file size, not the
+// larger device size. Ownership, mutation detection and hole verification have
+// the same contract as BuildMaterializedFileGeneration.
+func BuildMaterializedSparseFileGeneration(ctx context.Context, file *os.File, logicalSize int64,
+	publisher ImmutableObjectPublisher, options BuildOptions, layout *DataRangeLayout,
+) (BuildResult, error) {
+	return buildMaterializedFileGeneration(ctx, file, logicalSize, publisher, options, layout, true)
+}
+
+func buildMaterializedFileGeneration(ctx context.Context, file *os.File, logicalSize int64,
+	publisher ImmutableObjectPublisher, options BuildOptions, layout *DataRangeLayout, sparseTail bool,
+) (result BuildResult, resultErr error) {
 	if file == nil {
 		return BuildResult{}, fmt.Errorf("materialized image file is required")
 	}
@@ -37,8 +54,8 @@ func BuildMaterializedFileGeneration(ctx context.Context, file *os.File, logical
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("stat materialized image: %w", err)
 	}
-	if !before.Mode().IsRegular() || before.Size() != logicalSize {
-		return BuildResult{}, fmt.Errorf("materialized image must be a regular file of the exact logical size")
+	if !before.Mode().IsRegular() || (!sparseTail && before.Size() != logicalSize) || before.Size() > logicalSize {
+		return BuildResult{}, fmt.Errorf("materialized image must be a regular file matching the device geometry")
 	}
 	enabled, err := materializedFileSeekEnabled(file)
 	if err != nil {
@@ -59,9 +76,9 @@ func BuildMaterializedFileGeneration(ctx context.Context, file *os.File, logical
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	reader := &materializedFileReader{ReaderAt: file, size: logicalSize, disabled: !enabled,
+	reader := &materializedFileReader{ReaderAt: file, size: before.Size(), disabled: !enabled,
 		seek: func(offset int64, hole bool) (int64, error) { return seekMaterializedFile(file, offset, hole) }}
-	return buildMaterializedGeneration(ctx, reader, logicalSize, publisher, options, layout)
+	return buildMaterializedGenerationGeometry(ctx, reader, before.Size(), logicalSize, publisher, options, layout)
 }
 
 type materializedFileReader struct {

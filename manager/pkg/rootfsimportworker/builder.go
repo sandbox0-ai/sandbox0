@@ -106,9 +106,10 @@ func (b *DurableBuilder) Build(
 			},
 			WorkRoot: b.workRoot, ProcdPath: b.procdPath, ExpectedProcdDigest: procdDigest,
 		},
-		LogicalSizeBytes: spec.LogicalSizeBytes,
-		BlockOptions:     spec.BlockOptions,
-		DataLayoutPolicy: spec.DataLayoutPolicy,
+		LogicalSizeBytes:           spec.LogicalSizeBytes,
+		InitialFilesystemSizeBytes: spec.InitialFilesystemSizeBytes,
+		BlockOptions:               spec.BlockOptions,
+		DataLayoutPolicy:           spec.DataLayoutPolicy,
 	})
 }
 

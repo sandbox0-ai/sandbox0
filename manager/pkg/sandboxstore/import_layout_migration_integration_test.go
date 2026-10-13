@@ -15,6 +15,7 @@ import (
 func TestRootFSImportLayoutMigrationRollbackRequiresNoPolicyRowsIntegration(t *testing.T) {
 	ctx := t.Context()
 	pool := newSandboxStoreIntegrationPoolAt(t, 55)
+	prepareLegacyRootFSImportStoreAdapter(t, pool)
 	// The layout rollback contract is migration 54, not whichever migration
 	// happens to be latest. Remove the empty mapping extension first.
 	require.NoError(t, migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{})))

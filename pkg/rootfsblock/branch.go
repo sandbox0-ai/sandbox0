@@ -36,6 +36,9 @@ type BranchIdentity struct {
 	WriterEpoch      int64  `json:"writer_epoch"`
 	LogicalSizeBytes int64  `json:"logical_size_bytes"`
 	BaseRootDigest   string `json:"base_root_digest"`
+	// SequenceBase is the last regionally committed sequence removed by a
+	// journal rotation. Subsequent records retain their original sequence.
+	SequenceBase uint64 `json:"sequence_base,omitempty"`
 }
 
 func (i BranchIdentity) Validate() error {
@@ -222,6 +225,8 @@ type Branch struct {
 	dirtyOwner        string
 	retirementGroup   string
 	closed            bool
+	checkpoints       int
+	rotationFailure   error
 }
 
 func OpenBranch(path string, identity BranchIdentity, base io.ReaderAt) (*Branch, error) {
@@ -292,8 +297,12 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 	return branch, nil
 }
 
-func (b *Branch) Identity() BranchIdentity { return b.identity }
-func (b *Branch) Size() int64              { return b.identity.LogicalSizeBytes }
+func (b *Branch) Identity() BranchIdentity {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.identity
+}
+func (b *Branch) Size() int64 { return b.identity.LogicalSizeBytes }
 
 func (b *Branch) ReadAt(target []byte, offset int64) (int, error) {
 	if len(target) == 0 {
@@ -627,6 +636,8 @@ func (b *Branch) createHeader() error {
 	}
 	b.header = int64(len(header))
 	b.end = b.header
+	b.sequence = b.identity.SequenceBase
+	b.durable = b.identity.SequenceBase
 	return nil
 }
 
@@ -655,7 +666,7 @@ func readBranchHeader(file *os.File) ([]byte, int64, error) {
 
 func (b *Branch) scanRecords(size int64) error {
 	offset := b.header
-	var previous uint64
+	previous := b.identity.SequenceBase
 	for size-offset >= 64 {
 		header := make([]byte, 64)
 		if _, err := b.file.ReadAt(header, offset); err != nil {
@@ -725,8 +736,14 @@ func (b *Branch) admitRecordsLocked(records int64) error {
 		return nil
 	}
 	for {
-		for b.pressure != nil && !b.retiring && !b.closed {
+		if b.rotationFailure != nil {
+			return fmt.Errorf("branch rotation installation is uncertain: %w", b.rotationFailure)
+		}
+		for b.pressure != nil && !b.retiring && !b.closed && b.rotationFailure == nil {
 			b.pressureChanged.Wait()
+		}
+		if b.rotationFailure != nil {
+			return fmt.Errorf("branch rotation installation is uncertain: %w", b.rotationFailure)
 		}
 		if b.closed {
 			return os.ErrClosed

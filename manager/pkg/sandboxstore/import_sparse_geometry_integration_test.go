@@ -115,7 +115,7 @@ func TestSparseImportPublishesExactGeometryAndRetainsDigestLookup(t *testing.T) 
 
 func TestSparseGeometryMigrationRollsBackOnlyWithoutSparseRows(t *testing.T) {
 	ctx := t.Context()
-	pool := newSandboxStoreIntegrationPool(t)
+	pool := newSandboxStoreIntegrationPoolAt(t, 120)
 	down := func() error {
 		return migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
 	}
@@ -123,7 +123,7 @@ func TestSparseGeometryMigrationRollsBackOnlyWithoutSparseRows(t *testing.T) {
 	var columns int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = 'manager' AND column_name = 'initial_filesystem_size_bytes'`).Scan(&columns))
 	require.Zero(t, columns)
-	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	applySandboxStoreMigrationsThrough(t, pool, 120)
 	store := NewPGSandboxStore(pool)
 	begin, _, _ := sparseImportFixture(t, "sparse-rollback", "", "")
 	_, err := store.BeginRootFSImport(ctx, begin)

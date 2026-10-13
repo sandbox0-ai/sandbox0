@@ -67,6 +67,20 @@ dependencies remain real FKs. Removal cascades object references and reuses the
 durable object deletion queue. Shared packs are retained while any reference needs
 any of their ranges; this change does not compact live packs.
 
+Migration 121 adds an active writer's separate live commit cursor. Remote committed
+and locally installed generations retain independent FKs, since an acknowledged
+remote cut does not prove that the NBD branch has switched readers/WALs. Local
+installation acknowledgement advances the installed pin. New remote commits
+compact prior successful live upload receipts, including recuts made before local
+installation, while the latest digest remains available for exact replay. Canonical
+grant/sequence operation IDs reject stale uploads after compaction. Writer launch
+identities and the active lifecycle head remain immutable.
+Final lifecycle generations also retain an explicit dependency on their installed
+live read base, even though their proof parent remains the launch generation.
+Verified inventory releases this extra dependency. Physical crash abandonment
+promotes the last remote cut before terminally releasing writer progress pins.
+These regional mechanisms do not enable the node scheduler by themselves.
+
 Sandbox deletion releases an unbound origin's former head while keeping its origin
 row and IDs. Child heads, snapshot heads and incomplete dependencies still protect
 their own versions. Explicit snapshots and effective fork/runtime custody keep their

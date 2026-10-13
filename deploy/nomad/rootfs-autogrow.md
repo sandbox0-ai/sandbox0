@@ -119,12 +119,38 @@ initial-size rejection, captured-template digest lookup, metadata immutability,
 SQL terminal fencing independent of Go validation, and guarded migration
 rollback. Existing import/format/geometry regression also passed on that host.
 
-## Live publication protocol still to integrate
+## Regional live publication and remaining node integration
 
 The writer's Stage, binding digest and initial generation remain immutable.
-Live publication must track a separate regional committed head and node-installed
+Live publication tracks a separate regional committed generation and node-installed
 base generation; updating the Stage's initial generation would invalidate writer
 authentication and retained lifecycle proofs.
+
+Migration 121 and the authenticated `/live-commit` and `/live-commit/installed`
+writer endpoints implement this regional cursor. A positive cut sequence identifies
+each live generation; sequence zero preserves the existing single terminal
+generation per filesystem/writer epoch. New cuts require the exact consumed,
+unexpired node binding, previous committed generation, installed read base, and
+uploaded mapping-root custody. Receipt replay validates the complete request digest.
+Both remote and installed generations have real retention FKs. New remote commits
+compact prior successful live upload receipts even during repeated cuts before
+installation; the latest complete request digest remains retryable. Canonical
+grant/sequence operation IDs reject obsolete upload attempts after compaction.
+A local installation acknowledgement releases the old installed pin;
+checksum-verified inventory allows obsolete generations to retire.
+
+The filesystem lifecycle head remains at the immutable launch generation while
+the writer is active. Final lifecycle publication retains that launch parent and
+adds an explicit dependency on the installed live read base until inventory
+completes. Crash abandonment promotes the last remote commit only after the existing
+exact runtime, lifecycle and physical terminal-proof checks. This preserves writer
+authentication and lifecycle proof identity without discarding remote durable cuts.
+
+This regional path passed isolated Linux PostgreSQL tests with in-memory immutable
+objects, plus HTTPS client/handler authentication tests. It does not yet establish
+full-product automatic growth, node journal recovery, remote object-service or
+gVisor acceptance. The node scheduler and durable rotation transaction remain to
+be integrated before enabling sparse imports or deploying this feature.
 
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal
@@ -134,8 +160,9 @@ authentication and retained lifecycle proofs.
    exact consumed, unexpired writer and node/boot binding, serialized with
    lifecycle operations and fenced by the previous committed head.
 3. Atomically insert the immutable child generation, transfer its object custody,
-   advance the filesystem and grant's committed head, and retain an idempotent
-   operation receipt. A lost response retries the same cut and payload.
+   advance the separate live progress cursor, and retain an idempotent operation
+   receipt. Keep the lifecycle head and launch binding unchanged. A lost response
+   retries the same cut and payload.
 4. Keep the grant's installed-base generation pinned for GC while the node still
    reads it. The committed head alone is insufficient: a previous base's root
    mapping may no longer be reachable from the new descriptor even though the
@@ -149,14 +176,17 @@ authentication and retained lifecycle proofs.
    pressure, normal writes are already blocked, so a later acknowledged cut can
    have an empty suffix and rotate without borrowing retirement reserve. The
    pending journal must distinguish published head from installed base through
-   these retries; lifecycle sealing must use the actual committed parent.
+   these retries; lifecycle cuts must include every post-install WAL write and
+   keep their inherited installed base pinned until inventory completes.
 7. Growth must retain exact mount/session ownership without preventing the
    commit/rotation path from reclaiming WAL if kernel growth writes encounter
    pressure. A parent mutex held across a blocking growth ioctl must not also
    be required by the reclaim operation that can unblock it.
 8. Coordinate fork, memory checkpoints, pause, migration and live handoff with
    pending publication/installation. Preserve original writer proofs while using
-   the current committed generation for parentage and object-reference retention.
+   the current installed descriptor and WAL for disk contents. Serialize capture
+   publication with installation so the regional inherited-base pin matches the
+   base used by the cut; retain the immutable launch parent for lifecycle proofs.
 
-These are integration requirements, not claims that regional live commits,
-installation receipts or the scheduler are already implemented.
+Regional commits and installation receipts are implemented; node journal recovery,
+scheduling and lifecycle coordination are still integration requirements.

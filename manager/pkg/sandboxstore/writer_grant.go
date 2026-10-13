@@ -200,7 +200,8 @@ type CompleteRootFSWriterPrelaunchAbortRequest struct {
 // proved that every physical writer is gone. ProofDigest is evidence already
 // validated by the caller; lease expiry by itself is never evidence.
 //
-// The transaction preserves ExpectedOldGenerationID as the durable head,
+// The transaction promotes the last acknowledged live checkpoint (or keeps
+// ExpectedOldGenerationID when no live commit exists) as the durable head,
 // pauses an exact crashed active runtime, preserves explicit termination, and
 // aborts its lifecycle transaction with RootFSWriterCrashAbandonReason. It
 // never reports a successful planned pause.
@@ -1618,6 +1619,9 @@ func completeRootFSWriterCrashAbandon(
 	if err := lockRootFSWriterCrashFallbackGeneration(
 		ctx, tx.tx, record, normalized.ExpectedOldGenerationID, runtimeMatch.failedClaimDeletion,
 	); err != nil {
+		return nil, err
+	}
+	if err := restoreRootFSLiveCrashHead(ctx, tx.tx, record); err != nil {
 		return nil, err
 	}
 

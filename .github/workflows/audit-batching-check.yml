@@ -1,0 +1,66 @@
+name: Audit batching check
+
+on:
+  pull_request:
+    paths:
+      - 'cluster-gateway/pkg/http/audit*'
+      - 'cluster-gateway/pkg/metrics/metrics.go'
+      - '.github/workflows/audit-batching-check.yml'
+      - 'tests/audit-batching/**'
+  workflow_dispatch:
+    inputs:
+      baseline_commit:
+        description: Exact baseline revision for an isolated comparison
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/restore-infra-build-cache
+        with:
+          go-version: '1.25.5'
+          cache-key-suffix: pr-amd64
+      - name: Audit reliability and concurrency regressions
+        run: go test -race ./cluster-gateway/... ./pkg/sandboxobservability/... -count=1 -timeout=3m
+      - name: Start disposable object storage and ClickHouse
+        run: bash tests/audit-batching/start-backends.sh
+      - name: Compare the base and candidate under identical traffic
+        env:
+          BASELINE_COMMIT: ${{ inputs.baseline_commit || github.event.pull_request.base.sha }}
+          SANDBOX0_AUDIT_PERFORMANCE_DSN: clickhouse://default@127.0.0.1:9000
+          SANDBOX0_AUDIT_PERFORMANCE_S3: http://127.0.0.1:19000
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin "$BASELINE_COMMIT"
+          git worktree add --detach "$RUNNER_TEMP/audit-baseline" "$BASELINE_COMMIT"
+          cp cluster-gateway/pkg/http/audit_delivery_performance_test.go \
+            "$RUNNER_TEMP/audit-baseline/cluster-gateway/pkg/http/"
+          mkdir -p test-results/audit-batching
+          (
+            cd "$RUNNER_TEMP/audit-baseline"
+            go test ./cluster-gateway/pkg/http -run '^TestAuditDeliveryPerformance$' -count=1 -v -timeout=8m
+          ) | tee test-results/audit-batching/baseline.log
+          docker rm -f audit-clickhouse audit-s3
+          bash tests/audit-batching/start-backends.sh
+          go test ./cluster-gateway/pkg/http -run '^TestAuditDeliveryPerformance$' -count=1 -v -timeout=8m \
+            | tee test-results/audit-batching/candidate.log
+          python3 tests/audit-batching/compare.py test-results/audit-batching
+      - name: Retain comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-batching-comparison
+          path: test-results/audit-batching/
+      - name: Stop disposable backends
+        if: always()
+        run: |
+          docker rm -f audit-clickhouse audit-s3 || true
+          docker network rm audit-perf || true

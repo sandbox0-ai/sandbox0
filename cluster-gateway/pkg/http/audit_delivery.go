@@ -24,6 +24,9 @@ const (
 	auditReplayInterval        = time.Second
 	auditReplayMaxBackoff      = 30 * time.Second
 	auditReplayBatchSize       = 500
+	auditReplayBatchBytes      = 2 << 20
+	auditSpoolMaxBytes         = 1 << 30
+	auditSpoolMaxRecords       = 1_000_000
 	auditCanonicalBatchWindow  = 2 * time.Millisecond
 	auditCanonicalWriterSlots  = 4
 	auditCanonicalRequestQueue = 2048
@@ -42,6 +45,7 @@ type auditEventInserter interface {
 
 type auditCanonicalCall struct {
 	event sandboxobservability.Event
+	bytes int64
 	done  chan struct{}
 	once  sync.Once
 	err   error
@@ -73,6 +77,9 @@ type auditDelivery struct {
 	canonicalCalls  map[string]*auditCanonicalCall
 	foregroundCalls atomic.Int64
 	pendingCalls    atomic.Int64
+	pendingBytes    atomic.Int64
+	spoolRecords    int64 // protected by mu; includes records retained after failed ACKs
+	spoolBytes      int64
 }
 
 func newAuditDelivery(
@@ -112,9 +119,13 @@ func newAuditDelivery(
 		spoolQueue:      make(chan *auditSpoolCall, auditCanonicalRequestQueue),
 		syncDir:         syncAuditDirectory,
 	}
-	if err := delivery.scanSpoolLocked(0, nil); err != nil {
+	if err := delivery.walkSpoolLocked(0, 0, nil, func(_ sandboxobservability.Event, size int) {
+		delivery.spoolRecords++
+		delivery.spoolBytes += int64(size)
+	}); err != nil {
 		return nil, err
 	}
+	delivery.observeSpoolPending()
 	return delivery, nil
 }
 
@@ -260,8 +271,11 @@ func (d *auditDelivery) joinCanonicalCall(event sandboxobservability.Event) (*au
 		event: event,
 		done:  make(chan struct{}),
 	}
+	payload, _ := json.Marshal(event) // callers have validated and spooled this event
+	call.bytes = int64(len(payload))
 	d.canonicalCalls[event.EventID] = call
 	d.pendingCalls.Add(1)
+	d.pendingBytes.Add(call.bytes)
 	return call, true
 }
 
@@ -276,6 +290,7 @@ func (d *auditDelivery) completeCanonicalCall(call *auditCanonicalCall, err erro
 			delete(d.canonicalCalls, call.event.EventID)
 		}
 		d.pendingCalls.Add(-1)
+		d.pendingBytes.Add(-call.bytes)
 		close(call.done)
 		d.canonicalMu.Unlock()
 	})
@@ -468,11 +483,15 @@ func (d *auditDelivery) deliverCanonicalBatch(
 		}
 		return results, nil
 	}
+	if d.metrics != nil && d.metrics.AuditCanonicalVisibility != nil {
+		for _, event := range events {
+			d.metrics.AuditCanonicalVisibility.WithLabelValues(source).
+				Observe(max(0, time.Since(event.IngestedAt).Seconds()))
+		}
+	}
 
 	cleanupStarted := time.Now()
-	d.mu.Lock()
-	cleanupErr := d.removeBatchLocked(events)
-	d.mu.Unlock()
+	cleanupErr := d.removeBatch(events)
 	d.observeStage(source, "spool_cleanup", cleanupStarted, cleanupErr)
 	if cleanupErr != nil {
 		d.logger.Error("Canonical sandbox audit batch was acknowledged but spool cleanup failed",
@@ -516,9 +535,24 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 	ticker := time.NewTicker(auditReplayInterval)
 	defer ticker.Stop()
 	backoff := auditReplayInterval
+	// Startup and recovery may drain existing records immediately. New wakes
+	// only flush a full batch; a fixed ticker bounds the wait for sparse traffic
+	// and cannot be postponed by continuous arrivals.
+	due := true
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		full := d.replayBatchReady()
+		if !due && !full {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				due = true
+			case <-d.wake:
+			}
+			continue
 		}
 		replayCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
 		delivered, err := d.replayBatch(replayCtx)
@@ -540,18 +574,36 @@ func (d *auditDelivery) runReplay(ctx context.Context) {
 			case <-timer.C:
 			}
 			backoff = min(backoff*2, auditReplayMaxBackoff)
+			due = true
 			continue
 		}
 		if delivered {
 			backoff = auditReplayInterval
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		case <-d.wake:
+		// Drain the tail of a full backlog too, but never turn sparse new wakes
+		// into singleton inserts after that tail has completed.
+		due = delivered && full
+		if !due {
+			// No unowned record may be deliverable even if an approximate byte
+			// threshold is met. Wait for a new notification rather than spinning.
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				due = true
+			case <-d.wake:
+			}
 		}
 	}
+}
+
+func (d *auditDelivery) replayBatchReady() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Foreground-owned records do not count toward the row threshold. They are
+	// delivered by the short canonical batcher, independently of replay.
+	return d.spoolRecords-d.pendingCalls.Load() >= auditReplayBatchSize ||
+		d.spoolBytes-d.pendingBytes.Load() >= auditReplayBatchBytes
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
@@ -561,20 +613,20 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 
 // A deferred replay is not evidence that canonical storage recovered.
 func (d *auditDelivery) replayBatch(ctx context.Context) (bool, error) {
-	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return false, nil
-	}
 	if !d.replayMu.TryLock() {
 		return false, nil
 	}
 	defer d.replayMu.Unlock()
-	if d.foregroundCalls.Load() > 0 || d.pendingCalls.Load() > 0 {
-		return false, nil
+	// Skip individual foreground/in-flight records instead of yielding to all
+	// foreground traffic. A single replay worker uses at most one of the four
+	// shared writer slots, leaving foreground capacity while preventing starvation.
+	d.canonicalMu.Lock()
+	owned := make(map[string]bool, len(d.canonicalCalls))
+	for id := range d.canonicalCalls {
+		owned[id] = true
 	}
-
-	d.mu.Lock()
-	events, err := d.loadBatchLocked(auditReplayBatchSize)
-	d.mu.Unlock()
+	d.canonicalMu.Unlock()
+	events, err := d.loadReplayBatch(owned)
 	if err != nil {
 		return false, err
 	}
@@ -615,9 +667,6 @@ func (d *auditDelivery) replayBatch(ctx context.Context) (bool, error) {
 	// retain their successful ACK. A read-only spool must not busy-loop inserts.
 	if err == nil {
 		err = cleanupErr
-	}
-	if err == nil && len(events) == auditReplayBatchSize {
-		d.signalReplay()
 	}
 	return err == nil, err
 }
@@ -710,17 +759,38 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 	return events, nil
 }
 
+func (d *auditDelivery) loadReplayBatch(owned map[string]bool) ([]sandboxobservability.Event, error) {
+	events := make([]sandboxobservability.Event, 0, auditReplayBatchSize)
+	err := d.walkSpool(auditReplayBatchSize, auditReplayBatchBytes, owned, true, func(event sandboxobservability.Event, _ int) {
+		events = append(events, event)
+	})
+	return events, err
+}
+
 // Startup validates every record without retaining every event. Replay reads
 // directory entries incrementally and stops at its batch limit; UUID ordering
 // is not delivery ordering, and per-event canonical ownership still deduplicates
 // foreground requests. Only acknowledged records are removed.
 func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservability.Event)) error {
+	return d.walkSpoolLocked(limit, 0, nil, func(event sandboxobservability.Event, _ int) {
+		if visit != nil {
+			visit(event)
+		}
+	})
+}
+
+func (d *auditDelivery) walkSpoolLocked(limit, byteLimit int, owned map[string]bool, visit func(sandboxobservability.Event, int)) error {
+	return d.walkSpool(limit, byteLimit, owned, false, visit)
+}
+
+func (d *auditDelivery) walkSpool(limit, byteLimit int, owned map[string]bool, lockRecords bool, visit func(sandboxobservability.Event, int)) error {
 	directory, err := os.Open(d.dir)
 	if err != nil {
 		return fmt.Errorf("read audit spool: %w", err)
 	}
 	defer directory.Close()
 	count := 0
+	bytes := 0
 	for {
 		entries, readErr := directory.ReadDir(128)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -734,7 +804,22 @@ func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservabili
 			if entry.Type()&os.ModeSymlink != 0 {
 				return fmt.Errorf("unsafe audit spool record %s", name)
 			}
+			if owned[strings.TrimSuffix(name, ".json")] {
+				continue
+			}
+			// Only copy a committed record under the filesystem lock. Decoding
+			// and signature verification of a large replay batch must not stall
+			// foreground fsyncs for the duration of the entire batch.
+			if lockRecords {
+				d.mu.Lock()
+			}
 			payload, err := os.ReadFile(filepath.Join(d.dir, name))
+			if lockRecords {
+				d.mu.Unlock()
+				if os.IsNotExist(err) {
+					continue // a foreground ACK may have cleaned this record
+				}
+			}
 			if err != nil {
 				return err
 			}
@@ -753,10 +838,16 @@ func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservabili
 					return fmt.Errorf("invalid audit spool integrity %s: %w", name, err)
 				}
 			}
+			// A single valid record larger than the batch budget must still be
+			// deliverable; otherwise it would permanently block the backlog.
+			if byteLimit > 0 && count > 0 && bytes+len(payload) > byteLimit {
+				return nil
+			}
 			if visit != nil {
-				visit(event)
+				visit(event, len(payload))
 			}
 			count++
+			bytes += len(payload)
 			if limit > 0 && count >= limit {
 				return nil
 			}
@@ -767,16 +858,56 @@ func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservabili
 	}
 }
 
-func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
+func (d *auditDelivery) removeBatch(events []sandboxobservability.Event) error {
+	// ACKed records can be removed in short chunks without monopolizing spool
+	// admission. Keep one directory barrier after all removals; a crash before
+	// that barrier may replay an ACKed record, as with the original cleanup.
+	for len(events) > 0 {
+		count := min(16, len(events))
+		d.mu.Lock()
+		err := d.removeRecordsLocked(events[:count])
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		events = events[count:]
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.syncDir(d.dir)
+}
+
+func (d *auditDelivery) removeRecordsLocked(events []sandboxobservability.Event) error {
+	defer d.observeSpoolPending()
 	for _, event := range events {
 		if _, err := uuid.Parse(event.EventID); err != nil {
 			return fmt.Errorf("audit event_id is invalid")
 		}
-		if err := os.Remove(d.path(event.EventID)); err != nil && !os.IsNotExist(err) {
+		info, err := os.Stat(d.path(event.EventID))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
+		if err := os.Remove(d.path(event.EventID)); err != nil {
+			return err
+		}
+		d.spoolRecords--
+		d.spoolBytes -= info.Size()
 	}
-	return d.syncDir(d.dir)
+	return nil
+}
+
+func (d *auditDelivery) observeSpoolPending() {
+	if d.metrics != nil {
+		if d.metrics.AuditSpoolPendingEvents != nil {
+			d.metrics.AuditSpoolPendingEvents.Set(float64(d.spoolRecords))
+		}
+		if d.metrics.AuditSpoolPendingBytes != nil {
+			d.metrics.AuditSpoolPendingBytes.Set(float64(d.spoolBytes))
+		}
+	}
 }
 
 func (d *auditDelivery) observeStage(mode, stage string, started time.Time, err error) {

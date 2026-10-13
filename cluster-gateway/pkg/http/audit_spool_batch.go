@@ -102,6 +102,7 @@ func (d *auditDelivery) putSpoolBatchLocked(batch []*auditSpoolCall) []error {
 	owners := make(map[string]int, len(batch))
 	duplicates := make(map[int]int)
 	jobs := make([]int, 0, len(batch))
+	var reservedBytes int64
 	for i, call := range batch {
 		if owner, exists := owners[call.event.EventID]; exists {
 			if string(batch[owner].payload) != string(call.payload) {
@@ -119,7 +120,12 @@ func (d *auditDelivery) putSpoolBatchLocked(batch []*auditSpoolCall) []error {
 				errs[i] = fmt.Errorf("audit event_id collision")
 			}
 		case os.IsNotExist(err):
-			jobs = append(jobs, i)
+			if d.spoolRecords+int64(len(jobs)) >= auditSpoolMaxRecords || d.spoolBytes+reservedBytes+int64(len(call.payload)) > auditSpoolMaxBytes {
+				errs[i] = auditSpoolWriteError("spool capacity exhausted", fmt.Errorf("pending audit backlog must drain before accepting more records"))
+			} else {
+				jobs = append(jobs, i)
+				reservedBytes += int64(len(call.payload))
+			}
 		default:
 			errs[i] = auditSpoolWriteError("read existing record", err)
 		}
@@ -140,6 +146,13 @@ func (d *auditDelivery) putSpoolBatchLocked(batch []*auditSpoolCall) []error {
 		})
 	}
 	workers.Wait()
+	for _, i := range jobs {
+		if errs[i] == nil {
+			d.spoolRecords++
+			d.spoolBytes += int64(len(batch[i].payload))
+		}
+	}
+	d.observeSpoolPending()
 	// Existing records also need this barrier: a previous rename may have
 	// succeeded while its directory sync failed. A retry must not accept that
 	// record as durable merely because it can be read from the page cache.

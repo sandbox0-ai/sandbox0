@@ -31,8 +31,9 @@ feature is not deployed until the gates below have evidence attached.
 1. Complete full regional lifecycle/fencing/GC acceptance with installed live
    bases. Component running-fork/cold-restore gates and actual Nomad growth,
    live ctld transfer and retained-memory pause/resume gates below passed.
-2. Qualify abrupt owner loss and replacement-node recovery; normal retirement,
-   fresh caches/devices and memory restore do not establish this failure mode.
+2. Qualify complete node loss and replacement-machine recovery. The abrupt
+   process-owner gate below passed with actual NBD fencing and remote recovery,
+   but retained PostgreSQL/object services on the same physical fixture host.
 3. Extend injected S3 request-outage acceptance to provider disruption and
    larger Nomad workloads. The shared-node two-writer contention gate passed;
    node behavior remains disabled by default.
@@ -539,6 +540,54 @@ log and explicit exit-code receipt, independently of SSH output delivery.
 This qualifies shared component admission with real NBD/XFS/runsc, regional
 PostgreSQL, mTLS and RustFS. It does not qualify multiple actual Nomad claims,
 a provider outage or production fleet density; those boundaries remain explicit.
+
+## Abrupt process-owner loss and remote-cut recovery
+
+The isolated runner kills the actual Go storage-owner process with SIGKILL;
+source defers and planned retirement cannot run. It verifies a root-owned
+fixture, exact test executable, package working directory and mount namespace,
+and uses a Linux pidfd to avoid signaling a reused numeric PID. PostgreSQL and
+the real S3-compatible object service remain available independently of that
+process. A durable remote log and kill/result receipts survive the SSH session.
+
+Before killing the owner, the guest writes and verifies the high-entropy
+600 MiB workload, including 78 overwritten chunks, 55 zero chunks and the
+deleted/recreated file. The source syncs XFS and completes a remote live cut,
+then stops publication and fsyncs a separate file and its directory only into
+the local suffix. Regional committed/installed progress must remain unchanged
+after that suffix write.
+
+Recovery reopens the existing database and session journal, follows the
+production startup freeze/fork/rebase/release reconciliation order, expires
+only the dedicated fixture writer's lease after proving process death, and
+uses the production crash-fence path with actual Linux mount/NBD observations.
+The last remote cut becomes the lifecycle head; the old grant is retired and
+cannot renew. After five inventory passes and generation GC, a fresh cache,
+session and separately reserved NBD device restore all 600 MiB from S3. The
+unpublished suffix file must be absent. The restored writer retires normally.
+
+The complete fresh-source run passed under the race detector, without runner
+or recovery retries. The source reached remote sequence 189,335 before SIGKILL;
+its expected nonzero Go exit was recorded explicitly. Recovery passed in
+25.53 seconds, writer epoch advanced to 2, and restored XFS geometry was
+1,258,291,200 bytes. Both recovery and runner exited zero. The source's allocated
+WAL/cache/journal peak was 41,705,472 bytes, below 128 MiB. Both NBD devices
+were released and the fixture's mount-free state and bucket contents removed.
+An earlier retained-scene retry also passed; startup reconciliation and the
+required task key are fixture obligations, not bypasses of production fencing.
+
+Reproduce with the infra repository's
+`ali/nomad/tests/live_node/owner_loss_rootfs_run.py`. Run only on the disposable
+host with both isolated markers, private RustFS credentials, a PostgreSQL root
+superuser and exclusive NBD 62/63. `--resume DATABASE` handles a source retained
+before SIGKILL; `--recover DATABASE` retries a failed recovery only with a
+previous durable kill receipt. Successful recovery removes fixture objects
+and mount-free temporary state. Failed attempts retain their evidence.
+
+This proves abrupt process-owner fencing and cold remote recovery on the same
+host, including the distinction between local fsync and remote custody. It
+does not prove physical-machine loss, provider observation, replacement-node
+admission or process-memory recovery after an unplanned crash.
 
 ## Actual Nomad, procd and live-owner transfer acceptance
 

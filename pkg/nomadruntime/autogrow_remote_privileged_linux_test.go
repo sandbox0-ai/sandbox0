@@ -467,6 +467,10 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	filesystem, err := store.GetRootFSFilesystem(ctx, stage.Identity.RootFSID)
 	require.NoError(t, err)
 	require.Equal(t, stage.InitialGeneration, filesystem.HeadGenerationID)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_SOURCE") == "1" {
+		autogrowWaitForOwnerLoss(t, ctx, root, bucket, mount.Source, m, client, stage)
+		return
+	}
 	require.NoError(t, runner.Delete(ctx, "writer", true))
 	operation := rootfshandoff.PlannedRetireOperationID(stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
 	require.NoError(t, runtime.PlanRetire(ctx, stage, operation))

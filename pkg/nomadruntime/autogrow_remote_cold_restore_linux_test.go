@@ -99,6 +99,10 @@ func autogrowVerifyColdRestore(t *testing.T, ctx context.Context, originalRoot s
 	}()
 	mount, err := m.Ensure(ctx, stage)
 	require.NoError(t, err)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_RECOVER") == "1" {
+		_, err := os.Stat(filepath.Join(mount.Source, "unpublished-after-cut.bin"))
+		require.ErrorIs(t, err, os.ErrNotExist, "unpublished local suffix must not appear in remote recovery")
+	}
 	usage, err := host.InspectXFS(device, filepath.Dir(mount.Source)+"/xfs")
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, usage.SizeBytes, int64(1200<<20))

@@ -139,7 +139,7 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 		t.Fatalf("EnqueueDurable() error = %v", err)
 	}
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if got := writer.snapshotEvents(); len(got) == 1 && got[0].EventID == event.EventID {
 			if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
@@ -324,7 +324,7 @@ func TestAuditDeliveryBoundsCanonicalWriters(t *testing.T) {
 	t.Fatalf("max canonical writer concurrency = %d, pending calls = %d", writer.maxConcurrency(), delivery.pendingCalls.Load())
 }
 
-func TestAuditDeliveryPrioritizesForegroundOverReplay(t *testing.T) {
+func TestAuditDeliveryReplayProgressesDuringForegroundWrite(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
 	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
@@ -351,8 +351,12 @@ func TestAuditDeliveryPrioritizesForegroundOverReplay(t *testing.T) {
 		t.Fatal("foreground canonical insert did not start")
 	}
 
-	if err := delivery.replay(context.Background()); err != nil {
-		t.Fatalf("replay() while foreground active error = %v", err)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- delivery.replay(ctx) }()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("background replay starved behind foreground write")
 	}
 	if got := len(writer.snapshotBatchSizes()); got != 0 {
 		t.Fatalf("completed batches before foreground release = %d, want 0", got)
@@ -361,8 +365,8 @@ func TestAuditDeliveryPrioritizesForegroundOverReplay(t *testing.T) {
 	if err := <-foregroundDone; err != nil {
 		t.Fatalf("foreground PersistCanonical() error = %v", err)
 	}
-	if err := delivery.replay(context.Background()); err != nil {
-		t.Fatalf("replay() after foreground error = %v", err)
+	if err := <-replayDone; err != nil {
+		t.Fatalf("concurrent replay() error = %v", err)
 	}
 	batches := writer.snapshotBatchSizes()
 	if len(batches) != 2 || batches[0] != 1 || batches[1] != 1 {
@@ -796,6 +800,8 @@ func TestAuditDeliveryReplayBackoffAndRecovery(t *testing.T) {
 		if err := delivery.EnqueueDurable(ctx, testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
 			t.Fatal(err)
 		}
+		attempts(10) // sparse new events wait for the fixed flush boundary
+		time.Sleep(time.Second)
 		attempts(11)
 		time.Sleep(time.Second)
 		attempts(12)
@@ -902,7 +908,7 @@ func TestAuditDeliveryReplayCleanupFailurePreservesCanonicalACK(t *testing.T) {
 	}
 }
 
-func TestAuditDeliveryReplayDeferralDoesNotResetBackoff(t *testing.T) {
+func TestAuditDeliveryForegroundDoesNotBypassReplayBackoff(t *testing.T) {
 	dir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		writer := &auditDeliveryWriter{err: errors.New("canonical storage unavailable")}
@@ -932,7 +938,7 @@ func TestAuditDeliveryReplayDeferralDoesNotResetBackoff(t *testing.T) {
 		attempts(2)
 		delivery.foregroundCalls.Store(1)
 		time.Sleep(2 * time.Second)
-		attempts(2)
+		attempts(3) // continuous foreground traffic cannot starve replay
 		delivery.foregroundCalls.Store(0)
 		delivery.signalReplay()
 		attempts(3)

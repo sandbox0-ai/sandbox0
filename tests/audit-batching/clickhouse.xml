@@ -1,0 +1,31 @@
+<clickhouse>
+    <max_server_memory_usage>2147483648</max_server_memory_usage>
+    <background_pool_size>2</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>16</background_merges_mutations_concurrency_ratio>
+    <storage_configuration>
+        <disks>
+            <audit_s3>
+                <type>s3</type>
+                <endpoint>http://audit-s3:5000/audit-test/data/</endpoint>
+                <access_key_id>audit-test</access_key_id>
+                <secret_access_key>audit-test-only</secret_access_key>
+            </audit_s3>
+        </disks>
+        <policies><audit_test><volumes><main><disk>audit_s3</disk></main></volumes></audit_test></policies>
+    </storage_configuration>
+    <part_log>
+        <database>system</database><table>part_log</table>
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+        <storage_policy>default</storage_policy>
+    </part_log>
+    <query_log>
+        <database>system</database><table>query_log</table>
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+        <storage_policy>default</storage_policy>
+    </query_log>
+    <blob_storage_log>
+        <database>system</database><table>blob_storage_log</table>
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+        <storage_policy>default</storage_policy>
+    </blob_storage_log>
+</clickhouse>

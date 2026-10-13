@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,24 @@ import (
 )
 
 type liveNomadObjectPublisher string
+
+func liveNomadGrowthFixtureMiB(t *testing.T) int {
+	t.Helper()
+	mib := 600
+	if value := os.Getenv("S0_NOMAD_LIVE_GROWTH_MIB"); value != "" {
+		var err error
+		mib, err = strconv.Atoi(value)
+		require.NoError(t, err)
+	}
+	require.GreaterOrEqual(t, mib, 600)
+	require.LessOrEqual(t, mib, 4096)
+	return mib
+}
+
+func liveNomadGrowthFixtureMarker(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("isolated-growth-fixture:%d", liveNomadGrowthFixtureMiB(t))
+}
 
 func (s liveNomadObjectPublisher) PutImmutable(_ context.Context, key string, data []byte) error {
 	path := filepath.Join(string(s), key)
@@ -131,7 +150,7 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/payload"), payload, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/live-fixture"), []byte("isolated-fixture"), 0600))
 	if realRegion {
-		require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/live-growth"), []byte("isolated-growth-fixture"), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(mount, "lower/live-growth"), []byte(liveNomadGrowthFixtureMarker(t)), 0600))
 	}
 	procdPath, err := exec.Command(filepath.Join(root, "f/bin/ctld"), "--install-procd", "--procd-cache-dir="+filepath.Join(root, "f/procd")).Output()
 	require.NoError(t, err)
@@ -216,15 +235,27 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 	require.NoError(t, mapping.Truncate(4096))
 	area, err := unix.Mmap(int(mapping.Fd()), 0, 4096, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	require.NoError(t, err)
-	_, growthErr := os.Stat("/live-growth")
+	growthMarker, growthErr := os.ReadFile("/live-growth")
 	var growing *os.File
 	var chunk []byte
-	var hashes [600][sha256.Size]byte
+	var hashes [][sha256.Size]byte
+	var growthTarget int64
 	growthBytes := int64(0)
 	verified := false
 	verificationCount := uint64(0)
 	var lastVerification time.Time
 	if growthErr == nil {
+		prefix, size, found := strings.Cut(string(growthMarker), ":")
+		require.Equal(t, "isolated-growth-fixture", prefix)
+		mib := 600 // Keep historical fixture images readable.
+		if found {
+			mib, err = strconv.Atoi(size)
+			require.NoError(t, err)
+		}
+		require.GreaterOrEqual(t, mib, 600)
+		require.LessOrEqual(t, mib, 4096)
+		growthTarget = int64(mib) << 20
+		hashes = make([][sha256.Size]byte, mib)
 		growing, err = os.OpenFile("/growing.bin", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 		require.NoError(t, err)
 		defer growing.Close()
@@ -242,7 +273,7 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 		require.NoError(t, err)
 		binary.LittleEndian.PutUint64(area, count)
 		require.NoError(t, unix.Msync(area, unix.MS_SYNC))
-		if growing != nil && growthBytes < 600<<20 {
+		if growing != nil && growthBytes < growthTarget {
 			_, err := rand.Read(chunk)
 			require.NoError(t, err)
 			hashes[growthBytes>>20] = sha256.Sum256(chunk)
@@ -252,7 +283,7 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 			require.NoError(t, growing.Sync())
 			growthBytes += int64(written)
 		}
-		if growing != nil && growthBytes == 600<<20 && (!verified || time.Since(lastVerification) >= 15*time.Second) {
+		if growing != nil && growthBytes == growthTarget && (!verified || time.Since(lastVerification) >= 15*time.Second) {
 			for index, expected := range hashes {
 				_, err := growing.ReadAt(chunk, int64(index)<<20)
 				require.NoError(t, err)

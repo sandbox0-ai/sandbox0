@@ -61,7 +61,7 @@ func TestLiveNomadRegionalReceiptFixture(t *testing.T) {
 	require.Equal(t, int64(unix.XFS_SUPER_MAGIC), int64(stat.Type))
 	size := int64(stat.Blocks) * int64(stat.Bsize)
 	require.GreaterOrEqual(t, size, int64(1<<30), "XFS must grow beyond its initial 300 MiB")
-	require.LessOrEqual(t, size, int64(1200<<20))
+	require.LessOrEqual(t, size, int64(2*liveNomadGrowthFixtureMiB(t))<<20)
 	client, err := rootfsauthority.NewManagerClient(rootfsauthority.ManagerClientConfig{BaseURL: "https://s0-fixture.local:19445",
 		CAFile: filepath.Join(root, "pki/ca.pem"), ClientCertFile: filepath.Join(root, "pki/peer.pem"), ClientKeyFile: filepath.Join(root, "pki/peer-key.pem"),
 		TokenFile: filepath.Join(root, "token"), Timeout: 5 * time.Second})

@@ -104,7 +104,7 @@ func liveNomadImportBase(t *testing.T, image *os.File, procd []byte, suffix stri
 		ManifestDigest: digest.FromString("live-nomad-manifest-" + suffix), ConfigDigest: digest.FromString("live-nomad-config-" + suffix),
 		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"}, LayerDigests: []digest.Digest{digest.FromString("live-nomad-layer-" + suffix)},
 		DiffIDs: []digest.Digest{digest.FromString("live-nomad-diff-" + suffix)}, ProcdDigest: digest.Digest(spec.ProcdDigest), Files: 4,
-		UnpackedBytes:    payload.Size() + int64(len(procd)+len("isolated-fixture")+len("isolated-growth-fixture")),
+		UnpackedBytes:    payload.Size() + int64(len(procd)+len("isolated-fixture")+len(liveNomadGrowthFixtureMarker(t))),
 		LogicalSizeBytes: spec.LogicalSizeBytes, InitialFilesystemSizeBytes: spec.InitialFilesystemSizeBytes,
 		DescriptorDigest: digest.FromBytes(sparse.Payload), BaseBlockRoot: digest.Digest(sparse.Descriptor.MappingRoot.RootDigest),
 		Descriptor: sparse.Descriptor, DescriptorBytes: sparse.Payload, Objects: len(references), Bytes: total, References: references}

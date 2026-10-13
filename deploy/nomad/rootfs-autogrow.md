@@ -683,6 +683,32 @@ stopped through normal fixture teardown. This qualifies real node integration
 and live ownership transfer; public manager lifecycle, memory checkpoint/resume,
 replacement-node crash recovery and production release provenance remain open.
 
+## Real object-service suspension: failed acceptance
+
+The larger Nomad fixture can select 600 through 4096 MiB with
+`S0_NOMAD_LIVE_GROWTH_MIB`; its default remains 600. Infra's
+`S0_NOMAD_LIVE_OBJECT_SERVICE_OUTAGE=1` option pauses the exact disposable
+RustFS container after initial write progress and arms an independent
+65-second systemd unpause timer before suspension. This exercises a real
+unresponsive object service, rather than immediate injected HTTP errors.
+
+The initial 2048 MiB attempt did not pass. It observed about 32 seconds of
+stalled progress and the service recovered, but the original Nomad allocation
+terminated with exit status 137 before complete content verification or live
+transfers. Its saved guest progress remained at 84 MiB; that file and its PID
+marker were stale and cannot prove process continuity. Regional writer custody
+was still consumed with an unexpired lease when the task exited. Kernel OOM
+records and aggregate cgroup OOM counters did not establish an OOM cause.
+The cause remains under investigation; no node behavior or sparse imports
+have been enabled in production on the strength of this run.
+
+The harness now checks the original allocations remain running before reading
+guest progress, so stale files cannot turn a dead process into a passing outage
+result. Failed journals, WALs, storage namespace and explicit nonzero runner
+receipt are retained on the disposable host. The independent timer and cleanup
+restored RustFS, and fixture services stopped. A successful full rerun remains
+required before this gate can qualify deployment.
+
 ## Expanded RootFS memory-checkpoint acceptance
 
 The optional isolated Nomad memory fixture uses the complete production

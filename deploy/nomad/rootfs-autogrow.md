@@ -555,6 +555,8 @@ deadline, so TLS shutdown cannot prolong canceled stream custody. The durable
 publication record stays intact. The migration peer/publication race suite
 passed ten repetitions in 33.452 seconds; its fixtures use the same connection
 context hook as the real listener.
+The complete Nomad runtime race suite passed in 204.184 seconds after this
+fix, and the complete driver race suite passed in 55.187 seconds.
 
 ## Public capacity description synchronization
 

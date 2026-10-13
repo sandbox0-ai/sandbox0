@@ -315,6 +315,7 @@ type Manager struct {
 	liveCommitWG          sync.WaitGroup
 	liveCommitSlots       chan struct{}
 	growthWG              sync.WaitGroup
+	freezeWG              sync.WaitGroup
 	readCache             *rootfsblock.ReadCache
 	runtime               HostRuntime
 	maxDirty              int64
@@ -324,6 +325,8 @@ type Manager struct {
 	live                  map[string]*liveSession
 	captures              map[string]bool
 	liveCommitting        map[string]bool
+	liveCommitDone        map[string]chan struct{}
+	freezes               map[string]runningFreeze
 	growing               map[string]bool
 	locks                 sync.Map
 	lifetime              context.Context
@@ -430,7 +433,8 @@ func New(config Config) (*Manager, error) {
 		runtime:             config.Runtime, maxDirty: config.MaxDirtyTailBytes,
 		retirementReserve: config.DirtyTailRetirementReserveBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
-		liveCommitting: make(map[string]bool), growing: make(map[string]bool),
+		liveCommitting: make(map[string]bool), liveCommitDone: make(map[string]chan struct{}),
+		freezes: make(map[string]runningFreeze), growing: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
 		pressureSignal:  make(chan struct{}, 1),
@@ -532,9 +536,14 @@ func (m *Manager) ReconcileFreezes(ctx context.Context) error {
 		unlock := m.lock(parent)
 		current, err := m.load(parent)
 		if err == nil && current.FreezeOperationID != "" && current.Migration == nil && current.AbandonedMigration == nil {
-			if err = m.runtime.ThawXFS(current.XFSRoot); err == nil {
-				current.FreezeOperationID = ""
-				err = m.save(current)
+			m.mu.Lock()
+			active := m.captures[parent]
+			m.mu.Unlock()
+			if !active {
+				if err = m.runtime.ThawXFS(current.XFSRoot); err == nil {
+					current.FreezeOperationID = ""
+					err = m.save(current)
+				}
 			}
 		}
 		unlock()
@@ -715,19 +724,25 @@ func (m *Manager) CaptureRunningFork(
 	}
 	m.mu.Lock()
 	live := m.live[parent]
-	m.mu.Unlock()
-	if live == nil {
+	if live == nil || m.closing || m.handoff {
+		m.mu.Unlock()
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session has no live branch owner: %w", errdefs.ErrUnavailable)
 	}
-	m.mu.Lock()
 	m.captures[parent] = true
+	m.freezes[parent] = runningFreeze{operationID: request.OperationID, draining: true}
+	m.freezeWG.Add(1)
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		delete(m.captures, parent)
+		delete(m.freezes, parent)
 		m.mu.Unlock()
+		m.freezeWG.Done()
 	}()
+	ctx, cancel := context.WithCancel(ctx)
+	stopOwner := context.AfterFunc(m.lifetime, cancel)
+	defer func() { stopOwner(); cancel() }()
 	if current.FreezeOperationID != "" {
 		if err := m.runtime.ThawXFS(current.XFSRoot); err != nil {
 			unlock()
@@ -747,7 +762,25 @@ func (m *Manager) CaptureRunningFork(
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("persist RootFS freeze intent: %w", err)
 	}
-	if freezeErr := m.runtime.FreezeXFS(current.XFSRoot); freezeErr != nil {
+	// Freeze drains kernel metadata writes before returning. Those writes can
+	// block on the normal WAL budget, so retain capture custody but release the
+	// parent lock and permit authenticated reclaim until the drain finishes.
+	unlock()
+	freezeErr, settleErr := m.freezeRunningFork(ctx, stage, current, live)
+	unlock = m.lock(parent)
+	latest, loadErr := m.load(parent)
+	if loadErr != nil {
+		thawErr := m.runtime.ThawXFS(current.XFSRoot)
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(loadErr, freezeErr, settleErr, thawErr)
+	}
+	current = latest
+	if current.FreezeOperationID != request.OperationID || current.RunningForkRequest == nil || *current.RunningForkRequest != request {
+		thawErr := m.runtime.ThawXFS(current.XFSRoot)
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(errdefs.ErrFailedPrecondition, freezeErr, settleErr, thawErr)
+	}
+	if freezeErr != nil || settleErr != nil {
 		thawErr := m.runtime.ThawXFS(current.XFSRoot)
 		if thawErr == nil {
 			current.FreezeOperationID = ""
@@ -756,7 +789,8 @@ func (m *Manager) CaptureRunningFork(
 		}
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(
-			fmt.Errorf("freeze running RootFS: %w", freezeErr),
+			wrapIfError("freeze running RootFS", freezeErr),
+			wrapIfError("settle frozen RootFS live installation", settleErr),
 			wrapIfError("recover failed RootFS freeze", thawErr),
 		)
 	}
@@ -2426,11 +2460,15 @@ func (m *Manager) Close() error {
 	}
 	m.closing = true
 	// Unexpected owner shutdown must wake kernel metadata writes blocked on
-	// dirty-tail admission before joining a non-cancellable growth ioctl.
-	// Planned live handoff joins growth while retaining the backend instead.
+	// dirty-tail admission before joining non-cancellable growth/freeze ioctls.
+	// Planned live handoff joins their owners while retaining the backend instead.
 	var growing []*rootfsblock.Branch
-	for parent := range m.growing {
-		if session := m.live[parent]; session != nil {
+	for parent, session := range m.live {
+		_, freezing := m.freezes[parent]
+		if !m.growing[parent] && !freezing {
+			continue
+		}
+		if session != nil {
 			growing = append(growing, session.branch)
 		}
 	}
@@ -2441,6 +2479,7 @@ func (m *Manager) Close() error {
 		result = errors.Join(result, branch.Close())
 	}
 	m.growthWG.Wait()
+	m.freezeWG.Wait()
 	m.liveCommitWG.Wait()
 	m.rebaseWG.Wait()
 	m.mu.Lock()

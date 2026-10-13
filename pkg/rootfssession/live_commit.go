@@ -132,13 +132,18 @@ func (m *Manager) runLiveCommit(ctx context.Context, stage rootfshandoff.StageRe
 		unlock()
 		return fmt.Errorf("live commit authority is unavailable: %w", errdefs.ErrUnavailable)
 	}
-	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) || current.State != stateReady || current.Stage == nil || current.RunningForkRequest != nil || current.FreezeOperationID != "" || current.Migration != nil || current.CrashFence != nil {
+	m.mu.Lock()
+	freeze, freezing := m.freezes[stage.Parent]
+	freezeOwned := freezing && freeze.matches(current)
+	if current.State != stateReady || current.Stage == nil ||
+		(current.RunningForkRequest != nil || current.FreezeOperationID != "") && !freezeOwned ||
+		freezeOwned && allowNewCut && !freeze.draining || current.Migration != nil || current.CrashFence != nil {
+		m.mu.Unlock()
 		unlock()
 		return fmt.Errorf("RootFS writer cannot commit in its current custody: %w", errdefs.ErrUnavailable)
 	}
-	m.mu.Lock()
 	live := m.live[stage.Parent]
-	if live == nil || m.captures[stage.Parent] || m.closing || m.handoff {
+	if live == nil || m.liveCommitting[stage.Parent] || m.captures[stage.Parent] && !freezeOwned || m.closing || m.handoff {
 		m.mu.Unlock()
 		unlock()
 		return errdefs.ErrUnavailable
@@ -152,13 +157,19 @@ func (m *Manager) runLiveCommit(ctx context.Context, stage rootfshandoff.StageRe
 	}
 	m.captures[stage.Parent] = true
 	m.liveCommitting[stage.Parent] = true
+	done := make(chan struct{})
+	m.liveCommitDone[stage.Parent] = done
 	m.liveCommitWG.Add(1)
 	m.mu.Unlock()
 	unlock()
 	defer func() {
 		m.mu.Lock()
-		delete(m.captures, stage.Parent)
+		if !freezeOwned {
+			delete(m.captures, stage.Parent)
+		}
 		delete(m.liveCommitting, stage.Parent)
+		delete(m.liveCommitDone, stage.Parent)
+		close(done)
 		<-m.liveCommitSlots
 		m.mu.Unlock()
 		m.liveCommitWG.Done()
@@ -507,6 +518,9 @@ func (m *Manager) saveLiveCommitLocked(current record) error {
 	if err := m.validateLiveCommit(current); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	freeze := m.freezes[current.Parent]
+	m.mu.Unlock()
 	err := m.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		payload := bucket.Get([]byte(current.Parent))
@@ -519,7 +533,8 @@ func (m *Manager) saveLiveCommitLocked(current record) error {
 		}
 		if stored.Parent != current.Parent || stored.RootFSID != current.RootFSID || stored.WriterEpoch != current.WriterEpoch ||
 			stored.BindingDigest != current.BindingDigest || stored.GenerationID != current.GenerationID || stored.State != stateReady ||
-			stored.Stage == nil || stored.RunningForkRequest != nil || stored.Migration != nil || stored.CrashFence != nil || stored.FreezeOperationID != "" {
+			stored.Stage == nil || stored.Migration != nil || stored.CrashFence != nil ||
+			(stored.RunningForkRequest != nil || stored.FreezeOperationID != "") && !freeze.matches(stored) {
 			return fmt.Errorf("RootFS custody changed during live publication: %w", errdefs.ErrFailedPrecondition)
 		}
 		if current.BranchSequenceBase > stored.BranchSequenceBase {

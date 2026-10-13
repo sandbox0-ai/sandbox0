@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -196,22 +197,26 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	require.NoError(t, runner.Create(ctx, filepath.Join(root, "bundle"), "writer"))
 	require.NoError(t, runner.Start(ctx, "writer"))
 	d := &nodeRuntime{runtime: runtime, logger: newLogger(zap.NewNop())}
-	control, stopControl := context.WithCancel(ctx)
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-control.Done():
-				return
-			case <-tick.C:
-				d.scanLiveCommits(control)
-				d.scanRootFSGrowth(control)
+	startControl := func() context.CancelFunc {
+		control, stop := context.WithCancel(ctx)
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-control.Done():
+					return
+				case <-tick.C:
+					d.scanLiveCommits(control)
+					d.scanRootFSGrowth(control)
+				}
 			}
-		}
-	}()
+		}()
+		return stop
+	}
+	stopControl := startControl()
 	defer func() { stopControl(); d.wg.Wait() }()
 	finished := make(chan error, 1)
 	go func() {
@@ -226,6 +231,7 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	defer ticker.Stop()
 	var first, last autogrowGuestEvidence
 	peakWAL := int64(0)
+	freezeChecked := false
 	running := true
 	for running {
 		select {
@@ -250,6 +256,46 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 			require.Equal(t, first.PID, last.PID)
 			require.Equal(t, first.Inode, last.Inode)
 			require.Equal(t, int64(last.Chunks)<<20, last.Offset)
+			if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_FREEZE") == "1" && !freezeChecked && last.Chunks >= 100 {
+				// Stop and join the normal scheduler, leaving the same guest
+				// running until its normal WAL admission blocks. Only the freeze
+				// owner's progress guardian can reclaim during the kernel drain.
+				stopControl()
+				d.wg.Wait()
+				require.Eventually(t, func() bool {
+					pressure, err := m.DirtyTailPressureSessions()
+					require.NoError(t, err)
+					return len(pressure) > 0
+				}, 10*time.Second, 10*time.Millisecond)
+				for {
+					err := m.CommitLive(ctx, stage)
+					var capacity *rootfsblock.DirtyTailCapacityError
+					if err == nil {
+						break
+					}
+					if !errdefs.IsUnavailable(err) && !errors.As(err, &capacity) {
+						require.NoError(t, err)
+					}
+					require.NoError(t, ctx.Err())
+				}
+				// Guest writes continue immediately after that cut and fill the
+				// WAL again before the freeze begins.
+				require.Eventually(t, func() bool {
+					pressure, err := m.DirtyTailPressureSessions()
+					require.NoError(t, err)
+					return len(pressure) > 0
+				}, 10*time.Second, 10*time.Millisecond)
+				fork := rootfshandoff.RunningForkCheckpointRequest{OperationID: "autogrow-freeze-boundary",
+					SourceSandboxID: "autogrow-sandbox", TargetSandboxID: "autogrow-freeze-target", TargetGenerationID: "autogrow-freeze-generation"}
+				checkpoint, err := m.CaptureRunningFork(ctx, stage, fork)
+				require.NoError(t, err)
+				require.NoError(t, checkpoint.Validate())
+				// This gate validates a local running-fork cut and authenticated
+				// uploads, not the regional target-creation transaction.
+				require.NoError(t, m.AcknowledgeRunningFork(stage, fork.OperationID, checkpoint.ProofDigest))
+				freezeChecked = true
+				stopControl = startControl()
+			}
 		}
 	}
 	stopControl()
@@ -258,6 +304,9 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(data, &last))
 	require.Equal(t, 600, last.Chunks)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_FREEZE") == "1" {
+		require.True(t, freezeChecked)
+	}
 	require.NoError(t, m.SettleLiveCommit(ctx, stage))
 	require.True(t, loss.publish.Load())
 	require.True(t, loss.install.Load())
@@ -289,5 +338,5 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	grant, err := store.GetRootFSWriterGrant(ctx, stage.Identity.WriterGrantID)
 	require.NoError(t, err)
 	require.Equal(t, sandboxstore.RootFSWriterGrantStateRetired, grant.State)
-	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID)
+	t.Logf("real_mtls_region_postgres_s3_runsc=true bytes_written=%d initial_xfs_bytes=%d final_xfs_bytes=%d peak_node_wal_payload_bytes=%d installed_sequence=%d guest_pid=%d lost_publish_ack=true lost_install_ack=true running_fork_freeze_checked=%t retired=true", 600<<20, 300<<20, usage.SizeBytes, peakWAL, observation.Progress.InstalledSequence, first.PID, freezeChecked)
 }

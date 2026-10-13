@@ -331,6 +331,44 @@ The test refuses to drop schemas unless the database name starts with
 `s0_rootfs_autogrow`. Its destructive fixture migration and object cleanup must
 never run against a production database or shared bucket.
 
+## Running-fork freeze progress under WAL pressure
+
+A running-fork freeze retains exclusive checkpoint custody but releases the
+parent mutex while the kernel drains dirty filesystem writes. A private owner
+permit allows the exact authenticated writer to commit and reclaim during that
+drain. The permit is not persisted: a recovered freeze intent cannot authorize
+new live cuts, and recovery must thaw it before resuming normal ownership.
+
+After the kernel freeze returns, new cuts are excluded. The capture joins any
+in-flight commit, settles its publication/installation journal, and reloads the
+current installed base before taking the WAL checkpoint. Recovery scans do not
+thaw a barrier still owned by an active capture. RPC cancellation retains the
+owner's progress guardian until the kernel drain returns; failed settlement
+thaws and clears the fork request while preserving the pending live journal.
+Unexpected owner shutdown wakes blocked branch writes before joining freeze
+work. Planned retirement and live handoff continue to reject active captures.
+
+Linux race regressions cover full-budget metadata writes, both lost receipts,
+capture of the rotated base and suffix, cancellation, owner shutdown, failed
+settlement retry and rejection of recovered-intent authorization. Focused tests
+passed in 9.757 seconds. Full session, Nomad runtime, ctld, configuration and
+deployment tests passed (session 133.284 seconds; Nomad runtime 193.629 seconds).
+
+The combined real guest/S3 gate also passed with
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` in 100.829 seconds. It stopped and joined the
+ordinary scheduler, waited for the running guest to fill its WAL, then captured
+a local running-fork boundary using the freeze-owned reclaim path. The same
+guest subsequently completed all 600 MiB; every byte was verified before final
+authenticated retirement. XFS reached 1,258,291,200 bytes and peak sampled WAL
+payload was 41,680,896 bytes, below the 40 MiB transient allowance. Both lost
+receipts were resolved, and installed sequence reached 153,359.
+
+This local boundary gate does not create or publish a regional fork target.
+Full fork/snapshot transaction, memory checkpoint, migration, outage and
+production gates remain required before deployment.
+
+## Live publication ordering
+
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal
    writes can otherwise prevent a freeze from completing and deadlock reclaim.

@@ -103,7 +103,7 @@ func (m *Manager) GrowLiveXFS(ctx context.Context, stage rootfshandoff.StageRequ
 	progressDone := make(chan struct{})
 	go func() {
 		defer close(progressDone)
-		m.maintainGrowthProgress(progressCtx, stage, live.branch)
+		m.maintainKernelWriteProgress(progressCtx, stage, live.branch)
 	}()
 	defer func() { stopProgress(); <-progressDone }()
 	workCtx, cancel := context.WithCancel(ctx)
@@ -121,7 +121,7 @@ func (m *Manager) GrowLiveXFS(ctx context.Context, stage rootfshandoff.StageRequ
 	return err == nil, err
 }
 
-func (m *Manager) maintainGrowthProgress(ctx context.Context, stage rootfshandoff.StageRequest, branch *rootfsblock.Branch) {
+func (m *Manager) maintainKernelWriteProgress(ctx context.Context, stage rootfshandoff.StageRequest, branch *rootfsblock.Branch) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {

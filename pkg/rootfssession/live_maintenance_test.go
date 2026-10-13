@@ -73,3 +73,22 @@ func TestLiveCommitSettlementDoesNotStartCutOrAcceptDifferentWriter(t *testing.T
 	delete(m.captures, stage.Parent)
 	m.mu.Unlock()
 }
+
+func TestLiveCommitReclaimSharesBoundedUploadAdmission(t *testing.T) {
+	m, a, stage, branch := newNodeLiveFixture(t, "live-shared-admission")
+	_, err := branch.WriteAt([]byte("cut"), 0)
+	require.NoError(t, err)
+	for range MaxConcurrentLiveCommits {
+		m.liveCommitSlots <- struct{}{}
+	}
+	require.ErrorIs(t, m.CommitLive(t.Context(), stage), errdefs.ErrUnavailable)
+	require.Empty(t, a.published)
+	stored, err := m.load(stage.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.LiveCommit, "admission failure must not create new durable intent")
+	for range MaxConcurrentLiveCommits {
+		<-m.liveCommitSlots
+	}
+	require.NoError(t, m.CommitLive(t.Context(), stage))
+	require.Empty(t, m.liveCommitSlots)
+}

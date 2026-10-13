@@ -35,6 +35,18 @@ func validNodeRuntimeConfig() Config {
 	}
 }
 
+func TestAutomaticGrowthRequiresLiveCommits(t *testing.T) {
+	config := validNodeRuntimeConfig()
+	config.RootFSAutoGrow = true
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "requires live RootFS commits") {
+		t.Fatalf("automatic growth without commits was accepted: %v", err)
+	}
+	config.RootFSLiveCommits = true
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func validNomadAllocationConfig() NomadAllocationConfig {
 	return NomadAllocationConfig{
 		ClusterID:                    "cluster-1",

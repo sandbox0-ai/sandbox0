@@ -71,7 +71,7 @@ type pendingLiveCommit struct {
 
 func (m *Manager) requireLiveCommitSettled(current record) error {
 	m.mu.Lock()
-	busy := m.captures[current.Parent]
+	busy := m.captures[current.Parent] || m.growing[current.Parent]
 	m.mu.Unlock()
 	if busy || current.LiveCommit != nil && (current.LiveCommit.Pending != nil || current.LiveCommit.ObsoleteBranch != nil) {
 		return fmt.Errorf("RootFS checkpoint or live installation is pending: %w", errdefs.ErrUnavailable)
@@ -143,11 +143,26 @@ func (m *Manager) runLiveCommit(ctx context.Context, stage rootfshandoff.StageRe
 		unlock()
 		return errdefs.ErrUnavailable
 	}
+	select {
+	case m.liveCommitSlots <- struct{}{}:
+	default:
+		m.mu.Unlock()
+		unlock()
+		return fmt.Errorf("live commit workers are occupied: %w", errdefs.ErrUnavailable)
+	}
 	m.captures[stage.Parent] = true
+	m.liveCommitting[stage.Parent] = true
 	m.liveCommitWG.Add(1)
 	m.mu.Unlock()
 	unlock()
-	defer func() { m.mu.Lock(); delete(m.captures, stage.Parent); m.mu.Unlock(); m.liveCommitWG.Done() }()
+	defer func() {
+		m.mu.Lock()
+		delete(m.captures, stage.Parent)
+		delete(m.liveCommitting, stage.Parent)
+		<-m.liveCommitSlots
+		m.mu.Unlock()
+		m.liveCommitWG.Done()
+	}()
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.lifetime, cancel)
 	defer func() { stop(); cancel() }()

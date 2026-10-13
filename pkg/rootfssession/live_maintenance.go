@@ -12,6 +12,10 @@ import (
 const LiveCommitInterval = 30 * time.Second
 const LiveCommitDirtyBytes = 64 << 20
 
+// MaxConcurrentLiveCommits includes both scheduled uploads and the reclaim
+// workers that keep kernel growth moving during a planned owner handoff.
+const MaxConcurrentLiveCommits = 4
+
 // LiveCommitSession is a disposable scheduling hint, not writer authority. The
 // operation rechecks durable binding and custody before starting any upload.
 type LiveCommitSession struct {

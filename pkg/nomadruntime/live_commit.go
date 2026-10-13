@@ -49,7 +49,7 @@ func (r *rootfsRuntime) CommitLiveRootFS(ctx context.Context, stage rootfshandof
 	return r.sessions.CommitLive(ctx, stage)
 }
 
-const liveCommitConcurrency = 4
+const liveCommitConcurrency = rootfssession.MaxConcurrentLiveCommits
 
 type liveCommitRetry struct {
 	delay time.Duration

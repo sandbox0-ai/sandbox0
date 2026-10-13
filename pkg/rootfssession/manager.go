@@ -313,6 +313,8 @@ type Manager struct {
 	publisherForRebase    func(rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher
 	liveCommitAuthority   LiveCommitAuthority
 	liveCommitWG          sync.WaitGroup
+	liveCommitSlots       chan struct{}
+	growthWG              sync.WaitGroup
 	readCache             *rootfsblock.ReadCache
 	runtime               HostRuntime
 	maxDirty              int64
@@ -321,6 +323,8 @@ type Manager struct {
 	mu                    sync.Mutex
 	live                  map[string]*liveSession
 	captures              map[string]bool
+	liveCommitting        map[string]bool
+	growing               map[string]bool
 	locks                 sync.Map
 	lifetime              context.Context
 	cancel                context.CancelFunc
@@ -422,9 +426,11 @@ func New(config Config) (*Manager, error) {
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, publisherForOperation: config.PublisherForOperation, publisherForRebase: config.PublisherForRebase, readCache: readCache,
 		liveCommitAuthority: config.LiveCommitAuthority,
+		liveCommitSlots:     make(chan struct{}, MaxConcurrentLiveCommits),
 		runtime:             config.Runtime, maxDirty: config.MaxDirtyTailBytes,
 		retirementReserve: config.DirtyTailRetirementReserveBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
+		liveCommitting: make(map[string]bool), growing: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
 		pressureSignal:  make(chan struct{}, 1),
@@ -2192,7 +2198,7 @@ func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) err
 		}
 	} else {
 		m.mu.Lock()
-		busy := m.captures[current.Parent]
+		busy := m.captures[current.Parent] || m.growing[current.Parent]
 		m.mu.Unlock()
 		if busy {
 			return errdefs.ErrUnavailable
@@ -2419,8 +2425,22 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closing = true
+	// Unexpected owner shutdown must wake kernel metadata writes blocked on
+	// dirty-tail admission before joining a non-cancellable growth ioctl.
+	// Planned live handoff joins growth while retaining the backend instead.
+	var growing []*rootfsblock.Branch
+	for parent := range m.growing {
+		if session := m.live[parent]; session != nil {
+			growing = append(growing, session.branch)
+		}
+	}
 	m.mu.Unlock()
 	m.cancel()
+	var result error
+	for _, branch := range growing {
+		result = errors.Join(result, branch.Close())
+	}
+	m.growthWG.Wait()
 	m.liveCommitWG.Wait()
 	m.rebaseWG.Wait()
 	m.mu.Lock()
@@ -2429,7 +2449,6 @@ func (m *Manager) Close() error {
 		live = append(live, session)
 	}
 	m.mu.Unlock()
-	var result error
 	for _, session := range live {
 		result = errors.Join(result, session.device.Close(), session.branch.Close())
 	}

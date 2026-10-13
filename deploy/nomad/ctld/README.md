@@ -44,6 +44,17 @@ worker rollout. Live commits alone do not enable XFS automatic growth or change
 an existing device's geometry; complete the linked rollout gates before enabling
 sparse image imports.
 
+`nomad_runtime.auto_grow` also defaults to false and requires `live_commits`.
+Its separate two-worker lane checks mounted XFS once per second, scanning idle
+owners without consuming the upload lane. Growth doubles filesystem capacity
+when available space reaches the greater of 20 percent and 64 MiB, up to the
+existing device ceiling. It preserves the exact NBD device and mounted session,
+and does not allocate the logical capacity on the host disk. Planned capture,
+release and owner transfer wait for growth to finish. An admitted Linux growth
+ioctl cannot be cancelled; its commit/reclaim path stays alive under the existing
+session owner when control workers are cancelled for a planned live update.
+Storage outages can delay that update; retain its operation fence and journal.
+
 If an interrupted planned pause leaves a claimed slot quiescing with an XFS
 reference to an NBD device after the host mount paths disappear, keep the
 regional node fence and maintenance journal. Do not disconnect the device,

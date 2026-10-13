@@ -64,7 +64,7 @@ func (m *Manager) PrepareLiveHandoff(ctx context.Context) (_ *PreparedLiveHandof
 	for parent := range m.live {
 		parents = append(parents, parent)
 	}
-	busy := len(m.captures) != 0 || len(m.rebaseAdmission) != 0
+	busy := len(m.captures) != 0 || len(m.growing) != 0 || len(m.rebaseAdmission) != 0
 	m.mu.Unlock()
 	prepared := &PreparedLiveHandoff{manager: m, Manifest: LiveHandoff{Version: 1}}
 	defer func() {

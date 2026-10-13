@@ -209,6 +209,9 @@ type nodeRuntime struct {
 	liveCommitActive       int
 	liveCommitAfter        string
 	liveCommitRetries      map[string]liveCommitRetry
+	growthActive           int
+	growthAfter            string
+	growthRetries          map[string]liveCommitRetry
 	trigger                chan string
 	allocations            nomadAllocationSource
 	runtimeSlotNetwork     runtimeSlotNetworkControl
@@ -1637,6 +1640,7 @@ func (d *nodeRuntime) reconcileLoop(ctx context.Context) {
 	}
 	d.scanDirtyTailPressures(ctx)
 	d.scanLiveCommits(ctx)
+	d.scanRootFSGrowth(ctx)
 	d.scan(ctx, "")
 	for {
 		select {
@@ -1650,6 +1654,7 @@ func (d *nodeRuntime) reconcileLoop(ctx context.Context) {
 		case <-ticker.C:
 			d.scanDirtyTailPressures(ctx)
 			d.scanLiveCommits(ctx)
+			d.scanRootFSGrowth(ctx)
 			d.scan(ctx, "")
 		}
 	}

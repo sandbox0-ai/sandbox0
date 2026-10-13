@@ -30,8 +30,8 @@ feature is not deployed until the gates below have evidence attached.
 
 1. Validate the wired authenticated scheduler with real remote object storage
    and regional services, including full-product lifecycle/fencing races.
-2. Schedule early XFS growth under session ownership;
-   growth must not hold a lock required by a blocked writer's commit/reclaim.
+2. Validate scheduled XFS growth with real services and running guest workloads;
+   its session-owned worker must preserve commit/reclaim under kernel pressure.
 3. Verify the enabled live-reclaim path under real outage/pressure recovery
    without process loss; the new node configuration is still disabled by default.
 4. Verify all lifecycle operations, GC and live ctld transfer with installed
@@ -151,8 +151,8 @@ authentication and lifecycle proof identity without discarding remote durable cu
 This regional path passed isolated Linux PostgreSQL tests with in-memory immutable
 objects, plus HTTPS client/handler authentication tests. It does not yet establish
 full-product automatic growth, remote object-service or gVisor acceptance. The
-node's automatic-growth scheduling, full-product lifecycle recovery and
-acceptance remain required before enabling sparse imports or deploying this
+node's full-product automatic-growth and lifecycle recovery
+acceptance remains required before enabling sparse imports or deploying this
 feature.
 
 ## Durable node live-commit transaction
@@ -228,8 +228,52 @@ aborts the transfer.
 Isolated Linux race tests verify bounded worker concurrency, fair admission,
 retry backoff, disablement, absence of pressure retirement for enabled writers,
 installed-time scheduling, exact payload/parent mapping through the authority
-adapter, and settlement without capturing post-cut writes. Automatic XFS growth
-and full-product remote-service acceptance remain required before rollout.
+adapter, and settlement without capturing post-cut writes. Full-product
+remote-service acceptance remains required before rollout.
+
+## Session-owned automatic XFS growth
+
+`nomad_runtime.auto_grow` requires `live_commits` and defaults to false.
+The one-second control loop schedules a separate two-worker lane. Workers
+inspect idle candidates through each snapshot rather than spending one tick
+per two idle filesystems; active kernel growth never occupies the upload lane.
+Available space at or below the greater of 20 percent and 64 MiB triggers
+doubling, capped at the immutable logical device size. At the ceiling, ordinary
+filesystem capacity limits apply. A finite inspection interval does not guarantee
+that arbitrary write bursts cannot exhaust free space before growth completes.
+
+The manager validates the durable writer binding, ready custody and exact live
+device before retaining a growth permit. That permit rejects freeze/capture,
+release and live owner transfer while allowing background cuts and installation.
+Neither inspection nor the kernel grow ioctl holds the parent mutex. A growth
+progress worker retries pending commits and pressure reclamation under the
+primary session lifetime, even after planned-update cancellation stops control
+workers. It shares the manager's four-upload admission bound with the scheduled
+commit lane. A storage outage keeps the same backend and may delay the planned
+update; a timeout aborts transfer without dropping its source journal or fence.
+Unexpected primary shutdown closes growing branches to wake blocked kernel
+writes before joining growth. This is a shutdown path, not a planned rollout or
+a substitute for memory-preserving sandbox drain.
+
+The complete Linux race suites for `pkg/rootfssession`, `pkg/nomadruntime`,
+`ctld/cmd/ctld`, `pkg/config` and `deploy/nomad/ctld` passed after this integration.
+Focused tests cover exact binding, growth/commit overlap, rejection of captures
+and transfer during growth, reclaim after control cancellation, unexpected-close
+admission wakeup, shared upload bounds, worker separation, idle-owner sweeps,
+per-parent retry state and disabled configuration.
+
+The isolated Linux race gate `TestPrivilegedSessionAutoGrowthAndLiveCommitsKeepWriterRunning`
+passed with a real 64 TiB NBD device, XFS and the production Bolt session journal.
+One Python process retained its PID, heap marker and open file while writing
+600 distinct 1 MiB chunks. Two growth operations increased XFS from 300 MiB to
+1,200 MiB; 19 foreground commits and the pressure-reclaim path kept the selected
+WAL below its 32 MiB budget (observed peak 33,468,416 payload bytes). All chunks
+were verified after writing. Rotation suffixes that exceed the 8 MiB copy limit
+are treated as a retry with a newer cut, preserving the acknowledged remote
+cursor and complete old WAL. The fixture retired its mounted session in normal
+order and released its exclusive NBD device. These objects and authority receipts
+are still in-memory doubles; this evidence does not replace remote-service,
+runsc, lifecycle or production acceptance.
 
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal
@@ -267,5 +311,6 @@ and full-product remote-service acceptance remain required before rollout.
    publication with installation so the regional inherited-base pin matches the
    base used by the cut; retain the immutable launch parent for lifecycle proofs.
 
-Regional commits and installation receipts are implemented; node journal recovery,
-scheduling and lifecycle coordination are still integration requirements.
+Regional receipts, node journal recovery, bounded scheduling and growth custody
+are implemented. Full-product service/lifecycle acceptance and deployment remain
+required before enabling either node switch or sparse imports.

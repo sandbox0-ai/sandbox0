@@ -61,6 +61,7 @@ type rootfsRuntime struct {
 	renewals          map[string]*rootfsRenewal
 	renewalBatcher    *writerRenewalBatcher
 	liveCommits       bool
+	autoGrow          bool
 }
 
 // RuntimeInfo returns the immutable configuration owned by this ctld runtime.
@@ -365,6 +366,9 @@ func newRuntime(ctx context.Context, config *Config, logger logger, imported ...
 	if config.RootFSLiveCommits && liveAuthority == nil {
 		return nil, fmt.Errorf("live RootFS commits require authenticated regional authority")
 	}
+	if config.RootFSAutoGrow && !config.RootFSLiveCommits {
+		return nil, fmt.Errorf("automatic XFS growth requires live RootFS commits")
+	}
 	sessions, err := rootfssession.New(rootfssession.Config{
 		StatePath: config.RootFSStatePath, BranchRoot: config.RootFSBranchRoot,
 		MountRoot: config.RootFSMountRoot, MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
@@ -437,6 +441,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger, imported ...
 		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),
 		liveCommits:       config.RootFSLiveCommits,
+		autoGrow:          config.RootFSAutoGrow,
 	}, nil
 }
 

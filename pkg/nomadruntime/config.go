@@ -54,6 +54,7 @@ type Config struct {
 	RootFSDirtyTailRetirementReserveBytes int64
 	RootFSNBDDevices                      []string
 	RootFSTransferableNBD                 bool
+	RootFSLiveCommits                     bool
 	RootFSReadCacheBytes                  int64
 	RootFSReadCacheDirectory              string
 	RootFSReadDiskCacheBytes              int64

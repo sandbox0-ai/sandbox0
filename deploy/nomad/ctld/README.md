@@ -26,6 +26,24 @@ acknowledging process and memory loss. An unplanned primary loss recovers from
 the last committed generation and may lose the dirty tail. Both processes run
 on the same node; durable sandbox truth remains in PostgreSQL and S3.
 
+`nomad_runtime.live_commits` enables authenticated background RootFS commits.
+It defaults to false during the [automatic-growth rollout](../rootfs-autogrow.md).
+Upgrade every regional manager and node before enabling it. The node checks
+eligible live writers once per second, commits at 64 MiB of WAL payload (or a
+quarter of a smaller writer limit), and commits smaller nonempty tails after
+30 seconds. Pending publication/installation receipts are eligible immediately.
+At most four uploads run concurrently; writers rotate through the worker lane
+and transient failures back off for up to 30 seconds.
+
+Enabled live writers reclaim WAL pressure through a new acknowledged cut;
+they do not request the legacy pressure pause. Storage outages retain complete
+journals and apply write backpressure. Planned pause, running fork, migration
+RootFS capture and live owner transfer settle pending installation before taking
+their existing custody. Explicit `memory: true` remains mandatory for occupied
+worker rollout. Live commits alone do not enable XFS automatic growth or change
+an existing device's geometry; complete the linked rollout gates before enabling
+sparse image imports.
+
 If an interrupted planned pause leaves a claimed slot quiescing with an XFS
 reference to an NBD device after the host mount paths disappear, keep the
 regional node fence and maintenance journal. Do not disconnect the device,

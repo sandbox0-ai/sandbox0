@@ -206,6 +206,9 @@ type nodeRuntime struct {
 	periodicRecovery       int
 	periodicProofs         int
 	urgentRecovery         int
+	liveCommitActive       int
+	liveCommitAfter        string
+	liveCommitRetries      map[string]liveCommitRetry
 	trigger                chan string
 	allocations            nomadAllocationSource
 	runtimeSlotNetwork     runtimeSlotNetworkControl
@@ -1633,6 +1636,7 @@ func (d *nodeRuntime) reconcileLoop(ctx context.Context) {
 		pressureSignal = runtime.DirtyTailPressureSignal()
 	}
 	d.scanDirtyTailPressures(ctx)
+	d.scanLiveCommits(ctx)
 	d.scan(ctx, "")
 	for {
 		select {
@@ -1640,16 +1644,21 @@ func (d *nodeRuntime) reconcileLoop(ctx context.Context) {
 			return
 		case <-pressureSignal:
 			d.scanDirtyTailPressures(ctx)
+			d.scanLiveCommits(ctx)
 		case parent := <-d.trigger:
 			d.scan(ctx, parent)
 		case <-ticker.C:
 			d.scanDirtyTailPressures(ctx)
+			d.scanLiveCommits(ctx)
 			d.scan(ctx, "")
 		}
 	}
 }
 
 func (d *nodeRuntime) scanDirtyTailPressures(ctx context.Context) {
+	if runtime, ok := d.runtime.(liveCommitRuntime); ok && runtime.LiveCommitsEnabled() {
+		return
+	}
 	runtime, ok := d.runtime.(dirtyTailPressureRuntime)
 	if !ok {
 		return

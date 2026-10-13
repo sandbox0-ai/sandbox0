@@ -28,12 +28,12 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Wire the session's durable live-commit interface to the node's authenticated
-   regional client and reconcile pending operations before lifecycle transfers.
-2. Schedule bounded live commits and early XFS growth under session ownership;
+1. Validate the wired authenticated scheduler with real remote object storage
+   and regional services, including full-product lifecycle/fencing races.
+2. Schedule early XFS growth under session ownership;
    growth must not hold a lock required by a blocked writer's commit/reclaim.
-3. Replace the deployed pressure-triggered retirement path with live reclaim
-   for enabled writers, and verify outage/pressure recovery without process loss.
+3. Verify the enabled live-reclaim path under real outage/pressure recovery
+   without process loss; the new node configuration is still disabled by default.
 4. Verify all lifecycle operations, GC and live ctld transfer with installed
    live bases and interrupted node operations.
 5. Regenerate affected public contracts/SDKs and update runtime, CLI, website,
@@ -151,15 +151,16 @@ authentication and lifecycle proof identity without discarding remote durable cu
 This regional path passed isolated Linux PostgreSQL tests with in-memory immutable
 objects, plus HTTPS client/handler authentication tests. It does not yet establish
 full-product automatic growth, remote object-service or gVisor acceptance. The
-node's authenticated adapter, scheduler, lifecycle recovery and full-product
+node's automatic-growth scheduling, full-product lifecycle recovery and
 acceptance remain required before enabling sparse imports or deploying this
 feature.
 
 ## Durable node live-commit transaction
 
 The session manager now exposes an explicit `CommitLive` operation through a
-separate authority interface. It does not implicitly start a scheduler or enable
-production behavior. Session journal version 13 records the deterministic grant/
+separate authority interface. The authenticated node adapter and bounded scheduler
+are wired behind `nomad_runtime.live_commits`, which defaults to false. Session
+journal version 13 records the deterministic grant/
 sequence operation, exact flushed WAL cut, materialized publication payload,
 regional receipt, selected branch path/sequence, installed base and one obsolete
 branch. The launch Stage and generation ID remain unchanged.
@@ -203,6 +204,32 @@ normal-budget recutting, durable successor reopen and guarded terminal cleanup.
 The complete session test suite also passed on that host. These tests use real
 Bolt journals with fake host runtime and in-memory immutable objects; actual
 runsc, remote object-storage and deployment gates remain open.
+
+## Authenticated background commit scheduling
+
+The node's one-second reconciliation loop admits up to four concurrent live
+commits. A writer becomes eligible at 64 MiB of WAL payload, a quarter of a
+smaller configured writer limit, 30 seconds since its last local installation,
+or immediately for admission pressure or an unresolved operation. Consumer
+renewal timestamps do not postpone commits. Round-robin admission prevents
+continuously dirty writers from starving other eligible writers; failed attempts
+use bounded one-to-30-second retry backoff. Node shutdown and planned live update
+join these workers through the existing control/reconciliation wait group.
+
+Enabled writers bypass legacy pressure-triggered planned retirement. They keep
+their process and mounted filesystem while a new cut reclaims the WAL; an
+unavailable object store applies backpressure. The legacy path remains available
+when live commits are disabled. Pauses, running forks and migration RootFS cuts
+settle existing pending intent without starting a new cut. Before a live owner
+transfer, control workers join and every pending receipt is settled before the
+session manifest is captured. A failed settlement preserves the journal and
+aborts the transfer.
+
+Isolated Linux race tests verify bounded worker concurrency, fair admission,
+retry backoff, disablement, absence of pressure retirement for enabled writers,
+installed-time scheduling, exact payload/parent mapping through the authority
+adapter, and settlement without capturing post-cut writes. Automatic XFS growth
+and full-product remote-service acceptance remain required before rollout.
 
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal

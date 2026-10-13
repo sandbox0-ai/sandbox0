@@ -49,6 +49,7 @@ type liveCommitRecord struct {
 	CommittedGenerationID string             `json:"committed_generation_id"`
 	CommittedSequence     uint64             `json:"committed_sequence"`
 	InstalledGenerationID string             `json:"installed_generation_id"`
+	LastInstalledAt       string             `json:"last_installed_at,omitempty"`
 	Pending               *pendingLiveCommit `json:"pending,omitempty"`
 	ObsoleteBranch        *obsoleteBranch    `json:"obsolete_branch,omitempty"`
 }
@@ -95,12 +96,19 @@ func (m *Manager) branchPath(current record) string {
 // side effect is preceded by a durable intent and can be retried verbatim.
 // The owner must invoke it regularly; it does not start an implicit goroutine.
 func (m *Manager) CommitLive(ctx context.Context, stage rootfshandoff.StageRequest) error {
+	return m.runLiveCommit(ctx, stage, true)
+}
+
+// SettleLiveCommit resolves existing publication/installation intent without
+// starting a new cut. Lifecycle callers invoke it before taking storage custody.
+func (m *Manager) SettleLiveCommit(ctx context.Context, stage rootfshandoff.StageRequest) error {
+	return m.runLiveCommit(ctx, stage, false)
+}
+
+func (m *Manager) runLiveCommit(ctx context.Context, stage rootfshandoff.StageRequest, allowNewCut bool) error {
 	stage = stage.WithoutWriterGrantToken()
 	if err := stage.ValidateDurableBinding(); err != nil {
 		return err
-	}
-	if m.liveCommitAuthority == nil {
-		return fmt.Errorf("live commit authority is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	binding, err := stage.BindingDigest()
 	if err != nil {
@@ -111,6 +119,18 @@ func (m *Manager) CommitLive(ctx context.Context, stage rootfshandoff.StageReque
 	if err != nil {
 		unlock()
 		return err
+	}
+	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) || current.Stage == nil {
+		unlock()
+		return errdefs.ErrFailedPrecondition
+	}
+	if !allowNewCut && (current.LiveCommit == nil || current.LiveCommit.Pending == nil && current.LiveCommit.ObsoleteBranch == nil) {
+		unlock()
+		return nil
+	}
+	if m.liveCommitAuthority == nil {
+		unlock()
+		return fmt.Errorf("live commit authority is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) || current.State != stateReady || current.Stage == nil || current.RunningForkRequest != nil || current.FreezeOperationID != "" || current.Migration != nil || current.CrashFence != nil {
 		unlock()
@@ -131,10 +151,10 @@ func (m *Manager) CommitLive(ctx context.Context, stage rootfshandoff.StageReque
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.lifetime, cancel)
 	defer func() { stop(); cancel() }()
-	return m.commitLive(ctx, current, live)
+	return m.commitLive(ctx, current, live, allowNewCut)
 }
 
-func (m *Manager) commitLive(ctx context.Context, current record, live *liveSession) error {
+func (m *Manager) commitLive(ctx context.Context, current record, live *liveSession, allowNewCut bool) error {
 	stage := *current.Stage
 	if current.LiveCommit == nil {
 		current.LiveCommit = &liveCommitRecord{CommittedGenerationID: current.GenerationID, InstalledGenerationID: current.GenerationID}
@@ -153,6 +173,9 @@ func (m *Manager) commitLive(ctx context.Context, current record, live *liveSess
 	}
 	cursor := current.LiveCommit
 	if cursor.Pending == nil {
+		if !allowNewCut {
+			return nil
+		}
 		checkpoint, err := live.branch.Checkpoint()
 		if err != nil {
 			return err
@@ -283,6 +306,7 @@ func (m *Manager) commitLive(ctx context.Context, current record, live *liveSess
 		return err
 	}
 	current.LiveCommit.Pending = nil
+	current.LiveCommit.LastInstalledAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return m.saveLiveCommit(current)
 }
 

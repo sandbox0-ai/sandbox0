@@ -386,6 +386,12 @@ func normalizeNomadSandboxForkRequest(
 	normalized.SourceSandboxID = strings.TrimSpace(request.SourceSandboxID)
 	normalized.ExpectedTeamID = strings.TrimSpace(request.ExpectedTeamID)
 	target := *request.Target
+	// pgx persists timestamptz at microsecond precision. Use that same identity
+	// before insertion so API retries compare equal to the database round-trip.
+	target.ClaimedAt = canonicalNomadForkTime(target.ClaimedAt)
+	target.ExpiresAt = canonicalNomadForkTime(target.ExpiresAt)
+	target.HardExpiresAt = canonicalNomadForkTime(target.HardExpiresAt)
+	target.CreatedAt = canonicalNomadForkTime(target.CreatedAt)
 	normalized.Target = &target
 	targetDigest, err := NomadSandboxForkTargetRecordDigest(&target)
 	if err != nil {
@@ -423,22 +429,23 @@ func NomadSandboxForkTargetRecordDigest(target *SandboxRecord) ([]byte, error) {
 	canonical.HotClaimCompletedAt = time.Time{}
 	canonical.DeletedAt = time.Time{}
 	canonical.UpdatedAt = time.Time{}
-	canonicalTime := func(value time.Time) time.Time {
-		if value.IsZero() {
-			return time.Time{}
-		}
-		return value.UTC().Truncate(time.Microsecond)
-	}
-	canonical.ClaimedAt = canonicalTime(canonical.ClaimedAt)
-	canonical.ExpiresAt = canonicalTime(canonical.ExpiresAt)
-	canonical.HardExpiresAt = canonicalTime(canonical.HardExpiresAt)
-	canonical.CreatedAt = canonicalTime(canonical.CreatedAt)
+	canonical.ClaimedAt = canonicalNomadForkTime(canonical.ClaimedAt)
+	canonical.ExpiresAt = canonicalNomadForkTime(canonical.ExpiresAt)
+	canonical.HardExpiresAt = canonicalNomadForkTime(canonical.HardExpiresAt)
+	canonical.CreatedAt = canonicalNomadForkTime(canonical.CreatedAt)
 	payload, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, fmt.Errorf("marshal Nomad fork target identity: %w", err)
 	}
 	digest := sha256.Sum256(payload)
 	return digest[:], nil
+}
+
+func canonicalNomadForkTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 func validateNomadRunningForkSourceRecord(source *SandboxRecord) error {

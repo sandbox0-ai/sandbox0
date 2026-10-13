@@ -68,6 +68,17 @@ func TestLiveNomadRegionalReceiptFixture(t *testing.T) {
 	require.NoError(t, err)
 	observation, err := client.ObserveLiveCommit(t.Context(), stage)
 	require.NoError(t, err)
+	if os.Getenv("S0_NOMAD_LIVE_MEMORY") == "1" {
+		if _, statErr := os.Stat(filepath.Join(root, "memory-result.json")); statErr == nil {
+			// Restore consumes a new writer, whose own live cursor begins at zero.
+			// Require it to publish and install a fresh cut; the source's receipts
+			// cannot stand in for continued live publication by this new owner.
+			require.Eventually(t, func() bool {
+				observation, err = client.ObserveLiveCommit(t.Context(), stage)
+				return err == nil && observation.Progress.InstalledSequence > 0
+			}, 90*time.Second, 100*time.Millisecond, "restored writer must install a fresh live cut")
+		}
+	}
 	require.Positive(t, observation.Progress.InstalledSequence)
 	grant, err := store.GetRootFSWriterGrant(t.Context(), stage.Identity.WriterGrantID)
 	require.NoError(t, err)
@@ -80,7 +91,7 @@ func TestLiveNomadRegionalReceiptFixture(t *testing.T) {
 	require.Equal(t, sandboxstore.RuntimeSlotStateActive, slot.State)
 	require.Equal(t, stage.Identity.AllocationID, slot.AllocationID)
 	require.Equal(t, grant.ID, slot.WriterGrantID)
-	t.Logf("real_nomad_postgres_s3_live_base=true xfs_bytes=%d logical_device_bytes=%d installed_sequence=%d committed_sequence=%d original_writer_consumed=true original_slot_active=true", size, descriptor.LogicalSizeBytes, observation.Progress.InstalledSequence, observation.Progress.CommittedSequence)
+	t.Logf("real_nomad_postgres_s3_live_base=true xfs_bytes=%d logical_device_bytes=%d installed_sequence=%d committed_sequence=%d current_writer_consumed=true current_slot_active=true", size, descriptor.LogicalSizeBytes, observation.Progress.InstalledSequence, observation.Progress.CommittedSequence)
 }
 
 func liveNomadRegionalPool(t *testing.T) *pgxpool.Pool {
@@ -117,6 +128,10 @@ func TestLiveNomadRegionalAuthorityFixture(t *testing.T) {
 	store := sandboxstore.NewPGSandboxStore(pool)
 	nodeID := os.Getenv("S0_NOMAD_LIVE_NODE_ID")
 	require.NotEmpty(t, nodeID)
+	if os.Getenv("S0_NOMAD_LIVE_MEMORY") == "1" {
+		liveNomadMemoryAuthority(t, store, nodeID)
+		return
+	}
 	verifier, err := nodeauth.NewCertificateVerifier([]nodeauth.CertificateIdentity{
 		{CommonName: "s0-live-fixture", ClusterID: "fixture-cluster", NodeID: nodeID, NodeUID: "fixture-node-1", AgentUID: "fixture-ctld"},
 	})

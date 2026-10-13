@@ -28,21 +28,19 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Validate the wired authenticated scheduler with real remote object storage
-   and regional services in the full Nomad deployment, including lifecycle/
-   fencing races. The combined component gate below passed.
-2. Exercise growth and live reclaim through lifecycle barriers and owner loss;
-   the combined scheduled-growth guest workload below passed.
-3. Extend the injected S3 request-outage gate below to longer interruptions and
-   node-wide contention; the new node configuration is still disabled by default.
-4. Verify all lifecycle operations, GC and live ctld transfer with installed
-   live bases and interrupted node operations.
-5. Deploy the regenerated contracts/SDK descriptions and synchronized runtime,
-   CLI, website and operator docs alongside the compatible runtime release.
-6. Use the isolated remote fixture for real NBD/XFS/runsc and PostgreSQL/
-   object-storage acceptance. Retain sanitized evidence and remove resources.
-7. Merge passing changes, deploy manager before enabling node behavior, then
-   roll workers with memory-preserving drain and verify production continuity.
+1. Complete full regional lifecycle/fencing/GC acceptance with installed live
+   bases. Component running-fork/cold-restore gates and actual Nomad growth,
+   live ctld transfer and retained-memory pause/resume gates below passed.
+2. Qualify abrupt owner loss and replacement-node recovery; normal retirement,
+   fresh caches/devices and memory restore do not establish this failure mode.
+3. Extend injected S3 request-outage acceptance to longer provider disruption
+   and node-wide contention. Node behavior remains disabled by default.
+4. Verify exact production release/checkpoint compatibility, including retained
+   stock runsc bundles and procd digests; fixture release IDs are synthetic.
+5. Finish acceptance, retain sanitized evidence and remove temporary resources.
+6. Merge passing runtime, contracts/SDK descriptions, CLI, website and operator
+   documentation together. Deploy the compatible manager before enabling node
+   behavior, roll workers with memory preservation and verify a regional canary.
 
 ## Acceptance gates
 
@@ -62,6 +60,20 @@ feature is not deployed until the gates below have evidence attached.
   removed; production rollout receipts and canary evidence prove deployment.
 
 ## Import geometry and rollout contract
+
+This design separates guest capacity from compute-node disk capacity. A large
+sparse NBD address space does not allocate an equally large host file. Mounted
+XFS grows within that address space, while acknowledged live publication moves
+data into remote object storage and permits covered local WAL records to be
+reclaimed. A local sparse image alone would still consume local disk as data
+accumulates and would not provide this property.
+
+The compute node still needs its configured cache, dirty-tail, journal and
+transient-operation budgets. Memory checkpoint images have a separate enforced
+staging quota; they are not included in a RootFS cache/WAL bound. Remote storage
+capacity, the committed device ceiling and upload throughput remain limits.
+Online growth preserves the running guest, but is not a promise of zero I/O
+latency or uninterrupted write progress during storage outages.
 
 `rootfs_importer.sparse_device_size_bytes` is a regional image-import setting.
 Zero retains the previous fixed-size contract during rollout. The intended
@@ -510,6 +522,48 @@ the infra repository's `ali/nomad/tests/live_node/README.md`. Services and guest
 stopped through normal fixture teardown. This qualifies real node integration
 and live ownership transfer; public manager lifecycle, memory checkpoint/resume,
 replacement-node crash recovery and production release provenance remain open.
+
+## Expanded RootFS memory-checkpoint acceptance
+
+The optional isolated Nomad memory fixture uses the complete production
+node-authority component, allocation observation, checkpoint coordination and
+checkpoint claim planner. It retains canonical assignment and network-policy
+inputs from the actual source claim, executes the canonical immutable stock
+runsc bundle for native CPU evidence, and requests `memory: true` for both pause
+and resume after growth and three live-owner transfers.
+
+The workload starts once through authenticated procd context creation. A
+restored allocation must retain the same running context, original guest PID,
+heap and tmpfs markers, mmap and unlinked-file offset. Its original open growth
+file is reverified against all 600 MiB of hashes retained in guest memory after
+the regional restore receipt; a pre-checkpoint verification count is insufficient.
+Stock gVisor deliberately kills `runsc exec`-injected processes on restore
+([upstream explanation](https://github.com/google/gvisor/pull/11478)), so raw
+exec injection cannot qualify this product process-continuity gate.
+
+The restored writer has a new live cursor starting at zero. Acceptance waits
+for its own first installed live cut instead of treating the source writer's
+receipts as evidence of continued publication. The regional authority process
+must also exit successfully. Checkpoint staging uses a separately enforced
+512 MiB/4096-inode XFS project quota on a disposable 2 GiB sparse backing image;
+it is excluded from, and does not replace, the fixed RootFS WAL/cache budget.
+The complete gate passed on the isolated host. The original procd-managed guest
+retained PID 10, its heap/tmpfs markers, mmap, unlinked FD and original open
+growth file through the three transfers and a fresh-allocation memory restore.
+After the regional restore receipt its counter advanced from 805 to 809 and
+its full-file verification count from 2 to 3, proving a new complete 600 MiB
+verification using retained in-memory hashes. The same authenticated procd
+context remained running. The new writer installed sequence 1,024 after a
+17.46-second wait; both committed and installed receipts agreed. XFS retained
+1,191,182,336 bytes of statfs data capacity on its 64 TiB logical device.
+
+The 322 one-second worker-artifact samples peaked at 54,706,176 allocated bytes,
+below 128 MiB. This excludes the separate enforced checkpoint staging quota,
+remote storage backend and temporary import image. The regional authority
+finished successfully, and fixture services and guests stopped normally.
+This qualifies expanded RootFS with real retained-memory pause/resume and
+continued live publication; public manager API, abrupt node-loss recovery,
+node-wide contention and production release provenance remain separate gates.
 
 ## Migration filesystem drain and live-WAL custody
 

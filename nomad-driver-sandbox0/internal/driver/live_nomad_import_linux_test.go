@@ -15,12 +15,14 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
@@ -112,8 +114,12 @@ func liveNomadImportBase(t *testing.T, image *os.File, procd []byte, suffix stri
 	return artifact
 }
 
-func liveNomadPrepareRegionalClaim(t *testing.T, stage *rootfshandoff.StageRequest, artifact *sandboxstore.RootFSBaseArtifact, resources runtimeslot.RuntimeResourceLease, revision string) {
+func liveNomadPrepareRegionalClaim(t *testing.T, stage *rootfshandoff.StageRequest, artifact *sandboxstore.RootFSBaseArtifact, resources runtimeslot.RuntimeResourceLease, assignment *runtimecontrol.Assignment, networkPolicy string) {
 	t.Helper()
+	revision, err := assignment.Revision()
+	require.NoError(t, err)
+	payload, err := json.Marshal(assignment)
+	require.NoError(t, err)
 	store := sandboxstore.NewPGSandboxStore(liveNomadRegionalPool(t))
 	slot, err := store.GetRuntimeSlot(t.Context(), stage.Identity.SlotNonce)
 	require.NoError(t, err)
@@ -141,10 +147,16 @@ func liveNomadPrepareRegionalClaim(t *testing.T, stage *rootfshandoff.StageReque
 	claimed, err := store.AcquireRuntimeSlot(t.Context(), &sandboxstore.AcquireRuntimeSlotRequest{
 		OperationID: "operation-1", ClaimID: "claim-1", SandboxID: record.ID, FilesystemID: filesystem.ID, SourceGenerationID: initial.ID,
 		CompatibilityDigest: slot.CompatibilityDigest, ClusterID: slot.ClusterID, RuntimeAssignmentRevision: revision,
+		RuntimeAssignmentPayload: string(payload), NetworkPolicy: networkPolicy,
 		NetworkPolicyDigest: stage.ExpectedPolicyToken.PolicyDigest, ClaimTTL: time.Minute,
 		Resources: runtimeslot.RuntimeResourceRequest{Version: runtimeslot.RuntimeResourceRequestVersion, CPUMillicores: 250, MemoryBytes: 256 << 20, PIDsLimit: runtimeslot.DefaultRuntimePIDsLimit}})
 	require.NoError(t, err)
 	require.Equal(t, resources, claimed.ResourceLease)
+	inputs, err := store.GetRuntimeSlotClaimInputs(t.Context(), slot.ID)
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	require.Equal(t, *assignment, inputs.Runtime)
+	require.Equal(t, networkPolicy, inputs.NetworkPolicy)
 	binding, err := stage.BindingDigest()
 	require.NoError(t, err)
 	issued, err := store.IssueRootFSWriterGrant(t.Context(), &sandboxstore.IssueRootFSWriterGrantRequest{
@@ -205,4 +217,53 @@ func liveNomadCompleteRegionalClaim(t *testing.T, stage rootfshandoff.StageReque
 		AllocationNamespace: slot.AllocationNamespace, ResourceLeaseID: slot.ResourceLease.LeaseID, ResourceLeaseDigest: slot.ResourceLeaseDigest})
 	require.NoError(t, err)
 	t.Log("actual driver/procd handshake committed through regional PostgreSQL claim/slot authority")
+}
+
+// The payload must be a procd-managed child of the container's init process.
+// Stock runsc intentionally kills processes injected with runsc exec on restore.
+func liveNomadStartManagedPayload(t *testing.T, state PersistedState) {
+	t.Helper()
+	_, address, err := nomadProcdEndpoint(state.TaskConfig)
+	require.NoError(t, err)
+	request := procdapi.CreateContextRequest{Type: procdapi.ProcessTypeCMD,
+		Cmd: &procdapi.CreateCMDContextRequest{Command: []string{"/payload", "-test.run=^TestLiveNomadGuestPayload$", "-test.timeout=30m", "-test.v"}},
+		CWD: "/", IdleTimeoutSec: 3600, TTLSec: 3600}
+	context := liveNomadManagedContext(t, address, http.MethodPost, procdapi.ContextsPath, http.StatusCreated, request)
+	require.NotEmpty(t, context.ID)
+	require.True(t, context.Running, "original managed payload must be running")
+	metadata, err := json.Marshal(map[string]string{"context_id": context.ID})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile("/opt/s0-live-update-test/f/managed-context.json", metadata, 0600))
+	t.Logf("continuous payload launched once through authenticated procd context %s", context.ID)
+}
+
+func liveNomadManagedContext(t *testing.T, address, method, path string, status int, value any) *procdapi.ContextResponse {
+	t.Helper()
+	key, err := internalauth.LoadEd25519PrivateKeyFromFile("/opt/s0-live-update-test/f/pki/procd-key.pem")
+	require.NoError(t, err)
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "manager", PrivateKey: key})
+	token, err := generator.Generate("procd", "live-nomad-team", "live-nomad-user", internalauth.GenerateOptions{})
+	require.NoError(t, err)
+	var body io.Reader
+	if value != nil {
+		payload, err := json.Marshal(value)
+		require.NoError(t, err)
+		body = bytes.NewReader(payload)
+	}
+	request, err := http.NewRequestWithContext(t.Context(), method, address+path, body)
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Internal-Token", token)
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(payload), 1<<20)
+	require.Equal(t, status, response.StatusCode, "managed context response: %s", payload)
+	result, apiError, err := spec.DecodeResponse[procdapi.ContextResponse](bytes.NewReader(payload))
+	require.NoError(t, err)
+	require.Nil(t, apiError)
+	require.NotNil(t, result)
+	return result
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -91,6 +92,11 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	if realRegion {
 		assignment.SandboxID, assignment.TeamID = stage.Identity.RootFSID, "live-nomad-team"
 		assignment.EnvVars[runtimecontrol.EnvSandboxID] = assignment.SandboxID
+		networkPolicy, err = sandboxspec.NetworkPolicyToAnnotation(&sandboxspec.NetworkPolicySpec{
+			Version: "v1", SandboxID: assignment.SandboxID, TeamID: assignment.TeamID, Mode: sandboxspec.NetworkModeAllowAll,
+		})
+		require.NoError(t, err)
+		stage.ExpectedPolicyToken.PolicyDigest = runtimeslot.NetworkPolicyDigest(networkPolicy)
 	}
 	revision, err := assignment.Revision()
 	require.NoError(t, err)
@@ -136,7 +142,7 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	require.NoError(t, err, "%s", output)
 	if realRegion {
 		artifact := liveNomadImportBase(t, image, procd, suffix)
-		liveNomadPrepareRegionalClaim(t, &stage, artifact, resources, revision)
+		liveNomadPrepareRegionalClaim(t, &stage, artifact, resources, assignment, networkPolicy)
 	} else {
 		built, err := rootfsblock.BuildMaterializedGeneration(t.Context(), image, initialBytes, liveNomadObjectPublisher(filepath.Join(root, "f/objects")), rootfsblock.BuildOptions{})
 		require.NoError(t, err)
@@ -163,9 +169,20 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	if realRegion {
 		liveNomadCommitCommandReady(t, state, stage)
 		liveNomadCompleteRegionalClaim(t, stage)
+		if os.Getenv("S0_NOMAD_LIVE_MEMORY") == "1" {
+			active, err := readPersistedState(filepath.Join(state.BundleDir, ".sandbox0-driver-state.json"))
+			require.NoError(t, err)
+			require.NotNil(t, active.Claim)
+			require.NotNil(t, active.Claim.MigrationCPULaunch, "memory fixture requires native CPU launch evidence from the canonical stock bundle")
+			_, err = active.Claim.MigrationCPULaunch.Digest()
+			require.NoError(t, err)
+		}
 		metadata, err := json.Marshal(stage.WithoutWriterGrantToken())
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(root, "f/regional-stage.json"), metadata, 0600))
+		liveNomadStartManagedPayload(t, state)
+		t.Logf("real driver claim launched original guest %s; managed procd payload started once", state.ContainerID)
+		return
 	}
 	log, err := os.OpenFile(filepath.Join(root, "guest-payload.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	require.NoError(t, err)
@@ -205,6 +222,8 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 	var hashes [600][sha256.Size]byte
 	growthBytes := int64(0)
 	verified := false
+	verificationCount := uint64(0)
+	var lastVerification time.Time
 	if growthErr == nil {
 		growing, err = os.OpenFile("/growing.bin", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 		require.NoError(t, err)
@@ -233,20 +252,22 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 			require.NoError(t, growing.Sync())
 			growthBytes += int64(written)
 		}
-		if growing != nil && growthBytes == 600<<20 && !verified {
+		if growing != nil && growthBytes == 600<<20 && (!verified || time.Since(lastVerification) >= 15*time.Second) {
 			for index, expected := range hashes {
 				_, err := growing.ReadAt(chunk, int64(index)<<20)
 				require.NoError(t, err)
 				require.Equal(t, expected, sha256.Sum256(chunk), "growth chunk=%d", index)
 			}
 			verified = true
+			verificationCount++
+			lastVerification = time.Now()
 		}
 		if growing != nil {
 			position, err := growing.Seek(0, io.SeekCurrent)
 			require.NoError(t, err)
 			require.Equal(t, growthBytes, position)
 		}
-		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area), "growth_bytes": growthBytes, "growth_verified": verified})
+		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area), "growth_bytes": growthBytes, "growth_verified": verified, "growth_verifications": verificationCount})
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile("/guest-state.tmp", data, 0600))
 		require.NoError(t, os.Rename("/guest-state.tmp", "/guest-state.json"))

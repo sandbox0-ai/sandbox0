@@ -766,7 +766,7 @@ func (m *Manager) CaptureRunningFork(
 	// block on the normal WAL budget, so retain capture custody but release the
 	// parent lock and permit authenticated reclaim until the drain finishes.
 	unlock()
-	freezeErr, settleErr := m.freezeRunningFork(ctx, stage, current, live)
+	freezeErr, settleErr := m.freezeLiveXFS(ctx, stage, current, live)
 	unlock = m.lock(parent)
 	latest, loadErr := m.load(parent)
 	if loadErr != nil {

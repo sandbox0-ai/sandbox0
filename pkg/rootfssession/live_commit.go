@@ -135,9 +135,9 @@ func (m *Manager) runLiveCommit(ctx context.Context, stage rootfshandoff.StageRe
 	m.mu.Lock()
 	freeze, freezing := m.freezes[stage.Parent]
 	freezeOwned := freezing && freeze.matches(current)
-	if current.State != stateReady || current.Stage == nil ||
+	if current.State != stateReady && !freezeOwned || current.Stage == nil ||
 		(current.RunningForkRequest != nil || current.FreezeOperationID != "") && !freezeOwned ||
-		freezeOwned && allowNewCut && !freeze.draining || current.Migration != nil || current.CrashFence != nil {
+		freezeOwned && allowNewCut && !freeze.draining || current.Migration != nil && !freezeOwned || current.CrashFence != nil {
 		m.mu.Unlock()
 		unlock()
 		return fmt.Errorf("RootFS writer cannot commit in its current custody: %w", errdefs.ErrUnavailable)
@@ -532,8 +532,8 @@ func (m *Manager) saveLiveCommitLocked(current record) error {
 			return err
 		}
 		if stored.Parent != current.Parent || stored.RootFSID != current.RootFSID || stored.WriterEpoch != current.WriterEpoch ||
-			stored.BindingDigest != current.BindingDigest || stored.GenerationID != current.GenerationID || stored.State != stateReady ||
-			stored.Stage == nil || stored.Migration != nil || stored.CrashFence != nil ||
+			stored.BindingDigest != current.BindingDigest || stored.GenerationID != current.GenerationID || stored.State != stateReady && !freeze.matches(stored) ||
+			stored.Stage == nil || stored.Migration != nil && !freeze.matches(stored) || stored.CrashFence != nil ||
 			(stored.RunningForkRequest != nil || stored.FreezeOperationID != "") && !freeze.matches(stored) {
 			return fmt.Errorf("RootFS custody changed during live publication: %w", errdefs.ErrFailedPrecondition)
 		}

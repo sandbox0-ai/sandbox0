@@ -478,6 +478,34 @@ Go test timeout. Optional `SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD` accepts duratio
 from five seconds to two minutes. Provider-level outages, node-wide contention,
 crash abandonment, full Nomad lifecycle and production rollout remain open.
 
+## Migration filesystem drain and live-WAL custody
+
+A stopped Sentry may leave buffered XFS writes larger than the retirement
+reserve. A Linux regression reproduced a freeze failure with a full 4 KiB
+normal WAL, a 4 KiB reserve and two additional buffered metadata writes: the
+second drain write returned a dirty-tail capacity error. Enabling retirement
+admission before the kernel freeze prevented ordinary pressure/reclaim from
+making progress.
+
+Live-commit sessions now retain normal blocking admission during the migration
+freeze. The exact original owner holds an in-memory drain permit and releases
+the parent journal lock while its progress guardian publishes and installs
+immutable bases. After freeze returns, it stops new cuts, joins active work,
+settles receipts and reloads the updated base before syncing the immutable
+migration boundary. Only then does it enter retirement admission. Sessions
+without live publication retain their existing bounded reserve behavior.
+
+The permit requires the exact migration operation and an unsealed journal;
+owner recovery cannot reconstruct it from a persisted intent. Cancellation or
+failed settlement leaves migration custody without a synced sequence, and
+ordinary recovery cannot thaw or promote that cut. Owner shutdown wakes blocked
+branch writes before joining the non-cancellable freeze. Regression coverage
+checks installed-base bytes plus the WAL suffix, both lost receipts,
+cancellation and owner shutdown. The focused migration/fork/growth Linux race
+suite passed in 21.934 seconds; the full session race suite passed in 235.296
+seconds. Real memory capture and replacement-node migration remain separate
+deployment gates.
+
 ## Public capacity description synchronization
 
 The public OpenAPI field keeps its existing name and shape. Its description now

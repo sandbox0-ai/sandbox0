@@ -14,11 +14,20 @@ type runningFreeze struct {
 }
 
 func (f runningFreeze) matches(current record) bool {
-	return f.operationID != "" && current.RunningForkRequest != nil &&
-		current.RunningForkRequest.OperationID == f.operationID && current.FreezeOperationID == f.operationID
+	if f.operationID == "" || current.FreezeOperationID != f.operationID {
+		return false
+	}
+	if current.State == stateReady && current.Migration == nil && current.RunningForkRequest != nil {
+		return current.RunningForkRequest.OperationID == f.operationID
+	}
+	// Only the original owner draining an unsealed migration barrier may
+	// reclaim its WAL. A journal recovered by another owner grants no permit.
+	cut := current.Migration
+	return current.State == stateMigration && cut != nil && cut.Request.OperationID == f.operationID &&
+		cut.Sequence == nil && cut.Result == nil && cut.DetachRequest == nil && validateMigrationCutRecord(current) == nil
 }
 
-func (m *Manager) freezeRunningFork(ctx context.Context, stage rootfshandoff.StageRequest, current record, live *liveSession) (error, error) {
+func (m *Manager) freezeLiveXFS(ctx context.Context, stage rootfshandoff.StageRequest, current record, live *liveSession) (error, error) {
 	// A kernel freeze cannot be cancelled once admitted. Its progress guardian
 	// belongs to the session owner, surviving cancellation of the control RPC.
 	progress, stop := context.WithCancel(m.lifetime)

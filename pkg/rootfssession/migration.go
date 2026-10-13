@@ -118,13 +118,30 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 		}
 	}
 	m.mu.Lock()
-	if m.captures[stage.Parent] {
+	if m.captures[stage.Parent] || m.closing || m.handoff {
 		m.mu.Unlock()
 		return zero, errdefs.ErrUnavailable
 	}
 	m.captures[stage.Parent] = true
+	if initial {
+		m.freezes[stage.Parent] = runningFreeze{operationID: request.OperationID, draining: true}
+		m.freezeWG.Add(1)
+	}
 	m.mu.Unlock()
-	defer func() { m.mu.Lock(); delete(m.captures, stage.Parent); m.mu.Unlock() }()
+	defer func() {
+		m.mu.Lock()
+		delete(m.captures, stage.Parent)
+		if initial {
+			delete(m.freezes, stage.Parent)
+		}
+		m.mu.Unlock()
+		if initial {
+			m.freezeWG.Done()
+		}
+	}()
+	ctx, cancel := context.WithCancel(ctx)
+	stopOwner := context.AfterFunc(m.lifetime, cancel)
+	defer func() { stopOwner(); cancel() }()
 	if initial {
 		if current.State != stateReady || live == nil || current.RetireOperationID != "" || current.RunningForkRequest != nil ||
 			current.DirtyTailPressure != nil || current.FreezeOperationID != "" || current.CrashFence != nil {
@@ -133,11 +150,13 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 		if err := ctx.Err(); err != nil {
 			return zero, err
 		}
-		// A competing retirement is retryable until the filesystem barrier
-		// begins. Reserve its bounded sync capacity before persisting cut intent;
-		// an intent without a synced sequence must remain fail-closed.
-		if err := live.branch.BeginRetirement(); err != nil {
-			return zero, err
+		// Legacy sessions without live publication still require the bounded
+		// retirement reserve. Live writers retain normal blocking admission so
+		// buffered XFS writes can be reclaimed throughout the kernel drain.
+		if m.liveCommitAuthority == nil {
+			if err := live.branch.BeginRetirement(); err != nil {
+				return zero, err
+			}
 		}
 		current.Migration = &migrationCutRecord{Request: request}
 		current.State, current.Version = stateMigration, sessionSchemaVersion
@@ -186,8 +205,30 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 		}
 	}
 	if initial {
-		if err := m.runtime.FreezeXFS(current.XFSRoot); err != nil {
-			return zero, fmt.Errorf("freeze migration RootFS: %w", err)
+		unlock()
+		unlock = nil
+		freezeErr, settleErr := m.freezeLiveXFS(ctx, stage, current, live)
+		unlock = m.lock(stage.Parent)
+		current, err = m.load(stage.Parent)
+		if err != nil {
+			return zero, errors.Join(err, freezeErr, settleErr)
+		}
+		if err := validateMigrationCutRecord(current); err != nil {
+			return zero, errors.Join(err, freezeErr, settleErr)
+		}
+		if current.Migration.Request != request || current.Migration.Sequence != nil {
+			return zero, errdefs.ErrFailedPrecondition
+		}
+		if freezeErr != nil || settleErr != nil {
+			// An unconfirmed freeze remains under migration custody. Neither
+			// RPC cancellation nor recovery may manufacture a synced boundary.
+			return zero, fmt.Errorf("freeze migration RootFS: %w", errors.Join(freezeErr, settleErr))
+		}
+		if current.LiveCommit != nil && (current.LiveCommit.Pending != nil || current.LiveCommit.ObsoleteBranch != nil) {
+			return zero, fmt.Errorf("migration drain has an unsettled live installation: %w", errdefs.ErrUnavailable)
+		}
+		if err := branch.BeginRetirement(); err != nil {
+			return zero, err
 		}
 	}
 	checkpoint, err := branch.Checkpoint()

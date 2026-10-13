@@ -16,6 +16,7 @@ import (
 
 const liveCommitSuffix = "/live-commit"
 const liveInstallSuffix = "/live-commit/installed"
+const liveObserveSuffix = "/live-commit/status"
 
 type PublishLiveCommitRequest struct {
 	protocol.TerminalRequest
@@ -36,6 +37,84 @@ type InstallLiveCommitRequest struct {
 type liveCommitStore interface {
 	PublishRootFSLiveCommit(context.Context, *sandboxstore.PublishRootFSLiveCommitRequest) (*sandboxstore.RootFSLiveProgress, error)
 	InstallRootFSLiveCommit(context.Context, *sandboxstore.InstallRootFSLiveCommitRequest) (*sandboxstore.RootFSLiveProgress, error)
+}
+
+type liveObservationStore interface {
+	ObserveRootFSLiveCommit(context.Context, *sandboxstore.ObserveRootFSLiveCommitRequest) (*protocol.LiveCommitObservation, error)
+}
+
+func serveLiveObservation(config HandlerConfig, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.Header().Set("Allow", http.MethodPut)
+		writeError(w, http.StatusMethodNotAllowed, "method is not supported")
+		return
+	}
+	grantID, err := parseRenewGrantID(strings.TrimSuffix(r.URL.EscapedPath(), liveObserveSuffix) + renewPathSuffix)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bearer, err := bearerToken(r.Header.Get("Authorization"))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	caller, err := config.Verifier.Verify(r.Context(), bearer)
+	if err != nil {
+		writeClassifiedError(w, err)
+		return
+	}
+	var body protocol.TerminalRequest
+	if err = decodeRequest(w, r, &body); err == nil {
+		err = body.Validate()
+	}
+	if err != nil || body.BindingVersion != sandboxstore.RootFSWriterBindingVersion {
+		writeError(w, http.StatusBadRequest, "invalid live writer observation")
+		return
+	}
+	grant, err := config.Store.GetRootFSWriterGrant(r.Context(), grantID)
+	if err != nil {
+		writeClassifiedError(w, err)
+		return
+	}
+	if err = verifyWriterGrantBinding(grant, grantID, body, caller); err != nil {
+		writeClassifiedError(w, err)
+		return
+	}
+	store, ok := config.Store.(liveObservationStore)
+	if !ok {
+		writeClassifiedError(w, errdefs.ErrUnavailable)
+		return
+	}
+	binding, _ := body.DecodedBindingDigest()
+	observation, err := store.ObserveRootFSLiveCommit(r.Context(), &sandboxstore.ObserveRootFSLiveCommitRequest{GrantID: grantID, NodeUID: caller.NodeUID,
+		WriterEpoch: body.WriterEpoch, BindingVersion: body.BindingVersion, BindingDigest: binding})
+	if err != nil {
+		writeClassifiedError(w, err)
+		return
+	}
+	if observation == nil {
+		writeClassifiedError(w, errdefs.ErrUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(observation)
+}
+
+func (c *ManagerClient) ObserveLiveCommit(ctx context.Context, stage rootfshandoff.StageRequest) (protocol.LiveCommitObservation, error) {
+	var observation protocol.LiveCommitObservation
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return observation, err
+	}
+	request := protocol.TerminalRequest{WriterEpoch: binding.WriterEpoch, BindingVersion: binding.BindingVersion, BindingDigest: binding.BindingDigest}
+	err = c.putWriterGrant(ctx, "observe live checkpoint", protocol.ConsumePath(stage.Identity.WriterGrantID)+liveObserveSuffix, request, &observation)
+	if err == nil {
+		if validation := observation.Validate(stage.Identity.WriterGrantID, stage.InitialGeneration); validation != nil {
+			err = fmt.Errorf("%w: %v", errdefs.ErrUnavailable, validation)
+		}
+	}
+	return observation, err
 }
 
 func validLiveCommitIdentity(operation string, sequence uint64) bool {

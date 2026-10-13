@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
@@ -26,6 +27,16 @@ type fakeLiveCommitStore struct {
 	install  *sandboxstore.InstallRootFSLiveCommitRequest
 	progress sandboxstore.RootFSLiveProgress
 	err      error
+	observe  *sandboxstore.ObserveRootFSLiveCommitRequest
+}
+
+func (f *fakeLiveCommitStore) ObserveRootFSLiveCommit(_ context.Context, r *sandboxstore.ObserveRootFSLiveCommitRequest) (*protocol.LiveCommitObservation, error) {
+	f.observe = r
+	o := &protocol.LiveCommitObservation{WriterState: f.grant.State, Progress: f.progress}
+	if f.publish != nil {
+		o.CommittedDescriptorDigest = digest.FromBytes(f.publish.Generation.Descriptor).String()
+	}
+	return o, f.err
 }
 
 func (f *fakeLiveCommitStore) PublishRootFSLiveCommit(_ context.Context, r *sandboxstore.PublishRootFSLiveCommitRequest) (*sandboxstore.RootFSLiveProgress, error) {
@@ -75,6 +86,17 @@ func TestLiveCommitTLSClientUsesDurableBindingAndValidatesCutAcknowledgement(t *
 	_, err = client.InstallLiveCommit(t.Context(), stage, InstallLiveCommitRequest{OperationID: request.OperationID, GenerationID: "live-1", CutSequence: 7})
 	require.NoError(t, err)
 	require.Equal(t, stage.Identity.NodeUID, store.install.NodeUID)
+	store.grant.State = sandboxstore.RootFSWriterGrantStateRetiring
+	observation, err := client.ObserveLiveCommit(t.Context(), stage)
+	require.NoError(t, err)
+	require.Equal(t, sandboxstore.RootFSWriterGrantStateRetiring, observation.WriterState)
+	require.Equal(t, uint64(7), observation.Progress.InstalledSequence)
+	require.Equal(t, stage.Identity.NodeUID, store.observe.NodeUID)
+	require.Equal(t, stage.Identity.WriterEpoch, store.observe.WriterEpoch)
+	store.progress.OperationID = protocol.LiveCommitOperationID("other-grant", 7)
+	_, err = client.ObserveLiveCommit(t.Context(), stage)
+	require.True(t, errdefs.IsUnavailable(err), "observation must be bound to the exact writer grant")
+	store.progress.OperationID = request.OperationID
 	store.progress.CommittedSequence = 6
 	_, err = client.PublishLiveCommit(t.Context(), stage, request)
 	require.True(t, errdefs.IsUnavailable(err), "a success response for a different cut cannot release the WAL")

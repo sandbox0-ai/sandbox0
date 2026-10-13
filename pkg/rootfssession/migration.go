@@ -112,6 +112,11 @@ func (m *Manager) CaptureMigrationRootFS(ctx context.Context, stage rootfshandof
 	live := m.live[stage.Parent]
 	m.mu.Unlock()
 	initial := current.Migration == nil
+	if initial {
+		if err := m.requireLiveCommitSettled(current); err != nil {
+			return zero, err
+		}
+	}
 	m.mu.Lock()
 	if m.captures[stage.Parent] {
 		m.mu.Unlock()

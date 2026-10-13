@@ -87,6 +87,10 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 		return nil, fmt.Errorf("writer authority renewal grace must be between zero and %s", sandboxstore.RootFSWriterMaxRenewGrace)
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.EscapedPath(), liveObserveSuffix) {
+			serveLiveObservation(config, writer, request)
+			return
+		}
 		if strings.HasSuffix(request.URL.EscapedPath(), liveCommitSuffix) || strings.HasSuffix(request.URL.EscapedPath(), liveInstallSuffix) {
 			serveLiveCommit(config, writer, request)
 			return

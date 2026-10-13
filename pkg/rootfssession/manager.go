@@ -44,7 +44,7 @@ const (
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
 	durableBindingSchemaVersion    = 4
-	sessionSchemaVersion           = 12
+	sessionSchemaVersion           = 13
 	stateReserved                  = "reserved"
 	stateDeviceReserved            = "device_reserved"
 	stateDeviceReady               = "device_ready"
@@ -135,6 +135,7 @@ type Config struct {
 	Publisher                       rootfsblock.ImmutableObjectPublisher
 	PublisherForOperation           func(rootfshandoff.StageRequest, string) rootfsblock.ImmutableObjectPublisher
 	PublisherForRebase              func(rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher
+	LiveCommitAuthority             LiveCommitAuthority
 	Runtime                         HostRuntime
 	RebaseEngine                    RebaseEngine
 }
@@ -184,6 +185,8 @@ type record struct {
 	GenerationID              string                                      `json:"generation_id"`
 	BaseDescriptor            []byte                                      `json:"base_descriptor,omitempty"`
 	BranchPath                string                                      `json:"branch_path"`
+	BranchSequenceBase        uint64                                      `json:"branch_sequence_base,omitempty"`
+	LiveCommit                *liveCommitRecord                           `json:"live_commit,omitempty"`
 	DevicePath                string                                      `json:"device_path,omitempty"`
 	DeviceAllocationID        string                                      `json:"device_allocation_id,omitempty"`
 	DeviceReservationReleased bool                                        `json:"device_reservation_released,omitempty"`
@@ -308,6 +311,8 @@ type Manager struct {
 	publisher             rootfsblock.ImmutableObjectPublisher
 	publisherForOperation func(rootfshandoff.StageRequest, string) rootfsblock.ImmutableObjectPublisher
 	publisherForRebase    func(rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher
+	liveCommitAuthority   LiveCommitAuthority
+	liveCommitWG          sync.WaitGroup
 	readCache             *rootfsblock.ReadCache
 	runtime               HostRuntime
 	maxDirty              int64
@@ -416,7 +421,8 @@ func New(config Config) (*Manager, error) {
 	manager := &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, publisherForOperation: config.PublisherForOperation, publisherForRebase: config.PublisherForRebase, readCache: readCache,
-		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
+		liveCommitAuthority: config.LiveCommitAuthority,
+		runtime:             config.Runtime, maxDirty: config.MaxDirtyTailBytes,
 		retirementReserve: config.DirtyTailRetirementReserveBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
@@ -675,6 +681,10 @@ func (m *Manager) CaptureRunningFork(
 	if !sameBinding(current, stage, bindingText) || current.State != stateReady || current.Stage == nil {
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session is not a live matching writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := m.requireLiveCommitSettled(current); err != nil {
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
 	if current.RunningForkRequest != nil {
 		if *current.RunningForkRequest != request {
@@ -1602,6 +1612,9 @@ func (m *Manager) BeginRetire(parent string, identity rootfshandoff.Identity, op
 	if current.State != stateReady {
 		return fmt.Errorf("RootFS session cannot retire from state %q: %w", current.State, errdefs.ErrFailedPrecondition)
 	}
+	if err := m.requireLiveCommitSettled(current); err != nil {
+		return err
+	}
 	if current.DirtyTailPressure != nil && current.DirtyTailPressure.OperationID != operationID {
 		return fmt.Errorf("RootFS session pressure belongs to operation %q: %w", current.DirtyTailPressure.OperationID, errdefs.ErrAlreadyExists)
 	}
@@ -1672,22 +1685,20 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 // explicitly authorized migration completion. Callers hold the session lock
 // and verify the exact durable physical fence before entering.
 func (m *Manager) reclaimTerminalArtifactsLocked(current *record) error {
-	expected := sessionPaths(m.branchRoot, m.mountRoot, current.Parent).branch
-	if current.BranchPath != expected {
-		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	branches, err := m.ownedSessionBranches(*current)
+	if err != nil {
+		return err
 	}
 	if !current.BranchRemoved {
-		if err := m.nodeDirty.ValidateOwnerDetached(expected); err != nil {
-			return fmt.Errorf("validate terminal RootFS branch release: %w", err)
+		for _, path := range branches {
+			if err := m.nodeDirty.ValidateOwnerDetached(path); err != nil {
+				return fmt.Errorf("validate terminal RootFS branch release: %w", err)
+			}
 		}
-		if err := os.Remove(expected); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove terminal RootFS branch: %w", err)
-		}
-		if err := syncTerminalDirectory(filepath.Dir(expected)); err != nil {
-			return fmt.Errorf("sync terminal RootFS branch removal: %w", err)
-		}
-		if err := m.nodeDirty.ReleaseOwner(expected); err != nil {
-			return fmt.Errorf("release terminal RootFS dirty tail: %w", err)
+		for _, path := range branches {
+			if err := m.removeInactiveLiveBranch(path); err != nil {
+				return fmt.Errorf("remove terminal RootFS branch: %w", err)
+			}
 		}
 		current.BranchRemoved = true
 		if err := m.save(*current); err != nil {
@@ -1783,13 +1794,16 @@ func reclaimedExternalProof(current record) (bool, error) {
 
 func (m *Manager) validateTerminalArtifactAbsence(current record) error {
 	paths := sessionPaths(m.branchRoot, m.mountRoot, current.Parent)
-	if current.BranchPath != paths.branch {
-		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	branches, err := m.ownedSessionBranches(current)
+	if err != nil {
+		return err
 	}
-	if err := m.nodeDirty.ValidateOwnerDetached(paths.branch); err != nil {
-		return fmt.Errorf("validate terminal RootFS branch owner absence: %w", err)
+	for _, path := range branches {
+		if err := m.nodeDirty.ValidateOwnerDetached(path); err != nil {
+			return fmt.Errorf("validate terminal RootFS branch owner absence: %w", err)
+		}
 	}
-	for _, path := range []string{paths.branch, filepath.Dir(paths.xfs)} {
+	for _, path := range append(branches, filepath.Dir(paths.xfs)) {
 		if _, err := os.Lstat(path); err == nil {
 			return fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -2172,6 +2186,18 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 // releasePhysicalLocked is shared teardown. Migration callers must first
 // persist exact handoff intent; the public release path rejects their custody.
 func (m *Manager) releasePhysicalLocked(ctx context.Context, current record) error {
+	if current.RetireOperationID != "" {
+		if err := m.requireLiveCommitSettled(current); err != nil {
+			return err
+		}
+	} else {
+		m.mu.Lock()
+		busy := m.captures[current.Parent]
+		m.mu.Unlock()
+		if busy {
+			return errdefs.ErrUnavailable
+		}
+	}
 	parent := current.Parent
 	plannedRetire := current.RetireOperationID != ""
 	if current.DirtyTailPressure != nil && !plannedRetire {
@@ -2352,6 +2378,7 @@ func (m *Manager) reopenBranchWithIndex(current record, index *os.File) (*rootfs
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
+		SequenceBase: current.BranchSequenceBase,
 	}, reader, options)
 	if err != nil {
 		return nil, fmt.Errorf("reopen session branch: %w", err)
@@ -2394,6 +2421,7 @@ func (m *Manager) Close() error {
 	m.closing = true
 	m.mu.Unlock()
 	m.cancel()
+	m.liveCommitWG.Wait()
 	m.rebaseWG.Wait()
 	m.mu.Lock()
 	live := make([]*liveSession, 0, len(m.live))
@@ -2449,6 +2477,12 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 	m.recoveryMu.RUnlock()
 	sort.Strings(parents)
 	pressures := make([]DirtyTailPressureSession, 0)
+	// Never acquire a branch lock while holding Bolt's writer transaction:
+	// live installation holds the branch lock while persisting its pointer.
+	observedPressure := make(map[string]*rootfsblock.DirtyTailPressure, len(live))
+	for parent, branch := range live {
+		observedPressure[parent] = branch.DirtyTailPressure()
+	}
 	err := m.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		type pressureUpdate struct {
@@ -2488,11 +2522,7 @@ func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error
 					return fmt.Errorf("validate persisted RootFS pressure %q", key)
 				}
 			} else {
-				branch := live[string(key)]
-				if branch == nil {
-					continue
-				}
-				observed := branch.DirtyTailPressure()
+				observed := observedPressure[string(key)]
 				if observed == nil {
 					continue
 				}
@@ -2705,6 +2735,9 @@ func (m *Manager) load(parent string) (record, error) {
 	})
 	if err == nil {
 		err = validateAbandonedMigrationCut(value)
+	}
+	if err == nil && (value.LiveCommit != nil || value.BranchSequenceBase != 0) {
+		err = m.validateLiveCommit(value)
 	}
 	return value, err
 }

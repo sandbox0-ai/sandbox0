@@ -28,18 +28,19 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Complete acceptance of separate initial XFS size and sparse device geometry
-   through imports and their immutable artifact identity.
-2. Add mounted-XFS inspection and bounded early growth under session ownership.
-3. Add crash-safe WAL suffix rotation and accurate node budget reclamation.
-4. Add authenticated, idempotent live generation publication and recovery,
-   coordinated with lifecycle operations and regional storage custody.
-5. Schedule bounded live commits/growth and wake blocked writers after reclaim.
-6. Regenerate affected public contracts/SDKs and update runtime, CLI, website,
+1. Wire the session's durable live-commit interface to the node's authenticated
+   regional client and reconcile pending operations before lifecycle transfers.
+2. Schedule bounded live commits and early XFS growth under session ownership;
+   growth must not hold a lock required by a blocked writer's commit/reclaim.
+3. Replace the deployed pressure-triggered retirement path with live reclaim
+   for enabled writers, and verify outage/pressure recovery without process loss.
+4. Verify all lifecycle operations, GC and live ctld transfer with installed
+   live bases and interrupted node operations.
+5. Regenerate affected public contracts/SDKs and update runtime, CLI, website,
    and operator docs to describe initial size, growth ceiling, and durability.
-7. Create an isolated remote fixture and run real NBD/XFS/runsc and PostgreSQL/
+6. Use the isolated remote fixture for real NBD/XFS/runsc and PostgreSQL/
    object-storage acceptance. Retain sanitized evidence and remove resources.
-8. Merge passing changes, deploy manager before enabling node behavior, then
+7. Merge passing changes, deploy manager before enabling node behavior, then
    roll workers with memory-preserving drain and verify production continuity.
 
 ## Acceptance gates
@@ -126,7 +127,8 @@ Live publication tracks a separate regional committed generation and node-instal
 base generation; updating the Stage's initial generation would invalidate writer
 authentication and retained lifecycle proofs.
 
-Migration 121 and the authenticated `/live-commit` and `/live-commit/installed`
+Migration 121 and the authenticated `/live-commit`, `/live-commit/installed`
+and `/live-commit/status`
 writer endpoints implement this regional cursor. A positive cut sequence identifies
 each live generation; sequence zero preserves the existing single terminal
 generation per filesystem/writer epoch. New cuts require the exact consumed,
@@ -148,9 +150,59 @@ authentication and lifecycle proof identity without discarding remote durable cu
 
 This regional path passed isolated Linux PostgreSQL tests with in-memory immutable
 objects, plus HTTPS client/handler authentication tests. It does not yet establish
-full-product automatic growth, node journal recovery, remote object-service or
-gVisor acceptance. The node scheduler and durable rotation transaction remain to
-be integrated before enabling sparse imports or deploying this feature.
+full-product automatic growth, remote object-service or gVisor acceptance. The
+node's authenticated adapter, scheduler, lifecycle recovery and full-product
+acceptance remain required before enabling sparse imports or deploying this
+feature.
+
+## Durable node live-commit transaction
+
+The session manager now exposes an explicit `CommitLive` operation through a
+separate authority interface. It does not implicitly start a scheduler or enable
+production behavior. Session journal version 13 records the deterministic grant/
+sequence operation, exact flushed WAL cut, materialized publication payload,
+regional receipt, selected branch path/sequence, installed base and one obsolete
+branch. The launch Stage and generation ID remain unchanged.
+
+Before PUT, persist the flushed cut. Upload retries use `CheckpointAtCut`, which
+reads the original prefix even if later writes overwrite those blocks. Persist
+the complete publication before asking the region to accept it. A lost reply is
+resolved by the authenticated status observation; an accepted operation is never
+rebuilt or re-uploaded after its upload receipt has been compacted.
+Active status observations include the immutable committed descriptor's SHA-256
+digest. Matching the operation and generation IDs alone cannot authorize WAL
+release if the locally journaled publication payload differs.
+
+After acceptance, the Bolt transaction selects the materialized read base and
+suffix WAL before switching the same NBD Branch. Ambiguous local acknowledgements
+retain both files. Recovery reads the durable selection and verifies every copied
+suffix record against the complete old WAL before resuming append admission.
+Pending writes wait through this transition rather than receiving a temporary
+I/O error that could shut down XFS. The region receives the installed-base ack
+only after durable selection and in-memory installation; lifecycle publication
+and planned live handoff reject unsettled installations.
+
+WAL rotation copies at most 8 MiB of post-cut payload while holding the branch
+lock. If that suffix or its normal node-budget duplication does not fit, retain
+the acknowledged remote cursor and full selected WAL, then take a newer cut.
+An empty successor consumes no payload budget and can reclaim a preloaded WAL
+even after limits were lowered. Protected retirement reserve remains unavailable
+to normal writes and nonempty rotation copies. Obsolete WAL cleanup uses exact
+parent/sequence paths, not directory globs.
+
+Uploads hold neither the parent lock nor a filesystem freeze. Storage progress
+is merged in the Bolt write transaction so concurrent consumer renewal is not
+overwritten by an older upload snapshot. Branch pressure is observed before a
+Bolt writer transaction to avoid the branch-lock/journal-lock inversion during
+installation. Unplanned physical teardown can retain an unresolved receipt;
+artifact deletion still requires the existing exact regional terminal proof.
+
+Isolated Linux race tests verify upload failure, lost publication and installation
+replies, original-cut retry, continued suffix writes, concurrent consumer renewal,
+normal-budget recutting, durable successor reopen and guarded terminal cleanup.
+The complete session test suite also passed on that host. These tests use real
+Bolt journals with fake host runtime and in-memory immutable objects; actual
+runsc, remote object-storage and deployment gates remain open.
 
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
@@ -116,17 +117,34 @@ func TestBranchRotationRetainsBothJournalsOnAmbiguousInstallation(t *testing.T) 
 		_, err = os.Stat(journal)
 		require.NoError(t, err)
 	}
-	_, err = branch.WriteAt([]byte("must not append"), 0)
-	require.ErrorIs(t, err, injected)
-	// If durable state chose the successor, it contains the complete suffix.
-	reopened, err := OpenBranch(destination, installed, bytes.NewReader(newBase))
-	require.NoError(t, err)
-	defer reopened.Close()
+	written := make(chan error, 1)
+	go func() { _, writeErr := branch.WriteAt([]byte("next"), 0); written <- writeErr }()
+	select {
+	case writeErr := <-written:
+		t.Fatalf("uncertain journal append returned instead of waiting: %v", writeErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// Durable state chose the successor. Recovery resumes the same backend.
+	require.NoError(t, branch.RecoverRotation(destination, installed, bytes.NewReader(newBase)))
+	select {
+	case writeErr := <-written:
+		require.NoError(t, writeErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not resume after recovery")
+	}
 	actual := make([]byte, len(initial))
-	_, err = reopened.ReadAt(actual, 0)
+	_, err = branch.ReadAt(actual, 0)
 	require.NoError(t, err)
 	copy(newBase[LogicalBlockSize:], []byte("suffix"))
+	copy(newBase, []byte("next"))
 	require.Equal(t, newBase, actual)
+	require.Equal(t, installed, branch.Identity())
+	require.NoError(t, branch.Flush())
+	sequence, err := branch.DurableSequence()
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), sequence)
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestBranchRotationDoesNotConsumeProtectedRetirementBudget(t *testing.T) {

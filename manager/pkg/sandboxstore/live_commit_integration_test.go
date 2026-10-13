@@ -280,8 +280,18 @@ func TestRootFSLiveCommitConcurrentCutsHaveOneCASWinnerIntegration(t *testing.T)
 func TestRootFSLiveCommitCrashRestoresLastRemoteCutIntegration(t *testing.T) {
 	f, objects := newLiveCommitFixture(t)
 	ctx := t.Context()
+	observe := &ObserveRootFSLiveCommitRequest{GrantID: f.issued.Grant.ID, NodeUID: "node-a", WriterEpoch: f.issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: f.request.BindingDigest}
+	observation, err := f.store.ObserveRootFSLiveCommit(ctx, observe)
+	require.NoError(t, err)
+	require.Equal(t, f.initial.ID, observation.Progress.CommittedGenerationID)
+	require.Zero(t, observation.Progress.CommittedSequence)
+	forged := *observe
+	forged.NodeUID = "other-node"
+	_, err = f.store.ObserveRootFSLiveCommit(ctx, &forged)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantConflict)
 	commit := buildLiveCommit(t, f, objects, f.initial, f.initial, 9, 99)
-	_, err := f.store.PublishRootFSLiveCommit(ctx, commit)
+	_, err = f.store.PublishRootFSLiveCommit(ctx, commit)
 	require.NoError(t, err)
 	// No local installation ack. Crash recovery must still use this durable cut,
 	// after the usual physical terminal proof, rather than reverting to launch.
@@ -289,7 +299,16 @@ func TestRootFSLiveCommitCrashRestoresLastRemoteCutIntegration(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.store.BeginRootFSWriterCrashAbandon(ctx, f.beginRequest)
 	require.NoError(t, err)
+	observation, err = NewPGSandboxStore(f.pool).ObserveRootFSLiveCommit(ctx, observe)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetiring, observation.WriterState)
+	require.Equal(t, commit.Generation.ID, observation.Progress.CommittedGenerationID)
+	require.Equal(t, f.initial.ID, observation.Progress.InstalledGenerationID)
 	require.NoError(t, f.complete(t))
+	observation, err = f.store.ObserveRootFSLiveCommit(ctx, observe)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, observation.WriterState)
+	require.Equal(t, uint64(9), observation.Progress.CommittedSequence)
 	fs, err := NewPGSandboxStore(f.pool).GetRootFSFilesystem(ctx, f.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, commit.Generation.ID, fs.HeadGenerationID)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/jackc/pgx/v5"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
@@ -38,13 +39,43 @@ type InstallRootFSLiveCommitRequest struct {
 	CutSequence                   uint64
 }
 
-type RootFSLiveProgress struct {
-	CommittedGenerationID string `json:"committed_generation_id"`
-	CommittedSequence     uint64 `json:"committed_sequence"`
-	InstalledGenerationID string `json:"installed_generation_id"`
-	InstalledSequence     uint64 `json:"installed_sequence"`
-	OperationID           string `json:"operation_id"`
-	RequestDigest         []byte `json:"-"`
+type RootFSLiveProgress = protocol.LiveCommitProgress
+
+type ObserveRootFSLiveCommitRequest struct {
+	GrantID, NodeUID string
+	WriterEpoch      int64
+	BindingVersion   int
+	BindingDigest    []byte
+}
+
+func (s *PGSandboxStore) ObserveRootFSLiveCommit(ctx context.Context, req *ObserveRootFSLiveCommitRequest) (*protocol.LiveCommitObservation, error) {
+	if req == nil {
+		return nil, errdefs.ErrInvalidArgument
+	}
+	var observation *protocol.LiveCommitObservation
+	err := s.withRootFSWriterGrantTx(ctx, func(tx pgx.Tx) error {
+		grant, err := lockRootFSLiveWriter(ctx, tx, req.GrantID, req.NodeUID, req.WriterEpoch, req.BindingVersion, req.BindingDigest)
+		if err != nil {
+			return err
+		}
+		progress, err := getRootFSLiveProgress(ctx, tx, grant.ID)
+		if err != nil {
+			return err
+		}
+		if progress == nil {
+			progress = &RootFSLiveProgress{CommittedGenerationID: grant.InitialGenerationID, InstalledGenerationID: grant.InitialGenerationID}
+		}
+		observation = &protocol.LiveCommitObservation{WriterState: grant.State, Progress: *progress}
+		if progress.CommittedSequence > 0 && (grant.State == RootFSWriterGrantStateConsumed || grant.State == RootFSWriterGrantStateRetiring) {
+			var payload []byte
+			if err := tx.QueryRow(ctx, `SELECT descriptor FROM manager.rootfs_generations WHERE generation_id=$1`, progress.CommittedGenerationID).Scan(&payload); err != nil {
+				return err
+			}
+			observation.CommittedDescriptorDigest = digest.FromBytes(payload).String()
+		}
+		return observation.Validate(grant.ID, grant.InitialGenerationID)
+	})
+	return observation, err
 }
 
 func (s *PGSandboxStore) PublishRootFSLiveCommit(ctx context.Context, req *PublishRootFSLiveCommitRequest) (*RootFSLiveProgress, error) {

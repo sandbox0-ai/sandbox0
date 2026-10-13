@@ -197,6 +197,9 @@ func (m *Manager) liveHandoffRecords() (map[string]string, error) {
 			}
 			switch current.State {
 			case stateReady:
+				if current.LiveCommit != nil && (current.LiveCommit.Pending != nil || current.LiveCommit.ObsoleteBranch != nil) {
+					return fmt.Errorf("RootFS session %s has an unfinished live installation", key)
+				}
 				digest := sha256.Sum256(value)
 				result[string(key)] = hex.EncodeToString(digest[:])
 			case stateTombstoned, stateReserved, stateDeviceReserved:

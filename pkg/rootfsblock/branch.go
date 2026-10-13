@@ -736,14 +736,11 @@ func (b *Branch) admitRecordsLocked(records int64) error {
 		return nil
 	}
 	for {
-		if b.rotationFailure != nil {
-			return fmt.Errorf("branch rotation installation is uncertain: %w", b.rotationFailure)
-		}
-		for b.pressure != nil && !b.retiring && !b.closed && b.rotationFailure == nil {
+		// An ambiguous local commit must be resolved before appending to either
+		// WAL. Keep the guest I/O pending, rather than returning an EIO that can
+		// permanently shut down XFS during an otherwise recoverable transition.
+		for !b.closed && (b.rotationFailure != nil || b.pressure != nil && !b.retiring) {
 			b.pressureChanged.Wait()
-		}
-		if b.rotationFailure != nil {
-			return fmt.Errorf("branch rotation installation is uncertain: %w", b.rotationFailure)
 		}
 		if b.closed {
 			return os.ErrClosed

@@ -152,15 +152,13 @@ func autogrowVerifyRegionalFork(t *testing.T, ctx context.Context, root string, 
 	require.GreaterOrEqual(t, stat.Size(), int64(100<<20))
 	require.Less(t, stat.Size(), int64(600<<20), "fork must retain its earlier boundary after the source completes")
 	buffer := make([]byte, 1<<20)
+	stress := os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_UNIQUE") == "1"
 	for offset := int64(0); offset < stat.Size(); {
 		length := min(int64(len(buffer)), stat.Size()-offset)
 		_, err := io.ReadFull(file, buffer[:length])
 		require.NoError(t, err)
-		for index, value := range buffer[:length] {
-			if value != byte(((offset+int64(index))>>20)%251) {
-				t.Fatalf("fork byte differs at offset=%d", offset+int64(index))
-			}
-		}
+		expected := autogrowChunkPattern(int(offset>>20), stress, false)
+		require.True(t, bytes.Equal(expected[:length], buffer[:length]), "fork chunk differs at offset=%d", offset)
 		offset += length
 	}
 	t.Logf("real_remote_fork_prefix_bytes_verified=%d source_final_bytes=%d fresh_cache_device=true", stat.Size(), 600<<20)

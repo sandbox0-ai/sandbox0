@@ -440,6 +440,44 @@ fork/resume, memory capture, crash recovery and deployment gates remain open.
 The workload uses repeating byte patterns, so high-entropy storage throughput
 and multiple contending writers still need separate acceptance.
 
+## High-entropy writes, mutations and bounded local artifacts
+
+The combined Linux race gate passed with `SANDBOX0_ROOTFS_AUTOGROW_UNIQUE=1`,
+regional fork and cold restore in 306.161 seconds. A deterministic high-entropy
+stream includes a distinct address marker in every 4 KiB block. The guest first
+wrote 600 MiB, then overwrote 78 earlier 1 MiB chunks with new contents, zeroed
+55 chunks and deleted/recreated a 64 KiB file with different contents. Both the
+original mount and a fresh stock-runsc reader verified the final bytes. The
+independent regional fork retained its earlier 157 MiB prefix after all source
+mutations. Peak sampled source WAL payload was 33,787,904 bytes and installed
+sequence reached 187,900. XFS retained its 1,200 MiB size through cold recovery.
+
+The strengthened gate also passed with injected object-request failures and
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD=30s` in 337.796 seconds. After observing
+failed requests and normal WAL admission pressure, it held transport failure for
+30 more seconds (16 rejected requests), then restored access to real RustFS.
+The same guest completed the high-entropy writes and mutations; regional fork,
+remote cold verification and both normal retirements passed. Both deliberately
+lost acknowledgements converged. Peak sampled WAL payload was 41,844,736 bytes
+and installed sequence reached 188,548.
+
+Allocated filesystem blocks of source-side branch files, disk cache and Bolt
+state were sampled once per second and after verification. Their observed peak
+was 42,225,664 bytes, within a fixed 134,217,728-byte acceptance bound. This
+counts disposable compute artifacts, excluding mounted virtual RootFS contents
+and the separate RustFS object-service data. The test object service runs on the
+same disposable host, so whole-host `df` would mix worker and durable-storage
+usage. This is sampled evidence for one writer, not a fleet-wide occupancy bound
+or a guarantee about arbitrary write rates.
+
+Set `SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE=1`,
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK=1` alongside the unique-write mode to run
+this gate; it requires both explicitly reserved unused devices. Use a 20-minute
+Go test timeout. Optional `SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD` accepts durations
+from five seconds to two minutes. Provider-level outages, node-wide contention,
+crash abandonment, full Nomad lifecycle and production rollout remain open.
+
 ## Public capacity description synchronization
 
 The public OpenAPI field keeps its existing name and shape. Its description now

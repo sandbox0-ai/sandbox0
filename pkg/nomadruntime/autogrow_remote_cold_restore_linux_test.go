@@ -113,8 +113,12 @@ func autogrowVerifyColdRestore(t *testing.T, ctx context.Context, originalRoot s
 			t.Errorf("retain cold network namespace: %v", err)
 		}
 	}()
+	readerArgs := []string{"/writer", "verify"}
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_UNIQUE") == "1" {
+		readerArgs = append(readerArgs, "stress")
+	}
 	spec := specs.Spec{Version: specs.Version, Root: &specs.Root{Path: mount.Source, Readonly: true},
-		Process: &specs.Process{Cwd: "/", Args: []string{"/writer", "verify"}, Env: []string{"PATH=/"}},
+		Process: &specs.Process{Cwd: "/", Args: readerArgs, Env: []string{"PATH=/"}},
 		Mounts: []specs.Mount{{Destination: "/proc", Type: "proc", Source: "proc"}, {Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}},
 			{Destination: "/evidence", Type: "bind", Source: filepath.Join(originalRoot, "evidence"), Options: []string{"rbind", "rw"}}},
 		Linux: &specs.Linux{Namespaces: []specs.LinuxNamespace{{Type: specs.PIDNamespace}, {Type: specs.MountNamespace}, {Type: specs.NetworkNamespace}, {Type: specs.IPCNamespace}, {Type: specs.UTSNamespace}}}}

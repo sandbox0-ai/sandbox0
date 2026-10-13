@@ -39,6 +39,7 @@ const autogrowWriterSource = `#define _GNU_SOURCE
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdint.h>
 static void die(const char *op) {
  int e=errno; int fd=open("/evidence/error.txt",O_WRONLY|O_CREAT|O_TRUNC,0600);
  if(fd>=0) { dprintf(fd,"%s: errno=%d\n",op,e); close(fd); } _exit(1);
@@ -46,20 +47,46 @@ static void die(const char *op) {
 static void all(int fd,const unsigned char *p,size_t n) {
  while(n) { ssize_t w=write(fd,p,n); if(w<=0) die("write"); p+=w; n-=w; }
 }
-static void verify(void) {
- unsigned char *chunk=malloc(1048576); if(!chunk) die("verify-malloc");
+static void pattern(unsigned char *chunk,int i,int stress,int final) {
+ if(final&&stress&&i%11==0) { memset(chunk,0,1048576); return; }
+ if(final&&stress&&i%7==0) i+=600;
+ if(!stress) { memset(chunk,i%251,1048576); return; }
+ uint32_t state=0x9e3779b9U^(uint32_t)(i+1);
+ for(int j=0;j<1048576;j+=4) {
+  state^=state<<13; state^=state>>17; state^=state<<5;
+  for(int k=0;k<4;k++) chunk[j+k]=(unsigned char)(state>>(8*k));
+ }
+ for(int j=0;j<1048576;j+=4096) {
+  uint64_t block=((uint64_t)(uint32_t)i<<32)|(uint64_t)(j/4096);
+  for(int k=0;k<8;k++) chunk[j+k]=(unsigned char)(block>>(8*k));
+ }
+}
+static void pall(int fd,const unsigned char *p,size_t n,off_t off) {
+ while(n) { ssize_t w=pwrite(fd,p,n,off); if(w<=0) die("pwrite"); p+=w; n-=w; off+=w; }
+}
+static void verify(int stress) {
+ unsigned char *chunk=malloc(1048576),*expected=malloc(1048576); if(!chunk||!expected) die("verify-malloc");
  int fd=open("/growing.bin",O_RDONLY); if(fd<0) die("verify-open");
  for(int i=0;i<600;i++) {
   size_t off=0;
   while(off<1048576) { ssize_t n=read(fd,chunk+off,1048576-off); if(n<=0) die("verify-read"); off+=n; }
-  for(int j=0;j<1048576;j++) if(chunk[j]!=(unsigned char)(i%251)) { errno=EIO; die("verify-content"); }
+  pattern(expected,i,stress,1);
+  if(memcmp(chunk,expected,1048576)) { errno=EIO; die("verify-content"); }
  }
  unsigned char extra; if(read(fd,&extra,1)!=0) { errno=EIO; die("verify-size"); }
  if(close(fd)) die("verify-close");
+ if(stress) {
+  fd=open("/turnover.bin",O_RDONLY); if(fd<0) die("verify-turnover-open");
+  size_t off=0; while(off<65536) { ssize_t n=read(fd,chunk+off,65536-off); if(n<=0) die("verify-turnover-read"); off+=n; }
+  pattern(expected,77,1,0);
+  if(memcmp(chunk,expected,65536)||read(fd,&extra,1)!=0) { errno=EIO; die("verify-turnover"); }
+  if(close(fd)) die("verify-turnover-close");
+ }
  puts("verified_remote_rootfs_bytes=629145600");
 }
 int main(int argc,char **argv) {
- if(argc==2&&!strcmp(argv[1],"verify")) { verify(); return 0; }
+ if(argc>=2&&!strcmp(argv[1],"verify")) { verify(argc==3&&!strcmp(argv[2],"stress")); return 0; }
+ int stress=argc==2&&!strcmp(argv[1],"stress");
  unsigned char token[16]; if(getrandom(token,sizeof(token),0)!=sizeof(token)) die("token");
  char text[33]; for(int i=0;i<16;i++) sprintf(text+2*i,"%02x",token[i]);
  unsigned char *chunk=malloc(1048576),*marker=malloc(1048576); if(!chunk||!marker) die("malloc");
@@ -67,13 +94,25 @@ int main(int argc,char **argv) {
  int fd=open("/growing.bin",O_RDWR|O_CREAT|O_TRUNC,0600); if(fd<0) die("open");
  struct stat st; if(fstat(fd,&st)) die("fstat");
  for(int i=0;i<600;i++) {
-  memset(chunk,i%251,1048576); all(fd,chunk,1048576); if(fsync(fd)) die("fsync");
+  pattern(chunk,i,stress,0); all(fd,chunk,1048576); if(fsync(fd)) die("fsync");
   for(int j=0;j<1048576;j++) if(marker[j]!=0x5a) die("heap-marker");
   off_t off=lseek(fd,0,SEEK_CUR); if(off!=(off_t)(i+1)*1048576) die("open-offset");
   int proof=open("/evidence/state.new",O_WRONLY|O_CREAT|O_TRUNC,0600); if(proof<0) die("proof");
   dprintf(proof,"{\"pid\":%d,\"token\":\"%s\",\"chunks\":%d,\"offset\":%lld,\"inode\":%llu,\"marker_ok\":true}\n",getpid(),text,i+1,(long long)off,(unsigned long long)st.st_ino);
   if(close(proof)||rename("/evidence/state.new","/evidence/state.json")) die("proof-publish");
   usleep(5000);
+ }
+ if(stress) {
+  for(int i=0;i<600;i++) if(i%7==0||i%11==0) {
+   pattern(chunk,i,1,1); pall(fd,chunk,1048576,(off_t)i*1048576); if(fsync(fd)) die("overwrite-fsync");
+   if(lseek(fd,0,SEEK_CUR)!=(off_t)600*1048576) die("overwrite-offset");
+   for(int j=0;j<1048576;j++) if(marker[j]!=0x5a) die("overwrite-marker");
+  }
+  int turnover=open("/turnover.bin",O_WRONLY|O_CREAT|O_TRUNC,0600); if(turnover<0) die("turnover-open");
+  pattern(chunk,42,1,0); all(turnover,chunk,65536);
+  if(fsync(turnover)||close(turnover)||unlink("/turnover.bin")) die("turnover-delete");
+  turnover=open("/turnover.bin",O_WRONLY|O_CREAT|O_EXCL,0600); if(turnover<0) die("turnover-recreate");
+  pattern(chunk,77,1,0); all(turnover,chunk,65536); if(fsync(turnover)||close(turnover)) die("turnover-fsync");
  }
  if(close(fd)) die("close"); return 0;
 }`
@@ -95,7 +134,12 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 		require.NotEmpty(t, os.Getenv(key), "missing explicit acceptance input %s", key)
 	}
 	require.Zero(t, os.Geteuid())
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
+	stress := os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_UNIQUE") == "1"
+	timeout := 8 * time.Minute
+	if stress {
+		timeout = 18 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	root, err := os.MkdirTemp("", "sandbox0-remote-autogrow-")
 	require.NoError(t, err)
@@ -204,7 +248,11 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 			t.Errorf("retain null network namespace: %v", err)
 		}
 	}()
-	spec := specs.Spec{Version: specs.Version, Root: &specs.Root{Path: mount.Source}, Process: &specs.Process{Cwd: "/", Args: []string{"/writer"}, Env: []string{"PATH=/"}},
+	writerArgs := []string{"/writer"}
+	if stress {
+		writerArgs = append(writerArgs, "stress")
+	}
+	spec := specs.Spec{Version: specs.Version, Root: &specs.Root{Path: mount.Source}, Process: &specs.Process{Cwd: "/", Args: writerArgs, Env: []string{"PATH=/"}},
 		Mounts: []specs.Mount{{Destination: "/proc", Type: "proc", Source: "proc"}, {Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"mode=755", "size=1m"}},
 			{Destination: "/evidence", Type: "bind", Source: filepath.Join(root, "evidence"), Options: []string{"rbind", "rw"}}},
 		Linux: &specs.Linux{Namespaces: []specs.LinuxNamespace{{Type: specs.PIDNamespace}, {Type: specs.MountNamespace}, {Type: specs.NetworkNamespace}, {Type: specs.IPCNamespace}, {Type: specs.UTSNamespace}}}}
@@ -248,6 +296,8 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	defer ticker.Stop()
 	var first, last autogrowGuestEvidence
 	peakWAL := int64(0)
+	peakArtifactBytes := int64(0)
+	lastArtifactSample := time.Time{}
 	freezeChecked := false
 	outageChecked := false
 	running := true
@@ -260,6 +310,10 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 			t.Fatal(ctx.Err())
 		case <-ticker.C:
 			peakWAL = max(peakWAL, m.NodeDirtyTailUsage().UsedBytes)
+			if time.Since(lastArtifactSample) >= time.Second {
+				peakArtifactBytes = max(peakArtifactBytes, autogrowNodeArtifactBytes(t, root))
+				lastArtifactSample = time.Now()
+			}
 			data, err := os.ReadFile(filepath.Join(root, "evidence/state.json"))
 			if os.IsNotExist(err) {
 				continue
@@ -296,13 +350,23 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 					require.NoError(t, json.Unmarshal(blocked, &proof))
 					require.Equal(t, first.Token, proof.Token)
 					require.Equal(t, first.PID, proof.PID)
-					timer := time.NewTimer(5 * time.Second)
+					hold := 5 * time.Second
+					if raw := os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD"); raw != "" {
+						var err error
+						hold, err = time.ParseDuration(raw)
+						require.NoError(t, err)
+						require.GreaterOrEqual(t, hold, 5*time.Second)
+						require.LessOrEqual(t, hold, 2*time.Minute)
+					}
+					timer := time.NewTimer(hold)
 					defer timer.Stop()
 					select {
 					case <-timer.C:
 					case <-ctx.Done():
 						t.Fatal(ctx.Err())
 					}
+					peakArtifactBytes = max(peakArtifactBytes, autogrowNodeArtifactBytes(t, root))
+					t.Logf("storage_request_outage_pressure_hold=%s rejected_requests=%d", hold, outage.rejected.Load())
 				}()
 				outageChecked = true
 			}
@@ -385,9 +449,18 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 		var chunk [1 << 20]byte
 		_, err = file.ReadAt(chunk[:], int64(i)<<20)
 		require.NoError(t, err)
-		require.True(t, bytes.Equal(chunk[:], bytes.Repeat([]byte{byte(i % 251)}, len(chunk))), "incorrect chunk %d", i)
+		require.True(t, bytes.Equal(chunk[:], autogrowChunkPattern(i, stress, true)), "incorrect chunk %d", i)
 	}
 	require.NoError(t, file.Close())
+	if stress {
+		recreated, err := os.ReadFile(filepath.Join(mount.Source, "turnover.bin"))
+		require.NoError(t, err)
+		require.Equal(t, autogrowChunkPattern(77, true, false)[:65536], recreated)
+		t.Logf("high_entropy_bytes_written=%d overwritten_chunks=78 zero_chunks=55 deleted_recreated_file_verified=true", 600<<20)
+	}
+	peakArtifactBytes = max(peakArtifactBytes, autogrowNodeArtifactBytes(t, root))
+	require.LessOrEqual(t, peakArtifactBytes, int64(128<<20), "bounded compute-side WAL, disk cache and Bolt artifacts; excludes the isolated object service")
+	t.Logf("peak_node_artifact_allocated_bytes=%d node_artifact_acceptance_limit_bytes=%d", peakArtifactBytes, 128<<20)
 	observation, err := client.ObserveLiveCommit(ctx, stage)
 	require.NoError(t, err)
 	require.Positive(t, observation.Progress.InstalledSequence)

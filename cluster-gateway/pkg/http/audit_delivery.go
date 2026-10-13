@@ -858,13 +858,6 @@ func (d *auditDelivery) walkSpool(limit, byteLimit int, owned map[string]bool, l
 	}
 }
 
-func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
-	if err := d.removeRecordsLocked(events); err != nil {
-		return err
-	}
-	return d.syncDir(d.dir)
-}
-
 func (d *auditDelivery) removeBatch(events []sandboxobservability.Event) error {
 	// ACKed records can be removed in short chunks without monopolizing spool
 	// admission. Keep one directory barrier after all removals; a crash before

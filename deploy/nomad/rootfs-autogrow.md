@@ -275,6 +275,17 @@ order and released its exclusive NBD device. These objects and authority receipt
 are still in-memory doubles; this evidence does not replace remote-service,
 runsc, lifecycle or production acceptance.
 
+The isolated fixture now includes a real RustFS 1.0.0 container pinned to
+`sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff`,
+bound only to loopback, with separate generated test credentials. The real
+PostgreSQL/RustFS `TestRootFSNodeLegacyUploadRetentionS3Integration` and
+`TestRootFSNodeUploadCustodyS3Integration` race gates passed. Legacy checkpoint
+inventory/GC reduced 11 objects to 3 and 1,114 bytes to 241 while preserving
+contents; tracked node uploads retained the expected live generation and released
+completed upload holds. These are storage-regression gates, not the combined
+authenticated live-cut/runsc acceptance gate. The fixture container, data,
+database and credentials remain temporary resources to remove after acceptance.
+
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal
    writes can otherwise prevent a freeze from completing and deadlock reclaim.

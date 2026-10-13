@@ -491,9 +491,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 	}
 
 	cleanupStarted := time.Now()
-	d.mu.Lock()
-	cleanupErr := d.removeBatchLocked(events)
-	d.mu.Unlock()
+	cleanupErr := d.removeBatch(events)
 	d.observeStage(source, "spool_cleanup", cleanupStarted, cleanupErr)
 	if cleanupErr != nil {
 		d.logger.Error("Canonical sandbox audit batch was acknowledged but spool cleanup failed",
@@ -628,9 +626,7 @@ func (d *auditDelivery) replayBatch(ctx context.Context) (bool, error) {
 		owned[id] = true
 	}
 	d.canonicalMu.Unlock()
-	d.mu.Lock()
-	events, err := d.loadReplayBatchLocked(owned)
-	d.mu.Unlock()
+	events, err := d.loadReplayBatch(owned)
 	if err != nil {
 		return false, err
 	}
@@ -763,9 +759,9 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 	return events, nil
 }
 
-func (d *auditDelivery) loadReplayBatchLocked(owned map[string]bool) ([]sandboxobservability.Event, error) {
+func (d *auditDelivery) loadReplayBatch(owned map[string]bool) ([]sandboxobservability.Event, error) {
 	events := make([]sandboxobservability.Event, 0, auditReplayBatchSize)
-	err := d.walkSpoolLocked(auditReplayBatchSize, auditReplayBatchBytes, owned, func(event sandboxobservability.Event, _ int) {
+	err := d.walkSpool(auditReplayBatchSize, auditReplayBatchBytes, owned, true, func(event sandboxobservability.Event, _ int) {
 		events = append(events, event)
 	})
 	return events, err
@@ -784,6 +780,10 @@ func (d *auditDelivery) scanSpoolLocked(limit int, visit func(sandboxobservabili
 }
 
 func (d *auditDelivery) walkSpoolLocked(limit, byteLimit int, owned map[string]bool, visit func(sandboxobservability.Event, int)) error {
+	return d.walkSpool(limit, byteLimit, owned, false, visit)
+}
+
+func (d *auditDelivery) walkSpool(limit, byteLimit int, owned map[string]bool, lockRecords bool, visit func(sandboxobservability.Event, int)) error {
 	directory, err := os.Open(d.dir)
 	if err != nil {
 		return fmt.Errorf("read audit spool: %w", err)
@@ -807,7 +807,19 @@ func (d *auditDelivery) walkSpoolLocked(limit, byteLimit int, owned map[string]b
 			if owned[strings.TrimSuffix(name, ".json")] {
 				continue
 			}
+			// Only copy a committed record under the filesystem lock. Decoding
+			// and signature verification of a large replay batch must not stall
+			// foreground fsyncs for the duration of the entire batch.
+			if lockRecords {
+				d.mu.Lock()
+			}
 			payload, err := os.ReadFile(filepath.Join(d.dir, name))
+			if lockRecords {
+				d.mu.Unlock()
+				if os.IsNotExist(err) {
+					continue // a foreground ACK may have cleaned this record
+				}
+			}
 			if err != nil {
 				return err
 			}
@@ -847,6 +859,33 @@ func (d *auditDelivery) walkSpoolLocked(limit, byteLimit int, owned map[string]b
 }
 
 func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
+	if err := d.removeRecordsLocked(events); err != nil {
+		return err
+	}
+	return d.syncDir(d.dir)
+}
+
+func (d *auditDelivery) removeBatch(events []sandboxobservability.Event) error {
+	// ACKed records can be removed in short chunks without monopolizing spool
+	// admission. Keep one directory barrier after all removals; a crash before
+	// that barrier may replay an ACKed record, as with the original cleanup.
+	for len(events) > 0 {
+		count := min(16, len(events))
+		d.mu.Lock()
+		err := d.removeRecordsLocked(events[:count])
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		events = events[count:]
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.syncDir(d.dir)
+}
+
+func (d *auditDelivery) removeRecordsLocked(events []sandboxobservability.Event) error {
+	defer d.observeSpoolPending()
 	for _, event := range events {
 		if _, err := uuid.Parse(event.EventID); err != nil {
 			return fmt.Errorf("audit event_id is invalid")
@@ -864,8 +903,7 @@ func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) e
 		d.spoolRecords--
 		d.spoolBytes -= info.Size()
 	}
-	d.observeSpoolPending()
-	return d.syncDir(d.dir)
+	return nil
 }
 
 func (d *auditDelivery) observeSpoolPending() {

@@ -136,7 +136,15 @@ func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artif
 	record := &sandboxstore.SandboxRecord{ID: sandboxID, TeamID: "autogrow-team", UserID: "autogrow-user", TemplateID: "autogrow-template",
 		TemplateName: "autogrow-template", TemplateNamespace: "sandbox0", DesiredState: sandboxstore.SandboxDesiredStateActive,
 		RuntimeGeneration: 1, RuntimeNamespace: "sandbox0", RuntimeID: "autogrow-pod", CreatedAt: time.Now().UTC(), ResourceMillicpu: 1000, ResourceMemoryMiB: 1024}
-	require.NoError(t, store.UpsertSandbox(t.Context(), record))
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
+		record.ClusterID = "autogrow-cluster"
+		record.RuntimeNamespace, record.RuntimeID = "", ""
+		_, err := store.ReserveSandboxClaim(t.Context(), &sandboxstore.ReserveSandboxClaimRequest{
+			Record: record, OperationID: "autogrow-claim-operation", LeaseTTL: time.Minute})
+		require.NoError(t, err)
+	} else {
+		require.NoError(t, store.UpsertSandbox(t.Context(), record))
+	}
 	filesystem, initial, err := store.EnsureInitialRootFSGeneration(t.Context(), &sandboxstore.EnsureInitialRootFSGenerationRequest{
 		SandboxID: sandboxID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest})
 	require.NoError(t, err)
@@ -155,11 +163,14 @@ func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artif
 	require.NoError(t, stage.Validate())
 	binding, err := stage.BindingDigest()
 	require.NoError(t, err)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
+		autogrowPrepareRegionalSlot(t, store, stage)
+	}
 	issued, err := store.IssueRootFSWriterGrant(t.Context(), &sandboxstore.IssueRootFSWriterGrantRequest{GrantID: stage.Identity.WriterGrantID,
 		SandboxID: sandboxID, ExpectedFilesystemID: filesystem.ID, InitialGenerationID: initial.ID,
 		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce, OperationID: "autogrow-issue", RawToken: token,
 		BindingVersion: stage.BindingVersion, BindingDigest: binding[:], NodeUID: stage.Identity.NodeUID, NodeBootID: stage.Identity.BootID,
-		RuntimeNamespace: record.RuntimeNamespace, RuntimeID: record.RuntimeID, RuntimeIncarnationID: stage.Identity.AllocationID,
+		RuntimeNamespace: "sandbox0", RuntimeID: "autogrow-pod", RuntimeIncarnationID: stage.Identity.AllocationID,
 		NodeName: "autogrow-node", GateParent: stage.Parent, RuntimeGeneration: stage.Identity.RuntimeGeneration, ConsumeExpiresAt: time.Now().Add(time.Minute)})
 	require.NoError(t, err)
 	require.Equal(t, stage.Identity.WriterEpoch, issued.Grant.WriterEpoch)

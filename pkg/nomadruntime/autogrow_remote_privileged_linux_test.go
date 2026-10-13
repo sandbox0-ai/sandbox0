@@ -155,6 +155,9 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	_, err = client.ConsumeWriterGrant(ctx, stage)
 	require.NoError(t, err)
 	stage = stage.WithoutWriterGrantToken()
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
+		autogrowActivateRegionalSlot(t, store, stage)
+	}
 	host, err := rootfssession.NewLinuxRuntime(rootfssession.LinuxRuntimeConfig{DevicePaths: []string{os.Getenv("SANDBOX0_PRIVILEGED_NBD_DEVICE")}})
 	require.NoError(t, err)
 	publisher := rootfsblock.ObjectStorePublisher{Store: conditional}
@@ -332,14 +335,18 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 					require.NoError(t, err)
 					return len(pressure) > 0
 				}, 10*time.Second, 10*time.Millisecond)
-				fork := rootfshandoff.RunningForkCheckpointRequest{OperationID: "autogrow-freeze-boundary",
-					SourceSandboxID: "autogrow-sandbox", TargetSandboxID: "autogrow-freeze-target", TargetGenerationID: "autogrow-freeze-generation"}
-				checkpoint, err := m.CaptureRunningFork(ctx, stage, fork)
-				require.NoError(t, err)
-				require.NoError(t, checkpoint.Validate())
-				// This gate validates a local running-fork cut and authenticated
-				// uploads, not the regional target-creation transaction.
-				require.NoError(t, m.AcknowledgeRunningFork(stage, fork.OperationID, checkpoint.ProofDigest))
+				if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
+					autogrowRegionalFork(t, ctx, store, runtime, stage)
+				} else {
+					fork := rootfshandoff.RunningForkCheckpointRequest{OperationID: "autogrow-freeze-boundary",
+						SourceSandboxID: "autogrow-sandbox", TargetSandboxID: "autogrow-freeze-target", TargetGenerationID: "autogrow-freeze-generation"}
+					checkpoint, err := m.CaptureRunningFork(ctx, stage, fork)
+					require.NoError(t, err)
+					require.NoError(t, checkpoint.Validate())
+					// This gate validates a local running-fork cut and authenticated
+					// uploads, not the regional target-creation transaction.
+					require.NoError(t, m.AcknowledgeRunningFork(stage, fork.OperationID, checkpoint.ProofDigest))
+				}
 				freezeChecked = true
 				stopControl = startControl()
 			}
@@ -358,7 +365,14 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 		require.True(t, outageChecked)
 		require.Positive(t, outage.rejected.Load())
 	}
-	require.NoError(t, m.SettleLiveCommit(ctx, stage))
+	// An accepted cut can retain a suffix larger than the bounded rotation
+	// copy. Settlement preserves the full WAL and clears that pending cut;
+	// retry the lifecycle boundary after this explicit transient outcome.
+	if err := m.SettleLiveCommit(ctx, stage); err != nil {
+		var capacity *rootfsblock.DirtyTailCapacityError
+		require.ErrorAs(t, err, &capacity)
+		require.NoError(t, m.SettleLiveCommit(ctx, stage))
+	}
 	require.True(t, loss.publish.Load())
 	require.True(t, loss.install.Load())
 	usage, err := host.InspectXFS(os.Getenv("SANDBOX0_PRIVILEGED_NBD_DEVICE"), filepath.Dir(mount.Source)+"/xfs")
@@ -389,6 +403,10 @@ func TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody(t *testi
 	grant, err := store.GetRootFSWriterGrant(ctx, stage.Identity.WriterGrantID)
 	require.NoError(t, err)
 	require.Equal(t, sandboxstore.RootFSWriterGrantStateRetired, grant.State)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
+		require.True(t, freezeChecked, "regional fork mode requires the freeze gate")
+		autogrowVerifyRegionalFork(t, ctx, root, store, conditional)
+	}
 	coldVerified := false
 	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE") == "1" {
 		require.NoError(t, m.Close())

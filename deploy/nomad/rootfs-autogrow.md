@@ -97,7 +97,7 @@ rollout remain required before activation.
 On an isolated Ubuntu 24.04 host with Linux 6.8, the privileged NBD/XFS gate
 exposed a 64-TiB sparse device, grew mounted XFS from 300 MiB to 1,200 MiB in
 two online growth operations, and rotated its WAL 37 times. One Python process
-retained its PID, heap marker and open file while writing 600 distinct 1-MiB
+retained its PID, heap marker and open file while writing 600 patterned 1-MiB
 chunks. Sampled bytes in every chunk matched; peak WAL payload was 18,341,888
 bytes under the configured 192-MiB writer limit.
 
@@ -266,7 +266,7 @@ per-parent retry state and disabled configuration.
 The isolated Linux race gate `TestPrivilegedSessionAutoGrowthAndLiveCommitsKeepWriterRunning`
 passed with a real 64 TiB NBD device, XFS and the production Bolt session journal.
 One Python process retained its PID, heap marker and open file while writing
-600 distinct 1 MiB chunks. Two growth operations increased XFS from 300 MiB to
+600 patterned 1 MiB chunks. Two growth operations increased XFS from 300 MiB to
 1,200 MiB; 19 foreground commits and the pressure-reclaim path kept the selected
 WAL below its 32 MiB budget (observed peak 33,468,416 payload bytes). All chunks
 were verified after writing. Rotation suffixes that exceed the 8 MiB copy limit
@@ -298,7 +298,7 @@ writer and lifecycle handlers behind verified client-certificate authentication.
 The source image contains a locally compiled static executable; its OCI identity
 is explicit fixture provenance, so this gate does not test registry importing.
 
-One gVisor guest process wrote and fsynced 600 distinct 1 MiB chunks through one
+One gVisor guest process wrote and fsynced 600 patterned 1 MiB chunks through one
 open file, retaining its PID, fresh-entry token, heap marker, inode and file offset.
 XFS grew from 314,572,800 to 1,258,291,200 bytes; peak node WAL payload was
 40,845,312 bytes, below the 32 MiB writer budget plus 8 MiB charged rotation
@@ -411,6 +411,34 @@ different from `SANDBOX0_PRIVILEGED_NBD_DEVICE` when enabling this gate. This is
 fresh-session/cache/device recovery on the same isolated host after normal
 retirement. It does not establish crash abandonment, replacement-node recovery,
 full Nomad resume or memory-checkpoint continuity. Those gates remain open.
+
+## Regional running-fork publication and independent reads
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK=1` in 112.073 seconds. The source used
+real regional capacity/slot/claim transitions and the normal running-fork request
+transaction to reserve a paused target. Under WAL pressure, the runtime captured
+and published the fork through authenticated regional handlers. An exact request
+retry observed the committed target. This exercises the regional transaction,
+but the slot readiness evidence is fixture-supplied; it does not establish a
+Nomad/procd handshake.
+
+After the original guest completed all 600 MiB and retired normally, an empty
+read cache and independently reserved NBD device mounted the remote target.
+Every byte of its 164,626,432-byte file matched the earlier source prefix. The
+target remained at that earlier boundary despite later source live commits and
+terminal publication. The original guest retained its PID/token, heap marker,
+inode and open offset. XFS reached 1,258,291,200 bytes; peak sampled source WAL
+payload was 33,554,432 bytes. Both lost receipts converged and installed sequence
+reached 147,086. Both devices and fixture objects were cleaned up normally.
+
+The verification branch is disposable and only permits XFS replay locally; it
+does not publish a new child writer. Set `SANDBOX0_PRIVILEGED_NBD_RESTORE_DEVICE`
+to a separately reserved unused device when enabling this mode. Full Nomad
+fork/resume, memory capture, crash recovery and deployment gates remain open.
+The workload uses repeating byte patterns, so high-entropy storage throughput
+and multiple contending writers still need separate acceptance.
 
 ## Public capacity description synchronization
 

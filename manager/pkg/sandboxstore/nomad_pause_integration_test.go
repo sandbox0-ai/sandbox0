@@ -369,6 +369,13 @@ func newNomadPauseStoreFixtureOnNode(t *testing.T, suffix string, pool *pgxpool.
 }
 
 func newNomadPauseStoreFixtureWithBase(t *testing.T, suffix string, pool *pgxpool.Pool, node string, base *PutReadyRootFSBaseArtifactRequest, configure ...func(*AcquireRuntimeSlotRequest)) *nomadPauseStoreFixture {
+	return newNomadPauseStoreFixtureWithInitialSeed(t, suffix, pool, node, base, nil, configure...)
+}
+
+func newNomadPauseStoreFixtureWithInitialSeed(t *testing.T, suffix string, pool *pgxpool.Pool, node string, base *PutReadyRootFSBaseArtifactRequest,
+	seed func(*testing.T, *PGSandboxStore, *SandboxRecord, *PutReadyRootFSBaseArtifactRequest) (*RootFSFilesystem, *RootFSGeneration),
+	configure ...func(*AcquireRuntimeSlotRequest),
+) *nomadPauseStoreFixture {
 	t.Helper()
 	ctx := context.Background()
 	store := NewPGSandboxStore(pool)
@@ -385,13 +392,19 @@ func newNomadPauseStoreFixtureWithBase(t *testing.T, suffix string, pool *pgxpoo
 		Record: record, OperationID: operationID, LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
-	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, base)
-	require.NoError(t, err)
-	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
-		SandboxID: sandboxID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef,
-		SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
-	})
-	require.NoError(t, err)
+	var filesystem *RootFSFilesystem
+	var initial *RootFSGeneration
+	if seed != nil {
+		filesystem, initial = seed(t, store, record, base)
+	} else {
+		artifact, err := store.PutReadyRootFSBaseArtifact(ctx, base)
+		require.NoError(t, err)
+		filesystem, initial, err = store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+			SandboxID: sandboxID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef,
+			SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+		})
+		require.NoError(t, err)
+	}
 	registration := runtimeSlotTestRegistration(slotID, allocationID)
 	registration.AllocationNamespace = allocationNamespace
 	if node != "" {

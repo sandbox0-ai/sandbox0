@@ -711,6 +711,17 @@ context hook as the real listener.
 The complete Nomad runtime race suite passed in 204.184 seconds after this
 fix, and the complete driver race suite passed in 55.187 seconds.
 
+## Historical-schema regression checks
+
+Current artifact lookup requires migration 120's initial-filesystem geometry
+column. Historical storage tests at schemas 108, 109 and 110 now seed their
+original SQL shape explicitly, including the initial memory-fork filesystem,
+before running the intended upgrade or rollback guard. Production readers do
+not fall back to an unmigrated schema. These three PostgreSQL race tests and
+live-commit receipt replay passed in 22.891 seconds. Rotation recovery now also
+asserts that a rejected incomplete candidate keeps its exact truncated size;
+the focused block/session rotation and live-commit race tests passed.
+
 ## Public capacity description synchronization
 
 The public OpenAPI field keeps its existing name and shape. Its description now

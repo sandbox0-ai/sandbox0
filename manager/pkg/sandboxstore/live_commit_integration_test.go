@@ -94,6 +94,9 @@ func TestRootFSLiveCommitProgressAndReceiptReplayIntegration(t *testing.T) {
 	// neither advances the lifecycle head nor changes the immutable grant binding.
 	p, err = NewPGSandboxStore(f.pool).PublishRootFSLiveCommit(ctx, first)
 	require.NoError(t, err)
+	require.Equal(t, first.Generation.ID, p.CommittedGenerationID)
+	require.Equal(t, first.CutSequence, p.CommittedSequence)
+	require.Equal(t, f.initial.ID, p.InstalledGenerationID)
 	fs, err := f.store.GetRootFSFilesystem(ctx, f.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, f.initial.ID, fs.HeadGenerationID)

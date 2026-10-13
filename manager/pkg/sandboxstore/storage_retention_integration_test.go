@@ -190,7 +190,7 @@ func TestRootFSStorageMigrationBackfillIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPoolAt(t, 108)
 	store := NewPGSandboxStore(pool)
 	repo := storageRetentionMeteringRepository(t, pool)
-	seedStorageRetentionObjects(t, store, "storage-before-migration")
+	seedPreSparseStorageRetentionObjects(t, store, "storage-before-migration")
 	previous := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	require.NoError(t, repo.RecordStorageObservation(t.Context(), rootFSStorageObservation("legacy-orphan", 12345, previous)))
 	var expected int64
@@ -217,6 +217,60 @@ func TestRootFSStorageMigrationBackfillIntegration(t *testing.T) {
 func seedStorageRetentionObjects(t *testing.T, store *PGSandboxStore, sandboxID string) {
 	t.Helper()
 	filesystem, initial := seedCompositeTestFilesystem(t, t.Context(), store, sandboxID)
+	publishStorageRetentionObjects(t, store, sandboxID, filesystem, initial)
+}
+
+// Historical migration tests deliberately lack migration 120's geometry
+// columns. Seed the historical SQL shape instead of using today's artifact
+// lookup/claim methods, whose select list requires the fully migrated schema.
+func seedPreSparseStorageRetentionObjects(t *testing.T, store *PGSandboxStore, name string) {
+	t.Helper()
+	ctx := t.Context()
+	sandboxID := "sandbox-" + name
+	record := rootFSTestSandboxRecord(sandboxID, "team-1")
+	require.NoError(t, store.UpsertSandbox(ctx, record))
+	filesystem, initial := seedPreSparseTestFilesystem(t, store, record, readyRootFSBaseArtifactTestRequest())
+	publishStorageRetentionObjects(t, store, name, filesystem, initial)
+}
+
+func seedPreSparseTestFilesystem(t *testing.T, store *PGSandboxStore, record *SandboxRecord, base *PutReadyRootFSBaseArtifactRequest) (*RootFSFilesystem, *RootFSGeneration) {
+	t.Helper()
+	ctx, sandboxID := t.Context(), record.ID
+	artifact, err := validateReadyRootFSBaseArtifact(base)
+	require.NoError(t, err)
+	_, err = store.pool.Exec(ctx, `INSERT INTO manager.rootfs_base_artifacts (
+		artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
+		format_generation, oci_os, oci_architecture, oci_variant, procd_protocol,
+		procd_digest, logical_size_bytes, state, descriptor)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'ready',$12)`,
+		artifact.ArtifactDigest, artifact.SourceOCIRef, artifact.SourceOCIDigest, artifact.BaseBlockRoot,
+		artifact.FormatGeneration, artifact.Platform.OS, artifact.Platform.Architecture, artifact.Platform.Variant,
+		artifact.ProcdProtocol, artifact.ProcdDigest, artifact.LogicalSizeBytes, artifact.Descriptor)
+	require.NoError(t, err)
+	_, err = store.pool.Exec(ctx, `INSERT INTO manager.rootfs_filesystems
+		(filesystem_id,team_id,base_artifact_digest,format_generation) VALUES ($1,$2,$3,$4)`,
+		sandboxID, record.TeamID, artifact.ArtifactDigest, artifact.FormatGeneration)
+	require.NoError(t, err)
+	_, err = store.pool.Exec(ctx, `INSERT INTO manager.sandbox_rootfs_bindings
+		(sandbox_id,filesystem_id,team_id) VALUES ($1,$1,$2)`, sandboxID, record.TeamID)
+	require.NoError(t, err)
+	initial := &RootFSGeneration{ID: initialRootFSGenerationID(sandboxID, artifact.ArtifactDigest, artifact.FormatGeneration),
+		FilesystemID: sandboxID, SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+		BaseBlockRoot: artifact.BaseBlockRoot, CurrentBlockHead: artifact.BaseBlockRoot, FormatGeneration: artifact.FormatGeneration,
+		DurabilityState: RootFSGenerationStateS3Materialized, LocatorVersion: 1, Descriptor: artifact.Descriptor}
+	_, err = store.pool.Exec(ctx, `INSERT INTO manager.rootfs_generations (
+		generation_id,filesystem_id,source_oci_digest,base_artifact_digest,base_block_root,
+		current_block_head,writer_epoch,format_generation,durability_state,locator_version,descriptor)
+		VALUES ($1,$2,$3,$4,$5,$5,0,$6,$7,1,$8)`, initial.ID, sandboxID, initial.SourceOCIDigest,
+		initial.BaseArtifactDigest, initial.BaseBlockRoot, initial.FormatGeneration, initial.DurabilityState, initial.Descriptor)
+	require.NoError(t, err)
+	_, err = store.pool.Exec(ctx, `UPDATE manager.rootfs_filesystems SET head_generation_id=$2 WHERE filesystem_id=$1`, sandboxID, initial.ID)
+	require.NoError(t, err)
+	return &RootFSFilesystem{ID: sandboxID, TeamID: record.TeamID, HeadGenerationID: initial.ID, BaseArtifactDigest: artifact.ArtifactDigest, FormatGeneration: artifact.FormatGeneration}, initial
+}
+
+func publishStorageRetentionObjects(t *testing.T, store *PGSandboxStore, sandboxID string, filesystem *RootFSFilesystem, initial *RootFSGeneration) {
+	t.Helper()
 	composite := compositeTestGeneration(t, initial, filesystem.ID, sandboxID+"-checkpoint", 1)
 	require.NoError(t, insertCompositeTestGeneration(t.Context(), store.pool, composite))
 	request := beginRootFSMaterializationIntegrationBatch(t, t.Context(), store, composite, initial.Descriptor)
@@ -350,7 +404,7 @@ func TestRootFSStorageLateBootstrapAndQuiescentZeroIntegration(t *testing.T) {
 
 func TestRootFSStorageMigrationPreservesCapacityHistoryIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPoolAt(t, 109)
-	seedStorageRetentionObjects(t, NewPGSandboxStore(pool), "storage-forward-only")
+	seedPreSparseStorageRetentionObjects(t, NewPGSandboxStore(pool), "storage-forward-only")
 	err := migrate.Down(t.Context(), pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
 	require.ErrorContains(t, err, "RootFS capacity history cannot be discarded")
 	var pending int
@@ -360,7 +414,7 @@ func TestRootFSStorageMigrationPreservesCapacityHistoryIntegration(t *testing.T)
 
 func TestRootFSStorageMigrationBackfillsLiveMemoryForkIntegration(t *testing.T) {
 	pool := newSandboxStoreIntegrationPoolAt(t, 110)
-	f := newNomadPauseStoreFixtureOnNode(t, "retention-legacy-memory-fork", pool, "")
+	f := newNomadPauseStoreFixtureWithInitialSeed(t, "retention-legacy-memory-fork", pool, "", readyRootFSBaseArtifactTestRequest(), seedPreSparseTestFilesystem)
 	assignment := migrationAssignmentFixture(t, f, "retention-legacy-memory-fork")
 	source := assignment.Target
 	source.RuntimeGeneration = assignment.SourceGeneration

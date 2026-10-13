@@ -82,10 +82,12 @@ func TestBranchRotationRecoveryRejectsDamagedSuffixAndCloseReleasesWaiter(t *tes
 	// candidate that the installation journal may have selected.
 	info, err := os.Stat(destination)
 	require.NoError(t, err)
-	require.NoError(t, os.Truncate(destination, info.Size()-1))
+	truncatedSize := info.Size() - 1
+	require.NoError(t, os.Truncate(destination, truncatedSize))
 	require.ErrorContains(t, branch.RecoverRotation(destination, next, base), "incomplete")
 	info, err = os.Stat(destination)
 	require.NoError(t, err)
+	require.Equal(t, truncatedSize, info.Size(), "ambiguous selected WAL must not be repaired in place")
 	require.Equal(t, cut.Identity, branch.Identity())
 	require.NotNil(t, branch.RotationFailure())
 	wrong := next

@@ -235,8 +235,9 @@ func (m *Manager) commitLive(ctx context.Context, current record, live *liveSess
 	}
 	p := observation.Progress
 	if p.CommittedSequence == pending.Cut.Sequence && p.CommittedGenerationID == pending.GenerationID && p.OperationID == pending.OperationID {
-		if !(p.InstalledSequence == pending.Cut.Identity.SequenceBase && p.InstalledGenerationID == pending.BaseGenerationID ||
-			p.InstalledSequence == pending.Cut.Sequence && p.InstalledGenerationID == pending.GenerationID && current.BranchSequenceBase == pending.Cut.Sequence) {
+		previousInstalled := p.InstalledSequence == pending.Cut.Identity.SequenceBase && p.InstalledGenerationID == pending.BaseGenerationID
+		currentInstalled := p.InstalledSequence == pending.Cut.Sequence && p.InstalledGenerationID == pending.GenerationID && current.BranchSequenceBase == pending.Cut.Sequence
+		if !previousInstalled && !currentInstalled {
 			return fmt.Errorf("regional installation differs from the durable WAL pointer: %w", errdefs.ErrFailedPrecondition)
 		}
 		if pending.Generation == nil {

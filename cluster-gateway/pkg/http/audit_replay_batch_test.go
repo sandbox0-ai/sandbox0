@@ -1,11 +1,13 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -15,6 +17,69 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
+
+func TestAuditReplayCrashAfterDurableCustody(t *testing.T) {
+	const records = 64
+	if dir := os.Getenv("SANDBOX0_TEST_CRASH_SPOOL"); dir != "" {
+		d, err := newAuditDelivery(dir, &auditDeliveryWriter{err: errors.New("offline")}, zap.NewNop(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Start(context.Background())
+		for range records {
+			if err := d.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, uuid.NewString())); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := os.Stdout.WriteString("custody-ready\n"); err != nil {
+			t.Fatal(err)
+		}
+		<-context.Background().Done() // parent kills the process without shutdown
+		return
+	}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAuditReplayCrashAfterDurableCustody$")
+	child.Env = append(os.Environ(), "SANDBOX0_TEST_CRASH_SPOOL="+dir)
+	output, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = child.Process.Kill() }()
+	scanner := bufio.NewScanner(output)
+	ready := false
+	for scanner.Scan() {
+		if scanner.Text() == "custody-ready" {
+			ready = true
+			break
+		}
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+	if !ready {
+		t.Fatal("child did not acknowledge durable custody before crash")
+	}
+	writer := &auditDeliveryWriter{}
+	restarted, err := newAuditDelivery(dir, writer, zap.NewNop(), auditDeliveryTestSigningKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.spoolRecords != records {
+		t.Fatalf("crash retained %d records, want %d", restarted.spoolRecords, records)
+	}
+	if err := restarted.replay(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(writer.snapshotEvents()) != records || restarted.spoolRecords != 0 {
+		t.Fatal("crash recovery did not deliver and clean every acknowledged record")
+	}
+}
 
 func TestAuditReplayContinuousArrivalsCannotPostponeFlush(t *testing.T) {
 	dir := t.TempDir()

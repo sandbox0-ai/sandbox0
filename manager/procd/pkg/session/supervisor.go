@@ -606,6 +606,11 @@ func (s *Supervisor) WriteInput(id string, request InputRequest) (*InputResponse
 		}
 		response := &InputResponse{InputID: request.InputID, AttemptID: attemptID, Accepted: true, Duplicate: true}
 		managed.mu.Unlock()
+		// A previous write may have reached the PTY but failed persistence. Retry
+		// its receipt, never the native input, before acknowledging a duplicate.
+		if err := s.store.saveInputReceipt(id, receipt); err != nil {
+			return nil, err
+		}
 		return response, nil
 	}
 	if runtime == nil {
@@ -637,20 +642,26 @@ func (s *Supervisor) WriteInput(id string, request InputRequest) (*InputResponse
 		return nil, ErrAttemptMismatch
 	}
 	now := time.Now().UTC()
-	managed.record.InputReceipts = append(managed.record.InputReceipts, InputReceipt{
+	receipt := InputReceipt{
 		InputID: request.InputID, AttemptID: attemptID, Digest: digest, AcceptedAt: now,
-	})
+		Sequence: 1,
+	}
+	if count := len(managed.record.InputReceipts); count > 0 {
+		receipt.Sequence = managed.record.InputReceipts[count-1].Sequence + 1
+	}
+	_, _ = s.appendEventLocked(managed, Event{Type: "input.accepted", AttemptID: attemptID})
+	managed.record.InputReceipts = append(managed.record.InputReceipts, receipt)
 	if len(managed.record.InputReceipts) > maxInputReceipts {
 		managed.record.InputReceipts = append([]InputReceipt(nil), managed.record.InputReceipts[len(managed.record.InputReceipts)-maxInputReceipts:]...)
 	}
 	managed.record.LastActivityAt = now
 	managed.record.UpdatedAt = now
-	_, _ = s.appendEventLocked(managed, Event{Type: "input.accepted", AttemptID: attemptID})
-	if err := s.saveLocked(managed); err != nil {
-		managed.mu.Unlock()
+	managed.mu.Unlock()
+	// Keep inputMu until the receipt is durable (including EOF/exit ordering),
+	// but release the screen/output lock before filesystem I/O.
+	if err := s.store.saveInputReceipt(id, receipt); err != nil {
 		return nil, err
 	}
-	managed.mu.Unlock()
 	return &InputResponse{InputID: request.InputID, AttemptID: attemptID, Accepted: true}, nil
 }
 

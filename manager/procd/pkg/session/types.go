@@ -175,6 +175,8 @@ type InputReceipt struct {
 	AttemptID  string    `json:"attempt_id"`
 	Digest     string    `json:"digest"`
 	AcceptedAt time.Time `json:"accepted_at"`
+	// Acceptance order survives wall-clock adjustments and full-state checkpoints.
+	Sequence int64 `json:"sequence,omitempty"`
 }
 
 type InputResponse struct {

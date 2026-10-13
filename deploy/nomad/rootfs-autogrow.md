@@ -29,9 +29,10 @@ feature is not deployed until the gates below have evidence attached.
 ## Work remaining
 
 1. Validate the wired authenticated scheduler with real remote object storage
-   and regional services, including full-product lifecycle/fencing races.
-2. Validate scheduled XFS growth with real services and running guest workloads;
-   its session-owned worker must preserve commit/reclaim under kernel pressure.
+   and regional services in the full Nomad deployment, including lifecycle/
+   fencing races. The combined component gate below passed.
+2. Exercise growth and live reclaim through lifecycle barriers and owner loss;
+   the combined scheduled-growth guest workload below passed.
 3. Verify the enabled live-reclaim path under real outage/pressure recovery
    without process loss; the new node configuration is still disabled by default.
 4. Verify all lifecycle operations, GC and live ctld transfer with installed
@@ -285,6 +286,50 @@ contents; tracked node uploads retained the expected live generation and release
 completed upload holds. These are storage-regression gates, not the combined
 authenticated live-cut/runsc acceptance gate. The fixture container, data,
 database and credentials remain temporary resources to remove after acceptance.
+
+## Combined authenticated guest and object-service acceptance
+
+`TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody` passed
+under the Linux race detector in 99.525 seconds. It uses the pinned official
+`release-20260914.0` runsc bundle, a real 64 TiB NBD device and mounted XFS,
+production Bolt session journals, the production node commit/growth scheduling
+methods, PostgreSQL migrations, real loopback RustFS S3 objects, and the regional
+writer and lifecycle handlers behind verified client-certificate authentication.
+The source image contains a locally compiled static executable; its OCI identity
+is explicit fixture provenance, so this gate does not test registry importing.
+
+One gVisor guest process wrote and fsynced 600 distinct 1 MiB chunks through one
+open file, retaining its PID, fresh-entry token, heap marker, inode and file offset.
+XFS grew from 314,572,800 to 1,258,291,200 bytes; peak node WAL payload was
+40,845,312 bytes, below the 32 MiB writer budget plus 8 MiB charged rotation
+duplication allowance. Every completed chunk was checked byte for byte.
+
+The fixture deliberately lost one successful regional publication reply and
+one successful installed-base reply. Exact retries converged to installed cut
+151,334 while retaining the immutable launch head. After guest exit, normal
+retirement published the final generation, verified regional retirement, reclaimed
+local artifacts and released NBD. Successful test cleanup removed its bucket's
+objects. Empty buckets and the fixture host/services remain temporary resources.
+
+This is a combined component acceptance gate, not a running Nomad cluster or
+production rollout. Storage-outage recovery, fresh-node recovery, lifecycle/
+fencing/GC races, memory-preserving transfer and deployment gates remain open.
+Run it only on an isolated root-owned fixture with an exclusive unused NBD device:
+
+```sh
+# Also supply private fixture S3 credentials and the dedicated test database URL.
+SANDBOX0_ROOTFS_AUTOGROW_REMOTE=1 \
+SANDBOX0_TEST_RUNSC=/path/to/pinned/gvisor/runsc \
+SANDBOX0_PRIVILEGED_NBD_DEVICE=/dev/nbd63 \
+SANDBOX0_RUSTFS_ENDPOINT=http://127.0.0.1:19000 \
+go test -race ./pkg/nomadruntime \
+  -run '^TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody$' \
+  -v -count=1 -timeout=10m
+```
+
+The test refuses to drop schemas unless the database name starts with
+`s0_rootfs_autogrow`. Its destructive fixture migration and object cleanup must
+never run against a production database or shared bucket.
 
 1. Persist a deterministic pending operation, source descriptor and flushed
    WAL cut before publication. Background cuts do not freeze XFS: blocked normal

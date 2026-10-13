@@ -103,6 +103,30 @@ func TestApplyProgressBoundsCopyAndCanAbortUnpublishedTarget(t *testing.T) {
 	}
 }
 
+func TestApplyIgnoresFilesystemDependentDirectorySize(t *testing.T) {
+	oldRoot, sourceRoot, targetRoot := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, root := range []string{oldRoot, sourceRoot, targetRoot} {
+		normalizeFixtureTimes(t, root)
+	}
+	old := scanWithLineage(t, oldRoot, "lineage")
+	source := scanWithLineage(t, sourceRoot, "lineage")
+	// XFS/OverlayFS directory st_size can change with allocation and added
+	// entries; it is not file content that should be copied or truncated.
+	for index := range source.Nodes {
+		if source.Nodes[index].Path == "." {
+			source.Nodes[index].Size += 4096
+		}
+	}
+	diff, err := Diff(*old, *source, nil)
+	require.NoError(t, err)
+	result, err := Apply(t.Context(), ApplyRequest{OldRoot: oldRoot, SourceRoot: sourceRoot, TargetRoot: targetRoot, Old: *old, Source: *source, Diff: *diff})
+	require.NoError(t, err)
+	require.Zero(t, result.IO.WrittenBytes)
+	for _, change := range diff.Changes {
+		require.NotContains(t, change.Metadata.Fields, "size")
+	}
+}
+
 func TestApplyPreservesFilesystemSemantics(t *testing.T) {
 	oldRoot := t.TempDir()
 	sourceRoot := t.TempDir()

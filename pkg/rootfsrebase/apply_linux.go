@@ -163,6 +163,11 @@ func validateApplyRequest(request ApplyRequest) error {
 	for _, change := range request.Diff.Changes {
 		oldNode, oldExists := oldBy[change.Path]
 		sourceNode, sourceExists := sourceBy[change.Path]
+		for _, field := range change.Metadata.Fields {
+			if field == "size" && sourceNode.Type != NodeRegular {
+				return fmt.Errorf("size metadata for %q requires a regular file", change.Path)
+			}
+		}
 		switch change.Kind {
 		case ChangeAdd:
 			if oldExists || !sourceExists {

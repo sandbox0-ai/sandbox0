@@ -214,6 +214,17 @@ agent and passed with the fix, including exactly one execution; the complete
 node-channel/agent race suites passed. A full public lifecycle rerun is still
 required.
 
+The next real run delivered a worker error across the reconnected channel
+instead of losing transport: after bounded target staging, the merge treated
+the root directory's filesystem-dependent `st_size` as regular-file data and
+attempted to open `.` for writing. The runner exited one after 391.70 seconds;
+368 samples peaked at 67,850,240 worker bytes, and mounts/devices were released.
+Its 544-file archive remains retained. Directory-size changes are now excluded
+from semantic metadata deltas, and apply validation rejects size metadata on
+non-regular nodes before mutation. The focused regression reproduced the exact
+`is a directory` failure and passed with the correction. Complete public API
+acceptance remains open until a fresh real run finishes all operations.
+
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
 `TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,

@@ -147,11 +147,16 @@ rollback. Existing import/format/geometry regression also passed on that host.
 
 The optional `S0_NOMAD_LIVE_PUBLIC_API=1` isolated Nomad fixture adds an actual
 authenticated public-router lifecycle gate after growth and live transfers.
+It reserves three exclusive NBD devices for rebase's old/source/target roles.
 It uses production node/product/store components, running and paused snapshot/
 fork, exact fork retry, explicit filesystem-only pause of its disposable source,
 restore, a distinct attested rebase target, deletion, inventory/GC and fresh
-NBD/XFS full-file hashes without source WAL/cache. Its real execution remains
-pending; structural compilation and skip checks are not acceptance evidence.
+NBD/XFS full-file hashes without source WAL/cache. The first real run passed
+growth, three transfers, running snapshot/fork, two cold hashes, original-process
+continuity, pause and restore, then failed rebase because its two-device fixture
+pool could not mount three roles. Its nonzero receipt is retained. The public
+fixture now reserves a third empty device; complete acceptance remains pending.
+Structural compilation and skip checks are not acceptance evidence.
 Retained-memory and production occupied-worker drain qualification remain
 separate. See the infra fixture README for reproduction and provenance limits.
 

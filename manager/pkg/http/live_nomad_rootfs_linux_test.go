@@ -279,6 +279,7 @@ func livePublicRootFSLifecycle(t *testing.T, ctx context.Context, store *sandbox
 
 func livePublicRootFSRequest[T any](t *testing.T, base string, generator *internalauth.Generator, method, path, operation string, value any, status int) *T {
 	t.Helper()
+	t.Logf("public RootFS request: %s %s operation=%s", method, path, operation)
 	started := time.Now().UTC()
 	token, err := generator.Generate("manager", "live-nomad-team", "live-nomad-user", internalauth.GenerateOptions{
 		Audit: &internalauth.AuditContext{Actor: internalauth.AuditActor{Kind: "user", ID: "live-nomad-user"}, OperationID: operation, IngressStartedAt: &started},
@@ -305,6 +306,7 @@ func livePublicRootFSRequest[T any](t *testing.T, base string, generator *intern
 	require.NoError(t, err)
 	require.Nil(t, apiError)
 	require.NotNil(t, result)
+	t.Logf("public RootFS response: %s %s status=%d", method, path, response.StatusCode)
 	return result
 }
 
@@ -361,6 +363,7 @@ func livePublicRootFSObjects(t *testing.T) objectstore.ContextConditionalStore {
 // XFS log replay but never publishes writes or obtains a product writer grant.
 func livePublicRootFSColdHash(t *testing.T, store *sandboxstore.PGSandboxStore, objects objectstore.ContextConditionalStore, head, expected, root string) {
 	t.Helper()
+	t.Logf("fresh NBD/XFS full-file hash: generation=%s", head)
 	devicePath := "/dev/nbd63"
 	state, err := os.ReadFile("/sys/block/nbd63/size")
 	require.NoError(t, err)
@@ -405,4 +408,5 @@ func livePublicRootFSColdHash(t *testing.T, store *sandboxstore.PGSandboxStore, 
 	require.NoError(t, err, "%s", output)
 	mounted = true
 	require.Equal(t, expected, livePublicRootFSFileHash(t, filepath.Join(mount, "upper/growing.bin")))
+	t.Logf("fresh NBD/XFS full-file hash passed: generation=%s sha256=%s", head, expected)
 }

@@ -16,12 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
@@ -162,6 +164,34 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	if realRegion {
 		artifact := liveNomadImportBase(t, image, procd, suffix)
 		liveNomadPrepareRegionalClaim(t, &stage, artifact, resources, assignment, networkPolicy)
+		if os.Getenv("S0_NOMAD_LIVE_PUBLIC_API") == "1" {
+			// The public lifecycle gate needs a distinct attested rebase target,
+			// not a no-op rebase onto the source artifact.
+			target := liveNomadImportBase(t, image, procd, suffix+"-public-rebase")
+			require.NoError(t, os.WriteFile(filepath.Join(root, "f/public-rebase-artifact"), []byte(target.ArtifactDigest), 0600))
+			config := defaultPluginConfig()
+			config.DirectFS = false // The isolated Nomad agent explicitly selects this.
+			version, err := NewCommandRunsc(*config).Version(t.Context())
+			require.NoError(t, err)
+			compatibility := runtimeslot.RuntimeCompatibility{
+				Version: runtimeslot.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,
+				DriverVersion: PluginVersion, RunscVersion: strings.TrimSpace(version),
+				Platform: config.Platform, Overlay2: config.Overlay2, FileAccess: config.FileAccess,
+				DirectFS: config.DirectFS, Command: "/procd", ProcdPort: runtimeslot.NomadProcdPort,
+				RuntimeMode: runtimecontrol.ControlModeStatic, SecurityClass: state.DriverConfig.SecurityClass,
+			}
+			slot, err := sandboxstore.NewPGSandboxStore(liveNomadRegionalPool(t)).GetRuntimeSlot(t.Context(), stage.Identity.SlotNonce)
+			require.NoError(t, err)
+			classDigest, err := compatibility.Digest()
+			require.NoError(t, err)
+			require.Equal(t, slot.CompatibilityDigest, classDigest, "fixture class must match the actual registered carrier")
+			catalog, err := json.Marshal(map[string]any{"version": 3, "classes": []any{map[string]any{
+				"name": "fixture-privileged", "cluster_id": slot.ClusterID,
+				"artifact_platform": map[string]string{"os": "linux", "architecture": runtime.GOARCH}, "compatibility": compatibility,
+			}}})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(root, "f/public-runtime-classes.json"), catalog, 0600))
+		}
 	} else {
 		built, err := rootfsblock.BuildMaterializedGeneration(t.Context(), image, initialBytes, liveNomadObjectPublisher(filepath.Join(root, "f/objects")), rootfsblock.BuildOptions{})
 		require.NoError(t, err)

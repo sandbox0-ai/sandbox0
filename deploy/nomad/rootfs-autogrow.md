@@ -35,9 +35,10 @@ feature is not deployed until the gates below have evidence attached.
    process-owner fencing and a separately provisioned machine's fresh-cache
    remote recovery passed below; provider loss observation and actual Nomad
    replacement admission remain separate gates.
-3. Extend injected S3 request-outage acceptance to provider disruption and
-   larger Nomad workloads. The shared-node two-writer contention gate passed;
-   node behavior remains disabled by default.
+3. Qualify wider provider disruption beyond the injected request and real
+   object-service suspension gates. The 2 GiB Nomad suspension/transfer gate
+   and shared-node two-writer contention gate passed; node behavior remains
+   disabled by default.
 4. Verify exact production release/checkpoint compatibility, including retained
    stock runsc bundles and procd digests; fixture release IDs are synthetic.
 5. Finish acceptance, retain sanitized evidence and remove temporary resources.
@@ -143,6 +144,16 @@ SQL terminal fencing independent of Go validation, and guarded migration
 rollback. Existing import/format/geometry regression also passed on that host.
 
 ## Real S3 lifecycle and installed-base retention
+
+The optional `S0_NOMAD_LIVE_PUBLIC_API=1` isolated Nomad fixture adds an actual
+authenticated public-router lifecycle gate after growth and live transfers.
+It uses production node/product/store components, running and paused snapshot/
+fork, exact fork retry, explicit filesystem-only pause of its disposable source,
+restore, a distinct attested rebase target, deletion, inventory/GC and fresh
+NBD/XFS full-file hashes without source WAL/cache. Its real execution remains
+pending; structural compilation and skip checks are not acceptance evidence.
+Retained-memory and production occupied-worker drain qualification remain
+separate. See the infra fixture README for reproduction and provenance limits.
 
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
@@ -719,11 +730,30 @@ the 2 GiB workload therefore reaches the 2400-to-4800 MiB step. The test now
 checks the exact mounted geometry against that policy and actual allocated
 usage. Artifact statistics are durably retained on failed attempts as well.
 
-This attempt establishes the service-pause recovery/content subcheck, not a
-complete passing outage/transfer/bounded-disk gate. Its nonzero receipt remains
-retained, and the initial status-137 cause is still unresolved. Rebuilding with
-a different binary digest alone does not establish a fix. A complete successful
-rerun remains required before this gate can qualify deployment.
+This second attempt establishes the service-pause recovery/content subcheck,
+not a complete passing outage/transfer/bounded-disk gate. Its nonzero receipt
+remains retained, and the initial status-137 cause is still unresolved.
+Rebuilding with a different binary digest alone does not establish a fix.
+
+The next complete attempt passed in 740.70 seconds with the corrected geometry
+check. The original guest retained PID 9, its heap/tmpfs/mmap/unlinked-file state
+and original open file while verifying all 2048 MiB after service recovery and
+continuing through three live ownership transfers. The allocation and Sentry
+identity stayed unchanged, with zero task restarts; injected post-transfer
+driver-publication failure also rolled forward through its exact journal.
+Mounted XFS data capacity reached 4,966,055,936 bytes on the 64 TiB device.
+Installed live sequence advanced from 537,848 to 538,508; the regional writer
+stayed consumed and its slot stayed active. Across 724 one-second samples,
+worker WAL/cache/journal allocation peaked at 68,521,984 bytes, below 128 MiB.
+The independent service recovery timer was set to 65 seconds, with 33.74 seconds
+of observed write backpressure; the 92.43-second recovery observation includes
+polling latency. Both the regional authority and complete runner exited zero.
+
+This qualifies the one-writer real-service suspension, growth and live-transfer
+gate with fixture certificate/OCI/release provenance. It does not explain the
+earlier status-137 exit or establish public API lifecycle, complete machine loss,
+production checkpoint compatibility or canary deployment. Both failed receipts
+remain retained; production node behavior and sparse imports remain disabled.
 
 ## Expanded RootFS memory-checkpoint acceptance
 

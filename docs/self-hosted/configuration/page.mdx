@@ -142,6 +142,28 @@ The shared retirement reserve remains charged to its writer group across WAL
 close and reopen, until every charged journal is reclaimed. Reopening a journal
 alone does not authorize retirement writes or enlarge ordinary write admission.
 
+Automatic live publication and growth are opt-in node settings:
+
+```yaml
+nomad_runtime:
+  live_commits: false
+  auto_grow: false
+```
+
+`live_commits` publishes flushed WAL prefixes through the authenticated regional
+writer authority and rotates only acknowledged prefixes. `auto_grow` requires
+`live_commits` and grows the same mounted XFS/NBD device before free space is
+exhausted. Growth and filesystem-freeze owners retain a bounded reclaim path
+while kernel metadata writes wait for WAL admission. Keep per-writer and node
+dirty-tail limits, retirement reserve, and memory/disk read caches sized from
+measured workload and storage latency; the logical device ceiling does not
+reserve physical host disk. Periodic growth cannot guarantee that every possible
+write burst will avoid `ENOSPC`, and publication backpressure can delay I/O.
+
+Before enabling these settings, complete the operator acceptance gates and
+upgrade all managers, workers and future enrollment templates. Enable compatible
+node behavior before enabling the larger sparse import geometry below.
+
 ## Durable OCI Importer
 
 Manager's RootFS importer is required for the Nomad runtime. Configure:

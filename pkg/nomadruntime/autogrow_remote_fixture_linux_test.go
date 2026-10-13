@@ -131,11 +131,24 @@ func autogrowRemoteBase(t *testing.T, root, runID string, store *sandboxstore.PG
 }
 
 func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artifact *sandboxstore.RootFSBaseArtifact) rootfshandoff.StageRequest {
+	return autogrowRemoteNamedStage(t, store, artifact, "")
+}
+
+func autogrowRemoteNamedStage(t *testing.T, store *sandboxstore.PGSandboxStore, artifact *sandboxstore.RootFSBaseArtifact, suffix string) rootfshandoff.StageRequest {
 	t.Helper()
-	sandboxID := "autogrow-sandbox"
+	if suffix != "" {
+		require.NotEqual(t, "1", os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK"), "named contention claims do not use the single-source fork fixture")
+	}
+	name := func(value string) string {
+		if suffix == "" {
+			return "autogrow-" + value
+		}
+		return "autogrow-" + suffix + "-" + value
+	}
+	sandboxID := name("sandbox")
 	record := &sandboxstore.SandboxRecord{ID: sandboxID, TeamID: "autogrow-team", UserID: "autogrow-user", TemplateID: "autogrow-template",
 		TemplateName: "autogrow-template", TemplateNamespace: "sandbox0", DesiredState: sandboxstore.SandboxDesiredStateActive,
-		RuntimeGeneration: 1, RuntimeNamespace: "sandbox0", RuntimeID: "autogrow-pod", CreatedAt: time.Now().UTC(), ResourceMillicpu: 1000, ResourceMemoryMiB: 1024}
+		RuntimeGeneration: 1, RuntimeNamespace: "sandbox0", RuntimeID: name("pod"), CreatedAt: time.Now().UTC(), ResourceMillicpu: 1000, ResourceMemoryMiB: 1024}
 	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK") == "1" {
 		record.ClusterID = "autogrow-cluster"
 		record.RuntimeNamespace, record.RuntimeID = "", ""
@@ -148,14 +161,14 @@ func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artif
 	filesystem, initial, err := store.EnsureInitialRootFSGeneration(t.Context(), &sandboxstore.EnsureInitialRootFSGenerationRequest{
 		SandboxID: sandboxID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest})
 	require.NoError(t, err)
-	token := digest.FromString("isolated-autogrow-writer-token").Encoded()
-	stage := rootfshandoff.StageRequest{BindingVersion: rootfshandoff.WriterBindingVersion, Parent: digest.FromString("autogrow-parent").String(), InitialGeneration: initial.ID,
-		Identity: rootfshandoff.Identity{NodeUID: "autogrow-node", BootID: "autogrow-boot", RuntimeGeneration: "1", AllocationID: "autogrow-allocation",
+	token := digest.FromString("isolated-" + name("writer-token")).Encoded()
+	stage := rootfshandoff.StageRequest{BindingVersion: rootfshandoff.WriterBindingVersion, Parent: digest.FromString(name("parent")).String(), InitialGeneration: initial.ID,
+		Identity: rootfshandoff.Identity{NodeUID: "autogrow-node", BootID: "autogrow-boot", RuntimeGeneration: "1", AllocationID: name("allocation"),
 			NetworkIncarnationID: sandboxID, TaskName: "app", SourceOCIDigest: artifact.SourceOCIDigest, RootFSDriver: "sandbox0-rootfs",
-			RuntimeClass: "io.containerd.runsc.v1", SlotNonce: "autogrow-slot", ClaimID: "autogrow-claim", LaunchAttempt: "autogrow-attempt",
-			RootFSID: filesystem.ID, WriterEpoch: 1, WriterGrantID: "autogrow-grant", WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token)},
-		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{AllocationID: "autogrow-allocation", NetworkIncarnationID: sandboxID, ClaimID: "autogrow-claim",
-			NetworkEpoch: 1, PolicyDigest: digest.FromString("isolated-policy").String(), SourceIP: "192.0.2.2", CtldGeneration: "autogrow-ctld", NetNSIdentity: "autogrow-netns"},
+			RuntimeClass: "io.containerd.runsc.v1", SlotNonce: name("slot"), ClaimID: name("claim"), LaunchAttempt: name("attempt"),
+			RootFSID: filesystem.ID, WriterEpoch: 1, WriterGrantID: name("grant"), WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token)},
+		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{AllocationID: name("allocation"), NetworkIncarnationID: sandboxID, ClaimID: name("claim"),
+			NetworkEpoch: 1, PolicyDigest: digest.FromString("isolated-policy").String(), SourceIP: "192.0.2.2", CtldGeneration: "autogrow-ctld", NetNSIdentity: name("netns")},
 		Generation: &rootfshandoff.GenerationDescriptor{Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: initial.ID, FilesystemID: filesystem.ID,
 			SourceOCIDigest: initial.SourceOCIDigest, BaseArtifactDigest: initial.BaseArtifactDigest, BaseBlockRoot: initial.BaseBlockRoot,
 			CurrentBlockHead: initial.CurrentBlockHead, WriterEpoch: initial.WriterEpoch, FormatGeneration: initial.FormatGeneration,
@@ -168,9 +181,9 @@ func autogrowRemoteStage(t *testing.T, store *sandboxstore.PGSandboxStore, artif
 	}
 	issued, err := store.IssueRootFSWriterGrant(t.Context(), &sandboxstore.IssueRootFSWriterGrantRequest{GrantID: stage.Identity.WriterGrantID,
 		SandboxID: sandboxID, ExpectedFilesystemID: filesystem.ID, InitialGenerationID: initial.ID,
-		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce, OperationID: "autogrow-issue", RawToken: token,
+		ClaimID: stage.Identity.ClaimID, SlotID: stage.Identity.SlotNonce, OperationID: name("issue"), RawToken: token,
 		BindingVersion: stage.BindingVersion, BindingDigest: binding[:], NodeUID: stage.Identity.NodeUID, NodeBootID: stage.Identity.BootID,
-		RuntimeNamespace: "sandbox0", RuntimeID: "autogrow-pod", RuntimeIncarnationID: stage.Identity.AllocationID,
+		RuntimeNamespace: "sandbox0", RuntimeID: name("pod"), RuntimeIncarnationID: stage.Identity.AllocationID,
 		NodeName: "autogrow-node", GateParent: stage.Parent, RuntimeGeneration: stage.Identity.RuntimeGeneration, ConsumeExpiresAt: time.Now().Add(time.Minute)})
 	require.NoError(t, err)
 	require.Equal(t, stage.Identity.WriterEpoch, issued.Grant.WriterEpoch)

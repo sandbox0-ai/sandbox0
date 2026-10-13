@@ -33,8 +33,9 @@ feature is not deployed until the gates below have evidence attached.
    live ctld transfer and retained-memory pause/resume gates below passed.
 2. Qualify abrupt owner loss and replacement-node recovery; normal retirement,
    fresh caches/devices and memory restore do not establish this failure mode.
-3. Extend injected S3 request-outage acceptance to longer provider disruption
-   and node-wide contention. Node behavior remains disabled by default.
+3. Extend injected S3 request-outage acceptance to provider disruption and
+   larger Nomad workloads. The shared-node two-writer contention gate passed;
+   node behavior remains disabled by default.
 4. Verify exact production release/checkpoint compatibility, including retained
    stock runsc bundles and procd digests; fixture release IDs are synthetic.
 5. Finish acceptance, retain sanitized evidence and remove temporary resources.
@@ -74,6 +75,12 @@ staging quota; they are not included in a RootFS cache/WAL bound. Remote storage
 capacity, the committed device ceiling and upload throughput remain limits.
 Online growth preserves the running guest, but is not a promise of zero I/O
 latency or uninterrupted write progress during storage outages.
+
+Guest fsync makes the local WAL durable; it does not by itself acknowledge a
+regional live publication. Complete loss of that node's WAL can recover only
+the last regionally committed cut, not its unpublished suffix. Planned drain
+must settle publication and retain the exact memory checkpoint before removing
+the worker. Abrupt-node-loss acceptance must check this boundary explicitly.
 
 `rootfs_importer.sparse_device_size_bytes` is a regional image-import setting.
 Zero retains the previous fixed-size contract during rollout. The intended
@@ -489,6 +496,49 @@ this gate; it requires both explicitly reserved unused devices. Use a 20-minute
 Go test timeout. Optional `SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD` accepts durations
 from five seconds to two minutes. Provider-level outages, node-wide contention,
 crash abandonment, full Nomad lifecycle and production rollout remain open.
+
+## Shared-node two-writer contention gate
+
+`TestPrivilegedRemoteAutogrowTwoWritersShareNodeBudget` extends the combined
+component fixture with two real stock-runsc guests sharing one session manager,
+aggregate dirty-tail budget, cache and commit/growth scheduler. Each writes
+600 MiB of high-entropy data and performs the overwrite/zero/delete/recreate
+workload. The individual writer limit is 32 MiB; the shared node limit is
+40 MiB including an 8 MiB protected retirement reserve, less than the sum of
+the individual limits. The shared disk cache remains 32 MiB.
+
+After both writers pass 80 MiB, the proxy fails every real S3 request. The gate
+requires both writers to hit admission pressure, holds failure for another
+minute, verifies both regional grants remain consumed and then restores
+transport. Both original PID/token/heap/inode/open-offset proofs, every final
+file byte and installed live receipts must remain valid. Sampled aggregate WAL
+payload must stay within 40 MiB, and allocated worker WAL/cache/journal blocks
+within 128 MiB. The two sources renew their real regional leases throughout.
+
+Enable `SANDBOX0_ROOTFS_AUTOGROW_CONTENTION=1`,
+`SANDBOX0_ROOTFS_AUTOGROW_REMOTE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE=1`; leave regional-fork mode disabled. Supply
+the same private isolated PostgreSQL/S3/runsc inputs as the combined gate and
+both separately reserved NBD paths. Run only this test under the race detector
+with a 20-minute timeout. The gate passed under the race detector in 365.74
+seconds. Both original guests retained PID 1, heap markers, tokens and their
+open-file inode/offsets; each completed 600 MiB plus 78 overwrite and 55 zero
+chunks and a deleted/recreated file. All final contents were verified. After
+both writers blocked, the one-minute request-outage hold rejected 77 requests.
+Neither consumed regional grant was retired by pressure.
+
+Installed sequences reached 189,358 and 189,354. Both XFS filesystems reached
+1,258,291,200 bytes, up from 300 MiB. Peak aggregate WAL payload was 33,550,336
+bytes, below the 40 MiB node limit; normal pressure stayed within 32 MiB and
+left the protected reserve available. Across 270 samples, allocated worker
+WAL/cache/journal blocks peaked at 52,260,864 bytes, below 128 MiB, despite
+1,258,291,200 accumulated guest data bytes. Both normal retirements and
+exclusive-device cleanup succeeded. The fixture writes a durable remote test
+log and explicit exit-code receipt, independently of SSH output delivery.
+
+This qualifies shared component admission with real NBD/XFS/runsc, regional
+PostgreSQL, mTLS and RustFS. It does not qualify multiple actual Nomad claims,
+a provider outage or production fleet density; those boundaries remain explicit.
 
 ## Actual Nomad, procd and live-owner transfer acceptance
 

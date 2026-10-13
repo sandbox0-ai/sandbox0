@@ -39,12 +39,16 @@ func TestMaterializedSparseGeometryScansOnlyOwnedInput(t *testing.T) {
 }
 
 func TestMaterializedSparseFileMatchesExpandedDescriptor(t *testing.T) {
-	file, err := os.OpenFile(filepath.Join(t.TempDir(), "owned-image"), os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	path := filepath.Join(t.TempDir(), "owned-image")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
 	require.NoError(t, err)
-	defer file.Close()
 	require.NoError(t, file.Truncate(3*CompressedDataRangeBytes+LogicalBlockSize))
 	_, err = file.WriteAt(bytes.Repeat([]byte{0x49}, LogicalBlockSize), 0)
 	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	file, err = os.Open(path)
+	require.NoError(t, err)
+	defer file.Close()
 	_, err = file.Seek(17, 0)
 	require.NoError(t, err)
 	store := newBuildTestStore()

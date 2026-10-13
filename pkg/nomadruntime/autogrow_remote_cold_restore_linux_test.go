@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,8 +27,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// This is a fresh session/cache/device gate on the isolated host, not a full
-// Nomad resume or a replacement-machine/memory-checkpoint acceptance claim.
+// This verifies a fresh session/cache/device against an existing remote head.
+// The caller establishes whether it runs on the source or replacement machine;
+// it does not exercise Nomad admission or memory-checkpoint resume.
 func autogrowVerifyColdRestore(t *testing.T, ctx context.Context, originalRoot string, objects objectstore.ContextConditionalStore,
 	store *sandboxstore.PGSandboxStore, client *managerauthority.ManagerClient, original rootfshandoff.StageRequest,
 ) {
@@ -48,6 +50,14 @@ func autogrowVerifyColdRestore(t *testing.T, ctx context.Context, originalRoot s
 	stage := original
 	stage.Parent, stage.InitialGeneration = digest.FromString("autogrow-cold-parent").String(), head.ID
 	stage.Identity.BootID, stage.Identity.RuntimeGeneration = "autogrow-cold-boot", "2"
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REPLACEMENT_RESTORE") == "1" {
+		stage.Identity.NodeUID = os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REPLACEMENT_NODE_UID")
+		require.NotEmpty(t, stage.Identity.NodeUID)
+		require.NotEqual(t, original.Identity.NodeUID, stage.Identity.NodeUID)
+		boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		require.NoError(t, err)
+		stage.Identity.BootID = strings.TrimSpace(string(boot))
+	}
 	stage.Identity.AllocationID, stage.Identity.WriterGrantID = "autogrow-cold-allocation", "autogrow-cold-grant"
 	stage.Identity.ClaimID, stage.Identity.SlotNonce, stage.Identity.LaunchAttempt = "autogrow-cold-claim", "autogrow-cold-slot", "autogrow-cold-attempt"
 	stage.Identity.WriterEpoch = filesystem.WriterEpoch + 1
@@ -99,7 +109,7 @@ func autogrowVerifyColdRestore(t *testing.T, ctx context.Context, originalRoot s
 	}()
 	mount, err := m.Ensure(ctx, stage)
 	require.NoError(t, err)
-	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_RECOVER") == "1" {
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_RECOVER") == "1" || os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_REPLACEMENT_RESTORE") == "1" {
 		_, err := os.Stat(filepath.Join(mount.Source, "unpublished-after-cut.bin"))
 		require.ErrorIs(t, err, os.ErrNotExist, "unpublished local suffix must not appear in remote recovery")
 	}

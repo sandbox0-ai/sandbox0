@@ -34,6 +34,7 @@ type autogrowOwnerLossReceipt struct {
 	Root                string                     `json:"root"`
 	Bucket              string                     `json:"bucket"`
 	Namespace           string                     `json:"namespace"`
+	MachineBoot         string                     `json:"machine_boot"`
 	Stage               rootfshandoff.StageRequest `json:"stage"`
 	CommittedGeneration string                     `json:"committed_generation"`
 	CommittedSequence   uint64                     `json:"committed_sequence"`
@@ -73,8 +74,11 @@ func autogrowWaitForOwnerLoss(t *testing.T, ctx context.Context, root, bucket, m
 	require.Equal(t, cut.Progress, after.Progress)
 	namespace, err := os.Readlink("/proc/self/ns/mnt")
 	require.NoError(t, err)
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	require.NoError(t, err)
 	receipt := autogrowOwnerLossReceipt{PID: os.Getpid(), Root: root, Bucket: bucket, Namespace: namespace,
-		Stage: stage.WithoutWriterGrantToken(), CommittedGeneration: cut.Progress.CommittedGenerationID, CommittedSequence: cut.Progress.CommittedSequence}
+		MachineBoot: strings.TrimSpace(string(boot)),
+		Stage:       stage.WithoutWriterGrantToken(), CommittedGeneration: cut.Progress.CommittedGenerationID, CommittedSequence: cut.Progress.CommittedSequence}
 	payload, err := json.Marshal(receipt)
 	require.NoError(t, err)
 	out, err := os.OpenFile(path+".new", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -134,7 +138,7 @@ func TestPrivilegedRemoteAutogrowRecoversAfterOwnerLoss(t *testing.T) {
 	conditional, ok := objects.(objectstore.ContextConditionalStore)
 	require.True(t, ok)
 	t.Cleanup(func() {
-		if t.Failed() {
+		if t.Failed() || os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_EXPORT") == "1" {
 			return
 		}
 		for {
@@ -198,6 +202,10 @@ func TestPrivilegedRemoteAutogrowRecoversAfterOwnerLoss(t *testing.T) {
 	}
 	_, err = store.DeleteUnreferencedRootFSGenerations(ctx, "", 100)
 	require.NoError(t, err)
+	if os.Getenv("SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_EXPORT") == "1" {
+		t.Logf("source_fenced_for_replacement=true remote_cut_sequence=%d local_state_cleanup=true objects_retained=true", receipt.CommittedSequence)
+		return
+	}
 	autogrowVerifyColdRestore(t, ctx, receipt.Root, conditional, store, client, receipt.Stage)
 	t.Logf("source_sigkill=true actual_nbd_crash_fence=true generation_inventory_and_gc=true remote_cut_sequence=%d remote_bytes_verified=%d unpublished_local_suffix_absent=true", receipt.CommittedSequence, 600<<20)
 }

@@ -222,6 +222,12 @@ func autogrowObjectEndpoint(t *testing.T, endpoint string) (string, *autogrowObj
 
 func autogrowRemoteAuthority(t *testing.T, root string, store *sandboxstore.PGSandboxStore) (*managerauthority.ManagerClient, *autogrowReplyLoss) {
 	t.Helper()
+	return autogrowRemoteAuthorityForNode(t, root, store, "autogrow-node")
+}
+
+func autogrowRemoteAuthorityForNode(t *testing.T, root string, store *sandboxstore.PGSandboxStore, nodeUID string) (*managerauthority.ManagerClient, *autogrowReplyLoss) {
+	t.Helper()
+	require.NotEmpty(t, nodeUID)
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "autogrow-ca"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
@@ -246,7 +252,7 @@ func autogrowRemoteAuthority(t *testing.T, root string, store *sandboxstore.PGSa
 	}
 	serverCert, _, _ := cert(2, "autogrow-authority", x509.ExtKeyUsageServerAuth)
 	_, clientPEM, clientKey := cert(3, "autogrow-client", x509.ExtKeyUsageClientAuth)
-	identities := []nodeauth.CertificateIdentity{{CommonName: "autogrow-client", NodeUID: "autogrow-node", AgentUID: "autogrow-ctld"}}
+	identities := []nodeauth.CertificateIdentity{{CommonName: "autogrow-client", NodeUID: nodeUID, AgentUID: "autogrow-ctld"}}
 	verifier, err := nodeauth.NewCertificateVerifier(identities)
 	require.NoError(t, err)
 	handler, err := managerauthority.NewHandler(managerauthority.HandlerConfig{Verifier: verifier, Store: store, LeaseTTL: 10 * time.Minute})

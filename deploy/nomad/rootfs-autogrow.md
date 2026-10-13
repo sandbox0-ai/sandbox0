@@ -31,9 +31,10 @@ feature is not deployed until the gates below have evidence attached.
 1. Complete full regional lifecycle/fencing/GC acceptance with installed live
    bases. Component running-fork/cold-restore gates and actual Nomad growth,
    live ctld transfer and retained-memory pause/resume gates below passed.
-2. Qualify complete node loss and replacement-machine recovery. The abrupt
-   process-owner gate below passed with actual NBD fencing and remote recovery,
-   but retained PostgreSQL/object services on the same physical fixture host.
+2. Qualify complete node loss and replacement-node admission. Abrupt
+   process-owner fencing and a separately provisioned machine's fresh-cache
+   remote recovery passed below; provider loss observation and actual Nomad
+   replacement admission remain separate gates.
 3. Extend injected S3 request-outage acceptance to provider disruption and
    larger Nomad workloads. The shared-node two-writer contention gate passed;
    node behavior remains disabled by default.
@@ -588,6 +589,40 @@ This proves abrupt process-owner fencing and cold remote recovery on the same
 host, including the distinction between local fsync and remote custody. It
 does not prove physical-machine loss, provider observation, replacement-node
 admission or process-memory recovery after an unplanned crash.
+
+## Separate-machine remote recovery
+
+`TestPrivilegedRemoteAutogrowReplacementMachineRestoresPublishedCut` passed
+under the race detector on a newly provisioned second Ubuntu 24.04 machine.
+The source run wrote and verified the high-entropy 600 MiB workload, completed
+remote sequence 189,350, then fsynced the unpublished suffix. Its storage owner
+was killed with pidfd-bound SIGKILL; the existing recovery path completed NBD
+crash fencing, inventory and GC. Export mode removed the source's mounted local
+RootFS, WAL and cache while retaining the remote cut for the second machine.
+
+The replacement had a different machine boot ID and authenticated writer node
+UID. Only tooling, public Go dependencies, a token-free source receipt and
+private backend connection material were transferred. Neither source RootFS/
+WAL/cache nor PostgreSQL/object-store data were copied. Private loopback SSH
+forwards connected to the original fixture's PostgreSQL and S3 services.
+The replacement used a new session/cache/device, consumed its epoch-2 grant,
+restored XFS geometry of 1,258,291,200 bytes and verified all 629,145,600 data
+bytes in a fresh stock-runsc guest. The local-only suffix was absent. Recovery
+passed in 21.59 seconds; Go and the durable runner receipt both reported zero.
+The replacement retired normally and removed its mount-free state and fixture
+bucket contents. This gate did not sample peak replacement disk occupancy;
+bounded disk evidence comes from the growth and contention gates above.
+
+Reproduce with `SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_EXPORT=1` on the source's
+`owner_loss_rootfs_run.py`, then the infra fixture's
+`replacement_rootfs_bootstrap.sh` and `replacement_rootfs_run.py` on an exact
+new disposable machine. Do not use a disk snapshot or copy session directories,
+databases or buckets. Keep private backend keys/environment files mode 0600 and
+pin SSH host keys. Save sanitized receipts before deleting both machines and
+their operation-owned access key. This proves separate-machine RootFS recovery
+after a fenced owner crash; it does not prove complete provider machine-loss
+observation, actual Nomad replacement admission or crashed process-memory
+recovery. The authority/certificate and OCI provenance remain fixture-specific.
 
 ## Actual Nomad, procd and live-owner transfer acceptance
 

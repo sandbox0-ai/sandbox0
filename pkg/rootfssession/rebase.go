@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,22 +38,25 @@ const (
 var rebaseRoles = [...]string{"old", "source", "target"}
 
 type rebaseRecord struct {
-	Version       int                        `json:"version"`
-	OperationID   string                     `json:"operation_id"`
-	RequestDigest string                     `json:"request_digest"`
-	Request       rootfsrebase.WorkerRequest `json:"request"`
-	State         string                     `json:"state"`
-	Resources     []rebaseResource           `json:"resources"`
-	Result        *rootfsrebase.WorkerResult `json:"result,omitempty"`
-	Clean         bool                       `json:"clean,omitempty"`
-	Failure       string                     `json:"failure,omitempty"`
-	CreatedAt     string                     `json:"created_at"`
-	UpdatedAt     string                     `json:"updated_at"`
+	Version                 int                        `json:"version"`
+	OperationID             string                     `json:"operation_id"`
+	RequestDigest           string                     `json:"request_digest"`
+	Request                 rootfsrebase.WorkerRequest `json:"request"`
+	State                   string                     `json:"state"`
+	Resources               []rebaseResource           `json:"resources"`
+	Result                  *rootfsrebase.WorkerResult `json:"result,omitempty"`
+	Clean                   bool                       `json:"clean,omitempty"`
+	Failure                 string                     `json:"failure,omitempty"`
+	CreatedAt               string                     `json:"created_at"`
+	UpdatedAt               string                     `json:"updated_at"`
+	WorkingTargetDescriptor []byte                     `json:"working_target_descriptor,omitempty"`
+	WorkingTargetSequence   uint64                     `json:"working_target_sequence,omitempty"`
 }
 
 type rebaseResource struct {
 	Role                      string `json:"role"`
 	BranchPath                string `json:"branch_path"`
+	ObsoleteBranchPath        string `json:"obsolete_branch_path,omitempty"`
 	XFSRoot                   string `json:"xfs_root"`
 	MergedRoot                string `json:"merged_root"`
 	DeviceAllocationID        string `json:"device_allocation_id"`
@@ -83,6 +87,14 @@ func (filesystemRebaseEngine) Apply(
 	oldRoot, sourceRoot, targetRoot string,
 	dirtyBlocks []uint64,
 ) (*rootfsrebase.ApplyResult, error) {
+	return (filesystemRebaseEngine{}).ApplyWithProgress(ctx, request, oldRoot, sourceRoot, targetRoot, dirtyBlocks, nil)
+}
+
+func (filesystemRebaseEngine) ApplyWithProgress(
+	ctx context.Context, request rootfsrebase.WorkerRequest,
+	oldRoot, sourceRoot, targetRoot string, dirtyBlocks []uint64,
+	progress func(context.Context, uint64) error,
+) (*rootfsrebase.ApplyResult, error) {
 	lineageID := request.FilesystemID + ":" + request.SourceBaseArtifactDigest
 	oldManifest, err := rootfsrebase.ScanWithOptions(oldRoot, rootfsrebase.ScanOptions{LineageID: lineageID})
 	if err != nil {
@@ -108,6 +120,7 @@ func (filesystemRebaseEngine) Apply(
 	result, err := rootfsrebase.Apply(ctx, rootfsrebase.ApplyRequest{
 		OldRoot: oldRoot, SourceRoot: sourceRoot, TargetRoot: targetRoot,
 		Old: *oldManifest, Source: *sourceManifest, Diff: *diff,
+		Progress: progress,
 	})
 	if err != nil {
 		return nil, err
@@ -291,10 +304,16 @@ func (m *Manager) ExecuteRebase(
 	if oldResource == nil || sourceResource == nil || targetResource == nil {
 		return result, fmt.Errorf("RootFS rebase journal lacks a required resource")
 	}
-	applyResult, err := m.rebaseEngine.Apply(
-		workCtx, request, oldResource.MergedRoot, sourceResource.MergedRoot,
-		targetResource.MergedRoot, dirtyBlocks,
-	)
+	if err := m.prepareRebaseTargetCapacity(workCtx, sourceResource, targetResource, targetBase.LogicalSizeBytes); err != nil {
+		return result, err
+	}
+	progress := m.newRebaseProgress(&current, live.branches["target"], targetBase)
+	var applyResult *rootfsrebase.ApplyResult
+	if engine, ok := m.rebaseEngine.(rebaseProgressEngine); ok {
+		applyResult, err = engine.ApplyWithProgress(workCtx, request, oldResource.MergedRoot, sourceResource.MergedRoot, targetResource.MergedRoot, dirtyBlocks, progress.advance)
+	} else {
+		applyResult, err = m.rebaseEngine.Apply(workCtx, request, oldResource.MergedRoot, sourceResource.MergedRoot, targetResource.MergedRoot, dirtyBlocks)
+	}
 	if err != nil {
 		return result, fmt.Errorf("apply RootFS rebase: %w", err)
 	}
@@ -326,7 +345,7 @@ func (m *Manager) ExecuteRebase(
 		return result, err
 	}
 	built, err := rootfsblock.BuildIncrementalGenerationFromBlockReader(
-		workCtx, m.source, targetBase, live.checkpoint, m.rebasePublisher(request), rootfsblock.BuildOptions{},
+		workCtx, m.source, progress.base, live.checkpoint, m.rebasePublisher(request), rootfsblock.BuildOptions{},
 	)
 	if err != nil {
 		return result, fmt.Errorf("publish rebased target generation: %w", err)
@@ -348,7 +367,7 @@ func (m *Manager) ExecuteRebase(
 		FormatGeneration: request.TargetFormatGeneration, DurabilityState: rootfsblock.DurabilityS3,
 		LocatorVersion: request.SourceLocatorVersion + 1, Descriptor: built.Payload,
 		HealthCheckDigest: health, DirtyBlocks: len(dirtyBlocks),
-		PublishedObjects: built.Objects, PublishedBytes: built.Bytes, Apply: *applyResult,
+		PublishedObjects: progress.objects + built.Objects, PublishedBytes: progress.bytes + built.Bytes, Apply: *applyResult,
 	}
 	if err := result.SealProof(); err != nil {
 		return result, err
@@ -712,6 +731,14 @@ func (m *Manager) removeRebaseArtifacts(current *rebaseRecord) error {
 		if err := m.nodeDirty.ValidateOwnerDetached(resource.BranchPath); err != nil {
 			return fmt.Errorf("validate %s rebase dirty tail release: %w", resource.Role, err)
 		}
+		if resource.ObsoleteBranchPath != "" {
+			if filepath.Dir(resource.ObsoleteBranchPath) != branchRoot {
+				return fmt.Errorf("obsolete rebase branch path does not match operation identity")
+			}
+			if err := m.nodeDirty.ValidateOwnerDetached(resource.ObsoleteBranchPath); err != nil {
+				return err
+			}
+		}
 	}
 	if err := os.RemoveAll(branchRoot); err != nil {
 		return fmt.Errorf("remove RootFS rebase branches: %w", err)
@@ -719,6 +746,11 @@ func (m *Manager) removeRebaseArtifacts(current *rebaseRecord) error {
 	for _, resource := range current.Resources {
 		if err := m.nodeDirty.ReleaseOwner(resource.BranchPath); err != nil {
 			return fmt.Errorf("release %s rebase dirty tail: %w", resource.Role, err)
+		}
+		if resource.ObsoleteBranchPath != "" {
+			if err := m.nodeDirty.ReleaseOwner(resource.ObsoleteBranchPath); err != nil {
+				return err
+			}
 		}
 	}
 	if err := os.RemoveAll(mountRoot); err != nil {
@@ -1120,6 +1152,16 @@ func validateRebaseRecord(current rebaseRecord, operationID string) error {
 	if err != nil || digest != current.RequestDigest || current.Request.OperationID != current.OperationID {
 		return fmt.Errorf("RootFS rebase journal request identity is invalid")
 	}
+	if (len(current.WorkingTargetDescriptor) == 0) != (current.WorkingTargetSequence == 0) {
+		return fmt.Errorf("private rebase descriptor and sequence must be recorded together")
+	}
+	if len(current.WorkingTargetDescriptor) != 0 {
+		working, err := rootfsblock.DecodeDescriptor(current.WorkingTargetDescriptor)
+		target, targetErr := rootfsblock.DecodeDescriptor(current.Request.TargetBaseDescriptor)
+		if err != nil || targetErr != nil || working.LogicalSizeBytes != target.LogicalSizeBytes || working.BlockSizeBytes != target.BlockSizeBytes {
+			return fmt.Errorf("invalid private rebase working descriptor")
+		}
+	}
 	for index, role := range rebaseRoles {
 		resource := current.Resources[index]
 		if resource.Role != role || resource.BranchPath == "" || resource.XFSRoot == "" ||
@@ -1173,12 +1215,27 @@ func (m *Manager) validateRebaseRecord(current rebaseRecord, operationID string)
 	expected := newRebaseRecord(m.branchRoot, m.mountRoot, current.Request, current.RequestDigest)
 	for index := range expected.Resources {
 		want, got := expected.Resources[index], current.Resources[index]
-		if got.BranchPath != want.BranchPath || got.XFSRoot != want.XFSRoot ||
+		branchMatches := got.BranchPath == want.BranchPath && got.ObsoleteBranchPath == ""
+		if got.Role == "target" && current.WorkingTargetSequence != 0 {
+			root := filepath.Dir(want.BranchPath)
+			branchMatches = got.BranchPath == filepath.Join(root, fmt.Sprintf("target-%d.wal", current.WorkingTargetSequence)) && validObsoleteRebasePath(got.ObsoleteBranchPath, want.BranchPath, current.WorkingTargetSequence)
+		}
+		if !branchMatches || got.XFSRoot != want.XFSRoot ||
 			got.MergedRoot != want.MergedRoot || got.DeviceAllocationID != want.DeviceAllocationID {
 			return fmt.Errorf("RootFS rebase journal resource %s does not match its operation identity", got.Role)
 		}
 	}
 	return nil
+}
+
+func validObsoleteRebasePath(path, initial string, sequence uint64) bool {
+	if path == initial {
+		return true
+	}
+	name := filepath.Base(path)
+	raw := strings.TrimSuffix(strings.TrimPrefix(name, "target-"), ".wal")
+	old, err := strconv.ParseUint(raw, 10, 64)
+	return err == nil && old > 0 && old < sequence && path == filepath.Join(filepath.Dir(initial), fmt.Sprintf("target-%d.wal", old))
 }
 
 func cloneRebaseRequest(request rootfsrebase.WorkerRequest) rootfsrebase.WorkerRequest {

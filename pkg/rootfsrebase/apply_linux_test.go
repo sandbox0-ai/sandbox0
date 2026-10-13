@@ -55,12 +55,52 @@ func TestApplyReportsSameRangeConflictBeforeMutation(t *testing.T) {
 	createSparseFixture(t, targetRoot, map[int64]byte{offset: 0x62})
 
 	request := scanApplyRequest(t, oldRoot, sourceRoot, targetRoot, nil)
+	progressCalls := 0
+	request.Progress = func(context.Context, uint64) error { progressCalls++; return nil }
 	result, err := Apply(context.Background(), request)
 	require.Nil(t, result)
 	var conflict *ConflictError
 	require.True(t, errors.As(err, &conflict))
 	require.NotEmpty(t, conflict.Conflicts)
+	require.Zero(t, progressCalls, "a conflict must be rejected before progress can mutate the private target")
 	require.Equal(t, bytes.Repeat([]byte{0x62}, 4096), readAt(t, filepath.Join(targetRoot, "huge"), offset, 4096))
+}
+
+func TestApplyProgressBoundsCopyAndCanAbortUnpublishedTarget(t *testing.T) {
+	for _, abort := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "abort"}[abort], func(t *testing.T) {
+			oldRoot, sourceRoot, targetRoot := t.TempDir(), t.TempDir(), t.TempDir()
+			payload := bytes.Repeat([]byte{0x51}, 5<<20)
+			writeFile(t, filepath.Join(sourceRoot, "payload"), payload)
+			for _, root := range []string{oldRoot, sourceRoot, targetRoot} {
+				normalizeFixtureTimes(t, root)
+			}
+			request := scanApplyRequest(t, oldRoot, sourceRoot, targetRoot, nil)
+			var last uint64
+			calls := 0
+			request.Progress = func(_ context.Context, written uint64) error {
+				require.GreaterOrEqual(t, written, last)
+				require.LessOrEqual(t, written-last, uint64(rebaseIOBufferSize))
+				last = written
+				calls++
+				if abort && written >= 2<<20 {
+					return errors.New("injected private cut failure")
+				}
+				return nil
+			}
+			result, err := Apply(t.Context(), request)
+			if abort {
+				require.ErrorContains(t, err, "injected private cut failure")
+				require.Nil(t, result)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, uint64(len(payload)), last)
+				require.Equal(t, payload, readFile(t, filepath.Join(targetRoot, "payload")))
+			}
+			require.Greater(t, calls, 2)
+			require.Equal(t, payload, readFile(t, filepath.Join(sourceRoot, "payload")))
+		})
+	}
 }
 
 func TestApplyPreservesFilesystemSemantics(t *testing.T) {

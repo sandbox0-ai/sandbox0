@@ -36,8 +36,9 @@ type BranchIdentity struct {
 	WriterEpoch      int64  `json:"writer_epoch"`
 	LogicalSizeBytes int64  `json:"logical_size_bytes"`
 	BaseRootDigest   string `json:"base_root_digest"`
-	// SequenceBase is the last regionally committed sequence removed by a
-	// journal rotation. Subsequent records retain their original sequence.
+	// SequenceBase is the last acknowledged immutable cut removed by rotation.
+	// Live writers require regional publication; private rebase staging uses
+	// operation-owned upload custody. Later records retain their sequence.
 	SequenceBase uint64 `json:"sequence_base,omitempty"`
 }
 

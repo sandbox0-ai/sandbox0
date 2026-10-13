@@ -158,16 +158,41 @@ pool could not mount three roles. Its nonzero receipt is retained. The public
 fixture now reserves a third empty device. Its next real run passed the same
 preceding operations, then failed writing the grown 600 MiB file into rebase's
 initial 300 MiB target filesystem. Failed unmounting also exposed cleanup that
-closed still-mounted backends; the scene retains nine mounts and three NBD
-devices. Cleanup now retains backend/reservation ownership until mounts detach;
+closed still-mounted backends; the scene recorded nine mounts and three NBD
+devices. Its manifest-verified archive was retained before a guarded fixture
+reset released those mounts/devices. Cleanup retains backend/reservation ownership until mounts detach;
 an exact retry reuses those handles, while shutdown releases process handles
 without asserting physical absence. Regressions cover retry and restart;
 the complete session and Nomad-runtime race suites passed (75.17 and 123.31
-seconds). Target capacity and bounded rebase write/rotation integration
-still require a fix and complete rerun; public acceptance remains open.
+seconds). Target capacity and bounded rebase write/rotation are implemented
+below; complete public acceptance remains open until a real rerun passes.
 Structural compilation and skip checks are not acceptance evidence.
 Retained-memory and production occupied-worker drain qualification remain
 separate. See the infra fixture README for reproduction and provenance limits.
+
+### Private rebase growth and incremental staging
+
+The rebase target grows to the source's mounted filesystem capacity before
+copying, then follows the same free-space growth policy during application.
+The three-way merge calls its operation owner between metadata mutations and
+at most 1 MiB data chunks. At no more than one quarter of the writer WAL budget
+(capped at 8 MiB), the owner flushes target XFS and uploads an incremental cut
+under the existing regional rebase upload custody. After PUT and custody
+acknowledgements, a durable local record binds the new descriptor, sequence and
+exact current/obsolete WAL paths before rotation may reclaim covered records.
+The final descriptor builds on the latest staged base rather than losing
+earlier copied blocks. Writer and shared-node budgets are unchanged.
+
+These are unpublished operation-owned staging cuts. They never replace a
+tenant filesystem head or acknowledge a successful rebase. Only the complete
+semantic health proof and existing regional publication transaction do that.
+An interrupted operation discards its private target and retries from its
+immutable request, preserving the source, both bases and upload custody through
+cleanup. Upload failure retains the original WAL; failed unmount retains the
+backend and reservation. Unit/race regressions cover bounded overwrite cuts,
+fresh-reader correctness, failed uploads, path/sequence validation and apply
+progress cancellation; actual Nomad/S3 public lifecycle acceptance remains
+required.
 
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and

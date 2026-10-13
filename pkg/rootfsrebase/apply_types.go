@@ -1,6 +1,7 @@
 package rootfsrebase
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -18,6 +19,10 @@ type ApplyRequest struct {
 	Old        Manifest
 	Source     Manifest
 	Diff       DiffResult
+	// Progress runs on the apply goroutine between mutations and bounded data
+	// chunks. An operation owner can grow and checkpoint its private target;
+	// an error aborts this unpublished merge without changing either source.
+	Progress func(context.Context, uint64) error
 }
 
 type ApplyIOStats struct {

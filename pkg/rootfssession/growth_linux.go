@@ -34,6 +34,15 @@ func (r *LinuxRuntime) InspectXFS(devicePath, xfsRoot string) (XFSUsage, error) 
 	return usage, err
 }
 
+func (r *LinuxRuntime) SyncXFS(devicePath, xfsRoot string) error {
+	file, err := r.openGrowthXFS(devicePath, xfsRoot)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return unix.Syncfs(int(file.Fd()))
+}
+
 func (r *LinuxRuntime) GrowXFS(ctx context.Context, devicePath, xfsRoot string, targetBytes int64) (XFSUsage, error) {
 	if err := ctx.Err(); err != nil {
 		return XFSUsage{}, err

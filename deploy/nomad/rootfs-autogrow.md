@@ -539,6 +539,23 @@ suite passed in 21.934 seconds; the full session race suite passed in 235.296
 seconds. Real memory capture and replacement-node migration remain separate
 deployment gates.
 
+## Migration peer cancellation
+
+The acceptance regression also reproduced a migration-peer cancellation stall:
+an expired HTTP write deadline interrupted a non-reading destination, but
+HTTP's write-error path then entered TLS `close_notify` with a fresh five-second
+deadline. A blocked peer reader retained source publication custody beyond the
+cleanup's one-second budget. The captured Linux goroutine stack confirmed the
+wait in `crypto/tls.Conn.closeNotify`, with the publication worker waiting for
+its readers.
+
+The dedicated peer listener now retains the underlying socket in request
+context. Abandoning a transfer closes that socket before expiring the HTTP
+deadline, so TLS shutdown cannot prolong canceled stream custody. The durable
+publication record stays intact. The migration peer/publication race suite
+passed ten repetitions in 33.452 seconds; its fixtures use the same connection
+context hook as the real listener.
+
 ## Public capacity description synchronization
 
 The public OpenAPI field keeps its existing name and shape. Its description now

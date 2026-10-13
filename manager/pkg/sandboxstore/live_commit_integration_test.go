@@ -19,6 +19,11 @@ import (
 func newLiveCommitFixture(t *testing.T) (*rootFSWriterCrashAbandonFixture, objectstore.ContextConditionalStore) {
 	t.Helper()
 	objects := objectstore.NewMemoryStore(t.Name()).(objectstore.ContextConditionalStore)
+	return newLiveCommitFixtureWithObjects(t, objects), objects
+}
+
+func newLiveCommitFixtureWithObjects(t *testing.T, objects objectstore.ContextConditionalStore) *rootFSWriterCrashAbandonFixture {
+	t.Helper()
 	image, err := os.CreateTemp(t.TempDir(), "base-*")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = image.Close() })
@@ -40,7 +45,7 @@ func newLiveCommitFixture(t *testing.T) (*rootFSWriterCrashAbandonFixture, objec
 		_, err = f.pool.Exec(t.Context(), `INSERT INTO manager.rootfs_base_artifact_objects VALUES($1,$2)`, request.ArtifactDigest, ref.Key)
 		require.NoError(t, err)
 	}
-	return f, objects
+	return f
 }
 
 func buildLiveCommit(t *testing.T, f *rootFSWriterCrashAbandonFixture, objects objectstore.ContextConditionalStore, base, parent *RootFSGeneration, sequence uint64, value byte) *PublishRootFSLiveCommitRequest {
@@ -74,6 +79,11 @@ func liveInstallRequest(req *PublishRootFSLiveCommitRequest) *InstallRootFSLiveC
 
 func TestRootFSLiveCommitProgressAndReceiptReplayIntegration(t *testing.T) {
 	f, objects := newLiveCommitFixture(t)
+	verifyLiveCommitProgressAndReceiptReplay(t, f, objects)
+}
+
+func verifyLiveCommitProgressAndReceiptReplay(t *testing.T, f *rootFSWriterCrashAbandonFixture, objects objectstore.ContextConditionalStore) {
+	t.Helper()
 	ctx := t.Context()
 	first := buildLiveCommit(t, f, objects, f.initial, f.initial, 1, 11)
 	forged := *first
@@ -177,6 +187,11 @@ func TestRootFSLiveCommitProgressAndReceiptReplayIntegration(t *testing.T) {
 
 func TestRootFSLiveCommitTerminalPublicationRetainsInstalledBaseIntegration(t *testing.T) {
 	f, objects := newLiveCommitFixture(t)
+	verifyLiveCommitTerminalPublicationRetainsInstalledBase(t, f, objects)
+}
+
+func verifyLiveCommitTerminalPublicationRetainsInstalledBase(t *testing.T, f *rootFSWriterCrashAbandonFixture, objects objectstore.ContextConditionalStore) {
+	t.Helper()
 	ctx := t.Context()
 	commit := buildLiveCommit(t, f, objects, f.initial, f.initial, 1, 11)
 	_, err := f.store.PublishRootFSLiveCommit(ctx, commit)
@@ -213,7 +228,10 @@ func TestRootFSLiveCommitTerminalPublicationRetainsInstalledBaseIntegration(t *t
 			BindingVersion: commit.BindingVersion, BindingDigest: commit.BindingDigest, ProofDigest: f.request.ProofDigest,
 			ExpectedOldGenerationID: f.initial.ID, Generation: &sealed,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return tx.MarkRuntimePaused(ctx, f.sandboxID, f.runtimeGeneration, time.Now().UTC())
 	}))
 	_, err = f.store.DeleteUnreferencedRootFSGenerations(ctx, "", 100)
 	require.NoError(t, err)

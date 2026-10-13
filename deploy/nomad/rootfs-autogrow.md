@@ -142,6 +142,32 @@ initial-size rejection, captured-template digest lookup, metadata immutability,
 SQL terminal fencing independent of Go validation, and guarded migration
 rollback. Existing import/format/geometry regression also passed on that host.
 
+## Real S3 lifecycle and installed-base retention
+
+The regional store gates
+`TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
+`TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,
+real RustFS S3 and the race detector, both without encryption and with the
+AES-GCM/RSA immutable-object wrapper. Each backend mode also reran the existing
+progress/replay and terminal-publication regression gates. The four-test suites
+passed in 23.102 and 22.981 seconds respectively.
+
+The progress gate exercises lost/replayed publication and installation receipts,
+GC of obsolete live generations while the installed read base remains pinned,
+bounded retained receipts and rejection of forged writer/descriptor updates.
+The lifecycle gate installs a live read base, publishes a terminal generation
+that inherits it plus a new suffix block, and commits `MarkRuntimePaused` in
+the same transaction. It then creates a snapshot, forks the filesystem and
+restores the snapshot into a separate filesystem. Five inventory passes and
+real object GC retain every referenced head; fresh readers verify both the
+inherited live block and terminal suffix for the source, fork and restored copy.
+
+Objects use a unique fixture prefix, including all catalog and custody reads,
+and are removed by the fixture cleanup. These are regional transaction/storage
+gates with synthetic physical-retirement evidence. Actual NBD/runsc/Nomad
+and retained-memory evidence is recorded separately below; the public manager
+API and deployment canary remain required.
+
 ## Regional live publication and remaining node integration
 
 The writer's Stage, binding digest and initial generation remain immutable.

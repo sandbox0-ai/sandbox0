@@ -23,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/providerinstancealiyun"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -66,6 +67,8 @@ func TestLiveNomadProviderLossAuthorityFixture(t *testing.T) {
 		ProcdDigest   string                         `json:"procd_digest"`
 		ProcdProtocol string                         `json:"procd_protocol"`
 		PKIDirectory  string                         `json:"pki_directory"`
+		Resume        bool                           `json:"resume"`
+		ResumeCleanup bool                           `json:"resume_cleanup"`
 		Identities    []nodeauth.CertificateIdentity `json:"identities"`
 	}
 	configPath := filepath.Join(root, "provider-loss.json")
@@ -114,13 +117,76 @@ func TestLiveNomadProviderLossAuthorityFixture(t *testing.T) {
 	scope := providerinstance.Scope{Provider: "aliyun", AccountID: cfg.AccountID, RegionID: cfg.RegionID, InstanceID: cfg.InstanceID}
 	present, err := observer.Observe(t.Context(), scope)
 	require.NoError(t, err)
-	require.True(t, present.Present, "physical source must exist before loss injection")
+	if cfg.Resume {
+		var original providerinstance.Observation
+		livePublicRootFSReadJSON(t, filepath.Join(root, "provider-source-present.json"), &original)
+		require.NoError(t, original.ValidateFor(scope))
+		require.True(t, original.Present, "resume requires the original authenticated pre-deletion presence receipt")
+	} else {
+		require.True(t, present.Present, "physical source must exist before loss injection")
+	}
 	writeReceipt := func(name string, value any) {
 		data, err := json.Marshal(value)
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(root, name), data, 0600))
 	}
-	writeReceipt("provider-source-present.json", present)
+	if !cfg.Resume {
+		writeReceipt("provider-source-present.json", present)
+	}
+	// A failed deletion must be retried against the same physical scene. Its
+	// admission and independent data receipts remain separate earlier gates.
+	if cfg.ResumeCleanup {
+		require.True(t, cfg.Resume)
+		var admitted struct {
+			Passed      bool                                     `json:"provider_retirement_and_automatic_admission"`
+			SandboxID   string                                   `json:"sandbox_id"`
+			Source      sandboxstore.RuntimeSlot                 `json:"source"`
+			Target      sandboxstore.RuntimeSlot                 `json:"target"`
+			Proof       sandboxstore.RuntimeProviderAbsenceProof `json:"proof"`
+			ProofDigest string                                   `json:"proof_digest"`
+		}
+		livePublicRootFSReadJSON(t, filepath.Join(root, "provider-admission-result.json"), &admitted)
+		require.True(t, admitted.Passed)
+		require.Equal(t, cfg.SourceNodeID, admitted.Source.NodeID)
+		require.Equal(t, cfg.SourceBootID, admitted.Source.NodeBootID)
+		require.Equal(t, cfg.TargetNodeID, admitted.Target.NodeID)
+		require.Equal(t, admitted.SandboxID, admitted.Source.SandboxID)
+		require.Equal(t, admitted.SandboxID, admitted.Target.SandboxID)
+		require.Equal(t, scope, admitted.Proof.Scope)
+		digest, err := admitted.Proof.Digest()
+		require.NoError(t, err)
+		require.Equal(t, admitted.ProofDigest, hex.EncodeToString(digest))
+		var persistedDigest []byte
+		require.NoError(t, pool.QueryRow(t.Context(), `SELECT proof_digest FROM manager.runtime_provider_absence
+			WHERE cluster_id=$1 AND node_id=$2 AND node_uid=$3 AND node_boot_id=$4 AND NOT revoked`,
+			admitted.Source.ClusterID, admitted.Source.NodeID, admitted.Source.NodeUID, admitted.Source.NodeBootID).Scan(&persistedDigest))
+		require.Equal(t, digest, persistedDigest)
+		for _, previous := range []sandboxstore.RuntimeSlot{admitted.Source, admitted.Target} {
+			actual, err := store.GetRuntimeSlot(t.Context(), previous.ID)
+			require.NoError(t, err)
+			require.Equal(t, sandboxstore.RuntimeSlotStateTerminal, actual.State)
+			require.Equal(t, previous.AllocationID, actual.AllocationID)
+			require.Equal(t, previous.NodeID, actual.NodeID)
+			require.Equal(t, previous.NodeBootID, actual.NodeBootID)
+			require.Equal(t, sandboxstore.RuntimeResourceLeaseReleased, actual.ResourceLeaseState)
+		}
+		record, err := store.GetSandbox(t.Context(), admitted.SandboxID)
+		require.NoError(t, err)
+		require.Contains(t, []string{sandboxstore.SandboxDesiredStateTerminating, sandboxstore.SandboxDesiredStateDeleted}, record.DesiredState)
+		var liveWriters int
+		require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*) FROM manager.rootfs_writer_grants WHERE sandbox_id=$1 AND state IN ('issued','consumed','retiring')`, admitted.SandboxID).Scan(&liveWriters))
+		require.Zero(t, liveWriters)
+		claims, err := sandboxclaimreconciler.New(sandboxclaimreconciler.Config{Store: store})
+		require.NoError(t, err)
+		result, err := claims.RunOnce(t.Context())
+		require.NoError(t, err)
+		t.Logf("resumed ordinary deletion: %+v", result)
+		record, err = store.GetSandbox(t.Context(), admitted.SandboxID)
+		require.NoError(t, err)
+		require.Equal(t, sandboxstore.SandboxDesiredStateDeleted, record.DesiredState)
+		writeReceipt("provider-cleanup-result.json", map[string]any{"sandbox_id": admitted.SandboxID, "deleted": true, "phase": "resumed_cleanup"})
+		return
+	}
 	require.True(t, strings.HasPrefix(filepath.Clean(cfg.PKIDirectory), "/opt/s0-rootfs-autogrow-test/provider-loss-transport/pki/"))
 	pki := cfg.PKIDirectory
 	component, err := nodeauthority.New(nodeauthority.Config{Store: store, Address: cfg.Address,
@@ -151,10 +217,23 @@ func TestLiveNomadProviderLossAuthorityFixture(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("provider-loss authority did not bind")
 	}
-	start(func() error { return component.RunTerminal(ctx, nil) })
+	start(func() error {
+		return component.RunTerminal(ctx, func(report runtimeslotreconciler.WorkerReport) {
+			if report.Error != nil || report.Result.Failed > 0 {
+				t.Logf("terminal pass: %+v: %v", report.Result, report.Error)
+			}
+		})
+	})
 	claims, err := sandboxclaimreconciler.New(sandboxclaimreconciler.Config{Store: store})
 	require.NoError(t, err)
-	start(func() error { claims.Run(ctx, nil); return ctx.Err() })
+	start(func() error {
+		claims.Run(ctx, func(result sandboxclaimreconciler.Result, err error) {
+			if err != nil {
+				t.Logf("claim cleanup: %+v: %v", result, err)
+			}
+		})
+		return ctx.Err()
+	})
 	writeReceipt("region-ready", map[string]any{"provider_loss_authority": true})
 	defer os.Remove(filepath.Join(root, "region-ready"))
 	require.Eventually(t, func() bool {
@@ -170,7 +249,12 @@ func TestLiveNomadProviderLossAuthorityFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, source)
 	require.Equal(t, cfg.SourceNodeID, source.NodeID)
-	require.Equal(t, sandboxstore.RuntimeSlotStateActive, source.State)
+	if cfg.Resume {
+		require.Contains(t, []string{sandboxstore.RuntimeSlotStateActive, sandboxstore.RuntimeSlotStateQuiescing,
+			sandboxstore.RuntimeSlotStateOrphaned, sandboxstore.RuntimeSlotStateTerminal}, source.State)
+	} else {
+		require.Equal(t, sandboxstore.RuntimeSlotStateActive, source.State)
+	}
 	key, err := internalauth.LoadEd25519PrivateKeyFromFile(filepath.Join(root, "pki/procd-key.pem"))
 	require.NoError(t, err)
 	writerKey := make([]byte, 32)
@@ -200,7 +284,7 @@ func TestLiveNomadProviderLossAuthorityFixture(t *testing.T) {
 		}
 		target = candidate
 		return true
-	}, 10*time.Minute, 100*time.Millisecond, "production crash reconstruction must claim the same Sandbox on the independent replacement")
+	}, 20*time.Minute, 100*time.Millisecond, "production crash reconstruction must claim the same Sandbox on the independent replacement")
 	record, err := store.GetSandbox(ctx, source.SandboxID)
 	require.NoError(t, err)
 	require.Equal(t, sandboxstore.SandboxDesiredStateActive, record.DesiredState)

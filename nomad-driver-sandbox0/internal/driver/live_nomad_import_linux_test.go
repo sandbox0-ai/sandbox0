@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxspec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,6 +136,7 @@ func liveNomadPrepareRegionalClaim(t *testing.T, stage *rootfshandoff.StageReque
 	require.NoError(t, err)
 	record := &sandboxstore.SandboxRecord{ID: stage.Identity.RootFSID, TeamID: "live-nomad-team", UserID: "live-nomad-user",
 		TemplateID: "live-nomad-template", TemplateName: "live-nomad-template", TemplateNamespace: "sandbox0", ClusterID: slot.ClusterID,
+		TemplateSpec: sandboxspec.TemplateSpec{MainContainer: sandboxspec.ContainerSpec{Image: artifact.SourceOCIRef, SecurityClass: sandboxspec.SandboxSecurityClassPrivileged, Resources: sandboxspec.ResourceQuota{CPU: "250m", Memory: "256Mi"}}},
 		DesiredState: sandboxstore.SandboxDesiredStateActive, RuntimeGeneration: 1, CreatedAt: time.Now().UTC(), ResourceMillicpu: 250, ResourceMemoryMiB: 256}
 	_, err = store.ReserveSandboxClaim(t.Context(), &sandboxstore.ReserveSandboxClaimRequest{Record: record, OperationID: "operation-1", LeaseTTL: time.Minute})
 	require.NoError(t, err)

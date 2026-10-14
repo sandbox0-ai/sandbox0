@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -258,4 +259,45 @@ func TestRuntimeProviderAbandonCannotConvertPlannedPauseToCrashIntegration(t *te
 	fs, err := f.store.GetRootFSFilesystem(ctx, f.sandboxID)
 	require.NoError(t, err)
 	require.Equal(t, f.initial.ID, fs.HeadGenerationID)
+}
+
+func TestDeleteProviderRecoveredRootFSBeforeInventoryIntegration(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprintf("external_dependency_%t", external), func(t *testing.T) {
+			f, _, slot, cut := fencedProviderFixture(t)
+			ctx := t.Context()
+			_, err := f.store.CompleteRuntimeSlotProviderAbandon(ctx, providerCompletionRequest(t, f, slot, confirmedProviderProof(t, f, slot)))
+			require.NoError(t, err)
+			var dependentID string
+			if external {
+				record := rootFSTestSandboxRecord("external-reader", "team-a")
+				require.NoError(t, f.store.UpsertSandbox(ctx, record))
+				_, dependent, err := f.store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+					SandboxID: record.ID, TeamID: record.TeamID, SourceOCIRef: f.filesystem.BaseImageRef,
+					SourceOCIDigest: f.initial.SourceOCIDigest, BaseArtifactDigest: f.initial.BaseArtifactDigest,
+				})
+				require.NoError(t, err)
+				dependentID = dependent.ID
+				_, err = f.pool.Exec(ctx, `INSERT INTO manager.rootfs_generation_live_dependencies(generation_id,base_generation_id) VALUES($1,$2)`, dependentID, cut.Generation.ID)
+				require.NoError(t, err)
+			}
+			_, err = f.store.RequestSandboxRuntimeClaimCleanup(ctx, f.sandboxID, "delete recovered provider fixture")
+			require.NoError(t, err)
+			require.NoError(t, f.store.MarkSandboxDeleted(ctx, f.sandboxID, time.Now()))
+			box, err := f.store.GetSandbox(ctx, f.sandboxID)
+			require.NoError(t, err)
+			require.Equal(t, SandboxDesiredStateDeleted, box.DesiredState)
+			var generations, dependencies int
+			require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM manager.rootfs_generations WHERE filesystem_id=$1`, f.filesystem.ID).Scan(&generations))
+			if external {
+				require.Positive(t, generations, "an independent reader retains the source filesystem")
+				require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM manager.rootfs_generation_live_dependencies WHERE generation_id=$1 AND base_generation_id=$2`, dependentID, cut.Generation.ID).Scan(&dependencies))
+				require.Equal(t, 1, dependencies)
+			} else {
+				require.Zero(t, generations)
+				require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM manager.rootfs_generation_live_dependencies`).Scan(&dependencies))
+				require.Zero(t, dependencies)
+			}
+		})
+	}
 }

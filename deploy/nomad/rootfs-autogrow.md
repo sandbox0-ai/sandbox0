@@ -28,22 +28,10 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Complete machine-loss lifecycle/fencing/GC qualification on the release
-   candidate. Current `f3abe7d2` code passed complete public filesystem API,
-   retained-memory and 2 GiB object-service interruption acceptance below;
-   these isolated gates do not establish actual provider-loss admission.
-2. Qualify complete node loss and replacement-node admission. Abrupt
-   process-owner fencing and a separately provisioned machine's fresh-cache
-   remote recovery passed below; provider loss observation and actual Nomad
-   replacement admission remain separate gates.
-3. Qualify wider provider disruption beyond the injected request and real
-   object-service suspension gates. The 2 GiB Nomad suspension/transfer gate
-   and shared-node two-writer contention gate passed; node behavior remains
-   disabled by default.
-4. Verify exact production release/checkpoint compatibility, including retained
-   stock runsc bundles and procd digests; fixture release IDs are synthetic.
-5. Finish acceptance, retain sanitized evidence and remove temporary resources.
-6. Merge passing runtime, contracts/SDK descriptions, CLI, website and operator
+1. Verify the final release against retained production checkpoint/procd and
+   target CPU compatibility; isolated acceptance does not establish deployment.
+2. Preserve the complete acceptance evidence and remove temporary resources.
+3. Merge passing runtime, contracts/SDK descriptions, CLI, website and operator
    documentation together. Deploy the compatible manager before enabling node
    behavior, roll workers with memory preservation and verify a regional canary.
 
@@ -1128,6 +1116,49 @@ component tests and require their own release qualification. Complete
 provider-loss admission, retained older checkpoint/target CPU compatibility
 and production activation remain open. These passes do not diagnose the older
 outage allocation's unexplained status-137 exit.
+
+## Physical provider deletion and independent recovery
+
+The three-machine fixture deleted its actual Aliyun ECS source after a complete
+600 MiB growth workload. The Nomad server, PostgreSQL and object store remained
+on a separate control host; replacement execution used another physical host
+with fresh worker state. Two authenticated ECS absence observations spanned
+30.42 seconds. Normal reconciliation retired the original writer/slot/resources,
+retained the last remote cut at sequence 160,582 and automatically admitted the
+same Sandbox on the replacement with a higher writer epoch.
+
+The replacement read all 629,145,600 bytes and matched source SHA-256
+`6fd567cdb94f27887daeba6cdc230d947571a3780db0c4a79b917526409a8c1d`.
+Its XFS data capacity remained 1,191,182,336 bytes within a 64 TiB device. A
+separately fsynced 1 MiB source-local suffix, written while publication was
+blocked, was absent as required. Source worker artifacts peaked at 67,850,240
+bytes; a replacement post-read sample used 34,385,920 bytes across state,
+branches and disk cache. These scopes exclude remote storage and import staging.
+
+This was a staged acceptance with retained failures, not an uninterrupted pass.
+The source fixture omitted template resources needed by the resume planner;
+those metadata were repaired without replacing the original source, remote cut
+or provider proof. Missing replacement CNI plugins and a failed private backend
+forward were corrected. The source claim fixture now persists its resource
+shape, and the runbook requires worker/backend readiness checks.
+
+Ordinary deletion then exposed a real dependency-ordering bug: an immediate
+live-base foreign key could reject bulk generation deletion before dependent
+rows cascaded. Deletion now releases outgoing live dependency edges only for
+filesystems already selected as unreferenced, while retaining a filesystem with
+incoming dependencies from another filesystem. Both internal-edge deletion and
+external-reader preservation regressions reproduced the failure before the fix.
+The provider/deletion PostgreSQL race suite passed in 62.76 seconds afterward,
+including memory-checkpoint, running-fork and rollback-retention deletion tests.
+
+The same physical scene's ordinary deletion phase was retried with the fix and
+passed in 3.26 seconds. Its receipt explicitly identifies `resumed_cleanup`;
+the earlier admission/data receipts remain separate evidence. The Sandbox is
+deleted, all its generations and live dependencies are gone, no live writer
+remains, and the replacement's owned XFS mounts and NBD devices were released.
+The private source archive was copied off-host and SHA-256 verified before
+resource cleanup. Production compatibility, final release checks and activation
+remain outstanding.
 
 ## Migration filesystem drain and live-WAL custody
 

@@ -270,3 +270,15 @@ API keys, tokens, private endpoints, customer data, and credentials before
 sharing logs.
 
 Sandbox0 is Apache-2.0 licensed. See [LICENSE](./LICENSE).
+
+## Hosted builtin image refresh
+
+`Update Default Template` and `Update Coding Agent Template` check daily at
+00:23 UTC and rebuild every three UTC epoch days, with manual dispatch available.
+Both native architectures must pass stock-gVisor Docker checks before an
+immutable multi-architecture release receipt is published. Automatic builds
+refresh upstream package layers; default's fixed Python dependencies remain
+reviewed compatibility pins. Coding-agent also refreshes exact npm harness
+versions and verifies its browser runtime. The hosted infrastructure consumes
+these releases during its daily refresh and promotes ready images to builtin
+templates. Existing sandbox RootFS generations are unchanged.

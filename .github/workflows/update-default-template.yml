@@ -1,0 +1,41 @@
+name: Update Default Template
+
+on:
+  schedule:
+    - cron: '23 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-default-template
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      due: ${{ steps.cadence.outputs.due }}
+      version: ${{ steps.cadence.outputs.version }}
+    steps:
+      - name: Check three-day cadence
+        id: cadence
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == workflow_dispatch ]] || (( $(date -u +%s) / 86400 % 3 == 0 )); then
+            echo 'due=true' >> "$GITHUB_OUTPUT"
+            echo "version=default-auto-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          fi
+  build-and-publish:
+    needs: prepare
+    if: needs.prepare.outputs.due == 'true'
+    uses: ./.github/workflows/build-template-image.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      dockerfile: manager/procd/Dockerfile.default
+      publish_receipt: true
+    secrets: inherit

@@ -991,6 +991,52 @@ released every owned device and mount. No live guest or ctld remained.
 This qualifies the current fixture binary and procd, not production retained
 checkpoint/CPU compatibility or complete machine-loss admission.
 
+### Production-selected procd qualification
+
+The next isolated run used the exact private, digest-verified production-selected
+procd `sha256:b7bdac2fd37c19961fd45c6301bea653ff4102a93df246eff2bc1bd200a8843e`
+with its `sandbox0.procd.v1` protocol. Candidate ctld SHA-256 was
+`b9b46ce981022d9d99189a4c518b6d184825821271c6001b04c22a7f119561f1`;
+runtime head `4489ad45` differs from the qualified `f3abe7d2` production Go
+sources only in the explicit fixture protocol selector and documentation.
+No private executable or credentials are included in the repository.
+
+This complete retained-memory run exited zero in 309.85 seconds. The same
+managed context and process/memory/open-file identity survived three live
+transfers and `memory: true` pause/resume into a fresh allocation. After the
+regional restore receipt, the counter advanced from 821 to 825 and complete
+600 MiB verification count from 2 to 3. The restored writer committed and
+installed its own sequence 1,086. XFS retained 1,191,182,336 bytes of data
+capacity within the 64-TiB device. Across 300 samples, worker WAL/cache/journal
+allocation peaked at 56,778,752 bytes, below 128 MiB. The separately quota-limited
+checkpoint backing image allocated 25,673,728 bytes.
+
+The 556-file SHA-256-verified private archive retains the terminal receipt,
+logs, binary identity, checkpoint image and residual physical teardown state.
+The exited NBD server left three mounts and NBD 62 attached; guarded normal
+disconnect/unmount subsequently released all owned mounts and devices before
+the next run. This newly captured fixture checkpoint does
+not establish compatibility of retained production checkpoints carrying the
+older procd assignment, or complete machine-loss/replacement admission.
+
+The same ctld/procd/protocol subsequently passed complete public API acceptance
+in 397.46 seconds, with the regional fixture exiting zero after 380.60 seconds.
+It completed 600 MiB growth and three live transfers, two snapshots, two forks,
+one restore and one distinct imported-base rebase, then verified three fresh
+NBD/S3 full-file hashes. Each matched
+`a9fd8100dd0344b16b6aefe7c9d5ca0acddd911790f4b9edbb2136ffbe3fada7`.
+All three sandboxes reached deleted state and final inventory/GC completed.
+The original managed process/context survived the running operations with zero
+task restarts. Across 385 samples, worker artifacts peaked at 67,932,160 bytes,
+below 128 MiB. All owned mounts and devices were released before its 545-file
+SHA-256-verified private archive and the next guarded reset.
+
+The archived source manifest verified all 1,934 Go/module/build-script files
+against head `4489ad45`. The production-selected pin's complete 2 GiB real-service
+suspension run remains pending; earlier suspension receipts used a different
+procd binary. Provider-loss admission, retained older checkpoint/target CPU
+compatibility and production activation remain open.
+
 ## Migration filesystem drain and live-WAL custody
 
 A stopped Sentry may leave buffered XFS writes larger than the retirement

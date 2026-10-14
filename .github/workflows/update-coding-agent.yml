@@ -93,6 +93,8 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           push: true
           provenance: false
+          pull: true
+          no-cache: true
           tags: sandbox0ai/otemplates:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
 
       - name: Verify Docker in stock gVisor

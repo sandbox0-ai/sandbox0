@@ -331,6 +331,7 @@ type NodeAuthorityIdentityConfig struct {
 
 // RuntimeSlotTerminalConfig controls active-active terminal reconciliation.
 type RuntimeSlotTerminalConfig struct {
+	ProviderRecovery   bool     `yaml:"provider_recovery" json:"-"`
 	Enabled            bool     `yaml:"enabled" json:"-"`
 	NomadEndpointsFile string   `yaml:"nomad_endpoints_file" json:"-"`
 	Interval           Duration `yaml:"interval" json:"-"`

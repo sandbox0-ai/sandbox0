@@ -166,6 +166,28 @@ node behavior before enabling the larger sparse import geometry below.
 
 ## Durable OCI Importer
 
+For an already configured node authority and terminal reconciler, physical
+Aliyun instance-loss recovery is a separate opt-in manager setting:
+
+```yaml
+node_authority:
+  terminal:
+    provider_recovery: false
+```
+
+Enable it only after the provider-loss/replacement acceptance gate, migration
+122 and the control role's scoped `ecs:DescribeInstanceAttribute` permission.
+Both the node authority and terminal reconciler must be enabled. The configured
+node-pool provider region and enrollment owner account pin ECS/STS observations;
+client RPC failure and ESS detachment are not proof of machine loss. Two distinct
+authenticated observations must span at least 30 seconds of regional database
+time. The manager then fences the original writer, acknowledges exact Nomad
+server retirement and atomically restores the last regional RootFS cut while
+releasing the old slot/resources. The existing crash-reconstruction worker can
+resume that Sandbox on a new allocation. Unpublished local WAL and crashed
+process memory are not recovered. Pending checkpoint/migration custody and
+planned pauses cannot be converted to this crash path.
+
 Manager's RootFS importer is required for the Nomad runtime. Configure:
 
 ```yaml

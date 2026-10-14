@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func buildLiveCommit(t *testing.T, f *rootFSWriterCrashAbandonFixture, objects o
 	descriptor, err := rootfsblock.DecodeDescriptor(base.Descriptor)
 	require.NoError(t, err)
 	publisher := retentionNodePublisher{store: f.store, objects: objects, request: RootFSNodeUploadRequest{
-		GrantID: f.issued.Grant.ID, NodeUID: "node-a", OperationID: op, WriterEpoch: f.issued.Grant.WriterEpoch,
+		GrantID: f.issued.Grant.ID, NodeUID: f.issued.Grant.NodeUID, OperationID: op, WriterEpoch: f.issued.Grant.WriterEpoch,
 		BindingVersion: RootFSWriterBindingVersion, BindingDigest: f.request.BindingDigest,
 	}}
 	built, err := rootfsblock.BuildIncrementalGeneration(t.Context(), objects, descriptor, []rootfsblock.BlockUpdate{
@@ -66,7 +67,7 @@ func buildLiveCommit(t *testing.T, f *rootFSWriterCrashAbandonFixture, objects o
 		BaseBlockRoot: parent.BaseBlockRoot, CurrentBlockHead: built.Descriptor.MappingRoot.RootDigest, WriterEpoch: f.issued.Grant.WriterEpoch,
 		FormatGeneration: parent.FormatGeneration, DurabilityState: RootFSGenerationStateS3Materialized, LocatorVersion: 1, Descriptor: built.Payload,
 	}
-	return &PublishRootFSLiveCommitRequest{GrantID: f.issued.Grant.ID, NodeUID: "node-a", OperationID: op,
+	return &PublishRootFSLiveCommitRequest{GrantID: f.issued.Grant.ID, NodeUID: f.issued.Grant.NodeUID, OperationID: op,
 		WriterEpoch: f.issued.Grant.WriterEpoch, BindingVersion: RootFSWriterBindingVersion, BindingDigest: f.request.BindingDigest,
 		ExpectedCommittedGenerationID: parent.ID, BaseGenerationID: base.ID, CutSequence: sequence, Generation: generation,
 	}
@@ -168,7 +169,21 @@ func verifyLiveCommitProgressAndReceiptReplay(t *testing.T, f *rootFSWriterCrash
 	_, err = NewPGSandboxStore(f.pool).PublishRootFSLiveCommit(ctx, third)
 	require.NoError(t, err, "exact retry survives parent and upload receipt collection")
 	assertRetentionContents(t, objects, third.Generation, 33)
-	require.ErrorContains(t, migrate.Down(ctx, f.pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{})),
+	// This assertion belongs to migration 121, independently of later steps.
+	rollbackSQL, readErr := storemigrations.FS.ReadFile("00121_rootfs_live_commits.sql")
+	require.NoError(t, readErr)
+	sections := strings.Split(string(rollbackSQL), "-- +goose Down")
+	require.Len(t, sections, 2)
+	rollbackErr := func() error {
+		tx, err := f.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		_, err = tx.Exec(ctx, sections[1])
+		return err
+	}()
+	require.ErrorContains(t, rollbackErr,
 		"live commit rollback requires retired writers")
 	// Independent SQL fences protect against an older/incorrect authority writer.
 	for _, statement := range []string{

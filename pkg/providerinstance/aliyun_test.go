@@ -26,12 +26,12 @@ func (f stsReaderFunc) GetCallerIdentity(r *sts.GetCallerIdentityRequest) (*sts.
 
 func verifiedIdentity(*sts.GetCallerIdentityRequest) (*sts.GetCallerIdentityResponse, error) {
 	r := sts.CreateGetCallerIdentityResponse()
-	r.AccountId, r.RequestId = "1663579946854466", "identity-receipt"
+	r.AccountId, r.RequestId = "1234567890123456", "identity-receipt"
 	return r, nil
 }
 
 func testScope() Scope {
-	return Scope{Provider: "aliyun", AccountID: "1663579946854466", RegionID: "us-east-1", InstanceID: "i-exact"}
+	return Scope{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: "i-exact"}
 }
 
 func providerError(status int, code, receipt string) error {
@@ -42,10 +42,10 @@ func TestAliyunObserverRequiresExplicitNotFoundInVerifiedScope(t *testing.T) {
 	reader := ecsReaderFunc(func(r *ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error) {
 		require.Equal(t, "i-exact", r.InstanceId)
 		require.Equal(t, "us-east-1", r.RegionId)
-		require.Equal(t, "1663579946854466", string(r.OwnerId))
+		require.Equal(t, "1234567890123456", string(r.OwnerId))
 		return nil, fmt.Errorf("wrapped: %w", providerError(404, "InvalidInstanceId.NotFound", "not-found-receipt"))
 	})
-	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1663579946854466")
+	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 	require.NoError(t, err)
 	observation, err := o.Observe(context.Background(), testScope())
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestAliyunObserverNeverTreatsStoppedOrDetachedInstancesAsAbsent(t *testing.
 				r.InstanceId, r.RegionId, r.RequestId, r.Status = "i-exact", "us-east-1", "present-receipt", status
 				return r, nil
 			})
-			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1663579946854466")
+			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 			require.NoError(t, err)
 			observation, err := o.Observe(context.Background(), testScope())
 			require.NoError(t, err)
@@ -88,7 +88,7 @@ func TestAliyunObserverFailsClosedOnErrorsAndMalformedResponses(t *testing.T) {
 			reader := ecsReaderFunc(func(*ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error) {
 				return nil, apiErr
 			})
-			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1663579946854466")
+			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 			require.NoError(t, err)
 			observation, err := o.Observe(context.Background(), testScope())
 			require.Error(t, err)
@@ -111,7 +111,7 @@ func TestAliyunObserverFailsClosedOnErrorsAndMalformedResponses(t *testing.T) {
 				}
 				return r, nil
 			})
-			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1663579946854466")
+			o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 			require.NoError(t, err)
 			_, err = o.Observe(context.Background(), testScope())
 			require.Error(t, err)
@@ -132,7 +132,7 @@ func TestAliyunObserverChecksActualCredentialAccountBeforeECS(t *testing.T) {
 				response.AccountId = account
 				return response, nil
 			})
-			o, err := newAliyunObserver(reader, identity, "us-east-1", "1663579946854466")
+			o, err := newAliyunObserver(reader, identity, "us-east-1", "1234567890123456")
 			require.NoError(t, err)
 			_, err = o.Observe(context.Background(), testScope())
 			require.Error(t, err)
@@ -147,13 +147,13 @@ func TestAliyunObserverRejectsScopeDriftAndCancellation(t *testing.T) {
 		calls++
 		return nil, nil
 	})
-	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1663579946854466")
+	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 	require.NoError(t, err)
 	for _, scope := range []Scope{
 		{Provider: "aliyun", AccountID: "other", RegionID: "us-east-1", InstanceID: "i-exact"},
-		{Provider: "aliyun", AccountID: "1663579946854466", RegionID: "cn-hangzhou", InstanceID: "i-exact"},
-		{Provider: "other", AccountID: "1663579946854466", RegionID: "us-east-1", InstanceID: "i-exact"},
-		{Provider: "aliyun", AccountID: "1663579946854466", RegionID: "us-east-1", InstanceID: ""},
+		{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "cn-hangzhou", InstanceID: "i-exact"},
+		{Provider: "other", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: "i-exact"},
+		{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: ""},
 	} {
 		_, err := o.Observe(context.Background(), scope)
 		require.Error(t, err)

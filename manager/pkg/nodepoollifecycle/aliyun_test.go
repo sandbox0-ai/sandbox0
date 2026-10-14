@@ -250,7 +250,7 @@ func TestAliyunLifecycleDistinguishesAttachedFromInServiceInstances(t *testing.T
 	}}
 	cloud, err := newAliyunCloud(client, lifecycleVPCStub{}, "asg-1", []string{"rt-1"})
 	require.NoError(t, err)
-	cloud.region, cloud.accountID = "us-east-1", "1663579946854466"
+	cloud.region, cloud.accountID = "us-east-1", "1234567890123456"
 	cloud.instances = instancePresenceFunc(func(_ context.Context, scope providerinstance.Scope) (providerinstance.Observation, error) {
 		return providerinstance.Observation{Scope: scope, Present: scope.InstanceID != "missing", RequestID: "physical", IdentityRequestID: "owner"}, nil
 	})

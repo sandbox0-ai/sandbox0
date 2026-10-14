@@ -1556,6 +1556,12 @@ func completeRootFSWriterCrashAbandon(
 	if err != nil {
 		return nil, err
 	}
+	return completeValidatedRootFSWriterCrashAbandon(ctx, tx, normalized)
+}
+
+// Node and persisted-provider callers validate distinct proof contracts before
+// entering the shared lifecycle/head transition.
+func completeValidatedRootFSWriterCrashAbandon(ctx context.Context, tx sandboxStoreTx, normalized *CompleteRootFSWriterCrashAbandonRequest) (*RootFSWriterGrant, error) {
 	record, err := getRootFSWriterGrantForUpdate(ctx, tx.tx, normalized.GrantID)
 	if err != nil {
 		return nil, err
@@ -2183,6 +2189,10 @@ func validateCompleteRootFSWriterPrelaunchAbortRequest(
 func validateCompleteRootFSWriterCrashAbandonRequest(
 	req *CompleteRootFSWriterCrashAbandonRequest,
 ) (*CompleteRootFSWriterCrashAbandonRequest, error) {
+	return validateCompleteRootFSWriterCrashAbandonRequestAtVersion(req, RootFSWriterCrashAbandonProofVersion)
+}
+
+func validateCompleteRootFSWriterCrashAbandonRequestAtVersion(req *CompleteRootFSWriterCrashAbandonRequest, version int) (*CompleteRootFSWriterCrashAbandonRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("complete rootfs writer crash abandon request is required")
 	}
@@ -2205,7 +2215,7 @@ func validateCompleteRootFSWriterCrashAbandonRequest(
 	if err := validateRootFSWriterBindingVersion(normalized.BindingVersion); err != nil {
 		return nil, err
 	}
-	if normalized.ProofVersion != RootFSWriterCrashAbandonProofVersion {
+	if normalized.ProofVersion != version {
 		return nil, fmt.Errorf("unsupported proof_version %d", normalized.ProofVersion)
 	}
 	if err := validateRootFSWriterDigest("binding_digest", normalized.BindingDigest); err != nil {

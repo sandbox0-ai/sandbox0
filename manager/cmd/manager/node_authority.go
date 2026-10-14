@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 	"go.uber.org/zap"
 )
 
@@ -23,6 +24,9 @@ func buildManagerNodeAuthority(
 		return nil, nil
 	}
 	nodeConfig := cfg.NodeAuthority
+	if nodeConfig.Terminal.ProviderRecovery && !nodeConfig.Terminal.Enabled {
+		return nil, fmt.Errorf("provider recovery requires terminal reconciliation")
+	}
 	if !nodeConfig.Enabled {
 		if nodeConfig.Terminal.Enabled || strings.TrimSpace(nodeConfig.Terminal.NomadEndpointsFile) != "" {
 			return nil, fmt.Errorf("manager node authority must be enabled when terminal reconciliation is configured")
@@ -46,6 +50,17 @@ func buildManagerNodeAuthority(
 			NodeID: identity.NodeID, NodeUID: identity.NodeUID, AgentUID: identity.AgentUID,
 		})
 	}
+	var providerObserver providerinstance.Observer
+	if nodeConfig.Terminal.ProviderRecovery {
+		if cfg.NodePoolAutoscaler.Provider != "aliyun" {
+			return nil, fmt.Errorf("provider recovery requires the configured Aliyun instance scope")
+		}
+		var err error
+		providerObserver, err = providerinstance.NewAliyunObserver(cfg.NodePoolAutoscaler.Region, cfg.NodePoolAutoscaler.Enrollment.OwnerAccountID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return nodeauthority.New(nodeauthority.Config{
 		Store: store, Address: net.JoinHostPort(host, strconv.Itoa(nodeConfig.Port)),
 		RegionID: cfg.RegionID,
@@ -55,6 +70,9 @@ func buildManagerNodeAuthority(
 		WriterRenewalGrace:      nodeConfig.WriterRenewalGrace.Duration,
 		RuntimeSlotHeartbeatTTL: nodeConfig.RuntimeSlotHeartbeatTTL.Duration,
 		Terminal: runtimeslotterminal.Config{
+			ProviderObserver:   providerObserver,
+			ProviderRegion:     cfg.NodePoolAutoscaler.Region,
+			ProviderAccountID:  cfg.NodePoolAutoscaler.Enrollment.OwnerAccountID,
 			Enabled:            nodeConfig.Terminal.Enabled,
 			NomadEndpointsFile: nodeConfig.Terminal.NomadEndpointsFile,
 			Interval:           nodeConfig.Terminal.Interval.Duration,

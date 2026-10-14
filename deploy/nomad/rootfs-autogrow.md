@@ -839,14 +839,46 @@ additional RAM authorization. See the official
 [ECS API contract](https://www.alibabacloud.com/help/en/ecs/developer-reference/api-ecs-2014-05-26-describeinstanceattribute)
 and [STS identity contract](https://help.aliyun.com/en/ram/developer-reference/api-sts-2015-04-01-getcalleridentity).
 
-This corrects the existing warm-carrier observation and supplies a scoped
-provider receipt; it does not retire a claimed Sandbox. Claimed-writer recovery
-still requires a separate persistent provider-absence proof, exact node/boot
-and writer fencing, atomic last-committed-head/slot/resource-lease completion,
-and actual Nomad replacement admission. Source-host namespace proofs must not
-be fabricated on a replacement machine. The earlier growth/memory/API/outage
-receipts qualify their recorded source head and binary, not this new recovery
-path or a production rollout.
+The claimed-writer path is now wired separately behind the disabled-by-default
+`node_authority.terminal.provider_recovery` setting. Migration 122 persists two
+distinct ECS/STS receipts and their original node/boot identity, using regional
+database time for a minimum 30-second observation interval. Replay cannot advance
+that clock. Positive presence resets pending evidence or revokes a confirmed
+proof; confirmed proof bodies and identity remain immutable.
+
+An unavailable direct client only triggers this independent observation. The
+regional controller fences the exact consumed writer, requests exact Nomad
+server retirement and waits for terminal catalog state plus its scheduling
+acknowledgement. It never calls a missing client's GC or fabricates its mount
+namespace. A separate provider proof version, rejected by existing node proof
+APIs, authorizes one transaction that promotes the last regional live cut,
+aborts the crash lifecycle, retires the writer/slot and releases its bound
+resource lease. Existing foreign rollout fences are preserved. The existing
+automatic reconstruction authority recognizes the paused crash result.
+Checkpoint/migration custody and planned-pause authority cannot be bypassed.
+
+Regional PostgreSQL/race and controller tests verify observation grace/replay,
+scope and boot binding, proof revocation/immutability, exact retry, preserved
+foreign fences, reconstruction eligibility, remote-cut retention after GC and
+full rollback on a resource conflict. Controller tests exercise server-only
+retirement and response loss. Dead warm carriers cannot suppress claimed
+provider recovery later in the same bounded pass. These are regional/controller
+gates with synthetic provider receipts; actual compute deletion and Nomad
+replacement admission remain required before enablement. Earlier complete
+growth/memory/API/outage receipts qualify their recorded source head/binary,
+not this new recovery path or a production rollout.
+
+The complete selected PostgreSQL regression passed all 12 executed tests in
+65.31 seconds under the race detector, including four provider cases and the
+existing live-publication/crash-abandon cases. The two optional S3-specific
+tests were skipped in this database-only run; their earlier raw/encrypted
+receipts remain separate. A first run exposed a historical test targeting the
+latest rollback rather than migration 121; it now executes that migration's
+guard explicitly while the existing pinned empty-rollback test still verifies
+the goose step. The dead-warm-carrier regression failed with the previous
+whole-node skip condition and passed with provider dispatch enabled. Full
+Nomad/provider/reconciler/terminal/writer/node-authority and selected manager
+race suites also passed. No production setting or service changed.
 
 ## Actual Nomad, procd and live-owner transfer acceptance
 

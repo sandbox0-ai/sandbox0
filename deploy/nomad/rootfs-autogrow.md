@@ -28,10 +28,10 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Requalify regional lifecycle/fencing/GC on the final release candidate.
-   The complete actual public filesystem API case passed on `32e73885` below;
-   its read-root refinement still needs a complete rerun. Current-candidate
-   retained-memory and 2 GiB object-service interruption qualification passed.
+1. Complete machine-loss lifecycle/fencing/GC qualification on the release
+   candidate. Current `f3abe7d2` code passed complete public filesystem API,
+   retained-memory and 2 GiB object-service interruption acceptance below;
+   these isolated gates do not establish actual provider-loss admission.
 2. Qualify complete node loss and replacement-node admission. Abrupt
    process-owner fencing and a separately provisioned machine's fresh-cache
    remote recovery passed below; provider loss observation and actual Nomad
@@ -298,6 +298,19 @@ and completed materialization permits generation deletion while its journal
 keeps the object until the retention window ends. Rollback expiry and eventual
 filesystem collection still pass. Complete candidate CI and actual runtime
 qualification remain required.
+
+The refined `f3abe7d2` code subsequently passed its own complete public API
+rerun in 386.45 seconds (regional fixture 365.70 seconds). It completed growth,
+three live transfers, both snapshots/forks, restore and distinct imported-base
+rebase, all three matching full cold hashes, all three sandbox deletions and
+final inventory/GC. The 600 MiB payload hash was
+`48c4c6e80019178db94679c31f2968751285bb43d0670833536b304054f3b2f5`.
+Across 376 samples, worker artifacts peaked at 52,371,456 bytes, below 128 MiB.
+Both runner and regional fixture exited zero and all NBD devices/mounts were
+released. The same candidate binary/procd now have complete actual API,
+retained-memory and 2 GiB real-service suspension receipts. Later documentation
+commits do not change the qualified Go/build sources; complete provider loss
+and production compatibility/activation remain open.
 
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and

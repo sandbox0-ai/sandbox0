@@ -200,7 +200,8 @@ type CompleteRootFSWriterPrelaunchAbortRequest struct {
 // proved that every physical writer is gone. ProofDigest is evidence already
 // validated by the caller; lease expiry by itself is never evidence.
 //
-// The transaction preserves ExpectedOldGenerationID as the durable head,
+// The transaction promotes the last acknowledged live checkpoint (or keeps
+// ExpectedOldGenerationID when no live commit exists) as the durable head,
 // pauses an exact crashed active runtime, preserves explicit termination, and
 // aborts its lifecycle transaction with RootFSWriterCrashAbandonReason. It
 // never reports a successful planned pause.
@@ -1555,6 +1556,12 @@ func completeRootFSWriterCrashAbandon(
 	if err != nil {
 		return nil, err
 	}
+	return completeValidatedRootFSWriterCrashAbandon(ctx, tx, normalized)
+}
+
+// Node and persisted-provider callers validate distinct proof contracts before
+// entering the shared lifecycle/head transition.
+func completeValidatedRootFSWriterCrashAbandon(ctx context.Context, tx sandboxStoreTx, normalized *CompleteRootFSWriterCrashAbandonRequest) (*RootFSWriterGrant, error) {
 	record, err := getRootFSWriterGrantForUpdate(ctx, tx.tx, normalized.GrantID)
 	if err != nil {
 		return nil, err
@@ -1618,6 +1625,9 @@ func completeRootFSWriterCrashAbandon(
 	if err := lockRootFSWriterCrashFallbackGeneration(
 		ctx, tx.tx, record, normalized.ExpectedOldGenerationID, runtimeMatch.failedClaimDeletion,
 	); err != nil {
+		return nil, err
+	}
+	if err := restoreRootFSLiveCrashHead(ctx, tx.tx, record); err != nil {
 		return nil, err
 	}
 
@@ -2179,6 +2189,10 @@ func validateCompleteRootFSWriterPrelaunchAbortRequest(
 func validateCompleteRootFSWriterCrashAbandonRequest(
 	req *CompleteRootFSWriterCrashAbandonRequest,
 ) (*CompleteRootFSWriterCrashAbandonRequest, error) {
+	return validateCompleteRootFSWriterCrashAbandonRequestAtVersion(req, RootFSWriterCrashAbandonProofVersion)
+}
+
+func validateCompleteRootFSWriterCrashAbandonRequestAtVersion(req *CompleteRootFSWriterCrashAbandonRequest, version int) (*CompleteRootFSWriterCrashAbandonRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("complete rootfs writer crash abandon request is required")
 	}
@@ -2201,7 +2215,7 @@ func validateCompleteRootFSWriterCrashAbandonRequest(
 	if err := validateRootFSWriterBindingVersion(normalized.BindingVersion); err != nil {
 		return nil, err
 	}
-	if normalized.ProofVersion != RootFSWriterCrashAbandonProofVersion {
+	if normalized.ProofVersion != version {
 		return nil, fmt.Errorf("unsupported proof_version %d", normalized.ProofVersion)
 	}
 	if err := validateRootFSWriterDigest("binding_digest", normalized.BindingDigest); err != nil {

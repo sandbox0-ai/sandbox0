@@ -35,6 +35,11 @@ nomad_runtime:
   max_dirty_tail_bytes: 10737418240
   max_node_dirty_tail_bytes: 42949672960
   dirty_tail_retirement_reserve_bytes: 67108864
+  # Enable only after regional/node upgrades and the automatic-growth gates.
+  # Online commits bound the selected WAL; object-store outages block writes.
+  live_commits: false
+  # Requires live_commits; grows mounted XFS within its sparse device ceiling.
+  auto_grow: false
   nbd_devices: [${SANDBOX0_ROOTFS_NBD_DEVICES}]
   # Operator-provisioned XFS project quota; see ../live-migration.md.
   # All zero disables new migration image writes.

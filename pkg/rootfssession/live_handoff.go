@@ -64,7 +64,7 @@ func (m *Manager) PrepareLiveHandoff(ctx context.Context) (_ *PreparedLiveHandof
 	for parent := range m.live {
 		parents = append(parents, parent)
 	}
-	busy := len(m.captures) != 0 || len(m.rebaseAdmission) != 0
+	busy := len(m.captures) != 0 || len(m.growing) != 0 || len(m.rebaseAdmission) != 0
 	m.mu.Unlock()
 	prepared := &PreparedLiveHandoff{manager: m, Manifest: LiveHandoff{Version: 1}}
 	defer func() {
@@ -197,6 +197,9 @@ func (m *Manager) liveHandoffRecords() (map[string]string, error) {
 			}
 			switch current.State {
 			case stateReady:
+				if current.LiveCommit != nil && (current.LiveCommit.Pending != nil || current.LiveCommit.ObsoleteBranch != nil) {
+					return fmt.Errorf("RootFS session %s has an unfinished live installation", key)
+				}
 				digest := sha256.Sum256(value)
 				result[string(key)] = hex.EncodeToString(digest[:])
 			case stateTombstoned, stateReserved, stateDeviceReserved:

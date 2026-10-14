@@ -89,6 +89,18 @@ func (s *Service) PrepareLiveUpdate(ctx context.Context) (*PreparedLiveUpdate, e
 	s.liveMu.Lock()
 	runtime := s.liveRuntime
 	s.liveMu.Unlock()
+	pending, err := runtime.sessions.PendingLiveCommitStages()
+	if err == nil {
+		for _, stage := range pending {
+			if err = runtime.sessions.SettleLiveCommit(ctx, stage); err != nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		s.liveDecision <- false
+		return nil, fmt.Errorf("settle live RootFS before owner transfer: %w", err)
+	}
 	prepared, err := runtime.sessions.PrepareLiveHandoff(ctx)
 	if err != nil {
 		s.liveDecision <- false

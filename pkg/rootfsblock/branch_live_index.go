@@ -128,16 +128,21 @@ func (b *Branch) openLiveIndex(index *os.File) error {
 	if err != nil || device != cut.Device || inode != cut.Inode {
 		return fmt.Errorf("live branch journal inode changed: %w", err)
 	}
-	if cut.Version != 1 || cut.Identity != b.identity || cut.Header != headerEnd || cut.End != info.Size() || cut.Sequence > uint64(math.MaxInt64/branchRecordBytes) || cut.End-cut.Header != int64(cut.Sequence)*branchRecordBytes || indexInfo.Size() != 12+int64(length)+int64(cut.Sequence)*24+sha256.Size {
+	if cut.Sequence < b.identity.SequenceBase {
+		return fmt.Errorf("live branch sequence precedes its committed base")
+	}
+	recordCount := cut.Sequence - b.identity.SequenceBase
+	if cut.Version != 1 || cut.Identity != b.identity || cut.Header != headerEnd || cut.End != info.Size() || recordCount > uint64(math.MaxInt64/branchRecordBytes) || cut.End-cut.Header != int64(recordCount)*branchRecordBytes || indexInfo.Size() != 12+int64(length)+int64(recordCount)*24+sha256.Size {
 		return fmt.Errorf("live branch index differs from its exact journal cut")
 	}
 	entry := make([]byte, 24)
-	for sequence := uint64(1); sequence <= cut.Sequence; sequence++ {
+	for index := uint64(0); index < recordCount; index++ {
+		sequence := b.identity.SequenceBase + index + 1
 		if _, err := io.ReadFull(checked, entry); err != nil {
 			return err
 		}
 		record := branchRecord{sequence: binary.BigEndian.Uint64(entry), block: binary.BigEndian.Uint64(entry[8:]), offset: int64(binary.BigEndian.Uint64(entry[16:]))}
-		if record.sequence != sequence || record.block >= uint64(b.Size()/LogicalBlockSize) || record.offset != cut.Header+int64(sequence-1)*branchRecordBytes+64 {
+		if record.sequence != sequence || record.block >= uint64(b.Size()/LogicalBlockSize) || record.offset != cut.Header+int64(index)*branchRecordBytes+64 {
 			return fmt.Errorf("invalid live branch index record")
 		}
 		b.blocks[record.block] = record

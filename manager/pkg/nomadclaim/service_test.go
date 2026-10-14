@@ -809,6 +809,7 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(
 		(requirements.ImportDataRangeBytes != 0 && (f.artifact.ImportDataRangeBytes == nil || *f.artifact.ImportDataRangeBytes != requirements.ImportDataRangeBytes)) ||
 		f.artifact.FormatGeneration != requirements.FormatGeneration ||
 		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
+		f.artifact.InitialFilesystemSizeBytes != requirements.InitialFilesystemSizeBytes ||
 		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
 		f.artifact.ProcdDigest != requirements.ProcdDigest {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
@@ -829,7 +830,8 @@ func (f *fakeClaimStore) GetReadyRootFSBaseArtifactByDigest(
 	}
 	if f.artifact == nil || f.artifact.ArtifactDigest != digest || f.artifact.Platform != platform ||
 		f.artifact.FormatGeneration != requirements.FormatGeneration ||
-		f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes ||
+		((requirements.InitialFilesystemSizeBytes == 0 && f.artifact.InitialFilesystemSize() != requirements.LogicalSizeBytes) ||
+			(requirements.InitialFilesystemSizeBytes != 0 && (f.artifact.LogicalSizeBytes != requirements.LogicalSizeBytes || f.artifact.InitialFilesystemSizeBytes != requirements.InitialFilesystemSizeBytes))) ||
 		f.artifact.ProcdProtocol != requirements.ProcdProtocol ||
 		(!requirements.PreserveCommittedProcd && f.artifact.ProcdDigest != requirements.ProcdDigest) {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound

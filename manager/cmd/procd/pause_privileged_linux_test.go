@@ -122,8 +122,21 @@ func TestFilesystemResumeGuest(t *testing.T) {
 		if err != nil {
 			result["error"] = err.Error()
 		}
-		data, _ := json.Marshal(result)
-		_ = os.WriteFile(fmt.Sprintf("/evidence/resume-%d.json", generation), data, 0600)
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Errorf("encode filesystem-resume evidence: %v", err)
+			return
+		}
+		ready := fmt.Sprintf("/evidence/resume-%d.json", generation)
+		// The host treats the final path as readiness; publish it only once
+		// the entire JSON is written, rather than exposing an empty new file.
+		if err := os.WriteFile(ready+".pending", data, 0600); err != nil {
+			t.Errorf("write filesystem-resume evidence: %v", err)
+			return
+		}
+		if err := os.Rename(ready+".pending", ready); err != nil {
+			t.Errorf("publish filesystem-resume evidence: %v", err)
+		}
 	}()
 	main()
 }

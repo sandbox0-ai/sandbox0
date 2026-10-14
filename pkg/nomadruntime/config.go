@@ -54,6 +54,8 @@ type Config struct {
 	RootFSDirtyTailRetirementReserveBytes int64
 	RootFSNBDDevices                      []string
 	RootFSTransferableNBD                 bool
+	RootFSLiveCommits                     bool
+	RootFSAutoGrow                        bool
 	RootFSReadCacheBytes                  int64
 	RootFSReadCacheDirectory              string
 	RootFSReadDiskCacheBytes              int64
@@ -154,6 +156,9 @@ func (c *Config) ApplyDefaults() {
 // host runtime resources.
 func (c Config) Validate() error {
 	c.ApplyDefaults()
+	if c.RootFSAutoGrow && !c.RootFSLiveCommits {
+		return fmt.Errorf("automatic XFS growth requires live RootFS commits")
+	}
 	if strings.TrimSpace(c.RootFSObjectBucket) == "" {
 		return fmt.Errorf("rootfs_object_bucket is required")
 	}

@@ -16,6 +16,54 @@ import (
 
 const allocationObservationVersion = 1
 
+// RetireProviderAbsent observes only the trusted server catalog. The caller
+// first verifies a persisted cloud-instance absence proof; this is not a
+// substitute for direct-client cleanup when a machine still exists.
+func (c *Controller) RetireProviderAbsent(ctx context.Context, request runtimeslotreconciler.AllocationPurgeRequest, providerDigest []byte) ([]byte, error) {
+	if len(providerDigest) != sha256.Size {
+		return nil, errors.New("persisted provider proof is required")
+	}
+	if err := validateTarget(request.Target); err != nil {
+		return nil, err
+	}
+	if err := validateOperationID(request.OperationID); err != nil {
+		return nil, err
+	}
+	a, err := c.api.ServerAllocation(ctx, request.Target)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		if err = validateAllocation(*a, request.Target); err != nil {
+			return nil, err
+		}
+		if !allocationClientTerminal(a.ClientStatus) {
+			if a.DesiredStatus == "run" {
+				if err = c.api.StopAllocation(ctx, request.Target, request.OperationID); err != nil {
+					return nil, err
+				}
+			}
+			return nil, ErrProviderAllocationNotTerminal
+		}
+		if err = c.api.EvaluateTerminalAllocation(ctx, request.Target, request.OperationID); err != nil {
+			return nil, err
+		}
+	}
+	body, err := json.Marshal(struct {
+		Version        int
+		Evidence       string
+		Target         runtimeslotreconciler.AllocationTarget
+		ProviderDigest []byte
+	}{2, "provider-instance-absent/nomad-server-terminal", request.Target, providerDigest})
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(body)
+	return digest[:], nil
+}
+
+var ErrProviderAllocationNotTerminal = errors.New("await exact Nomad server terminal state after provider absence")
+
 // Allocation is the bounded server-catalog identity needed before a direct
 // Nomad client operation is allowed.
 type Allocation struct {

@@ -30,6 +30,18 @@ type migrationPeer struct {
 	handlers sync.WaitGroup
 }
 
+type migrationPeerConnectionKey struct{}
+
+// Keep the underlying socket for terminal cancellation. tls.Conn.Close may
+// send close_notify with a fresh five-second write deadline, even after an
+// expired HTTP write deadline interrupted a non-reading destination.
+func migrationPeerConnectionContext(ctx context.Context, connection net.Conn) context.Context {
+	if secure, ok := connection.(*tls.Conn); ok {
+		connection = secure.NetConn()
+	}
+	return context.WithValue(ctx, migrationPeerConnectionKey{}, connection)
+}
+
 type migrationPeerRead struct {
 	SlotID           string                                  `json:"slot_id"`
 	RequestDigest    string                                  `json:"request_digest"`
@@ -71,7 +83,8 @@ func (d *nodeRuntime) startMigrationPeer(ctx context.Context, address string) (*
 	peer := &migrationPeer{identity: identity, endpoint: endpoint, cancel: cancel, served: make(chan struct{})}
 	peer.server = &http.Server{Handler: peer.handler(d),
 		ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second,
-		IdleTimeout: 5 * time.Second, MaxHeaderBytes: 4096, BaseContext: func(net.Listener) context.Context { return ctx }}
+		IdleTimeout: 5 * time.Second, MaxHeaderBytes: 4096, BaseContext: func(net.Listener) context.Context { return ctx },
+		ConnContext: migrationPeerConnectionContext}
 	// TLS proves possession; the handler checks the exact operation's client
 	// certificate before looking up or returning any workload image bytes.
 	tlsListener := tls.NewListener(netutil.LimitListener(listener, 8), &tls.Config{
@@ -142,6 +155,11 @@ func (d *nodeRuntime) serveMigrationPeer(writer http.ResponseWriter, request *ht
 	}
 	interrupted := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
+		// This stream is being abandoned. Close the raw socket before HTTP's
+		// write-error path can enter TLS close_notify and extend custody.
+		if connection, ok := ctx.Value(migrationPeerConnectionKey{}).(net.Conn); ok {
+			_ = connection.Close()
+		}
 		_ = controller.SetWriteDeadline(time.Now())
 		close(interrupted)
 	})

@@ -25,6 +25,9 @@ type MigrationRootFSSealer interface {
 }
 
 func (r *rootfsRuntime) CaptureMigrationRootFS(ctx context.Context, stage rootfshandoff.StageRequest, request rootfshandoff.MigrationRootFSCutRequest) (rootfshandoff.MigrationRootFSCut, error) {
+	if err := r.sessions.SettleLiveCommit(ctx, stage); err != nil {
+		return rootfshandoff.MigrationRootFSCut{}, err
+	}
 	return r.sessions.CaptureMigrationRootFS(ctx, stage, request)
 }
 

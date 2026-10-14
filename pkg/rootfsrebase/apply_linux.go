@@ -163,6 +163,11 @@ func validateApplyRequest(request ApplyRequest) error {
 	for _, change := range request.Diff.Changes {
 		oldNode, oldExists := oldBy[change.Path]
 		sourceNode, sourceExists := sourceBy[change.Path]
+		for _, field := range change.Metadata.Fields {
+			if field == "size" && sourceNode.Type != NodeRegular {
+				return fmt.Errorf("size metadata for %q requires a regular file", change.Path)
+			}
+		}
 		switch change.Kind {
 		case ChangeAdd:
 			if oldExists || !sourceExists {
@@ -757,6 +762,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 
 	// Directory targets must exist before a rename or child creation uses them.
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if (plan.structure == structureCreate || plan.structure == structureReplace) &&
 			plan.source.Type == NodeDirectory {
@@ -771,6 +779,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 		}
 	}
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if plan.structure == structureRename {
 			if err := w.renameNode(plan.change.FromPath, plan.change.Path); err != nil {
@@ -783,6 +794,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 
 	// Remove leaves before parents, after files have moved out of removed trees.
 	for index := len(ordered) - 1; index >= 0; index-- {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if plan.structure == structureRemove {
 			if err := w.removeNode(plan.change.Path, plan.target.Type); err != nil {
@@ -792,6 +806,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 		}
 	}
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if (plan.structure == structureCreate || plan.structure == structureReplace) &&
 			plan.source.Type != NodeDirectory && plan.change.HardlinkTarget == "" {
@@ -806,6 +823,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 		}
 	}
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if plan.structure == structureHardlink {
 			if plan.change.Kind == ChangeReplace {
@@ -822,6 +842,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 
 	// Data precedes metadata so writes cannot perturb the final mode or mtime.
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if len(plan.data) == 0 && !plan.fields["size"] {
 			continue
@@ -832,6 +855,9 @@ func (w *applyWorker) execute(ctx context.Context, plans []changePlan) error {
 		delete(plan.fields, "size")
 	}
 	for index := range ordered {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		plan := &ordered[index]
 		if plan.change.Kind == ChangeAdd || plan.change.Kind == ChangeReplace {
 			if plan.change.HardlinkTarget == "" && plan.created {
@@ -1006,6 +1032,9 @@ func (w *applyWorker) copySourceRange(ctx context.Context, relative string, targ
 	defer unix.Close(sourceFD)
 	buffer := make([]byte, rebaseIOBufferSize)
 	for position := offset; position < offset+length; {
+		if err := w.progress(ctx); err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1035,6 +1064,18 @@ func (w *applyWorker) copySourceRange(ctx context.Context, relative string, targ
 		w.stats.SourceReadBytes += chunk
 		w.stats.WrittenBytes += chunk
 		position += chunk
+	}
+	return nil
+}
+
+func (w *applyWorker) progress(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if w.request.Progress != nil {
+		if err := w.request.Progress(ctx, w.stats.WrittenBytes); err != nil {
+			return fmt.Errorf("maintain private rebase target: %w", err)
+		}
 	}
 	return nil
 }

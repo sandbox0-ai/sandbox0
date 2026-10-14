@@ -159,7 +159,9 @@ func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64, retirementG
 		return fmt.Errorf("dirty tail owner %q retirement group cannot change before reclamation", owner)
 	}
 	normalLimit := b.normalLimitLocked()
-	if !preloaded && (b.used > normalLimit || recoveredBytes > normalLimit-b.used) {
+	// An empty successor consumes no payload capacity and lets a fully
+	// acknowledged WAL reclaim space even after configured limits were lowered.
+	if !preloaded && recoveredBytes > 0 && (b.used > normalLimit || recoveredBytes > normalLimit-b.used) {
 		return &DirtyTailCapacityError{
 			Scope: "node", UsedBytes: b.used,
 			RequestedBytes: recoveredBytes, LimitBytes: normalLimit,

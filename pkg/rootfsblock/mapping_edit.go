@@ -76,16 +76,23 @@ func (p *mappingEditPlan) prepare(ctx context.Context, reader *Reader, page Mapp
 	}
 	gap := func(start, end uint64) error {
 		part := takeBefore(end)
-		if len(part) == 0 {
-			return nil
-		}
-		child, err := p.prepare(ctx, reader, MappingPage{
-			Version: page.Version, Level: page.Level - 1, StartBlock: start, BlockCount: end - start,
-		}, part)
-		if err == nil {
+		// A root can cover more than uint32 blocks, while each child locator
+		// cannot. Materialize only windows containing writes, leaving the
+		// rest of a large sparse gap implicit.
+		for len(part) > 0 {
+			windowStart := start + (part[0]-start)/math.MaxUint32*math.MaxUint32
+			windowEnd := min(end, windowStart+math.MaxUint32)
+			count := sort.Search(len(part), func(i int) bool { return part[i] >= windowEnd })
+			child, err := p.prepare(ctx, reader, MappingPage{
+				Version: page.Version, Level: page.Level - 1, StartBlock: windowStart, BlockCount: windowEnd - windowStart,
+			}, part[:count])
+			if err != nil {
+				return err
+			}
 			node.children = append(node.children, mappingEditChild{edit: child})
+			part = part[count:]
 		}
-		return err
+		return nil
 	}
 	cursor := page.StartBlock
 	for _, entry := range page.Entries {
@@ -204,13 +211,17 @@ func publishMappingEdits(ctx context.Context, plans []*mappingEditPlan, pageEntr
 					pages = append(pages, mappingEditPage{owner: owner, node: node, page: page})
 					continue
 				}
-				for start := 0; start < len(page.Entries); start += pageEntries {
-					end := min(start+pageEntries, len(page.Entries))
+				for start := 0; start < len(page.Entries); {
+					end := start + 1
+					for end < min(start+pageEntries, len(page.Entries)) && mappingEntryEnd(page.Entries[end])-page.Entries[start].LogicalStart <= math.MaxUint32 {
+						end++
+					}
 					part := page
 					part.Entries = page.Entries[start:end]
 					part.StartBlock = part.Entries[0].LogicalStart
 					part.BlockCount = mappingEntryEnd(part.Entries[len(part.Entries)-1]) - part.StartBlock
 					pages = append(pages, mappingEditPage{owner: owner, node: node, page: part})
+					start = end
 				}
 				if node == plan.root {
 					if page.Level == math.MaxUint8 {

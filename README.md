@@ -56,6 +56,15 @@ still depends on unpublished writes, metadata, cache state, object-store access,
 and the workload's read working set. Optional memory checkpoint and restore
 also depend on the execution-state size.
 
+For image imports, template `resources.ephemeralStorage` sets the initial XFS
+capacity (`8Gi` by default, with supported values from `300Mi` through `1Ti`).
+Deployments with automatic growth enabled expose a larger sparse device and grow
+XFS online while processes continue running. Background incremental publication
+and acknowledged WAL rotation keep compute-node caches and write journals bounded
+as stored data accumulates; unavailable or slow storage can apply write backpressure.
+Existing generations retain their committed geometry. Automatic growth is disabled
+by default and requires the [operator rollout gates](deploy/nomad/rootfs-autogrow.md).
+
 ## Quickstart
 
 Install the `s0` CLI:

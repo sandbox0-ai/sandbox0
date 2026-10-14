@@ -889,6 +889,7 @@ func newRootFSWriterCrashAbandonFixture(
 	t *testing.T,
 	lifecycleSource string,
 	matureLease bool,
+	bases ...*PutReadyRootFSBaseArtifactRequest,
 ) *rootFSWriterCrashAbandonFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -902,7 +903,11 @@ func newRootFSWriterCrashAbandonFixture(
 	record.RuntimeID = "sandbox-crash-abandon-pod"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 
-	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	base := readyRootFSBaseArtifactTestRequest()
+	if len(bases) != 0 {
+		base = bases[0]
+	}
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, base)
 	require.NoError(t, err)
 	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
 		SandboxID: sandboxID, TeamID: "team-a", SourceOCIRef: artifact.SourceOCIRef,

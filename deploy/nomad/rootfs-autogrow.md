@@ -1,0 +1,1380 @@
+# RootFS automatic growth and live commits
+
+Implementation, acceptance and release record for automatic growth. The feature
+is deployed in the qualified region; it remains opt-in for other deployments.
+Use the current release status for completion, and the later historical records
+for the evidence and limits of each acceptance scene.
+
+## Required behavior
+
+- New image imports expose a large, sparse logical device while formatting a
+  smaller initial XFS filesystem. Empty address space creates no data objects.
+- The node grows mounted XFS before free space is exhausted, without replacing
+  NBD, stopping runsc, or changing guest process identity.
+- Live block cuts publish incrementally to regional object storage. Uploads
+  hold regional custody before PUT, and publication is authenticated against
+  the exact active writer. Old snapshots remain immutable.
+- Only a regionally acknowledged cut may replace the local branch base and
+  reclaim its covered WAL records. Writes after the cut survive, including
+  overwrites of blocks already included in the cut.
+- Local branch, reader, WAL path, sequence, and dirty-budget accounting switch
+  together. A crash between regional publication and local installation must
+  recover either complete version. Ambiguous acknowledgements are retried with
+  the same operation and descriptor, never treated as permission to delete.
+- WAL and cache occupancy remain bounded independently of accumulated RootFS
+  size. Slow or unavailable storage applies backpressure without retiring the
+  live writer. Thaw/flush must not deadlock behind blocked normal writes.
+- Pause, memory checkpoints, fork, snapshot, restore, rebase, migration, writer
+  fencing, storage inventory/GC, and live ctld transfer retain their existing
+  ownership and durability guarantees.
+
+## Current release status — 2026-10-14 UTC
+
+Feature activation used runtime
+[PR #1025](https://github.com/sandbox0-ai/sandbox0/pull/1025) at
+`5f0c98f43ae4746ae77ce0251ba32b7c6995c22f`. Manager schema 122, 64 TiB sparse
+imports, live publication and online growth are enabled, including the worker
+configuration used by future enrollments. Retained checkpoint/target CPU
+compatibility, both occupied sandboxes' memory-preserving rollout, the production
+canary and temporary fixture cleanup are recorded below. CLI, SDK and website
+capacity descriptions are merged; the website documentation is deployed.
+
+The canary exposed a deferred filesystem-GC dependency bug. The correction in
+[PR #1027](https://github.com/sandbox0-ai/sandbox0/pull/1027) passed PostgreSQL,
+Linux race, Nomad driver, stock-runsc checkpoint and release-package CI and is
+merged and deployed to the control role as
+`99f0b8ef0b1e061d37dae4eda0a80f73d0eafdea`. Normal background GC then removed
+the retained filesystem, its three generations and all 80 recorded object
+references. Canary storage accounting and the regional deletion queue reached
+zero. The new manager completed two successful maintenance cycles with no
+maintenance error metric; both existing business sandboxes remained active.
+The fixed worker retains the qualified `5f0c98f4` runtime, while future
+enrollments select `99f0b8ef` with both growth flags enabled and the same procd.
+
+| Requirement | Qualifying evidence |
+| --- | --- |
+| Sparse geometry and online growth | 64 TiB logical devices with 300 MiB initial production XFS; full 1,200 MiB production payload and 2 GiB isolated outage workload. |
+| Bounded WAL/cache and safe rotation | Complete real-service suspension with 68,468,736-byte sampled worker peak, separate checkpoint quota, two-writer pressure gate, and journal/rotation race tests. |
+| Process continuity and memory checkpoints | Three live transfers and retained-memory acceptance with the production-selected procd; exact capture/restoration/adoption for both occupied production sandboxes. |
+| Snapshot/fork/restore/rebase and GC | Complete isolated public lifecycle with three full cold hashes and final inventory/GC; production snapshot/fork and retained-memory full hashes; corrected background GC with zero canary filesystem, generation, object-reference and storage-accounting residue. |
+| Permanent compute loss | Actual source ECS deletion, independent replacement admission and complete 600 MiB remote-cut hash; unpublished local suffix absent. Separate resumed cleanup receipt. |
+| Publication and cleanup | Runtime, CLI, SDK and website changes merged; worker release and canary verified; archived private evidence and provider-confirmed fixture removal. |
+
+These are bounded qualification scenes, not a 64 TiB write-volume or fleet-density
+benchmark. The earlier unexplained status-137 fixture failure remains retained;
+later successful outage runs do not establish its cause.
+
+## Production canary on 2026-10-14 UTC
+
+The regional manager at `5f0c98f43ae4746ae77ce0251ba32b7c6995c22f` applied
+schema 122 and enabled 64 TiB sparse imports. The fixed worker and future
+enrollment template enabled live commits and online growth; both executing
+ctld binaries matched the qualified release. Eleven retained checkpoints
+passed comparison against both actual target CPU sets and the unchanged stock
+runsc bundle. The occupied-worker rollout restored both authorized sandboxes
+from their exact captures. Database receipts confirmed complete restoration
+and adoption, with no failed restore or cold fallback.
+
+A dedicated team-owned Python canary imported a 300 MiB initial filesystem on
+the 64 TiB device. One process wrote 1,258,291,200 bytes, including overwrites
+and zeros, and verified the entire payload. Mounted XFS data capacity grew
+from 247,463,936 to 2,449,473,536 bytes. Live committed and installed sequence
+314,843 converged; a subsequent worker observation found the canary's selected
+WAL at sequence 314,845 occupying 8,192 bytes. This is an endpoint observation,
+not a peak occupancy measurement or a 64 TiB workload qualification.
+
+Explicit `memory: true` pause/resume retained PID 11, a private heap marker,
+an anonymous mapping and an unlinked open file. The original process answered
+fresh nonce probes and recomputed the complete payload hash after restoration.
+Its new writer installed sequence 566. A running snapshot and filesystem fork
+also succeeded; a separate first-start allocation re-read the entire forked
+payload with the same SHA-256. The source process answered another full-hash
+and handle probe after those operations. This production scene used one fixed
+worker; independent physical-node loss, storage interruption and shared-node
+pressure retain their separate isolated acceptance evidence below.
+
+Deletion removed both canary sandboxes, their named snapshot, the template,
+active writers, occupied slots and retained memory references. Final background
+GC exposed a second dependency-ordering path: after direct deletion had deferred
+a filesystem while a reader existed, GC could hit the immediate live-base FK
+while bulk-deleting its generations. GC now preserves incoming live-base edges
+from independent filesystems and releases outgoing edges of selected unreferenced
+filesystems in the same transaction before deleting their generations. Real
+PostgreSQL regressions reproduced both failures before this correction and
+passed afterward. After the corrected manager's control-only deployment,
+normal GC removed the filesystem and all three generations. All 80 objects
+recorded before deployment disappeared from the catalog and deletion queue;
+none were shared base-artifact objects. Team object references and accounted
+bytes reached zero, with no active upload, writer, slot or memory-checkpoint
+reference. The regional deletion queue was empty and the new manager recorded
+555 successful object deletions and two successful maintenance cycles. This
+total includes other ordinarily collectible regional objects; it is not the
+canary's object count. No manual database deletion was used.
+
+The private 18-directory acceptance archive was verified off-host: 9,574 members,
+1,322,878,434 bytes, SHA-256
+`d19b0f8fc5f232039fcefbcec8fb819c3f15880c3254f52539e1caea9856dc99`.
+An additional 56-file metadata archive was also verified. The disposable
+acceptance host and its dedicated provider SSH key were then deleted and their
+absence confirmed through provider 404 responses; generated local credentials
+were removed. The source-provider fixture's network and observer cleanup had
+already completed. Runtime, CLI, SDK and website description PRs are merged,
+and the website deployment for that revision completed successfully.
+
+## Acceptance gates
+
+- A process keeps its PID and memory marker through multiple XFS growth and
+  WAL rotation cycles, while reads/writes and existing open files continue.
+- Accumulated data exceeds the original filesystem and configured WAL budget;
+  host disk stays within its fixed cache/WAL plus documented transient budget.
+- Unique writes, repeated overwrites, zeros, and deleted/recreated files remain
+  correct after commits, snapshot/fork, pause/resume and fresh-node restore.
+- Faults before/after PUT, regional commit, local journal persistence, pointer
+  switch and unlink preserve data/custody and converge on exact retries.
+- Storage outage and node-wide pressure block safely, recover without process
+  restart, and do not consume protected retirement space.
+- Lifecycle/fencing races cannot publish from a stale writer or delete a WAL
+  still needed for a cut, restore, or ownership transfer.
+- The temporary host, storage namespace, database and access credentials are
+  removed; production rollout receipts and canary evidence prove deployment.
+
+## Import geometry and rollout contract
+
+This design separates guest capacity from compute-node disk capacity. A large
+sparse NBD address space does not allocate an equally large host file. Mounted
+XFS grows within that address space, while acknowledged live publication moves
+data into remote object storage and permits covered local WAL records to be
+reclaimed. A local sparse image alone would still consume local disk as data
+accumulates and would not provide this property.
+
+The compute node still needs its configured cache, dirty-tail, journal and
+transient-operation budgets. Memory checkpoint images have a separate enforced
+staging quota; they are not included in a RootFS cache/WAL bound. Remote storage
+capacity, the committed device ceiling and upload throughput remain limits.
+Online growth preserves the running guest, but is not a promise of zero I/O
+latency or uninterrupted write progress during storage outages.
+
+Guest fsync makes the local WAL durable; it does not by itself acknowledge a
+regional live publication. Complete loss of that node's WAL can recover only
+the last regionally committed cut, not its unpublished suffix. Planned drain
+must settle publication and retain the exact memory checkpoint before removing
+the worker. Abrupt-node-loss acceptance must check this boundary explicitly.
+
+`rootfs_importer.sparse_device_size_bytes` is a regional image-import setting.
+Zero retains the previous fixed-size contract during rollout. The intended
+enabled value is `70368744177664` (64 TiB); supported ceilings are aligned values
+from 1 TiB through 64 TiB. A template's `ephemeralStorage` supplies the initial
+XFS size, still defaulting to 8 GiB and accepting 300 MiB through 1 TiB.
+
+Sparse imports explicitly bind `initial_filesystem_size_bytes` and
+`logical_size_bytes` in their deterministic operation and version-4 ready
+attestation. Version 4 can combine either supported data-layout policy and
+either supported mapping-group policy. Only the initial-size image is formatted
+and scanned; the larger address space creates no zero data objects or local
+image allocation. Existing zero-valued fields remain omitted from canonical
+legacy JSON. Migration 120 adds the indexed geometry and transactional fences:
+both capacities are immutable, and a Ready result must match its import.
+
+Image lookup matches both capacities. Exact-digest lookup for a captured
+template matches its original initial capacity, with the artifact digest
+retaining its committed device geometry and other policies. Paused resume does
+not select a replacement image. Enabling a new import setting does not change
+existing artifacts, generations, or live devices.
+
+Upgrade every regional manager and node before enabling the setting. An older
+manager cannot decode the version-4 attestation, and an older node cannot recover
+a WAL header carrying a nonzero `sequence_base`. Disablement stops new sparse
+imports; it cannot reinterpret existing sparse artifacts as fixed-size imports.
+Migration rollback refuses to erase geometry while sparse artifacts or import
+operations exist. Runtime integration, lifecycle/fault acceptance and production
+rollout remain required before activation.
+
+## Verified foundation evidence
+
+This and subsequent implementation/acceptance sections preserve the history of
+individual gates. Statements that later gates were still open or production was
+disabled describe that point in the sequence. The current release status above
+supersedes those historical deployment and cleanup statuses; evidence limits and
+the required ownership/durability invariants still apply.
+
+On an isolated Ubuntu 24.04 host with Linux 6.8, the privileged NBD/XFS gate
+exposed a 64-TiB sparse device, grew mounted XFS from 300 MiB to 1,200 MiB in
+two online growth operations, and rotated its WAL 37 times. One Python process
+retained its PID, heap marker and open file while writing 600 patterned 1-MiB
+chunks. Sampled bytes in every chunk matched; peak WAL payload was 18,341,888
+bytes under the configured 192-MiB writer limit.
+
+This is the block-device/filesystem primitive gate. Its object source is an
+in-memory fixture and its process runs on the host; it does not establish runsc,
+regional publication, restart recovery or deployment acceptance. The separate
+full-product gates above remain mandatory.
+
+The strengthened gate checked all bytes of the completed 600-MiB file and then
+mounted the last live increment on a fresh writable branch without the original
+WAL. XFS log replay recovered 593 complete 1-MiB chunks, all byte-correct. Those
+593 chunks belong to that earlier cut; the later writes remained in the original
+WAL suffix. The run again performed two growth operations and 37 rotations,
+with 17,911,808 peak WAL payload bytes. This proves cut consistency, not remote
+durability of writes after the cut or full-product node-loss recovery.
+
+Linux PostgreSQL import acceptance passed all four combinations of empty/
+file-relative data layout and empty/contiguous mapping grouping. It verified
+both capacities survive lease reconstruction, exact commit retries, mismatched
+initial-size rejection, captured-template digest lookup, metadata immutability,
+SQL terminal fencing independent of Go validation, and guarded migration
+rollback. Existing import/format/geometry regression also passed on that host.
+
+## Real S3 lifecycle and installed-base retention
+
+The optional `S0_NOMAD_LIVE_PUBLIC_API=1` isolated Nomad fixture adds an actual
+authenticated public-router lifecycle gate after growth and live transfers.
+It reserves three exclusive NBD devices for rebase's old/source/target roles.
+It uses production node/product/store components, running and paused snapshot/
+fork, exact fork retry, explicit filesystem-only pause of its disposable source,
+restore, a distinct attested rebase target, deletion, inventory/GC and fresh
+NBD/XFS full-file hashes without source WAL/cache. The first real run passed
+growth, three transfers, running snapshot/fork, two cold hashes, original-process
+continuity, pause and restore, then failed rebase because its two-device fixture
+pool could not mount three roles. Its nonzero receipt is retained. The public
+fixture now reserves a third empty device. Its next real run passed the same
+preceding operations, then failed writing the grown 600 MiB file into rebase's
+initial 300 MiB target filesystem. Failed unmounting also exposed cleanup that
+closed still-mounted backends; the scene recorded nine mounts and three NBD
+devices. Its manifest-verified archive was retained before a guarded fixture
+reset released those mounts/devices. Cleanup retains backend/reservation ownership until mounts detach;
+an exact retry reuses those handles, while shutdown releases process handles
+without asserting physical absence. Regressions cover retry and restart;
+the complete session and Nomad-runtime race suites passed (75.17 and 123.31
+seconds). Target capacity and bounded rebase write/rotation are implemented
+below; complete public acceptance remains open until a real rerun passes.
+Structural compilation and skip checks are not acceptance evidence.
+Retained-memory and production occupied-worker drain qualification remain
+separate. See the infra fixture README for reproduction and provenance limits.
+
+### Private rebase growth and incremental staging
+
+The rebase target grows to the source's mounted filesystem capacity before
+copying, then follows the same free-space growth policy during application.
+The three-way merge calls its operation owner between metadata mutations and
+at most 1 MiB data chunks. At no more than one quarter of the writer WAL budget
+(capped at 8 MiB), the owner flushes target XFS and uploads an incremental cut
+under the existing regional rebase upload custody. After PUT and custody
+acknowledgements, a durable local record binds the new descriptor, sequence and
+exact current/obsolete WAL paths before rotation may reclaim covered records.
+The final descriptor builds on the latest staged base rather than losing
+earlier copied blocks. Writer and shared-node budgets are unchanged.
+
+These are unpublished operation-owned staging cuts. They never replace a
+tenant filesystem head or acknowledge a successful rebase. Only the complete
+semantic health proof and existing regional publication transaction do that.
+An interrupted operation discards its private target and retries from its
+immutable request, preserving the source, both bases and upload custody through
+cleanup. Upload failure retains the original WAL; failed unmount retains the
+backend and reservation. Unit/race regressions cover bounded overwrite cuts,
+fresh-reader correctness, failed uploads, path/sequence validation and apply
+progress cancellation; actual Nomad/S3 public lifecycle acceptance remains
+required.
+
+The first staging-enabled real run still failed before returning rebase: the
+one-minute node-channel transport rotation canceled a longer worker operation,
+and its cleanup delayed reconnect beyond the manager's bounded grace. Rebase
+custody retained 371 objects (370 upload acknowledgements), totaling 768,260,279
+bytes; the 367 worker artifact samples peaked at 56,750,080 bytes. No tenant
+rebase head was published. The original growth, three transfers and preceding
+public operations passed again. The runner exited one after 391.03 seconds;
+its archive was retained, with mounts and NBD devices released.
+
+Paused-rebase execution now belongs to the agent lifetime and its dedicated
+timeout, while stream rotation still reloads credentials/capacity immediately.
+An exact request on a successor authenticated stream joins its existing job;
+request identity, payload and global execution concurrency remain bounded.
+Completed replies have bounded cardinality/retention and durable worker journals
+remain authoritative after eviction. Agent shutdown cancels and joins these
+jobs. A real TLS disconnect regression reproduced cancellation with the prior
+agent and passed with the fix, including exactly one execution; the complete
+node-channel/agent race suites passed. A full public lifecycle rerun is still
+required.
+
+The next real run delivered a worker error across the reconnected channel
+instead of losing transport: after bounded target staging, the merge treated
+the root directory's filesystem-dependent `st_size` as regular-file data and
+attempted to open `.` for writing. The runner exited one after 391.70 seconds;
+368 samples peaked at 67,850,240 worker bytes, and mounts/devices were released.
+Its 544-file archive remains retained. Directory-size changes are now excluded
+from semantic metadata deltas, and apply validation rejects size metadata on
+non-regular nodes before mutation. The focused regression reproduced the exact
+`is a directory` failure and passed with the correction. Complete public API
+acceptance remains open until a fresh real run finishes all operations.
+
+The following run passed rebase onto the imported artifact and a third fresh
+NBD/S3 full-file hash of the 600 MiB payload, then failed its final sandbox
+deletion wait. The fixture had omitted the production sandbox-claim cleanup
+worker: the source and restored copy retained `cleanup_pending` claims after
+their delete requests returned 202. The fixture now starts that real worker
+alongside runtime-slot terminal reconciliation. Its failure receipt and
+540-file archive remain retained, including the database deletion-state receipt;
+423 samples peaked at 53,100,544 worker bytes.
+The complete API gate remains open pending the fresh run with both workers.
+
+That fresh run failed at a later rebase stream rotation. The manager had kept
+the first transport gap's deadline after reconnecting, so a second rotation
+could immediately exceed that stale deadline. Its 543-file archive includes
+the regional and service logs; the runner exited one after 394.61 seconds,
+and 382 samples peaked at 54,640,640 worker bytes. Mounts/devices were released.
+Dispatch now ends the previous gap when it selects an authenticated stream;
+every later gap has its own bounded grace, within the operation's unchanged
+caller deadline. The real TLS regression holds the same rebase beyond the
+first grace and disconnects twice; it reproduced the stale-deadline failure
+before the correction and passed in the complete 72.88-second node-channel
+race suite afterward. The fixture HTTP and claim-cleanup race suites also
+passed. Complete public acceptance still requires a fresh run.
+
+The corrected run passed rebase and all three cold hashes of the complete
+600 MiB payload, then exposed a database deletion defect: `MarkSandboxDeleted`
+attempted to delete generations still retained by a restore/rebase rollback
+record, violating its old-generation foreign key. Its nonzero 509.05-second
+receipt and 551-file archive retain regional/service logs and deletion-state
+evidence. Across 492 samples, worker artifacts peaked at 58,769,408 bytes;
+all mounts/devices were released. Complete public acceptance remains open
+until deletion respects rollback retention and a fresh run finishes.
+
+Immediate deletion now checks the same independent generation read roots as GC
+and preserves filesystem-level rollback references. The sandbox can become
+deleted without removing its rollback generations; ordinary expiration/GC
+later releases them. The PostgreSQL regression reproduced the exact foreign-key
+failure before the correction, then proved successful deletion, retention of
+both generations during the rollback window and eventual filesystem collection
+after expiration. All nine selected deletion/restore/rebase race tests passed
+in 49.27 seconds, including retained-memory and completed-running-fork cleanup.
+The corrected real public API run passed in 443.60 seconds (410.26 seconds
+for the regional fixture). It preserved the original PID 10 and managed procd
+context through 600 MiB growth and three live ctld transfers with zero task
+restarts. XFS data capacity reached 1,191,182,336 bytes within the 64-TiB device.
+The authenticated lifecycle completed two snapshots, two forks, one restore,
+one distinct imported-base rebase, three full cold NBD/S3 hashes, deletion of
+all three sandboxes and the final inventory/GC passes. All hashes matched
+`87c445f52539b5fe353694f70ae6bc875fc3212b9c27fd8a1612c0b2910b77ff`.
+Across 419 samples, worker artifacts peaked at 56,832,000 bytes, below 128 MiB;
+the runner and regional fixture exited zero and mounts/devices were released.
+Its 545-file manifest-verified archive retains receipts and regional/service
+logs. This qualifies the isolated filesystem API case on candidate `32e73885`,
+not retained-memory, complete provider loss or production rollout.
+
+Migration CI then exposed excessive retention from treating completed
+materialization members as active read roots during explicit deletion. This
+retained deleted storage billing and delayed generation removal. Deletion now
+shares the independent generation read roots while keeping its earlier
+uploading-batch fence. Completed materialization journal objects retain their
+existing deletion-race custody without keeping the deleted filesystem live;
+ordinary generation GC continues to retain materialization members. The prior
+successful API receipt remains retained; the refined candidate needs its own
+full acceptance and CI qualification.
+
+All 19 selected deletion, restore/rebase, materialization and storage-metering
+PostgreSQL race tests passed in 105.10 seconds after that refinement. The three
+previously failing CI cases now pass unchanged: deletion/recreation ends the
+previous byte-time interval, migration backfill ends orphaned storage billing,
+and completed materialization permits generation deletion while its journal
+keeps the object until the retention window ends. Rollback expiry and eventual
+filesystem collection still pass. Complete candidate CI and actual runtime
+qualification remain required.
+
+The refined `f3abe7d2` code subsequently passed its own complete public API
+rerun in 386.45 seconds (regional fixture 365.70 seconds). It completed growth,
+three live transfers, both snapshots/forks, restore and distinct imported-base
+rebase, all three matching full cold hashes, all three sandbox deletions and
+final inventory/GC. The 600 MiB payload hash was
+`48c4c6e80019178db94679c31f2968751285bb43d0670833536b304054f3b2f5`.
+Across 376 samples, worker artifacts peaked at 52,371,456 bytes, below 128 MiB.
+Both runner and regional fixture exited zero and all NBD devices/mounts were
+released. The same candidate binary/procd now have complete actual API,
+retained-memory and 2 GiB real-service suspension receipts. Later documentation
+commits do not change the qualified Go/build sources; complete provider loss
+and production compatibility/activation remain open.
+
+The regional store gates
+`TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
+`TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,
+real RustFS S3 and the race detector, both without encryption and with the
+AES-GCM/RSA immutable-object wrapper. Each backend mode also reran the existing
+progress/replay and terminal-publication regression gates. The four-test suites
+passed in 23.102 and 22.981 seconds respectively.
+
+The progress gate exercises lost/replayed publication and installation receipts,
+GC of obsolete live generations while the installed read base remains pinned,
+bounded retained receipts and rejection of forged writer/descriptor updates.
+The lifecycle gate installs a live read base, publishes a terminal generation
+that inherits it plus a new suffix block, and commits `MarkRuntimePaused` in
+the same transaction. It then creates a snapshot, forks the filesystem and
+restores the snapshot into a separate filesystem. Five inventory passes and
+real object GC retain every referenced head; fresh readers verify both the
+inherited live block and terminal suffix for the source, fork and restored copy.
+
+Objects use a unique fixture prefix, including all catalog and custody reads,
+and are removed by the fixture cleanup. These are regional transaction/storage
+gates with synthetic physical-retirement evidence. Actual NBD/runsc/Nomad
+and retained-memory evidence is recorded separately below; the public manager
+API and deployment canary remain required.
+
+## Regional live publication and remaining node integration
+
+The writer's Stage, binding digest and initial generation remain immutable.
+Live publication tracks a separate regional committed generation and node-installed
+base generation; updating the Stage's initial generation would invalidate writer
+authentication and retained lifecycle proofs.
+
+Migration 121 and the authenticated `/live-commit`, `/live-commit/installed`
+and `/live-commit/status`
+writer endpoints implement this regional cursor. A positive cut sequence identifies
+each live generation; sequence zero preserves the existing single terminal
+generation per filesystem/writer epoch. New cuts require the exact consumed,
+unexpired node binding, previous committed generation, installed read base, and
+uploaded mapping-root custody. Receipt replay validates the complete request digest.
+Both remote and installed generations have real retention FKs. New remote commits
+compact prior successful live upload receipts even during repeated cuts before
+installation; the latest complete request digest remains retryable. Canonical
+grant/sequence operation IDs reject obsolete upload attempts after compaction.
+A local installation acknowledgement releases the old installed pin;
+checksum-verified inventory allows obsolete generations to retire.
+
+The filesystem lifecycle head remains at the immutable launch generation while
+the writer is active. Final lifecycle publication retains that launch parent and
+adds an explicit dependency on the installed live read base until inventory
+completes. Crash abandonment promotes the last remote commit only after the existing
+exact runtime, lifecycle and physical terminal-proof checks. This preserves writer
+authentication and lifecycle proof identity without discarding remote durable cuts.
+
+This regional path passed isolated Linux PostgreSQL tests with in-memory immutable
+objects, plus HTTPS client/handler authentication tests. It does not yet establish
+full-product automatic growth, remote object-service or gVisor acceptance. The
+node's full-product automatic-growth and lifecycle recovery
+acceptance remains required before enabling sparse imports or deploying this
+feature.
+
+## Durable node live-commit transaction
+
+The session manager now exposes an explicit `CommitLive` operation through a
+separate authority interface. The authenticated node adapter and bounded scheduler
+are wired behind `nomad_runtime.live_commits`, which defaults to false. Session
+journal version 13 records the deterministic grant/
+sequence operation, exact flushed WAL cut, materialized publication payload,
+regional receipt, selected branch path/sequence, installed base and one obsolete
+branch. The launch Stage and generation ID remain unchanged.
+
+Before PUT, persist the flushed cut. Upload retries use `CheckpointAtCut`, which
+reads the original prefix even if later writes overwrite those blocks. Persist
+the complete publication before asking the region to accept it. A lost reply is
+resolved by the authenticated status observation; an accepted operation is never
+rebuilt or re-uploaded after its upload receipt has been compacted.
+Active status observations include the immutable committed descriptor's SHA-256
+digest. Matching the operation and generation IDs alone cannot authorize WAL
+release if the locally journaled publication payload differs.
+
+After acceptance, the Bolt transaction selects the materialized read base and
+suffix WAL before switching the same NBD Branch. Ambiguous local acknowledgements
+retain both files. Recovery reads the durable selection and verifies every copied
+suffix record against the complete old WAL before resuming append admission.
+Pending writes wait through this transition rather than receiving a temporary
+I/O error that could shut down XFS. The region receives the installed-base ack
+only after durable selection and in-memory installation; lifecycle publication
+and planned live handoff reject unsettled installations.
+
+WAL rotation copies at most 8 MiB of post-cut payload while holding the branch
+lock. If that suffix or its normal node-budget duplication does not fit, retain
+the acknowledged remote cursor and full selected WAL, then take a newer cut.
+An empty successor consumes no payload budget and can reclaim a preloaded WAL
+even after limits were lowered. Protected retirement reserve remains unavailable
+to normal writes and nonempty rotation copies. Obsolete WAL cleanup uses exact
+parent/sequence paths, not directory globs.
+
+Uploads hold neither the parent lock nor a filesystem freeze. Storage progress
+is merged in the Bolt write transaction so concurrent consumer renewal is not
+overwritten by an older upload snapshot. Branch pressure is observed before a
+Bolt writer transaction to avoid the branch-lock/journal-lock inversion during
+installation. Unplanned physical teardown can retain an unresolved receipt;
+artifact deletion still requires the existing exact regional terminal proof.
+
+Isolated Linux race tests verify upload failure, lost publication and installation
+replies, original-cut retry, continued suffix writes, concurrent consumer renewal,
+normal-budget recutting, durable successor reopen and guarded terminal cleanup.
+The complete session test suite also passed on that host. These tests use real
+Bolt journals with fake host runtime and in-memory immutable objects; actual
+runsc, remote object-storage and deployment gates remain open.
+
+## Authenticated background commit scheduling
+
+The node's one-second reconciliation loop admits up to four concurrent live
+commits. A writer becomes eligible at 64 MiB of WAL payload, a quarter of a
+smaller configured writer limit, 30 seconds since its last local installation,
+or immediately for admission pressure or an unresolved operation. Consumer
+renewal timestamps do not postpone commits. Round-robin admission prevents
+continuously dirty writers from starving other eligible writers; failed attempts
+use bounded one-to-30-second retry backoff. Node shutdown and planned live update
+join these workers through the existing control/reconciliation wait group.
+
+Enabled writers bypass legacy pressure-triggered planned retirement. They keep
+their process and mounted filesystem while a new cut reclaims the WAL; an
+unavailable object store applies backpressure. The legacy path remains available
+when live commits are disabled. Pauses, running forks and migration RootFS cuts
+settle existing pending intent without starting a new cut. Before a live owner
+transfer, control workers join and every pending receipt is settled before the
+session manifest is captured. A failed settlement preserves the journal and
+aborts the transfer.
+
+Isolated Linux race tests verify bounded worker concurrency, fair admission,
+retry backoff, disablement, absence of pressure retirement for enabled writers,
+installed-time scheduling, exact payload/parent mapping through the authority
+adapter, and settlement without capturing post-cut writes. Full-product
+remote-service acceptance remains required before rollout.
+
+## Session-owned automatic XFS growth
+
+`nomad_runtime.auto_grow` requires `live_commits` and defaults to false.
+The one-second control loop schedules a separate two-worker lane. Workers
+inspect idle candidates through each snapshot rather than spending one tick
+per two idle filesystems; active kernel growth never occupies the upload lane.
+Available space at or below the greater of 20 percent and 64 MiB triggers
+doubling, capped at the immutable logical device size. At the ceiling, ordinary
+filesystem capacity limits apply. A finite inspection interval does not guarantee
+that arbitrary write bursts cannot exhaust free space before growth completes.
+
+The manager validates the durable writer binding, ready custody and exact live
+device before retaining a growth permit. That permit rejects freeze/capture,
+release and live owner transfer while allowing background cuts and installation.
+Neither inspection nor the kernel grow ioctl holds the parent mutex. A growth
+progress worker retries pending commits and pressure reclamation under the
+primary session lifetime, even after planned-update cancellation stops control
+workers. It shares the manager's four-upload admission bound with the scheduled
+commit lane. A storage outage keeps the same backend and may delay the planned
+update; a timeout aborts transfer without dropping its source journal or fence.
+Unexpected primary shutdown closes growing branches to wake blocked kernel
+writes before joining growth. This is a shutdown path, not a planned rollout or
+a substitute for memory-preserving sandbox drain.
+
+The complete Linux race suites for `pkg/rootfssession`, `pkg/nomadruntime`,
+`ctld/cmd/ctld`, `pkg/config` and `deploy/nomad/ctld` passed after this integration.
+Focused tests cover exact binding, growth/commit overlap, rejection of captures
+and transfer during growth, reclaim after control cancellation, unexpected-close
+admission wakeup, shared upload bounds, worker separation, idle-owner sweeps,
+per-parent retry state and disabled configuration.
+
+The isolated Linux race gate `TestPrivilegedSessionAutoGrowthAndLiveCommitsKeepWriterRunning`
+passed with a real 64 TiB NBD device, XFS and the production Bolt session journal.
+One Python process retained its PID, heap marker and open file while writing
+600 patterned 1 MiB chunks. Two growth operations increased XFS from 300 MiB to
+1,200 MiB; 19 foreground commits and the pressure-reclaim path kept the selected
+WAL below its 32 MiB budget (observed peak 33,468,416 payload bytes). All chunks
+were verified after writing. Rotation suffixes that exceed the 8 MiB copy limit
+are treated as a retry with a newer cut, preserving the acknowledged remote
+cursor and complete old WAL. The fixture retired its mounted session in normal
+order and released its exclusive NBD device. These objects and authority receipts
+are still in-memory doubles; this evidence does not replace remote-service,
+runsc, lifecycle or production acceptance.
+
+The isolated fixture now includes a real RustFS 1.0.0 container pinned to
+`sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff`,
+bound only to loopback, with separate generated test credentials. The real
+PostgreSQL/RustFS `TestRootFSNodeLegacyUploadRetentionS3Integration` and
+`TestRootFSNodeUploadCustodyS3Integration` race gates passed. Legacy checkpoint
+inventory/GC reduced 11 objects to 3 and 1,114 bytes to 241 while preserving
+contents; tracked node uploads retained the expected live generation and released
+completed upload holds. These are storage-regression gates, not the combined
+authenticated live-cut/runsc acceptance gate. The fixture container, data,
+database and credentials remain temporary resources to remove after acceptance.
+
+## Combined authenticated guest and object-service acceptance
+
+`TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody` passed
+under the Linux race detector in 99.525 seconds. It uses the pinned official
+`release-20260914.0` runsc bundle, a real 64 TiB NBD device and mounted XFS,
+production Bolt session journals, the production node commit/growth scheduling
+methods, PostgreSQL migrations, real loopback RustFS S3 objects, and the regional
+writer and lifecycle handlers behind verified client-certificate authentication.
+The source image contains a locally compiled static executable; its OCI identity
+is explicit fixture provenance, so this gate does not test registry importing.
+
+One gVisor guest process wrote and fsynced 600 patterned 1 MiB chunks through one
+open file, retaining its PID, fresh-entry token, heap marker, inode and file offset.
+XFS grew from 314,572,800 to 1,258,291,200 bytes; peak node WAL payload was
+40,845,312 bytes, below the 32 MiB writer budget plus 8 MiB charged rotation
+duplication allowance. Every completed chunk was checked byte for byte.
+
+The fixture deliberately lost one successful regional publication reply and
+one successful installed-base reply. Exact retries converged to installed cut
+151,334 while retaining the immutable launch head. After guest exit, normal
+retirement published the final generation, verified regional retirement, reclaimed
+local artifacts and released NBD. Successful test cleanup removed its bucket's
+objects. Empty buckets and the fixture host/services remain temporary resources.
+
+This is a combined component acceptance gate, not a running Nomad cluster or
+production rollout. Storage-outage recovery, fresh-node recovery, lifecycle/
+fencing/GC races, memory-preserving transfer and deployment gates remain open.
+Run it only on an isolated root-owned fixture with an exclusive unused NBD device:
+
+```sh
+# Also supply private fixture S3 credentials and the dedicated test database URL.
+SANDBOX0_ROOTFS_AUTOGROW_REMOTE=1 \
+SANDBOX0_TEST_RUNSC=/path/to/pinned/gvisor/runsc \
+SANDBOX0_PRIVILEGED_NBD_DEVICE=/dev/nbd63 \
+SANDBOX0_RUSTFS_ENDPOINT=http://127.0.0.1:19000 \
+go test -race ./pkg/nomadruntime \
+  -run '^TestPrivilegedRemoteAutogrowPreservesRunscWriterAndRegionalCustody$' \
+  -v -count=1 -timeout=10m
+```
+
+The test refuses to drop schemas unless the database name starts with
+`s0_rootfs_autogrow`. Its destructive fixture migration and object cleanup must
+never run against a production database or shared bucket.
+
+## Running-fork freeze progress under WAL pressure
+
+A running-fork freeze retains exclusive checkpoint custody but releases the
+parent mutex while the kernel drains dirty filesystem writes. A private owner
+permit allows the exact authenticated writer to commit and reclaim during that
+drain. The permit is not persisted: a recovered freeze intent cannot authorize
+new live cuts, and recovery must thaw it before resuming normal ownership.
+
+After the kernel freeze returns, new cuts are excluded. The capture joins any
+in-flight commit, settles its publication/installation journal, and reloads the
+current installed base before taking the WAL checkpoint. Recovery scans do not
+thaw a barrier still owned by an active capture. RPC cancellation retains the
+owner's progress guardian until the kernel drain returns; failed settlement
+thaws and clears the fork request while preserving the pending live journal.
+Unexpected owner shutdown wakes blocked branch writes before joining freeze
+work. Planned retirement and live handoff continue to reject active captures.
+
+Linux race regressions cover full-budget metadata writes, both lost receipts,
+capture of the rotated base and suffix, cancellation, owner shutdown, failed
+settlement retry and rejection of recovered-intent authorization. Focused tests
+passed in 9.757 seconds. Full session, Nomad runtime, ctld, configuration and
+deployment tests passed (session 133.284 seconds; Nomad runtime 193.629 seconds).
+
+The combined real guest/S3 gate also passed with
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` in 100.829 seconds. It stopped and joined the
+ordinary scheduler, waited for the running guest to fill its WAL, then captured
+a local running-fork boundary using the freeze-owned reclaim path. The same
+guest subsequently completed all 600 MiB; every byte was verified before final
+authenticated retirement. XFS reached 1,258,291,200 bytes and peak sampled WAL
+payload was 41,680,896 bytes, below the 40 MiB transient allowance. Both lost
+receipts were resolved, and installed sequence reached 153,359.
+
+This local boundary gate does not create or publish a regional fork target.
+Full fork/snapshot transaction, memory checkpoint, migration, outage and
+production gates remain required before deployment.
+
+## Injected S3 request-outage acceptance
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE=1` in 105.752 seconds. All reads/writes still use
+the real RustFS S3 backend; a loopback HTTP proxy returns S3-shaped `503`
+responses during the injected interruption. This simulates failed storage
+requests without stopping the isolated backend container or claiming a real
+provider outage.
+
+After the guest had written at least 80 MiB, every object-service request failed
+until at least one rejection and normal WAL admission pressure were observed.
+The test held that pressure for five additional seconds, checked that the
+regional writer remained consumed, then restored transport. The same guest
+retained its PID/token, heap marker, open-file inode and offset and completed all
+600 MiB. Every byte was checked; XFS reached 1,258,291,200 bytes. Peak sampled WAL
+payload was 41,750,528 bytes, below the 40 MiB transient allowance. Both injected
+lost receipts converged, installed sequence reached 154,349, and normal final
+retirement and object cleanup succeeded.
+
+Longer failures, provider-level disruption, multiple contending writers,
+node-loss recovery and full regional lifecycle/deployment gates remain open.
+
+## Fresh session, cache and device recovery
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE=1` in 125.681 seconds. After normal
+authenticated retirement of the original writer, it closed the session manager
+and created a new Bolt journal, branch directory, empty read cache and separately
+reserved `/dev/nbd62`. The region issued and consumed a new writer grant at epoch
+2 against the final committed generation. The new session fetched that
+generation from real RustFS through the authenticated regional descriptor.
+
+A fresh stock-runsc guest read all 629,145,600 file bytes and checked every byte,
+including EOF. Mounted XFS retained its 1,258,291,200-byte size. The second writer
+then completed normal authenticated retirement and released its device. The
+original guest retained its PID/token, heap marker, inode and open offset during
+growth; its sampled peak WAL payload was 39,579,648 bytes, within the configured
+40 MiB transient allowance. Both lost acknowledgements converged.
+
+Set `SANDBOX0_PRIVILEGED_NBD_RESTORE_DEVICE` explicitly to an unused device
+different from `SANDBOX0_PRIVILEGED_NBD_DEVICE` when enabling this gate. This is
+fresh-session/cache/device recovery on the same isolated host after normal
+retirement. It does not establish crash abandonment, replacement-node recovery,
+full Nomad resume or memory-checkpoint continuity. Those gates remain open.
+
+## Regional running-fork publication and independent reads
+
+The combined Linux race gate passed with
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK=1` in 112.073 seconds. The source used
+real regional capacity/slot/claim transitions and the normal running-fork request
+transaction to reserve a paused target. Under WAL pressure, the runtime captured
+and published the fork through authenticated regional handlers. An exact request
+retry observed the committed target. This exercises the regional transaction,
+but the slot readiness evidence is fixture-supplied; it does not establish a
+Nomad/procd handshake.
+
+After the original guest completed all 600 MiB and retired normally, an empty
+read cache and independently reserved NBD device mounted the remote target.
+Every byte of its 164,626,432-byte file matched the earlier source prefix. The
+target remained at that earlier boundary despite later source live commits and
+terminal publication. The original guest retained its PID/token, heap marker,
+inode and open offset. XFS reached 1,258,291,200 bytes; peak sampled source WAL
+payload was 33,554,432 bytes. Both lost receipts converged and installed sequence
+reached 147,086. Both devices and fixture objects were cleaned up normally.
+
+The verification branch is disposable and only permits XFS replay locally; it
+does not publish a new child writer. Set `SANDBOX0_PRIVILEGED_NBD_RESTORE_DEVICE`
+to a separately reserved unused device when enabling this mode. Full Nomad
+fork/resume, memory capture, crash recovery and deployment gates remain open.
+The workload uses repeating byte patterns, so high-entropy storage throughput
+and multiple contending writers still need separate acceptance.
+
+## High-entropy writes, mutations and bounded local artifacts
+
+The combined Linux race gate passed with `SANDBOX0_ROOTFS_AUTOGROW_UNIQUE=1`,
+regional fork and cold restore in 306.161 seconds. A deterministic high-entropy
+stream includes a distinct address marker in every 4 KiB block. The guest first
+wrote 600 MiB, then overwrote 78 earlier 1 MiB chunks with new contents, zeroed
+55 chunks and deleted/recreated a 64 KiB file with different contents. Both the
+original mount and a fresh stock-runsc reader verified the final bytes. The
+independent regional fork retained its earlier 157 MiB prefix after all source
+mutations. Peak sampled source WAL payload was 33,787,904 bytes and installed
+sequence reached 187,900. XFS retained its 1,200 MiB size through cold recovery.
+
+The strengthened gate also passed with injected object-request failures and
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD=30s` in 337.796 seconds. After observing
+failed requests and normal WAL admission pressure, it held transport failure for
+30 more seconds (16 rejected requests), then restored access to real RustFS.
+The same guest completed the high-entropy writes and mutations; regional fork,
+remote cold verification and both normal retirements passed. Both deliberately
+lost acknowledgements converged. Peak sampled WAL payload was 41,844,736 bytes
+and installed sequence reached 188,548.
+
+Allocated filesystem blocks of source-side branch files, disk cache and Bolt
+state were sampled once per second and after verification. Their observed peak
+was 42,225,664 bytes, within a fixed 134,217,728-byte acceptance bound. This
+counts disposable compute artifacts, excluding mounted virtual RootFS contents
+and the separate RustFS object-service data. The test object service runs on the
+same disposable host, so whole-host `df` would mix worker and durable-storage
+usage. This is sampled evidence for one writer, not a fleet-wide occupancy bound
+or a guarantee about arbitrary write rates.
+
+Set `SANDBOX0_ROOTFS_AUTOGROW_COLD_RESTORE=1`,
+`SANDBOX0_ROOTFS_AUTOGROW_FREEZE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_REGIONAL_FORK=1` alongside the unique-write mode to run
+this gate; it requires both explicitly reserved unused devices. Use a 20-minute
+Go test timeout. Optional `SANDBOX0_ROOTFS_AUTOGROW_OUTAGE_HOLD` accepts durations
+from five seconds to two minutes. Provider-level outages, node-wide contention,
+crash abandonment, full Nomad lifecycle and production rollout remain open.
+
+## Shared-node two-writer contention gate
+
+`TestPrivilegedRemoteAutogrowTwoWritersShareNodeBudget` extends the combined
+component fixture with two real stock-runsc guests sharing one session manager,
+aggregate dirty-tail budget, cache and commit/growth scheduler. Each writes
+600 MiB of high-entropy data and performs the overwrite/zero/delete/recreate
+workload. The individual writer limit is 32 MiB; the shared node limit is
+40 MiB including an 8 MiB protected retirement reserve, less than the sum of
+the individual limits. The shared disk cache remains 32 MiB.
+
+After both writers pass 80 MiB, the proxy fails every real S3 request. The gate
+requires both writers to hit admission pressure, holds failure for another
+minute, verifies both regional grants remain consumed and then restores
+transport. Both original PID/token/heap/inode/open-offset proofs, every final
+file byte and installed live receipts must remain valid. Sampled aggregate WAL
+payload must stay within 40 MiB, and allocated worker WAL/cache/journal blocks
+within 128 MiB. The two sources renew their real regional leases throughout.
+
+Enable `SANDBOX0_ROOTFS_AUTOGROW_CONTENTION=1`,
+`SANDBOX0_ROOTFS_AUTOGROW_REMOTE=1` and
+`SANDBOX0_ROOTFS_AUTOGROW_OUTAGE=1`; leave regional-fork mode disabled. Supply
+the same private isolated PostgreSQL/S3/runsc inputs as the combined gate and
+both separately reserved NBD paths. Run only this test under the race detector
+with a 20-minute timeout. The gate passed under the race detector in 365.74
+seconds. Both original guests retained PID 1, heap markers, tokens and their
+open-file inode/offsets; each completed 600 MiB plus 78 overwrite and 55 zero
+chunks and a deleted/recreated file. All final contents were verified. After
+both writers blocked, the one-minute request-outage hold rejected 77 requests.
+Neither consumed regional grant was retired by pressure.
+
+Installed sequences reached 189,358 and 189,354. Both XFS filesystems reached
+1,258,291,200 bytes, up from 300 MiB. Peak aggregate WAL payload was 33,550,336
+bytes, below the 40 MiB node limit; normal pressure stayed within 32 MiB and
+left the protected reserve available. Across 270 samples, allocated worker
+WAL/cache/journal blocks peaked at 52,260,864 bytes, below 128 MiB, despite
+1,258,291,200 accumulated guest data bytes. Both normal retirements and
+exclusive-device cleanup succeeded. The fixture writes a durable remote test
+log and explicit exit-code receipt, independently of SSH output delivery.
+
+This qualifies shared component admission with real NBD/XFS/runsc, regional
+PostgreSQL, mTLS and RustFS. It does not qualify multiple actual Nomad claims,
+a provider outage or production fleet density; those boundaries remain explicit.
+
+## Abrupt process-owner loss and remote-cut recovery
+
+The isolated runner kills the actual Go storage-owner process with SIGKILL;
+source defers and planned retirement cannot run. It verifies a root-owned
+fixture, exact test executable, package working directory and mount namespace,
+and uses a Linux pidfd to avoid signaling a reused numeric PID. PostgreSQL and
+the real S3-compatible object service remain available independently of that
+process. A durable remote log and kill/result receipts survive the SSH session.
+
+Before killing the owner, the guest writes and verifies the high-entropy
+600 MiB workload, including 78 overwritten chunks, 55 zero chunks and the
+deleted/recreated file. The source syncs XFS and completes a remote live cut,
+then stops publication and fsyncs a separate file and its directory only into
+the local suffix. Regional committed/installed progress must remain unchanged
+after that suffix write.
+
+Recovery reopens the existing database and session journal, follows the
+production startup freeze/fork/rebase/release reconciliation order, expires
+only the dedicated fixture writer's lease after proving process death, and
+uses the production crash-fence path with actual Linux mount/NBD observations.
+The last remote cut becomes the lifecycle head; the old grant is retired and
+cannot renew. After five inventory passes and generation GC, a fresh cache,
+session and separately reserved NBD device restore all 600 MiB from S3. The
+unpublished suffix file must be absent. The restored writer retires normally.
+
+The complete fresh-source run passed under the race detector, without runner
+or recovery retries. The source reached remote sequence 189,335 before SIGKILL;
+its expected nonzero Go exit was recorded explicitly. Recovery passed in
+25.53 seconds, writer epoch advanced to 2, and restored XFS geometry was
+1,258,291,200 bytes. Both recovery and runner exited zero. The source's allocated
+WAL/cache/journal peak was 41,705,472 bytes, below 128 MiB. Both NBD devices
+were released and the fixture's mount-free state and bucket contents removed.
+An earlier retained-scene retry also passed; startup reconciliation and the
+required task key are fixture obligations, not bypasses of production fencing.
+
+Reproduce with the infra repository's
+`ali/nomad/tests/live_node/owner_loss_rootfs_run.py`. Run only on the disposable
+host with both isolated markers, private RustFS credentials, a PostgreSQL root
+superuser and exclusive NBD 62/63. `--resume DATABASE` handles a source retained
+before SIGKILL; `--recover DATABASE` retries a failed recovery only with a
+previous durable kill receipt. Successful recovery removes fixture objects
+and mount-free temporary state. Failed attempts retain their evidence.
+
+This proves abrupt process-owner fencing and cold remote recovery on the same
+host, including the distinction between local fsync and remote custody. It
+does not prove physical-machine loss, provider observation, replacement-node
+admission or process-memory recovery after an unplanned crash.
+
+## Separate-machine remote recovery
+
+`TestPrivilegedRemoteAutogrowReplacementMachineRestoresPublishedCut` passed
+under the race detector on a newly provisioned second Ubuntu 24.04 machine.
+The source run wrote and verified the high-entropy 600 MiB workload, completed
+remote sequence 189,350, then fsynced the unpublished suffix. Its storage owner
+was killed with pidfd-bound SIGKILL; the existing recovery path completed NBD
+crash fencing, inventory and GC. Export mode removed the source's mounted local
+RootFS, WAL and cache while retaining the remote cut for the second machine.
+
+The replacement had a different machine boot ID and authenticated writer node
+UID. Only tooling, public Go dependencies, a token-free source receipt and
+private backend connection material were transferred. Neither source RootFS/
+WAL/cache nor PostgreSQL/object-store data were copied. Private loopback SSH
+forwards connected to the original fixture's PostgreSQL and S3 services.
+The replacement used a new session/cache/device, consumed its epoch-2 grant,
+restored XFS geometry of 1,258,291,200 bytes and verified all 629,145,600 data
+bytes in a fresh stock-runsc guest. The local-only suffix was absent. Recovery
+passed in 21.59 seconds; Go and the durable runner receipt both reported zero.
+The replacement retired normally and removed its mount-free state and fixture
+bucket contents. This gate did not sample peak replacement disk occupancy;
+bounded disk evidence comes from the growth and contention gates above.
+
+Reproduce with `SANDBOX0_ROOTFS_AUTOGROW_OWNER_LOSS_EXPORT=1` on the source's
+`owner_loss_rootfs_run.py`, then the infra fixture's
+`replacement_rootfs_bootstrap.sh` and `replacement_rootfs_run.py` on an exact
+new disposable machine. Do not use a disk snapshot or copy session directories,
+databases or buckets. Keep private backend keys/environment files mode 0600 and
+pin SSH host keys. Save sanitized receipts before deleting both machines and
+their operation-owned access key. This proves separate-machine RootFS recovery
+after a fenced owner crash; it does not prove complete provider machine-loss
+observation, actual Nomad replacement admission or crashed process-memory
+recovery. The authority/certificate and OCI provenance remain fixture-specific.
+
+## Physical provider instance observation
+
+ESS membership is not physical instance existence: a detached instance may
+still be running. Lifecycle recovery now uses the read-only `providerinstance`
+ECS observer for its provider-instance check. It pins the enrollment owner
+account and provider region, verifies the actual credential account through
+STS on every observation, and queries the exact instance with
+`DescribeInstanceAttribute`. Running, stopped and all other present statuses
+remain present. Only HTTP 404 `InvalidInstanceId.NotFound` with a provider
+request receipt qualifies as absence; missing/mismatched response identities,
+permission failures, transport errors and cancellation fail closed.
+
+The live single-instance read-only RAM credential exposed an SDK/API contract
+mismatch: populating the generated `OwnerId` field returns HTTP 400
+`UnsupportedParameter`. The observer omits that unsupported field while retaining
+the STS account check, configured region and exact instance ID. The same scoped
+credential successfully read the running instance without that field. The
+request-contract regression rejects a nonempty `OwnerId`; actual deletion and
+replacement admission still require the complete separate-machine gate.
+
+The detached-instance regression failed with the previous ESS-only method and
+passed with the physical observer. Provider, lazy-credential constructor,
+lifecycle and selected manager race tests passed on a separate isolated host.
+The control role requires region/account-scoped `ecs:DescribeInstanceAttribute`
+permission before installing this manager. STS `GetCallerIdentity` needs no
+additional RAM authorization. See the official
+[ECS API contract](https://www.alibabacloud.com/help/en/ecs/developer-reference/api-ecs-2014-05-26-describeinstanceattribute)
+and [STS identity contract](https://help.aliyun.com/en/ram/developer-reference/api-sts-2015-04-01-getcalleridentity).
+
+The claimed-writer path is now wired separately behind the disabled-by-default
+`node_authority.terminal.provider_recovery` setting. Migration 122 persists two
+distinct ECS/STS receipts and their original node/boot identity, using regional
+database time for a minimum 30-second observation interval. Replay cannot advance
+that clock. Positive presence resets pending evidence or revokes a confirmed
+proof; confirmed proof bodies and identity remain immutable.
+
+An unavailable direct client only triggers this independent observation. The
+regional controller fences the exact consumed writer, requests exact Nomad
+server retirement and waits for terminal catalog state plus its scheduling
+acknowledgement. It never calls a missing client's GC or fabricates its mount
+namespace. A separate provider proof version, rejected by existing node proof
+APIs, authorizes one transaction that promotes the last regional live cut,
+aborts the crash lifecycle, retires the writer/slot and releases its bound
+resource lease. Existing foreign rollout fences are preserved. The existing
+automatic reconstruction authority recognizes the paused crash result.
+Checkpoint/migration custody and planned-pause authority cannot be bypassed.
+
+Regional PostgreSQL/race and controller tests verify observation grace/replay,
+scope and boot binding, proof revocation/immutability, exact retry, preserved
+foreign fences, reconstruction eligibility, remote-cut retention after GC and
+full rollback on a resource conflict. Controller tests exercise server-only
+retirement and response loss. Dead warm carriers cannot suppress claimed
+provider recovery later in the same bounded pass. These are regional/controller
+gates with synthetic provider receipts; actual compute deletion and Nomad
+replacement admission remain required before enablement. Earlier complete
+growth/memory/API/outage receipts qualify their recorded source head/binary,
+not this new recovery path or a production rollout.
+
+The complete selected PostgreSQL regression passed all 12 executed tests in
+65.31 seconds under the race detector, including four provider cases and the
+existing live-publication/crash-abandon cases. The two optional S3-specific
+tests were skipped in this database-only run; their earlier raw/encrypted
+receipts remain separate. A first run exposed a historical test targeting the
+latest rollback rather than migration 121; it now executes that migration's
+guard explicitly while the existing pinned empty-rollback test still verifies
+the goose step. The dead-warm-carrier regression failed with the previous
+whole-node skip condition and passed with provider dispatch enabled. Full
+Nomad/provider/reconciler/terminal/writer/node-authority and selected manager
+race suites also passed. CI then found an unused wrapper and a driver-module
+dependency leak. The wrapper was removed and the Aliyun SDK implementation
+moved into the regional manager, retaining lightweight shared receipt types.
+Standalone module checks with `GOWORK=off` passed: provider/lifecycle/controller
+and root configuration/credential suites, plus the complete Nomad driver race
+suite (115.97 seconds overall, 58.49 seconds for its driver package). No module
+or checksum file changed. No production setting or service changed.
+
+## Actual Nomad, procd and live-owner transfer acceptance
+
+The isolated systemd live-node fixture now has an explicit
+`S0_NOMAD_LIVE_REAL_ROOTFS=1` mode. Its production runtime-slot, RootFS writer,
+lifecycle and node-channel handlers use a fresh dedicated PostgreSQL database
+and a real RustFS S3 bucket. Import publication records real object custody and
+the embedded procd digest; OCI provenance and the certificate/node bindings
+remain fixture-specific.
+
+The gate passed after a real Nomad allocation, driver claim, authenticated procd
+readiness probe and regional command-ready commit. The same guest wrote and
+verified 600 MiB of random data through one retained file descriptor. XFS grew
+from its 300 MiB initial image to 1,191,182,336 bytes of statfs data capacity on
+the 64 TiB logical device. Three production Worker ownership-transfer cycles
+preserved the allocation, zero restart count, Nomad/Sentry PIDs, guest PID,
+heap, tmpfs, mmap and unlinked file offset. The first transfer also survived
+the injected driver-publication failure and completed its exact journal.
+
+Authenticated PostgreSQL observations before and after the cycles confirmed
+the original grant remained consumed, the original slot active and the
+filesystem's immutable initial generation unchanged. Installed sequence
+advanced from 157,890 before handoff to 159,102 after the third cycle. Across
+353 one-second samples, peak allocated worker WAL/read-cache/journal blocks
+were 54,788,096 bytes, below the fixture's 128 MiB assertion despite 600 MiB of
+guest data. This excludes the durable object backend, the temporary import
+image and the virtual mounted filesystem. It is sampled one-writer evidence.
+
+The fixture runner and provisioning/cleanup requirements are documented in
+the infra repository's `ali/nomad/tests/live_node/README.md`. Services and guests
+stopped through normal fixture teardown. This qualifies real node integration
+and live ownership transfer; public manager lifecycle, memory checkpoint/resume,
+replacement-node crash recovery and production release provenance remain open.
+
+## Real object-service suspension: retained attempts
+
+The larger Nomad fixture can select 600 through 4096 MiB with
+`S0_NOMAD_LIVE_GROWTH_MIB`; its default remains 600. Infra's
+`S0_NOMAD_LIVE_OBJECT_SERVICE_OUTAGE=1` option pauses the exact disposable
+RustFS container after initial write progress and arms an independent
+65-second systemd unpause timer before suspension. This exercises a real
+unresponsive object service, rather than immediate injected HTTP errors.
+
+The initial 2048 MiB attempt did not pass. It observed about 32 seconds of
+stalled progress and the service recovered, but the original Nomad allocation
+terminated with exit status 137 before complete content verification or live
+transfers. Its saved guest progress remained at 84 MiB; that file and its PID
+marker were stale and cannot prove process continuity. Regional writer custody
+was still consumed with an unexpired lease when the task exited. Kernel OOM
+records and aggregate cgroup OOM counters did not establish an OOM cause.
+The cause remains under investigation; no node behavior or sparse imports
+have been enabled in production on the strength of this run.
+
+The harness now checks the original allocations remain running before reading
+guest progress, so stale files cannot turn a dead process into a passing outage
+result. Failed journals, WALs, storage namespace and explicit nonzero runner
+receipt are retained on the disposable host. The independent timer and cleanup
+restored RustFS, and fixture services stopped.
+
+A subsequent attempt rebuilt ctld after verifying the complete Go source tree
+against the candidate commit. The original Nomad/procd guest recovered from the
+real service pause and verified every byte of its 2048 MiB file with unchanged
+process-state identity. Observed write backpressure lasted 31.31 seconds. The
+complete runner still exited nonzero before live transfers: its receipt test
+incorrectly capped XFS at twice the payload, while mounted data capacity reached
+4,966,055,936 bytes. The growth policy doubles geometry at 20% or 64 MiB free;
+the 2 GiB workload therefore reaches the 2400-to-4800 MiB step. The test now
+checks the exact mounted geometry against that policy and actual allocated
+usage. Artifact statistics are durably retained on failed attempts as well.
+
+This second attempt establishes the service-pause recovery/content subcheck,
+not a complete passing outage/transfer/bounded-disk gate. Its nonzero receipt
+remains retained, and the initial status-137 cause is still unresolved.
+Rebuilding with a different binary digest alone does not establish a fix.
+
+The next complete attempt passed in 740.70 seconds with the corrected geometry
+check. The original guest retained PID 9, its heap/tmpfs/mmap/unlinked-file state
+and original open file while verifying all 2048 MiB after service recovery and
+continuing through three live ownership transfers. The allocation and Sentry
+identity stayed unchanged, with zero task restarts; injected post-transfer
+driver-publication failure also rolled forward through its exact journal.
+Mounted XFS data capacity reached 4,966,055,936 bytes on the 64 TiB device.
+Installed live sequence advanced from 537,848 to 538,508; the regional writer
+stayed consumed and its slot stayed active. Across 724 one-second samples,
+worker WAL/cache/journal allocation peaked at 68,521,984 bytes, below 128 MiB.
+The independent service recovery timer was set to 65 seconds, with 33.74 seconds
+of observed write backpressure; the 92.43-second recovery observation includes
+polling latency. Both the regional authority and complete runner exited zero.
+
+This qualifies the one-writer real-service suspension, growth and live-transfer
+gate with fixture certificate/OCI/release provenance. It does not explain the
+earlier status-137 exit or establish public API lifecycle, complete machine loss,
+production checkpoint compatibility or canary deployment. Both failed receipts
+remain retained; production node behavior and sparse imports remain disabled.
+
+The refined `f3abe7d2` candidate passed another complete 2048 MiB real-service
+suspension run in 811.21 seconds. Original PID 10, memory/open-file markers,
+allocation and Sentry identity remained unchanged through full content checks
+and all three transfers, with zero task restarts. The independent timer paused
+RustFS for 65 seconds; 229 paused observations recorded 31.93 seconds of write
+backpressure and 91.62 seconds to observe recovery, including polling latency.
+Installed sequence advanced from 537,922 to 538,798; XFS data capacity reached
+4,966,055,936 bytes within the 64-TiB device. Across 791 samples, worker artifacts
+peaked at 68,390,912 bytes, below 128 MiB. The runner and regional authority
+exited zero. Its 552-file verified archive retains logs, receipts and residual
+teardown state; guarded normal disconnect/unmount subsequently released the
+three mounts and NBD 62 whose server had exited. This qualifies the current
+one-writer outage/transfer gate, without diagnosing the older status-137 failure
+or establishing complete provider loss or production compatibility.
+
+## Expanded RootFS memory-checkpoint acceptance
+
+The isolated live fixture accepts `S0_NOMAD_LIVE_PROCD_PROTOCOL` as the
+artifact/claim protocol marker (`sandbox0.procd.v1` or `sandbox0.procd.v3`);
+the existing default remains v3. Import identity and public claim requirements
+use the same explicit value. This permits qualification of a digest-verified,
+prebuilt execution procd while retaining the production-selected protocol,
+without changing runtime protocol handling or replacing captured artifacts.
+
+The optional isolated Nomad memory fixture uses the complete production
+node-authority component, allocation observation, checkpoint coordination and
+checkpoint claim planner. It retains canonical assignment and network-policy
+inputs from the actual source claim, executes the canonical immutable stock
+runsc bundle for native CPU evidence, and requests `memory: true` for both pause
+and resume after growth and three live-owner transfers.
+
+The workload starts once through authenticated procd context creation. A
+restored allocation must retain the same running context, original guest PID,
+heap and tmpfs markers, mmap and unlinked-file offset. Its original open growth
+file is reverified against all 600 MiB of hashes retained in guest memory after
+the regional restore receipt; a pre-checkpoint verification count is insufficient.
+Stock gVisor deliberately kills `runsc exec`-injected processes on restore
+([upstream explanation](https://github.com/google/gvisor/pull/11478)), so raw
+exec injection cannot qualify this product process-continuity gate.
+
+The restored writer has a new live cursor starting at zero. Acceptance waits
+for its own first installed live cut instead of treating the source writer's
+receipts as evidence of continued publication. The regional authority process
+must also exit successfully. Checkpoint staging uses a separately enforced
+512 MiB/4096-inode XFS project quota on a disposable 2 GiB sparse backing image;
+it is excluded from, and does not replace, the fixed RootFS WAL/cache budget.
+The complete gate passed on the isolated host. The original procd-managed guest
+retained PID 10, its heap/tmpfs markers, mmap, unlinked FD and original open
+growth file through the three transfers and a fresh-allocation memory restore.
+After the regional restore receipt its counter advanced from 805 to 809 and
+its full-file verification count from 2 to 3, proving a new complete 600 MiB
+verification using retained in-memory hashes. The same authenticated procd
+context remained running. The new writer installed sequence 1,024 after a
+17.46-second wait; both committed and installed receipts agreed. XFS retained
+1,191,182,336 bytes of statfs data capacity on its 64 TiB logical device.
+
+The 322 one-second worker-artifact samples peaked at 54,706,176 allocated bytes,
+below 128 MiB. This excludes the separate enforced checkpoint staging quota,
+remote storage backend and temporary import image. The regional authority
+finished successfully, and fixture services and guests stopped normally.
+This qualifies expanded RootFS with real retained-memory pause/resume and
+continued live publication; public manager API, abrupt node-loss recovery,
+node-wide contention and production release provenance remain separate gates.
+
+The refined `f3abe7d2` candidate also passed this complete memory gate in
+347.11 seconds, with the regional authority exiting zero after 308.85 seconds.
+The same authenticated procd context retained its process/memory/open-file
+identity through three live transfers and fresh-allocation restore. After the
+restore receipt, the counter advanced from 794 to 798 and complete 600 MiB
+verification count from 2 to 3; the new writer committed and installed its
+own sequence 942. Across 325 samples, worker artifacts peaked at 75,710,464
+bytes, below 128 MiB. The separately quota-limited checkpoint backing image
+allocated 90,378,240 bytes and remains in the 554-file verified archive.
+Fixture teardown left three mounts and NBD 62 with an exited server PID;
+that physical state was archived before guarded normal disconnect/unmount
+released every owned device and mount. No live guest or ctld remained.
+This qualifies the current fixture binary and procd, not production retained
+checkpoint/CPU compatibility or complete machine-loss admission.
+
+### Production-selected procd qualification
+
+The next isolated run used the exact private, digest-verified production-selected
+procd `sha256:b7bdac2fd37c19961fd45c6301bea653ff4102a93df246eff2bc1bd200a8843e`
+with its `sandbox0.procd.v1` protocol. Candidate ctld SHA-256 was
+`b9b46ce981022d9d99189a4c518b6d184825821271c6001b04c22a7f119561f1`;
+runtime head `4489ad45` differs from the qualified `f3abe7d2` production Go
+sources only in the explicit fixture protocol selector and documentation.
+No private executable or credentials are included in the repository.
+
+This complete retained-memory run exited zero in 309.85 seconds. The same
+managed context and process/memory/open-file identity survived three live
+transfers and `memory: true` pause/resume into a fresh allocation. After the
+regional restore receipt, the counter advanced from 821 to 825 and complete
+600 MiB verification count from 2 to 3. The restored writer committed and
+installed its own sequence 1,086. XFS retained 1,191,182,336 bytes of data
+capacity within the 64-TiB device. Across 300 samples, worker WAL/cache/journal
+allocation peaked at 56,778,752 bytes, below 128 MiB. The separately quota-limited
+checkpoint backing image allocated 25,673,728 bytes.
+
+The 556-file SHA-256-verified private archive retains the terminal receipt,
+logs, binary identity, checkpoint image and residual physical teardown state.
+The exited NBD server left three mounts and NBD 62 attached; guarded normal
+disconnect/unmount subsequently released all owned mounts and devices before
+the next run. This newly captured fixture checkpoint does
+not establish compatibility of retained production checkpoints carrying the
+older procd assignment, or complete machine-loss/replacement admission.
+
+The same ctld/procd/protocol subsequently passed complete public API acceptance
+in 397.46 seconds, with the regional fixture exiting zero after 380.60 seconds.
+It completed 600 MiB growth and three live transfers, two snapshots, two forks,
+one restore and one distinct imported-base rebase, then verified three fresh
+NBD/S3 full-file hashes. Each matched
+`a9fd8100dd0344b16b6aefe7c9d5ca0acddd911790f4b9edbb2136ffbe3fada7`.
+All three sandboxes reached deleted state and final inventory/GC completed.
+The original managed process/context survived the running operations with zero
+task restarts. Across 385 samples, worker artifacts peaked at 67,932,160 bytes,
+below 128 MiB. All owned mounts and devices were released before its 545-file
+SHA-256-verified private archive and the next guarded reset.
+
+The archived source manifest verified all 1,934 Go/module/build-script files
+against head `4489ad45`. The same production-selected pin also passed complete
+2 GiB real-service suspension acceptance in 735.06 seconds; its regional fixture
+exited zero in 723.17 seconds. RustFS was actually suspended with an independently
+armed 65-second recovery timer. Across 242 paused observations, maximum observed
+write stall was 34.20 seconds and recovery was observed after 69.37 seconds,
+including polling. The original allocation/Sentry/process/context and memory/
+open-file state survived full 2 GiB verification and all three live transfers,
+with zero task restarts. XFS data capacity reached 4,966,055,936 bytes within
+the 64-TiB device. Installed sequence advanced from 537,872 to 538,408; the
+last transfer retained that same sequence. Across 720 samples, worker artifacts
+peaked at 68,468,736 bytes, below 128 MiB. The 550-file private archive was
+SHA-256 verified before guarded normal cleanup released residual mounts and
+the exited server's NBD device.
+
+All three complete live gates now qualify this exact ctld/procd/protocol on
+the recorded source head. Subsequent provider-observer changes have separate
+component tests and require their own release qualification. Complete
+provider-loss admission, retained older checkpoint/target CPU compatibility
+and production activation remain open. These passes do not diagnose the older
+outage allocation's unexplained status-137 exit.
+
+## Physical provider deletion and independent recovery
+
+The three-machine fixture deleted its actual Aliyun ECS source after a complete
+600 MiB growth workload. The Nomad server, PostgreSQL and object store remained
+on a separate control host; replacement execution used another physical host
+with fresh worker state. Two authenticated ECS absence observations spanned
+30.42 seconds. Normal reconciliation retired the original writer/slot/resources,
+retained the last remote cut at sequence 160,582 and automatically admitted the
+same Sandbox on the replacement with a higher writer epoch.
+
+The replacement read all 629,145,600 bytes and matched source SHA-256
+`6fd567cdb94f27887daeba6cdc230d947571a3780db0c4a79b917526409a8c1d`.
+Its XFS data capacity remained 1,191,182,336 bytes within a 64 TiB device. A
+separately fsynced 1 MiB source-local suffix, written while publication was
+blocked, was absent as required. Source worker artifacts peaked at 67,850,240
+bytes; a replacement post-read sample used 34,385,920 bytes across state,
+branches and disk cache. These scopes exclude remote storage and import staging.
+
+This was a staged acceptance with retained failures, not an uninterrupted pass.
+The source fixture omitted template resources needed by the resume planner;
+those metadata were repaired without replacing the original source, remote cut
+or provider proof. Missing replacement CNI plugins and a failed private backend
+forward were corrected. The source claim fixture now persists its resource
+shape, and the runbook requires worker/backend readiness checks.
+
+Ordinary deletion then exposed a real dependency-ordering bug: an immediate
+live-base foreign key could reject bulk generation deletion before dependent
+rows cascaded. Deletion now releases outgoing live dependency edges only for
+filesystems already selected as unreferenced, while retaining a filesystem with
+incoming dependencies from another filesystem. Both internal-edge deletion and
+external-reader preservation regressions reproduced the failure before the fix.
+The provider/deletion PostgreSQL race suite passed in 62.76 seconds afterward,
+including memory-checkpoint, running-fork and rollback-retention deletion tests.
+
+The same physical scene's ordinary deletion phase was retried with the fix and
+passed in 3.26 seconds. Its receipt explicitly identifies `resumed_cleanup`;
+the earlier admission/data receipts remain separate evidence. The Sandbox is
+deleted, all its generations and live dependencies are gone, no live writer
+remains, and the replacement's owned XFS mounts and NBD devices were released.
+The private source archive was copied off-host and SHA-256 verified before
+resource cleanup. Production compatibility, final release checks and activation
+remain outstanding.
+
+## Migration filesystem drain and live-WAL custody
+
+A stopped Sentry may leave buffered XFS writes larger than the retirement
+reserve. A Linux regression reproduced a freeze failure with a full 4 KiB
+normal WAL, a 4 KiB reserve and two additional buffered metadata writes: the
+second drain write returned a dirty-tail capacity error. Enabling retirement
+admission before the kernel freeze prevented ordinary pressure/reclaim from
+making progress.
+
+Live-commit sessions now retain normal blocking admission during the migration
+freeze. The exact original owner holds an in-memory drain permit and releases
+the parent journal lock while its progress guardian publishes and installs
+immutable bases. After freeze returns, it stops new cuts, joins active work,
+settles receipts and reloads the updated base before syncing the immutable
+migration boundary. Only then does it enter retirement admission. Sessions
+without live publication retain their existing bounded reserve behavior.
+
+The permit requires the exact migration operation and an unsealed journal;
+owner recovery cannot reconstruct it from a persisted intent. Cancellation or
+failed settlement leaves migration custody without a synced sequence, and
+ordinary recovery cannot thaw or promote that cut. Owner shutdown wakes blocked
+branch writes before joining the non-cancellable freeze. Regression coverage
+checks installed-base bytes plus the WAL suffix, both lost receipts,
+cancellation and owner shutdown. The focused migration/fork/growth Linux race
+suite passed in 21.934 seconds; the full session race suite passed in 235.296
+seconds. Real memory capture and replacement-node migration remain separate
+deployment gates.
+
+## Migration peer cancellation
+
+The acceptance regression also reproduced a migration-peer cancellation stall:
+an expired HTTP write deadline interrupted a non-reading destination, but
+HTTP's write-error path then entered TLS `close_notify` with a fresh five-second
+deadline. A blocked peer reader retained source publication custody beyond the
+cleanup's one-second budget. The captured Linux goroutine stack confirmed the
+wait in `crypto/tls.Conn.closeNotify`, with the publication worker waiting for
+its readers.
+
+The dedicated peer listener now retains the underlying socket in request
+context. Abandoning a transfer closes that socket before expiring the HTTP
+deadline, so TLS shutdown cannot prolong canceled stream custody. The durable
+publication record stays intact. The migration peer/publication race suite
+passed ten repetitions in 33.452 seconds; its fixtures use the same connection
+context hook as the real listener.
+The complete Nomad runtime race suite passed in 204.184 seconds after this
+fix, and the complete driver race suite passed in 55.187 seconds.
+
+## Historical-schema regression checks
+
+The stock-runsc CI gate exposed a test-evidence readiness race: on the fourth
+filesystem-resume generation the host observed the newly created JSON path
+before the guest finished writing it. The guest helper now writes a pending
+file and atomically renames it into readiness, reporting publication errors.
+The unchanged session-recovery assertions passed ten complete repetitions
+(40 stock-runsc guest generations) on the isolated replacement host. This
+corrects test coordination; production procd behavior is unchanged.
+
+Current artifact lookup requires migration 120's initial-filesystem geometry
+column. Historical storage tests at schemas 108, 109 and 110 now seed their
+original SQL shape explicitly, including the initial memory-fork filesystem,
+before running the intended upgrade or rollback guard. Production readers do
+not fall back to an unmigrated schema. These three PostgreSQL race tests and
+live-commit receipt replay passed in 22.891 seconds. Rotation recovery now also
+asserts that a rejected incomplete candidate keeps its exact truncated size;
+the focused block/session rotation and live-commit race tests passed.
+
+## Public capacity description synchronization
+
+The public OpenAPI field keeps its existing name and shape. Its description now
+identifies initial XFS capacity, conditional automatic growth and retained
+geometry. Go, JavaScript and Python SDK copies were updated and regenerated with
+their existing pinned generators. Review showed only the generated capacity
+comments changed. Generated Go code compiled; JavaScript and website typechecks,
+Python compilation and quota checks, and website docs metadata/generation
+verification passed.
+
+SDK/runtime/CLI README files, public template and self-hosted configuration docs,
+website template labels and the infrastructure rollout plan describe the same
+contract. Website MDX registries, Markdown aliases and `llms.txt` are generated
+from the runtime docs at build time and are intentionally untracked. These
+description changes are now merged and the website deployment is complete.
+Automatic growth remains opt-in outside the qualified deployment.
+
+## Live publication ordering
+
+1. Persist a deterministic pending operation, source descriptor and flushed
+   WAL cut before publication. Background cuts do not freeze XFS: blocked normal
+   writes can otherwise prevent a freeze from completing and deadlock reclaim.
+2. Journal each immutable object under regional upload custody before PUT and
+   mark upload success before generation publication. Publish only from the
+   exact consumed, unexpired writer and node/boot binding, serialized with
+   lifecycle operations and fenced by the previous committed head.
+3. Atomically insert the immutable child generation, transfer its object custody,
+   advance the separate live progress cursor, and retain an idempotent operation
+   receipt. Keep the lifecycle head and launch binding unchanged. A lost response
+   retries the same cut and payload.
+4. Keep the grant's installed-base generation pinned for GC while the node still
+   reads it. The committed head alone is insufficient: a previous base's root
+   mapping may no longer be reachable from the new descriptor even though the
+   running NBD branch still needs it. Update this pin only after durable local
+   installation, with an idempotent regional installation acknowledgement.
+5. Persist the regional receipt locally; install the new reader and suffix WAL
+   through the session journal's durable transaction, retaining both complete
+   versions on ambiguous local errors. Keep NBD attached to the same Branch.
+6. If duplicated suffix capacity does not fit normal node headroom, retain the
+   acknowledged head and old complete WAL and take a newer cut. At admission
+   pressure, normal writes are already blocked, so a later acknowledged cut can
+   have an empty suffix and rotate without borrowing retirement reserve. The
+   pending journal must distinguish published head from installed base through
+   these retries; lifecycle cuts must include every post-install WAL write and
+   keep their inherited installed base pinned until inventory completes.
+7. Growth must retain exact mount/session ownership without preventing the
+   commit/rotation path from reclaiming WAL if kernel growth writes encounter
+   pressure. A parent mutex held across a blocking growth ioctl must not also
+   be required by the reclaim operation that can unblock it.
+8. Coordinate fork, memory checkpoints, pause, migration and live handoff with
+   pending publication/installation. Preserve original writer proofs while using
+   the current installed descriptor and WAL for disk contents. Serialize capture
+   publication with installation so the regional inherited-base pin matches the
+   base used by the cut; retain the immutable launch parent for lifecycle proofs.
+
+Regional receipts, node journal recovery, bounded scheduling and growth custody
+are implemented. The recorded isolated gates and production canary qualify the
+deployed configuration; any additional deployment must verify its own runtime,
+checkpoint compatibility, worker enrollment settings and regional canary before
+enabling either node switch or sparse imports.

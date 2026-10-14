@@ -867,6 +867,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				AND writer.state IN ('issued','consumed','retiring'))`, filesystemIDs); err != nil {
 			return fmt.Errorf("release deleted sandbox rootfs heads: %w", err)
 		}
+		// Logical sandbox deletion does not expire independent read roots,
+		// including restore/rebase rollback custody. Leave their generations
+		// and filesystem for normal GC after those owners release their pins.
 		deletableRows, err := tx.Query(ctx, `
 				SELECT f.filesystem_id
 				FROM manager.rootfs_filesystems AS f
@@ -894,6 +897,21 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 					ON generation.generation_id = checkpoint_ref.generation_id
 				WHERE generation.filesystem_id = f.filesystem_id
 			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_head_rollbacks rollback
+				WHERE rollback.filesystem_id = f.filesystem_id
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_generations generation
+				WHERE generation.filesystem_id = f.filesystem_id
+					AND (`+rootFSGenerationReadRootSQL+`)
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_generation_live_dependencies dependency
+				JOIN manager.rootfs_generations base ON base.generation_id=dependency.base_generation_id
+				JOIN manager.rootfs_generations dependent ON dependent.generation_id=dependency.generation_id
+				WHERE base.filesystem_id=f.filesystem_id AND dependent.filesystem_id<>f.filesystem_id
+			)
 			FOR UPDATE OF f
 			`, filesystemIDs)
 		if err != nil {
@@ -914,8 +932,7 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		}
 		deletableRows.Close()
 		if len(deletableFilesystemIDs) == 0 {
-			// Snapshots, forks, or another sandbox binding still retain every
-			// candidate filesystem.
+			// Independent storage owners still retain every candidate filesystem.
 			deletableFilesystemIDs = nil
 		}
 		if len(deletableFilesystemIDs) > 0 {
@@ -949,6 +966,18 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				WHERE filesystem_id = ANY($1::text[])
 			`, deletableFilesystemIDs); err != nil {
 				return fmt.Errorf("clear deleted sandbox rootfs generation heads: %w", err)
+			}
+			// Every generation in these filesystems is being removed. Release
+			// their outgoing live-base edges before the bulk generation delete,
+			// whose immediate base FK can otherwise run before child cascades.
+			// The selection above preserves incoming edges from other filesystems.
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM manager.rootfs_generation_live_dependencies dependency
+				USING manager.rootfs_generations generation
+				WHERE dependency.generation_id=generation.generation_id
+					AND generation.filesystem_id=ANY($1::text[])
+			`, deletableFilesystemIDs); err != nil {
+				return fmt.Errorf("release deleted sandbox live generation dependencies: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `
 				DELETE FROM manager.rootfs_generations

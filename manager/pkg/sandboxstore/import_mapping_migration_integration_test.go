@@ -13,6 +13,7 @@ import (
 func TestRootFSImportMappingMigrationRollbackAndCombinedLayoutIntegration(t *testing.T) {
 	ctx := t.Context()
 	pool := newSandboxStoreIntegrationPoolAt(t, 55)
+	prepareLegacyRootFSImportStoreAdapter(t, pool)
 	down := func() error {
 		return migrate.Down(ctx, pool, ".", migrate.WithBaseFS(storemigrations.FS), migrate.WithSchema(sandboxStoreSchemaName), migrate.WithLogger(noopSandboxStoreMigrateLogger{}))
 	}

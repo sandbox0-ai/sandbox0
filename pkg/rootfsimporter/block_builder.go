@@ -71,10 +71,11 @@ func (f RootMutatorFunc) Mutate(ctx context.Context, root string) error {
 // BuildRequest binds filesystem construction and object publication
 // to one already digest-pinned OCI import request.
 type BuildRequest struct {
-	Image            ocirootfs.Request
-	LogicalSizeBytes int64
-	BlockOptions     rootfsblock.BuildOptions
-	DataLayoutPolicy string
+	Image                      ocirootfs.Request
+	LogicalSizeBytes           int64
+	InitialFilesystemSizeBytes int64
+	BlockOptions               rootfsblock.BuildOptions
+	DataLayoutPolicy           string
 }
 
 // MaterializedGenerationBuildRequest builds user-state output rather than a
@@ -89,17 +90,18 @@ type MaterializedGenerationBuildRequest struct {
 // BuildResult contains the non-secret attestation and complete object
 // inventory required by a later immutable ready-artifact transaction.
 type BuildResult struct {
-	SourceOCIRef     string
-	SourceOCIDigest  digest.Digest
-	ManifestDigest   digest.Digest
-	ConfigDigest     digest.Digest
-	Platform         ocispec.Platform
-	LayerDigests     []digest.Digest
-	DiffIDs          []digest.Digest
-	ProcdDigest      digest.Digest
-	UnpackedBytes    int64
-	Files            int
-	LogicalSizeBytes int64
+	SourceOCIRef               string
+	SourceOCIDigest            digest.Digest
+	ManifestDigest             digest.Digest
+	ConfigDigest               digest.Digest
+	Platform                   ocispec.Platform
+	LayerDigests               []digest.Digest
+	DiffIDs                    []digest.Digest
+	ProcdDigest                digest.Digest
+	UnpackedBytes              int64
+	Files                      int
+	LogicalSizeBytes           int64
+	InitialFilesystemSizeBytes int64
 	// DescriptorDigest identifies the block descriptor only. The final ready
 	// artifact identity must additionally bind platform and procd compatibility.
 	DescriptorDigest     digest.Digest

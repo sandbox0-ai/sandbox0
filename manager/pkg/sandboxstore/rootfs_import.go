@@ -110,15 +110,15 @@ func (s *PGSandboxStore) BeginRootFSImport(
 			oci_os, oci_architecture, oci_variant, format_generation,
 			procd_protocol, procd_digest, logical_size_bytes,
 			block_data_range_bytes, block_pack_bytes, block_page_entries,
-			object_prefix, data_layout_policy, mapping_group_policy, state
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'pending')
+			object_prefix, data_layout_policy, mapping_group_policy, initial_filesystem_size_bytes, state
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'pending')
 		ON CONFLICT (operation_id) DO NOTHING
 	`, normalized.OperationID, normalized.Spec.SourceOCIRef, sourceDigest.String(),
 		normalized.Spec.Platform.OS, normalized.Spec.Platform.Architecture,
 		normalized.Spec.Platform.Variant, normalized.Spec.FormatGeneration,
 		normalized.Spec.ProcdProtocol, normalized.Spec.ProcdDigest,
 		normalized.Spec.LogicalSizeBytes, options.DataRangeBytes, options.PackBytes,
-		options.PageEntries, options.ObjectPrefix, normalized.Spec.DataLayoutPolicy, options.MappingGroupPolicy)
+		options.PageEntries, options.ObjectPrefix, normalized.Spec.DataLayoutPolicy, options.MappingGroupPolicy, normalized.Spec.InitialFilesystemSizeBytes)
 	if err != nil {
 		return nil, fmt.Errorf("begin rootfs import operation: %w", err)
 	}
@@ -398,7 +398,7 @@ func rootFSImportOperationReturningColumns(alias string) string {
 		prefix + "oci_os, " + prefix + "oci_architecture, " + prefix + "oci_variant, " +
 		prefix + "format_generation, " + prefix + "procd_protocol, " + prefix + "procd_digest, " +
 		prefix + "logical_size_bytes, " + prefix + "block_data_range_bytes, " + prefix + "block_pack_bytes, " +
-		prefix + "block_page_entries, " + prefix + "object_prefix, " + prefix + "data_layout_policy, " + prefix + "mapping_group_policy, " + prefix + "state, " +
+		prefix + "block_page_entries, " + prefix + "object_prefix, " + prefix + "data_layout_policy, " + prefix + "mapping_group_policy, " + prefix + "initial_filesystem_size_bytes, " + prefix + "state, " +
 		prefix + "lease_owner, " + prefix + "lease_token, " + prefix + "lease_expires_at, " +
 		prefix + "attempt_count, " + prefix + "result_artifact_digest, " + prefix + "abandon_reason, " +
 		prefix + "created_at, " + prefix + "updated_at, " + prefix + "ready_at, " + prefix + "abandoned_at"
@@ -415,7 +415,7 @@ func scanRootFSImportOperation(row sandboxRecordScanner) (*RootFSImportOperation
 		&operation.Spec.ProcdProtocol, &operation.Spec.ProcdDigest,
 		&operation.Spec.LogicalSizeBytes, &operation.Spec.BlockOptions.DataRangeBytes,
 		&operation.Spec.BlockOptions.PackBytes, &operation.Spec.BlockOptions.PageEntries,
-		&operation.Spec.BlockOptions.ObjectPrefix, &operation.Spec.DataLayoutPolicy, &operation.Spec.BlockOptions.MappingGroupPolicy, &operation.State,
+		&operation.Spec.BlockOptions.ObjectPrefix, &operation.Spec.DataLayoutPolicy, &operation.Spec.BlockOptions.MappingGroupPolicy, &operation.Spec.InitialFilesystemSizeBytes, &operation.State,
 		&leaseOwner, &leaseToken, &leaseExpiresAt, &operation.AttemptCount,
 		&artifactDigest, &operation.AbandonReason, &operation.CreatedAt,
 		&operation.UpdatedAt, &readyAt, &abandonedAt,
@@ -882,11 +882,11 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 			manifest_digest, config_digest, base_block_root,
 			format_generation, oci_os, oci_architecture, oci_variant,
 			procd_protocol, procd_digest, logical_size_bytes,
-			descriptor_digest, state, descriptor, attestation, import_data_range_bytes, data_layout_policy, mapping_group_policy,
+			descriptor_digest, state, descriptor, attestation, import_data_range_bytes, data_layout_policy, mapping_group_policy, initial_filesystem_size_bytes,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, 'ready', $15, $16, $17, $18, $19, NOW(), NOW()
+			$11, $12, $13, $14, 'ready', $15, $16, $17, $18, $19, $20, NOW(), NOW()
 		)
 		ON CONFLICT (artifact_digest) DO NOTHING
 	`, artifactDigest.String(), attestation.SourceOCIRef, attestation.SourceOCIDigest,
@@ -895,7 +895,7 @@ func (s *PGSandboxStore) PublishReadyRootFSImport(
 		attestation.Platform.Architecture, attestation.Platform.Variant,
 		attestation.ProcdProtocol, attestation.ProcdDigest, attestation.LogicalSizeBytes,
 		attestation.DescriptorDigest, req.Result.DescriptorBytes, attestationBytes,
-		operation.Spec.BlockOptions.DataRangeBytes, operation.Spec.DataLayoutPolicy, operation.Spec.BlockOptions.MappingGroupPolicy)
+		operation.Spec.BlockOptions.DataRangeBytes, operation.Spec.DataLayoutPolicy, operation.Spec.BlockOptions.MappingGroupPolicy, operation.Spec.InitialFilesystemSizeBytes)
 	if err != nil {
 		return nil, fmt.Errorf("insert ready rootfs base artifact: %w", err)
 	}
@@ -1148,7 +1148,8 @@ func validateRootFSImportResult(
 		result.DataLayoutPolicy != operation.Spec.DataLayoutPolicy ||
 		result.MappingGroupPolicy != operation.Spec.BlockOptions.MappingGroupPolicy ||
 		(result.DataLayoutPolicy != "" && result.DataLayoutRangeBytes != operation.Spec.BlockOptions.DataRangeBytes) ||
-		result.LogicalSizeBytes != operation.Spec.LogicalSizeBytes {
+		result.LogicalSizeBytes != operation.Spec.LogicalSizeBytes ||
+		result.InitialFilesystemSizeBytes != operation.Spec.InitialFilesystemSizeBytes {
 		return rootfsimporter.ReadyArtifactAttestation{}, nil, "",
 			fmt.Errorf("%w: rootfs import result does not match its durable inputs", ErrRootFSImportConflict)
 	}
@@ -1192,6 +1193,7 @@ func rootFSBaseArtifactMatchesAttestation(
 		}) && artifact.ProcdProtocol == attestation.ProcdProtocol &&
 		artifact.ProcdDigest == attestation.ProcdDigest &&
 		artifact.LogicalSizeBytes == attestation.LogicalSizeBytes &&
+		artifact.InitialFilesystemSizeBytes == attestation.InitialFilesystemSizeBytes &&
 		artifact.DescriptorDigest == attestation.DescriptorDigest &&
 		artifact.State == RootFSBaseArtifactStateReady &&
 		bytes.Equal(artifact.Descriptor, descriptor) && bytes.Equal(artifact.Attestation, attestationBytes)

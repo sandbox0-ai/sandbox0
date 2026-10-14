@@ -28,6 +28,9 @@ import (
 // Validate verifies that every field returned by a block build is internally
 // consistent before it can participate in a ready-artifact attestation.
 func (result BuildResult) Validate() error {
+	if err := ValidateGeometry(result.LogicalSizeBytes, result.InitialFilesystemSizeBytes); result.InitialFilesystemSizeBytes != 0 && err != nil {
+		return err
+	}
 	if err := ValidateMappingGroupPolicy(result.MappingGroupPolicy, result.Descriptor.Version); err != nil {
 		return err
 	}

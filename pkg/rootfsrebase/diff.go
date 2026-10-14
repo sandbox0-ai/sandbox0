@@ -333,7 +333,7 @@ func metadataDelta(old, source Node) MetadataChange {
 	if old.Rdev != source.Rdev {
 		fields = append(fields, "rdev")
 	}
-	if old.Size != source.Size {
+	if source.Type == NodeRegular && old.Size != source.Size {
 		fields = append(fields, "size")
 	}
 	if old.LinkTarget != source.LinkTarget {

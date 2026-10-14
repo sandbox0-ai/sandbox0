@@ -9,8 +9,10 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnomad"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotprovider"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotwriter"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 )
 
 // Store combines the regional slot registry and RootFS writer transaction
@@ -23,6 +25,9 @@ type Store interface {
 // Config controls the bounded terminal worker and its strict Nomad endpoint
 // catalog. Destructive reconciliation is disabled unless Enabled is true.
 type Config struct {
+	ProviderObserver   providerinstance.Observer
+	ProviderAccountID  string
+	ProviderRegion     string
 	Enabled            bool
 	NomadEndpointsFile string
 	Interval           time.Duration
@@ -53,7 +58,7 @@ func NewWithAllocation(
 	config Config,
 ) (*runtimeslotreconciler.Worker, *runtimeslotnomad.Controller, error) {
 	if !config.Enabled {
-		if strings.TrimSpace(config.NomadEndpointsFile) != "" {
+		if strings.TrimSpace(config.NomadEndpointsFile) != "" || config.ProviderObserver != nil {
 			return nil, nil, fmt.Errorf("runtime slot terminal reconciler must be enabled when a Nomad endpoint catalog is configured")
 		}
 		return nil, nil, nil
@@ -88,8 +93,19 @@ func NewWithAllocation(
 	if err != nil {
 		return nil, nil, fmt.Errorf("create runtime slot writer controller: %w", err)
 	}
+	var providerRecovery runtimeslotreconciler.ProviderRecoveryController
+	if config.ProviderObserver != nil {
+		providerStore, ok := store.(runtimeslotprovider.Store)
+		if !ok {
+			return nil, nil, fmt.Errorf("provider recovery requires persistent regional proof and atomic completion store")
+		}
+		providerRecovery, err = runtimeslotprovider.New(providerStore, writer, allocation, config.ProviderObserver, config.ProviderAccountID, config.ProviderRegion)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	reconciler, err := runtimeslotreconciler.New(runtimeslotreconciler.Config{
-		Store: store, Allocation: allocation, Node: node, Writer: writer, Limit: config.ScanLimit,
+		Store: store, Allocation: allocation, Node: node, Writer: writer, ProviderRecovery: providerRecovery, Limit: config.ScanLimit,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create runtime slot terminal reconciler: %w", err)

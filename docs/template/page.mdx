@@ -86,7 +86,7 @@ The request shape is:
 Image-based template creation returns `201 Created` after validating the
 canonical digest-pinned source. Manager then idempotently discovers every
 required runtime platform and imports the exact image, `procd` identity, and
-RootFS size into the regional block store. A claim returns data-plane-not-ready
+initial RootFS capacity and immutable device geometry into the regional block store. A claim returns data-plane-not-ready
 until that durable import reaches `ready`. Template IDs are canonical within
 their scope and cannot be renamed.
 

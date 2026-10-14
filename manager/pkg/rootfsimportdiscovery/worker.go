@@ -38,16 +38,17 @@ type ImportStore interface {
 }
 
 type Config struct {
-	Sources          templatestore.ImageSourceStore
-	Imports          ImportStore
-	Platforms        []sandboxstore.RootFSArtifactPlatform
-	FormatGeneration int
-	ProcdProtocol    string
-	ProcdDigest      string
-	BlockOptions     rootfsblock.BuildOptions
-	DataLayoutPolicy string
-	Interval         time.Duration
-	PageSize         int
+	Sources               templatestore.ImageSourceStore
+	Imports               ImportStore
+	Platforms             []sandboxstore.RootFSArtifactPlatform
+	FormatGeneration      int
+	ProcdProtocol         string
+	ProcdDigest           string
+	BlockOptions          rootfsblock.BuildOptions
+	DataLayoutPolicy      string
+	SparseDeviceSizeBytes int64
+	Interval              time.Duration
+	PageSize              int
 }
 
 type Result struct {
@@ -69,6 +70,9 @@ type Worker struct {
 }
 
 func New(config Config) (*Worker, error) {
+	if err := rootfsimporter.ValidateSparseDeviceSize(config.SparseDeviceSizeBytes); err != nil {
+		return nil, err
+	}
 	if config.Sources == nil || config.Imports == nil {
 		return nil, fmt.Errorf("template image sources and RootFS import store are required")
 	}
@@ -195,18 +199,23 @@ func (w *Worker) ensureSource(
 		return err
 	}
 
+	logicalSize, initialSize, err := rootfsimporter.ResolveImportGeometry(logicalSize, w.config.SparseDeviceSizeBytes)
+	if err != nil {
+		return err
+	}
 	var failures []error
 	for _, platform := range w.config.Platforms {
 		result.Requirements++
 		requirements := sandboxstore.ReadyRootFSArtifactRequirements{
-			FormatGeneration:         w.config.FormatGeneration,
-			LogicalSizeBytes:         logicalSize,
-			ProcdProtocol:            w.config.ProcdProtocol,
-			ProcdDigest:              w.config.ProcdDigest,
-			ImportDataRangeBytes:     w.config.BlockOptions.DataRangeBytes,
-			ImportDataLayoutPolicy:   w.config.DataLayoutPolicy,
-			ImportMappingGroupPolicy: w.config.BlockOptions.MappingGroupPolicy,
-			SourceOCIRef:             source.Image,
+			FormatGeneration:           w.config.FormatGeneration,
+			LogicalSizeBytes:           logicalSize,
+			InitialFilesystemSizeBytes: initialSize,
+			ProcdProtocol:              w.config.ProcdProtocol,
+			ProcdDigest:                w.config.ProcdDigest,
+			ImportDataRangeBytes:       w.config.BlockOptions.DataRangeBytes,
+			ImportDataLayoutPolicy:     w.config.DataLayoutPolicy,
+			ImportMappingGroupPolicy:   w.config.BlockOptions.MappingGroupPolicy,
+			SourceOCIRef:               source.Image,
 		}
 		artifact, readyErr := w.config.Imports.GetReadyRootFSBaseArtifact(
 			ctx,
@@ -229,12 +238,13 @@ func (w *Worker) ensureSource(
 			Platform: rootfsimporter.ReadyArtifactPlatform{
 				OS: platform.OS, Architecture: platform.Architecture, Variant: platform.Variant,
 			},
-			FormatGeneration: w.config.FormatGeneration,
-			ProcdProtocol:    w.config.ProcdProtocol,
-			ProcdDigest:      w.config.ProcdDigest,
-			LogicalSizeBytes: logicalSize,
-			BlockOptions:     w.config.BlockOptions,
-			DataLayoutPolicy: w.config.DataLayoutPolicy,
+			FormatGeneration:           w.config.FormatGeneration,
+			ProcdProtocol:              w.config.ProcdProtocol,
+			ProcdDigest:                w.config.ProcdDigest,
+			LogicalSizeBytes:           logicalSize,
+			InitialFilesystemSizeBytes: initialSize,
+			BlockOptions:               w.config.BlockOptions,
+			DataLayoutPolicy:           w.config.DataLayoutPolicy,
 		}
 		operationID, normalized, operationErr := rootfsimporter.DeterministicOperation(operationSpec)
 		if operationErr != nil {

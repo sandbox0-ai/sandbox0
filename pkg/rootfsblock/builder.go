@@ -106,10 +106,18 @@ func buildMaterializedGeneration(
 	options BuildOptions,
 	layout *DataRangeLayout,
 ) (BuildResult, error) {
+	return buildMaterializedGenerationGeometry(ctx, reader, logicalSize, logicalSize, publisher, options, layout)
+}
+
+// contentSize bounds the owned input. Address space beyond it is implicit zero
+// without being scanned, allocated, or published as data objects.
+func buildMaterializedGenerationGeometry(ctx context.Context, reader io.ReaderAt, contentSize, logicalSize int64,
+	publisher ImmutableObjectPublisher, options BuildOptions, layout *DataRangeLayout,
+) (BuildResult, error) {
 	if reader == nil || publisher == nil {
 		return BuildResult{}, fmt.Errorf("reader and publisher are required")
 	}
-	if logicalSize <= 0 || logicalSize%LogicalBlockSize != 0 {
+	if contentSize <= 0 || contentSize%LogicalBlockSize != 0 || logicalSize < contentSize || logicalSize%LogicalBlockSize != 0 {
 		return BuildResult{}, fmt.Errorf("logical size must be a positive multiple of %d", LogicalBlockSize)
 	}
 	options, err := NormalizeBuildOptions(options)
@@ -117,7 +125,7 @@ func buildMaterializedGeneration(
 		return BuildResult{}, err
 	}
 	if layout != nil && (options.formatVersion() != CompressedFormatVersion ||
-		layout.logicalSize != logicalSize || layout.rangeBytes != int64(options.DataRangeBytes)) {
+		layout.logicalSize != contentSize || layout.rangeBytes != int64(options.DataRangeBytes)) {
 		return BuildResult{}, fmt.Errorf("data range layout must bind the same format-two image size and data unit")
 	}
 	state := generationBuilder{
@@ -128,10 +136,10 @@ func buildMaterializedGeneration(
 	tree := newMappingStream(&state, uint64(logicalSize/LogicalBlockSize))
 	pack := make([]pendingDataEntry, 0, options.PackBytes/options.DataRangeBytes)
 	packBytes := 0
-	payload := make([]byte, int(min(int64(options.DataRangeBytes), logicalSize)))
+	payload := make([]byte, int(min(int64(options.DataRangeBytes), contentSize)))
 	cursor := dataRangeCursor{layout: layout}
 	dataReader, sparse := reader.(materializedDataReader)
-	for offset := int64(0); offset < logicalSize; {
+	for offset := int64(0); offset < contentSize; {
 		if err := ctx.Err(); err != nil {
 			return BuildResult{}, err
 		}
@@ -140,17 +148,17 @@ func buildMaterializedGeneration(
 			if err != nil {
 				return BuildResult{}, fmt.Errorf("locate logical disk data at %d: %w", offset, err)
 			}
-			if next < offset || next > logicalSize {
+			if next < offset || next > contentSize {
 				return BuildResult{}, fmt.Errorf("logical disk data offset is outside the remaining image")
 			}
-			if next == logicalSize {
+			if next == contentSize {
 				break
 			}
 			// Read the original complete unit containing the next data byte.
 			// Re-basing a unit at an extent boundary would change publication.
 			offset = cursor.rangeStart(next, options.DataRangeBytes)
 		}
-		length := cursor.nextLength(offset, logicalSize, options.DataRangeBytes)
+		length := cursor.nextLength(offset, contentSize, options.DataRangeBytes)
 		payload = payload[:int(length)]
 		n, readErr := reader.ReadAt(payload, offset)
 		if readErr != nil && readErr != io.EOF {
@@ -186,8 +194,8 @@ func buildMaterializedGeneration(
 			packBytes += len(payload)
 			// Nonzero bytes belong to the pending pack. Zero ranges reuse the
 			// read buffer instead of allocating for every sparse image range.
-			if offset+length < logicalSize {
-				payload = make([]byte, int(min(int64(options.DataRangeBytes), logicalSize-offset-length)))
+			if offset+length < contentSize {
+				payload = make([]byte, int(min(int64(options.DataRangeBytes), contentSize-offset-length)))
 			}
 		}
 		offset += length

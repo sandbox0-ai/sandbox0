@@ -33,6 +33,7 @@ type BranchCheckpoint struct {
 	latest   map[uint64]branchRecord
 	blocks   []uint64
 	closed   bool
+	owner    *Branch
 }
 
 // Checkpoint flushes and captures the exact current branch boundary. It does
@@ -50,10 +51,61 @@ func (b *Branch) Checkpoint() (*BranchCheckpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("duplicate branch journal for checkpoint: %w", err)
 	}
+	b.checkpoints++
 	return &BranchCheckpoint{
 		file: file, identity: b.identity, end: b.end, sequence: b.sequence,
-		count: b.records.count, chunks: b.records.snapshot(),
+		count: b.records.count, chunks: b.records.snapshot(), owner: b,
 	}, nil
+}
+
+// CheckpointAtCut reopens a journaled, previously flushed boundary. Later
+// overwrites and appends remain outside the retry, so rebuilding after a lost
+// upload response produces the same immutable objects and operation payload.
+func (b *Branch) CheckpointAtCut(cut BranchCut) (*BranchCheckpoint, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, os.ErrClosed
+	}
+	if err := b.validateCutLocked(cut); err != nil {
+		return nil, err
+	}
+	file, err := duplicateBranchFile(b.file)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate branch for durable cut: %w", err)
+	}
+	count := int(cut.Sequence - b.identity.SequenceBase)
+	remaining := count
+	var chunks []*branchRecordChunk
+	for _, chunk := range b.records.snapshot() {
+		if remaining == 0 {
+			break
+		}
+		if len(chunk.records) <= remaining {
+			chunks = append(chunks, chunk)
+			remaining -= len(chunk.records)
+			continue
+		}
+		chunks = append(chunks, &branchRecordChunk{records: chunk.records[:remaining:remaining]})
+		remaining = 0
+	}
+	if remaining != 0 {
+		_ = file.Close()
+		return nil, fmt.Errorf("durable cut record index is incomplete")
+	}
+	b.checkpoints++
+	return &BranchCheckpoint{file: file, identity: b.identity, end: cut.End, sequence: cut.Sequence, count: count, chunks: chunks, owner: b}, nil
+}
+
+func (b *Branch) validateCutLocked(cut BranchCut) error {
+	if cut.Identity != b.identity || cut.Sequence < b.identity.SequenceBase || cut.Sequence > b.durable {
+		return fmt.Errorf("committed cut does not belong to the flushed current branch")
+	}
+	count := cut.Sequence - b.identity.SequenceBase
+	if count > uint64(b.records.count) || cut.End != b.header+int64(count)*branchRecordBytes || cut.End > b.end {
+		return fmt.Errorf("committed cut has an invalid journal boundary")
+	}
+	return nil
 }
 
 func (c *BranchCheckpoint) Identity() BranchIdentity { return c.identity }
@@ -132,7 +184,11 @@ func (c *BranchCheckpoint) Close() error {
 	c.chunks = nil
 	c.latest = nil
 	c.blocks = nil
-	return c.file.Close()
+	err := c.file.Close()
+	c.owner.mu.Lock()
+	c.owner.checkpoints--
+	c.owner.mu.Unlock()
+	return err
 }
 
 func (c *BranchCheckpoint) prepareFinalIndexLocked() {

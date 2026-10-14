@@ -223,6 +223,59 @@ func TestNomadPausedRebaseCleanupRejectsAndAcknowledgesExactWorkerIntegration(t 
 	))
 }
 
+func TestMarkSandboxDeletedRetainsRebaseRollbackUntilExpiryIntegration(t *testing.T) {
+	f := newNomadPausedRebaseStoreFixture(t, "delete-rollback")
+	request := f.request("rebase-delete-rollback", time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond))
+	candidate, err := f.store.RequestNomadPausedRebase(f.ctx, request)
+	require.NoError(t, err)
+	target := f.outputGeneration(t, candidate.TargetGenerationID, candidate.TargetWriterEpoch, "delete-rollback")
+	health := sha256.Sum256([]byte("delete-rollback-health"))
+	proof := sha256.Sum256([]byte("delete-rollback-proof"))
+	_, err = f.store.PublishPausedRootFSRebase(f.ctx, &PublishPausedRootFSRebaseRequest{
+		SandboxID: f.record.ID, TeamID: f.record.TeamID, OperationID: request.OperationID,
+		ExpectedSourceGenerationID: f.source.ID, ExpectedBaseArtifactDigest: f.sourceArtifact.ArtifactDigest,
+		Generation: target, HealthCheckDigest: health[:], RollbackExpiresAt: request.RollbackExpiresAt,
+		WorkerClusterID: request.WorkerClusterID, WorkerNodeID: request.WorkerNodeID,
+		WorkerNodeUID: request.WorkerNodeUID, WorkerProofDigest: proof[:],
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.store.AcknowledgeNomadPausedRebaseWorker(f.ctx, request.OperationID, f.record.ID,
+		request.WorkerClusterID, request.WorkerNodeID, request.WorkerNodeUID, proof[:]))
+	// This store-only fixture has synthetic descriptors. Reproduce the real
+	// lifecycle's completed-inventory state before testing relational retention.
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.rootfs_generations
+		SET storage_inventory_required=FALSE WHERE filesystem_id=$1`, f.filesystem.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.store.MarkSandboxDeleted(f.ctx, f.record.ID, time.Now().UTC()))
+	record, err := f.store.GetSandbox(f.ctx, f.record.ID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateDeleted, record.DesiredState)
+	require.False(t, record.DeletedAt.IsZero())
+	var headAbsent bool
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT head_generation_id IS NULL
+		FROM manager.rootfs_filesystems WHERE filesystem_id=$1`, f.filesystem.ID).Scan(&headAbsent))
+	require.True(t, headAbsent)
+	removed, err := f.store.DeleteUnreferencedRootFSGenerations(f.ctx, f.record.TeamID, 100)
+	require.NoError(t, err)
+	require.Zero(t, removed, "both rollback generations must remain retained")
+	var generations int
+	require.NoError(t, f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM manager.rootfs_generations
+		WHERE generation_id=ANY($1::TEXT[])`, []string{f.source.ID, target.ID}).Scan(&generations))
+	require.Equal(t, 2, generations)
+	removed, err = f.store.deleteTerminalRootFSHeadRollbacks(f.ctx, f.record.TeamID, 100)
+	require.NoError(t, err)
+	require.Zero(t, removed, "unexpired rollback custody must survive sandbox deletion")
+	_, err = f.pool.Exec(f.ctx, `UPDATE manager.rootfs_head_rollbacks
+		SET expires_at=NOW()-INTERVAL '1 second' WHERE operation_id=$1`, request.OperationID)
+	require.NoError(t, err)
+	removed, err = f.store.deleteTerminalRootFSHeadRollbacks(f.ctx, f.record.TeamID, 100)
+	require.NoError(t, err)
+	require.Equal(t, 1, removed)
+	removed, err = f.store.DeleteUnreferencedRootFSFilesystems(f.ctx, f.record.TeamID, 100)
+	require.NoError(t, err)
+	require.Equal(t, 1, removed, "normal GC should release the filesystem after its rollback expires")
+}
+
 func newNomadPausedRebaseStoreFixture(t *testing.T, suffix string) *nomadPausedRebaseStoreFixture {
 	t.Helper()
 	ctx := context.Background()

@@ -35,6 +35,56 @@ feature is not deployed until the gates below have evidence attached.
    documentation together. Deploy the compatible manager before enabling node
    behavior, roll workers with memory preservation and verify a regional canary.
 
+## Production canary on 2026-10-14 UTC
+
+The regional manager at `5f0c98f43ae4746ae77ce0251ba32b7c6995c22f` applied
+schema 122 and enabled 64 TiB sparse imports. The fixed worker and future
+enrollment template enabled live commits and online growth; both executing
+ctld binaries matched the qualified release. Eleven retained checkpoints
+passed comparison against both actual target CPU sets and the unchanged stock
+runsc bundle. The occupied-worker rollout restored both authorized sandboxes
+from their exact captures. Database receipts confirmed complete restoration
+and adoption, with no failed restore or cold fallback.
+
+A dedicated team-owned Python canary imported a 300 MiB initial filesystem on
+the 64 TiB device. One process wrote 1,258,291,200 bytes, including overwrites
+and zeros, and verified the entire payload. Mounted XFS data capacity grew
+from 247,463,936 to 2,449,473,536 bytes. Live committed and installed sequence
+314,843 converged; a subsequent worker observation found the canary's selected
+WAL at sequence 314,845 occupying 8,192 bytes. This is an endpoint observation,
+not a peak occupancy measurement or a 64 TiB workload qualification.
+
+Explicit `memory: true` pause/resume retained PID 11, a private heap marker,
+an anonymous mapping and an unlinked open file. The original process answered
+fresh nonce probes and recomputed the complete payload hash after restoration.
+Its new writer installed sequence 566. A running snapshot and filesystem fork
+also succeeded; a separate first-start allocation re-read the entire forked
+payload with the same SHA-256. The source process answered another full-hash
+and handle probe after those operations. This production scene used one fixed
+worker; independent physical-node loss, storage interruption and shared-node
+pressure retain their separate isolated acceptance evidence below.
+
+Deletion removed both canary sandboxes, their named snapshot, the template,
+active writers, occupied slots and retained memory references. Final background
+GC exposed a second dependency-ordering path: after direct deletion had deferred
+a filesystem while a reader existed, GC could hit the immediate live-base FK
+while bulk-deleting its generations. GC now preserves incoming live-base edges
+from independent filesystems and releases outgoing edges of selected unreferenced
+filesystems in the same transaction before deleting their generations. Real
+PostgreSQL regressions reproduced both failures before this correction and
+passed afterward. Production GC completion still requires the manager correction
+to be deployed and the retained canary filesystem to be observed gone.
+
+The private 18-directory acceptance archive was verified off-host: 9,574 members,
+1,322,878,434 bytes, SHA-256
+`d19b0f8fc5f232039fcefbcec8fb819c3f15880c3254f52539e1caea9856dc99`.
+An additional 56-file metadata archive was also verified. The disposable
+acceptance host and its dedicated provider SSH key were then deleted and their
+absence confirmed through provider 404 responses; generated local credentials
+were removed. The source-provider fixture's network and observer cleanup had
+already completed. Runtime, CLI, SDK and website description PRs are merged,
+and the website deployment for that revision completed successfully.
+
 ## Acceptance gates
 
 - A process keeps its PID and memory marker through multiple XFS growth and

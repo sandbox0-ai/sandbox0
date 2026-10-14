@@ -1,4 +1,4 @@
-package providerinstance
+package providerinstancealiyun
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	sdkerrors "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/sts"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,8 +31,8 @@ func verifiedIdentity(*sts.GetCallerIdentityRequest) (*sts.GetCallerIdentityResp
 	return r, nil
 }
 
-func testScope() Scope {
-	return Scope{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: "i-exact"}
+func testScope() providerinstance.Scope {
+	return providerinstance.Scope{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: "i-exact"}
 }
 
 func providerError(status int, code, receipt string) error {
@@ -149,7 +150,7 @@ func TestAliyunObserverRejectsScopeDriftAndCancellation(t *testing.T) {
 	})
 	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")
 	require.NoError(t, err)
-	for _, scope := range []Scope{
+	for _, scope := range []providerinstance.Scope{
 		{Provider: "aliyun", AccountID: "other", RegionID: "us-east-1", InstanceID: "i-exact"},
 		{Provider: "aliyun", AccountID: "1234567890123456", RegionID: "cn-hangzhou", InstanceID: "i-exact"},
 		{Provider: "other", AccountID: "1234567890123456", RegionID: "us-east-1", InstanceID: "i-exact"},

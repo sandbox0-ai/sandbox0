@@ -1,6 +1,6 @@
-// Package providerinstance observes physical cloud instance presence. An
+// Package providerinstancealiyun observes physical cloud instance presence. An
 // observation is not itself authorization to release a runtime or its writer.
-package providerinstance
+package providerinstancealiyun
 
 import (
 	"context"
@@ -14,31 +14,8 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/sts"
 	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 )
-
-// Scope pins the provider namespace independently of Nomad and ESS membership.
-type Scope struct {
-	Provider   string `json:"provider"`
-	AccountID  string `json:"account_id"`
-	RegionID   string `json:"region_id"`
-	InstanceID string `json:"instance_id"`
-}
-
-// Observation carries only the exact requested identity and provider receipts.
-// False Present means an authenticated, explicit instance-not-found response;
-// API failure, stopped instances, and missing ESS membership do not qualify.
-type Observation struct {
-	Scope             Scope  `json:"scope"`
-	Present           bool   `json:"present"`
-	RequestID         string `json:"request_id"`
-	IdentityRequestID string `json:"identity_request_id"`
-}
-
-// Observer is a read-only provider boundary. Regional callers must separately
-// fence the exact node incarnation, retain observations, and settle its writer.
-type Observer interface {
-	Observe(context.Context, Scope) (Observation, error)
-}
 
 type aliyunECS interface {
 	DescribeInstanceAttribute(*ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error)
@@ -100,32 +77,22 @@ func validateAliyunScope(region, accountID string) (int64, error) {
 	return ownerID, nil
 }
 
-func (o Observation) ValidateFor(scope Scope) error {
-	if !canonicalReceipt.MatchString(scope.Provider) || !canonicalReceipt.MatchString(scope.AccountID) ||
-		!canonicalRegion.MatchString(scope.RegionID) || len(scope.RegionID) > 64 ||
-		!canonicalReceipt.MatchString(scope.InstanceID) || o.Scope != scope || !canonicalReceipt.MatchString(o.RequestID) ||
-		!canonicalReceipt.MatchString(o.IdentityRequestID) {
-		return errors.New("provider instance observation does not match its scope or receipts")
-	}
-	return nil
-}
-
-func (o *AliyunObserver) Observe(ctx context.Context, scope Scope) (Observation, error) {
+func (o *AliyunObserver) Observe(ctx context.Context, scope providerinstance.Scope) (providerinstance.Observation, error) {
 	if err := ctx.Err(); err != nil {
-		return Observation{}, err
+		return providerinstance.Observation{}, err
 	}
 	if o == nil || o.ecs == nil || o.sts == nil || scope.Provider != "aliyun" ||
 		scope.AccountID != o.accountID || scope.RegionID != o.region ||
 		!canonicalInstance.MatchString(scope.InstanceID) {
-		return Observation{}, errors.New("provider instance target is outside the pinned ECS scope")
+		return providerinstance.Observation{}, errors.New("provider instance target is outside the pinned ECS scope")
 	}
 	identity, err := o.sts.GetCallerIdentity(sts.CreateGetCallerIdentityRequest())
 	if err := ctx.Err(); err != nil {
-		return Observation{}, err
+		return providerinstance.Observation{}, err
 	}
 	if err != nil || identity == nil || identity.AccountId != o.accountID ||
 		!canonicalReceipt.MatchString(identity.RequestId) {
-		return Observation{}, errors.New("provider credential owner account could not be verified")
+		return providerinstance.Observation{}, errors.New("provider credential owner account could not be verified")
 	}
 	request := ecs.CreateDescribeInstanceAttributeRequest()
 	request.RegionId = o.region
@@ -133,9 +100,9 @@ func (o *AliyunObserver) Observe(ctx context.Context, scope Scope) (Observation,
 	request.InstanceId = scope.InstanceID
 	response, err := o.ecs.DescribeInstanceAttribute(request)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Observation{}, ctxErr
+		return providerinstance.Observation{}, ctxErr
 	}
-	observation := Observation{Scope: scope, IdentityRequestID: identity.RequestId}
+	observation := providerinstance.Observation{Scope: scope, IdentityRequestID: identity.RequestId}
 	if err != nil {
 		var server *sdkerrors.ServerError
 		if !errors.As(err, &server) || server == nil || server.HttpStatus() != 404 ||
@@ -143,19 +110,19 @@ func (o *AliyunObserver) Observe(ctx context.Context, scope Scope) (Observation,
 			!canonicalReceipt.MatchString(server.RequestId()) {
 			// SDK error strings can include response headers. They are not part
 			// of the durable proof or manager logs.
-			return Observation{}, errors.New("ECS physical instance presence is unavailable")
+			return providerinstance.Observation{}, errors.New("ECS physical instance presence is unavailable")
 		}
 		observation.RequestID = server.RequestId()
 	} else {
 		if response == nil || response.InstanceId != scope.InstanceID || response.RegionId != o.region ||
 			!canonicalReceipt.MatchString(response.RequestId) {
-			return Observation{}, errors.New("ECS returned inconsistent physical instance identity")
+			return providerinstance.Observation{}, errors.New("ECS returned inconsistent physical instance identity")
 		}
 		observation.Present = true // Stopped and stopping instances still exist.
 		observation.RequestID = response.RequestId
 	}
 	if err := observation.ValidateFor(scope); err != nil {
-		return Observation{}, fmt.Errorf("validate ECS presence receipt: %w", err)
+		return providerinstance.Observation{}, fmt.Errorf("validate ECS presence receipt: %w", err)
 	}
 	return observation, nil
 }

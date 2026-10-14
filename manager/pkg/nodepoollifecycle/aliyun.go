@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/providerinstancealiyun"
 	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
 	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 
@@ -110,7 +111,7 @@ type AliyunCloud struct {
 }
 
 func NewAliyunCloud(region, accountID, scalingGroupID string, routeTableIDs []string) (*AliyunCloud, error) {
-	instances, err := providerinstance.NewAliyunObserver(region, accountID)
+	instances, err := providerinstancealiyun.NewAliyunObserver(region, accountID)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/providerinstancealiyun"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/pkg/config"
@@ -56,7 +57,7 @@ func buildManagerNodeAuthority(
 			return nil, fmt.Errorf("provider recovery requires the configured Aliyun instance scope")
 		}
 		var err error
-		providerObserver, err = providerinstance.NewAliyunObserver(cfg.NodePoolAutoscaler.Region, cfg.NodePoolAutoscaler.Enrollment.OwnerAccountID)
+		providerObserver, err = providerinstancealiyun.NewAliyunObserver(cfg.NodePoolAutoscaler.Region, cfg.NodePoolAutoscaler.Enrollment.OwnerAccountID)
 		if err != nil {
 			return nil, err
 		}

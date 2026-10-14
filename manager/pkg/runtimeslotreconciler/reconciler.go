@@ -266,7 +266,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 			result.Skipped++
 			continue
 		}
-		completed, err := r.reconcileNode(ctx, candidates[index].ID, unavailable[node])
+		completed, err := r.reconcile(ctx, candidates[index].ID, unavailable[node])
 		if err != nil {
 			result.Failed++
 			errs = append(errs, fmt.Errorf("reconcile runtime slot %s: %w", candidates[index].ID, err))
@@ -284,11 +284,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
-func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error) {
-	return r.reconcileNode(ctx, slotID, false)
-}
-
-func (r *Reconciler) reconcileNode(ctx context.Context, slotID string, unavailable bool) (bool, error) {
+func (r *Reconciler) reconcile(ctx context.Context, slotID string, unavailable bool) (bool, error) {
 	slot, err := r.store.GetRuntimeSlot(ctx, slotID)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {

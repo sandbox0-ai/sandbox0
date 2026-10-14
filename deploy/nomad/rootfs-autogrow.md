@@ -878,7 +878,13 @@ guard explicitly while the existing pinned empty-rollback test still verifies
 the goose step. The dead-warm-carrier regression failed with the previous
 whole-node skip condition and passed with provider dispatch enabled. Full
 Nomad/provider/reconciler/terminal/writer/node-authority and selected manager
-race suites also passed. No production setting or service changed.
+race suites also passed. CI then found an unused wrapper and a driver-module
+dependency leak. The wrapper was removed and the Aliyun SDK implementation
+moved into the regional manager, retaining lightweight shared receipt types.
+Standalone module checks with `GOWORK=off` passed: provider/lifecycle/controller
+and root configuration/credential suites, plus the complete Nomad driver race
+suite (115.97 seconds overall, 58.49 seconds for its driver package). No module
+or checksum file changed. No production setting or service changed.
 
 ## Actual Nomad, procd and live-owner transfer acceptance
 

@@ -1,7 +1,9 @@
 # RootFS automatic growth and live commits
 
-Implementation and acceptance record for the automatic-growth rollout. This
-feature is not deployed until the gates below have evidence attached.
+Implementation, acceptance and release record for automatic growth. The feature
+is deployed in the qualified region; it remains opt-in for other deployments.
+Use the current release status for completion, and the later historical records
+for the evidence and limits of each acceptance scene.
 
 ## Required behavior
 
@@ -26,14 +28,41 @@ feature is not deployed until the gates below have evidence attached.
   fencing, storage inventory/GC, and live ctld transfer retain their existing
   ownership and durability guarantees.
 
-## Work remaining
+## Current release status — 2026-10-14 UTC
 
-1. Verify the final release against retained production checkpoint/procd and
-   target CPU compatibility; isolated acceptance does not establish deployment.
-2. Preserve the complete acceptance evidence and remove temporary resources.
-3. Merge passing runtime, contracts/SDK descriptions, CLI, website and operator
-   documentation together. Deploy the compatible manager before enabling node
-   behavior, roll workers with memory preservation and verify a regional canary.
+Feature activation used runtime
+[PR #1025](https://github.com/sandbox0-ai/sandbox0/pull/1025) at
+`5f0c98f43ae4746ae77ce0251ba32b7c6995c22f`. Manager schema 122, 64 TiB sparse
+imports, live publication and online growth are enabled, including the worker
+configuration used by future enrollments. Retained checkpoint/target CPU
+compatibility, both occupied sandboxes' memory-preserving rollout, the production
+canary and temporary fixture cleanup are recorded below. CLI, SDK and website
+capacity descriptions are merged; the website documentation is deployed.
+
+The canary exposed a deferred filesystem-GC dependency bug. The correction in
+[PR #1027](https://github.com/sandbox0-ai/sandbox0/pull/1027) passed PostgreSQL,
+Linux race, Nomad driver, stock-runsc checkpoint and release-package CI and is
+merged and deployed to the control role as
+`99f0b8ef0b1e061d37dae4eda0a80f73d0eafdea`. Normal background GC then removed
+the retained filesystem, its three generations and all 80 recorded object
+references. Canary storage accounting and the regional deletion queue reached
+zero. The new manager completed two successful maintenance cycles with no
+maintenance error metric; both existing business sandboxes remained active.
+The fixed worker retains the qualified `5f0c98f4` runtime, while future
+enrollments select `99f0b8ef` with both growth flags enabled and the same procd.
+
+| Requirement | Qualifying evidence |
+| --- | --- |
+| Sparse geometry and online growth | 64 TiB logical devices with 300 MiB initial production XFS; full 1,200 MiB production payload and 2 GiB isolated outage workload. |
+| Bounded WAL/cache and safe rotation | Complete real-service suspension with 68,468,736-byte sampled worker peak, separate checkpoint quota, two-writer pressure gate, and journal/rotation race tests. |
+| Process continuity and memory checkpoints | Three live transfers and retained-memory acceptance with the production-selected procd; exact capture/restoration/adoption for both occupied production sandboxes. |
+| Snapshot/fork/restore/rebase and GC | Complete isolated public lifecycle with three full cold hashes and final inventory/GC; production snapshot/fork and retained-memory full hashes; corrected background GC with zero canary filesystem, generation, object-reference and storage-accounting residue. |
+| Permanent compute loss | Actual source ECS deletion, independent replacement admission and complete 600 MiB remote-cut hash; unpublished local suffix absent. Separate resumed cleanup receipt. |
+| Publication and cleanup | Runtime, CLI, SDK and website changes merged; worker release and canary verified; archived private evidence and provider-confirmed fixture removal. |
+
+These are bounded qualification scenes, not a 64 TiB write-volume or fleet-density
+benchmark. The earlier unexplained status-137 fixture failure remains retained;
+later successful outage runs do not establish its cause.
 
 ## Production canary on 2026-10-14 UTC
 
@@ -72,8 +101,15 @@ while bulk-deleting its generations. GC now preserves incoming live-base edges
 from independent filesystems and releases outgoing edges of selected unreferenced
 filesystems in the same transaction before deleting their generations. Real
 PostgreSQL regressions reproduced both failures before this correction and
-passed afterward. Production GC completion still requires the manager correction
-to be deployed and the retained canary filesystem to be observed gone.
+passed afterward. After the corrected manager's control-only deployment,
+normal GC removed the filesystem and all three generations. All 80 objects
+recorded before deployment disappeared from the catalog and deletion queue;
+none were shared base-artifact objects. Team object references and accounted
+bytes reached zero, with no active upload, writer, slot or memory-checkpoint
+reference. The regional deletion queue was empty and the new manager recorded
+555 successful object deletions and two successful maintenance cycles. This
+total includes other ordinarily collectible regional objects; it is not the
+canary's object count. No manual database deletion was used.
 
 The private 18-directory acceptance archive was verified off-host: 9,574 members,
 1,322,878,434 bytes, SHA-256
@@ -154,6 +190,12 @@ operations exist. Runtime integration, lifecycle/fault acceptance and production
 rollout remain required before activation.
 
 ## Verified foundation evidence
+
+This and subsequent implementation/acceptance sections preserve the history of
+individual gates. Statements that later gates were still open or production was
+disabled describe that point in the sequence. The current release status above
+supersedes those historical deployment and cleanup statuses; evidence limits and
+the required ownership/durability invariants still apply.
 
 On an isolated Ubuntu 24.04 host with Linux 6.8, the privileged NBD/XFS gate
 exposed a 64-TiB sparse device, grew mounted XFS from 300 MiB to 1,200 MiB in
@@ -1289,8 +1331,9 @@ verification passed.
 SDK/runtime/CLI README files, public template and self-hosted configuration docs,
 website template labels and the infrastructure rollout plan describe the same
 contract. Website MDX registries, Markdown aliases and `llms.txt` are generated
-from the runtime docs at build time and are intentionally untracked. The feature
-remains opt-in and has not been merged or deployed by this acceptance record.
+from the runtime docs at build time and are intentionally untracked. These
+description changes are now merged and the website deployment is complete.
+Automatic growth remains opt-in outside the qualified deployment.
 
 ## Live publication ordering
 
@@ -1331,5 +1374,7 @@ remains opt-in and has not been merged or deployed by this acceptance record.
    base used by the cut; retain the immutable launch parent for lifecycle proofs.
 
 Regional receipts, node journal recovery, bounded scheduling and growth custody
-are implemented. Full-product service/lifecycle acceptance and deployment remain
-required before enabling either node switch or sparse imports.
+are implemented. The recorded isolated gates and production canary qualify the
+deployed configuration; any additional deployment must verify its own runtime,
+checkpoint compatibility, worker enrollment settings and regional canary before
+enabling either node switch or sparse imports.

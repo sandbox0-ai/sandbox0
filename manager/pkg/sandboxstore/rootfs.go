@@ -1039,6 +1039,13 @@ func (s *PGSandboxStore) deleteUnreferencedRootFSFilesystemLeaves(ctx context.Co
 				WHERE rollback.filesystem_id = filesystem.filesystem_id
 			)
 			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_generation_live_dependencies dependency
+				JOIN manager.rootfs_generations base ON base.generation_id = dependency.base_generation_id
+				JOIN manager.rootfs_generations dependent ON dependent.generation_id = dependency.generation_id
+				WHERE base.filesystem_id = filesystem.filesystem_id
+					AND dependent.filesystem_id <> filesystem.filesystem_id
+			)
+			AND NOT EXISTS (
 				SELECT 1 FROM manager.rootfs_running_forks fork
 				WHERE fork.source_filesystem_id = filesystem.filesystem_id
 					OR fork.target_filesystem_id = filesystem.filesystem_id
@@ -1113,6 +1120,17 @@ func (s *PGSandboxStore) deleteUnreferencedRootFSFilesystemLeaves(ctx context.Co
 		WHERE filesystem_id = ANY($1::text[])
 	`, filesystemIDs); err != nil {
 		return 0, fmt.Errorf("clear unreferenced rootfs heads: %w", err)
+	}
+	// All generations in these unreferenced filesystems are being retired.
+	// Release their outgoing live-base edges before bulk deletion can reach an
+	// immediate base FK. The selection above preserves independent readers.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM manager.rootfs_generation_live_dependencies dependency
+		USING manager.rootfs_generations generation
+		WHERE dependency.generation_id = generation.generation_id
+			AND generation.filesystem_id = ANY($1::text[])
+	`, filesystemIDs); err != nil {
+		return 0, fmt.Errorf("release unreferenced rootfs live dependencies: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM manager.rootfs_generations

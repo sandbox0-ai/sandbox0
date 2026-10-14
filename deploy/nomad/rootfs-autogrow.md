@@ -929,6 +929,13 @@ or establishing complete provider loss or production compatibility.
 
 ## Expanded RootFS memory-checkpoint acceptance
 
+The isolated live fixture accepts `S0_NOMAD_LIVE_PROCD_PROTOCOL` as the
+artifact/claim protocol marker (`sandbox0.procd.v1` or `sandbox0.procd.v3`);
+the existing default remains v3. Import identity and public claim requirements
+use the same explicit value. This permits qualification of a digest-verified,
+prebuilt execution procd while retaining the production-selected protocol,
+without changing runtime protocol handling or replacing captured artifacts.
+
 The optional isolated Nomad memory fixture uses the complete production
 node-authority component, allocation observation, checkpoint coordination and
 checkpoint claim planner. It retains canonical assignment and network-policy

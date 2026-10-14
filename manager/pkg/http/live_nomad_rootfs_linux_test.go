@@ -170,10 +170,15 @@ func livePublicRootFSLifecycle(t *testing.T, ctx context.Context, store *sandbox
 	require.NoError(t, err)
 	procdDigest, err := exec.Command(filepath.Join(root, "bin/ctld"), "--procd-digest").Output()
 	require.NoError(t, err)
+	procdProtocol := os.Getenv("S0_NOMAD_LIVE_PROCD_PROTOCOL")
+	if procdProtocol == "" {
+		procdProtocol = "sandbox0.procd.v3"
+	}
+	require.Contains(t, []string{"sandbox0.procd.v1", "sandbox0.procd.v3"}, procdProtocol)
 	runtime, err := nomadclaim.New(nomadclaim.Config{Store: store, Templates: templates, RuntimeClasses: classes, Planner: planner,
 		Allocation: component.NomadAllocationController(), PlannedRetire: component, RunningFork: component, PausedRebase: component,
 		QuotaLimits: quotas, NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()), ClaimTTL: time.Minute,
-		RootFSFormatGeneration: stage.Generation.FormatGeneration, RootFSProcdProtocol: "sandbox0.procd.v3", RootFSProcdDigest: strings.TrimSpace(string(procdDigest)),
+		RootFSFormatGeneration: stage.Generation.FormatGeneration, RootFSProcdProtocol: procdProtocol, RootFSProcdDigest: strings.TrimSpace(string(procdDigest)),
 	})
 	require.NoError(t, err)
 	pauses := service.NewSandboxPauseController(store, runtime, zap.NewNop())

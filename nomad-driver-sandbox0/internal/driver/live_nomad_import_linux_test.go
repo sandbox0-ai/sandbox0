@@ -60,10 +60,15 @@ func liveNomadImportBase(t *testing.T, image *os.File, procd []byte, suffix stri
 	t.Helper()
 	store := sandboxstore.NewPGSandboxStore(liveNomadRegionalPool(t))
 	objects := liveNomadRegionalObjects(t)
+	procdProtocol := os.Getenv("S0_NOMAD_LIVE_PROCD_PROTOCOL")
+	if procdProtocol == "" {
+		procdProtocol = "sandbox0.procd.v3"
+	}
+	require.Contains(t, []string{"sandbox0.procd.v1", "sandbox0.procd.v3"}, procdProtocol)
 	source := digest.FromString("live-nomad-source-" + suffix)
 	spec := rootfsimporter.OperationSpec{SourceOCIRef: "fixture.invalid/nomad@" + source.String(),
 		Platform:         rootfsimporter.ReadyArtifactPlatform{OS: "linux", Architecture: "amd64"},
-		FormatGeneration: 2, ProcdProtocol: "sandbox0.procd.v3", ProcdDigest: digest.FromBytes(procd).String(),
+		FormatGeneration: 2, ProcdProtocol: procdProtocol, ProcdDigest: digest.FromBytes(procd).String(),
 		LogicalSizeBytes: 64 << 40, InitialFilesystemSizeBytes: 300 << 20,
 		BlockOptions: rootfsblock.BuildOptions{ObjectPrefix: "rootfs/live-nomad/" + suffix + "/import"}}
 	op, spec, err := rootfsimporter.DeterministicOperation(spec)

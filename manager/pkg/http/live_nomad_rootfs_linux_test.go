@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nomadclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -116,6 +117,16 @@ func TestLiveNomadPublicRootFSAuthorityFixture(t *testing.T) {
 		t.Fatal("public fixture node authority did not bind")
 	}
 	start(func() error { return component.RunTerminal(ctx, nil) })
+	claims, err := sandboxclaimreconciler.New(sandboxclaimreconciler.Config{Store: store})
+	require.NoError(t, err)
+	start(func() error {
+		claims.Run(ctx, func(result sandboxclaimreconciler.Result, err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Logf("sandbox claim cleanup pass failed: %+v: %v", result, err)
+			}
+		})
+		return ctx.Err()
+	})
 	ready := filepath.Join(root, "region-ready")
 	require.NoError(t, os.WriteFile(ready, []byte("public_rootfs_real_node_authority\n"), 0600))
 	defer os.Remove(ready)

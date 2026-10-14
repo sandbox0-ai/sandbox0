@@ -225,6 +225,29 @@ non-regular nodes before mutation. The focused regression reproduced the exact
 `is a directory` failure and passed with the correction. Complete public API
 acceptance remains open until a fresh real run finishes all operations.
 
+The following run passed rebase onto the imported artifact and a third fresh
+NBD/S3 full-file hash of the 600 MiB payload, then failed its final sandbox
+deletion wait. The fixture had omitted the production sandbox-claim cleanup
+worker: the source and restored copy retained `cleanup_pending` claims after
+their delete requests returned 202. The fixture now starts that real worker
+alongside runtime-slot terminal reconciliation. Its failure receipt and
+540-file archive remain retained, including the database deletion-state receipt;
+423 samples peaked at 53,100,544 worker bytes.
+The complete API gate remains open pending the fresh run with both workers.
+
+That fresh run failed at a later rebase stream rotation. The manager had kept
+the first transport gap's deadline after reconnecting, so a second rotation
+could immediately exceed that stale deadline. Its 543-file archive includes
+the regional and service logs; the runner exited one after 394.61 seconds,
+and 382 samples peaked at 54,640,640 worker bytes. Mounts/devices were released.
+Dispatch now ends the previous gap when it selects an authenticated stream;
+every later gap has its own bounded grace, within the operation's unchanged
+caller deadline. The real TLS regression holds the same rebase beyond the
+first grace and disconnects twice; it reproduced the stale-deadline failure
+before the correction and passed in the complete 72.88-second node-channel
+race suite afterward. The fixture HTTP and claim-cleanup race suites also
+passed. Complete public acceptance still requires a fresh run.
+
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
 `TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,

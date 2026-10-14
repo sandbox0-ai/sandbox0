@@ -65,7 +65,7 @@ func TestNodeChannelHubReplaysRebaseAcrossAuthenticatedReconnectWithoutCanceling
 	}()
 	key := nodeChannelKey{clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1", nodeBootID: "boot-1"}
 	waitNodeChannelConnected(t, hub, key.clusterID, key.nodeID, key.nodeUID, key.nodeBootID)
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*nodeChannelReconnectGrace+3*time.Second)
 	defer cancel()
 	type outcome struct {
 		result rootfsrebase.WorkerResult
@@ -84,11 +84,28 @@ func TestNodeChannelHubReplaysRebaseAcrossAuthenticatedReconnectWithoutCanceling
 	connection, _, _, err := hub.connectionForCommand(key, protocol.NodeChannelCommandPausedRebase)
 	require.NoError(t, err)
 	require.NotNil(t, connection)
-	connection.close(errdefs.ErrUnavailable)
-	require.Eventually(t, func() bool {
-		next, _, _, err := hub.connectionForCommand(key, protocol.NodeChannelCommandPausedRebase)
-		return err == nil && next != nil && next != connection && !next.isClosed()
-	}, time.Second, time.Millisecond)
+	for rotation := range 2 {
+		connection.close(errdefs.ErrUnavailable)
+		var successor *nodeChannelConnection
+		require.Eventually(t, func() bool {
+			next, _, _, err := hub.connectionForCommand(key, protocol.NodeChannelCommandPausedRebase)
+			if err == nil && next != nil && next != connection && !next.isClosed() {
+				successor = next
+				return true
+			}
+			return false
+		}, time.Second, time.Millisecond)
+		connection = successor
+		if rotation == 0 {
+			// A healthy stream may carry the same operation longer than the
+			// previous transport gap's grace. A later gap needs its own bound.
+			select {
+			case out := <-completed:
+				t.Fatalf("rebase ended on the first successor stream: %v", out.err)
+			case <-time.After(nodeChannelReconnectGrace + 100*time.Millisecond):
+			}
+		}
+	}
 	select {
 	case <-executor.canceled:
 		t.Fatal("transport rotation canceled the rebase")

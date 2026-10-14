@@ -939,6 +939,14 @@ fix, and the complete driver race suite passed in 55.187 seconds.
 
 ## Historical-schema regression checks
 
+The stock-runsc CI gate exposed a test-evidence readiness race: on the fourth
+filesystem-resume generation the host observed the newly created JSON path
+before the guest finished writing it. The guest helper now writes a pending
+file and atomically renames it into readiness, reporting publication errors.
+The unchanged session-recovery assertions passed ten complete repetitions
+(40 stock-runsc guest generations) on the isolated replacement host. This
+corrects test coordination; production procd behavior is unchanged.
+
 Current artifact lookup requires migration 120's initial-filesystem geometry
 column. Historical storage tests at schemas 108, 109 and 110 now seed their
 original SQL shape explicitly, including the initial memory-fork filesystem,

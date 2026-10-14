@@ -30,8 +30,8 @@ feature is not deployed until the gates below have evidence attached.
 
 1. Requalify regional lifecycle/fencing/GC on the final release candidate.
    The complete actual public filesystem API case passed on `32e73885` below;
-   its read-root refinement still needs a complete rerun. Retained-memory and
-   object-service interruption also require current-candidate qualification.
+   its read-root refinement still needs a complete rerun. Current-candidate
+   retained-memory and 2 GiB object-service interruption qualification passed.
 2. Qualify complete node loss and replacement-node admission. Abrupt
    process-owner fencing and a separately provisioned machine's fresh-cache
    remote recovery passed below; provider loss observation and actual Nomad
@@ -899,6 +899,21 @@ earlier status-137 exit or establish public API lifecycle, complete machine loss
 production checkpoint compatibility or canary deployment. Both failed receipts
 remain retained; production node behavior and sparse imports remain disabled.
 
+The refined `f3abe7d2` candidate passed another complete 2048 MiB real-service
+suspension run in 811.21 seconds. Original PID 10, memory/open-file markers,
+allocation and Sentry identity remained unchanged through full content checks
+and all three transfers, with zero task restarts. The independent timer paused
+RustFS for 65 seconds; 229 paused observations recorded 31.93 seconds of write
+backpressure and 91.62 seconds to observe recovery, including polling latency.
+Installed sequence advanced from 537,922 to 538,798; XFS data capacity reached
+4,966,055,936 bytes within the 64-TiB device. Across 791 samples, worker artifacts
+peaked at 68,390,912 bytes, below 128 MiB. The runner and regional authority
+exited zero. Its 552-file verified archive retains logs, receipts and residual
+teardown state; guarded normal disconnect/unmount subsequently released the
+three mounts and NBD 62 whose server had exited. This qualifies the current
+one-writer outage/transfer gate, without diagnosing the older status-137 failure
+or establishing complete provider loss or production compatibility.
+
 ## Expanded RootFS memory-checkpoint acceptance
 
 The optional isolated Nomad memory fixture uses the complete production
@@ -940,6 +955,21 @@ finished successfully, and fixture services and guests stopped normally.
 This qualifies expanded RootFS with real retained-memory pause/resume and
 continued live publication; public manager API, abrupt node-loss recovery,
 node-wide contention and production release provenance remain separate gates.
+
+The refined `f3abe7d2` candidate also passed this complete memory gate in
+347.11 seconds, with the regional authority exiting zero after 308.85 seconds.
+The same authenticated procd context retained its process/memory/open-file
+identity through three live transfers and fresh-allocation restore. After the
+restore receipt, the counter advanced from 794 to 798 and complete 600 MiB
+verification count from 2 to 3; the new writer committed and installed its
+own sequence 942. Across 325 samples, worker artifacts peaked at 75,710,464
+bytes, below 128 MiB. The separately quota-limited checkpoint backing image
+allocated 90,378,240 bytes and remains in the 554-file verified archive.
+Fixture teardown left three mounts and NBD 62 with an exited server PID;
+that physical state was archived before guarded normal disconnect/unmount
+released every owned device and mount. No live guest or ctld remained.
+This qualifies the current fixture binary and procd, not production retained
+checkpoint/CPU compatibility or complete machine-loss admission.
 
 ## Migration filesystem drain and live-WAL custody
 

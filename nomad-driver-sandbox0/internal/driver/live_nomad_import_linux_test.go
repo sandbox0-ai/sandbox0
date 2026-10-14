@@ -131,7 +131,7 @@ func liveNomadPrepareRegionalClaim(t *testing.T, stage *rootfshandoff.StageReque
 	require.Equal(t, sandboxstore.RuntimeSlotStateFastpathReady, slot.State)
 	_, err = store.RegisterRuntimeNodeCapacity(t.Context(), &sandboxstore.RegisterRuntimeNodeCapacityRequest{
 		ClusterID: slot.ClusterID, NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
-		CPUMillicores: 1000, MemoryBytes: 1 << 30, CPUSetCPUs: "0-3", CPUSetMems: "0", TTL: 5 * time.Minute})
+		CPUMillicores: 1000, MemoryBytes: 1 << 30, CPUSetCPUs: resources.CPUSetCPUs, CPUSetMems: resources.CPUSetMems, TTL: 5 * time.Minute})
 	require.NoError(t, err)
 	record := &sandboxstore.SandboxRecord{ID: stage.Identity.RootFSID, TeamID: "live-nomad-team", UserID: "live-nomad-user",
 		TemplateID: "live-nomad-template", TemplateName: "live-nomad-template", TemplateNamespace: "sandbox0", ClusterID: slot.ClusterID,

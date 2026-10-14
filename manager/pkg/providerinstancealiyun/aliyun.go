@@ -10,7 +10,6 @@ import (
 	"strconv"
 
 	sdkerrors "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
-	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/sts"
 	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
@@ -30,7 +29,6 @@ type AliyunObserver struct {
 	sts       aliyunSTS
 	region    string
 	accountID string
-	ownerID   int64
 }
 
 var (
@@ -58,14 +56,14 @@ func NewAliyunObserver(region, accountID string) (*AliyunObserver, error) {
 }
 
 func newAliyunObserver(ecsClient aliyunECS, stsClient aliyunSTS, region, accountID string) (*AliyunObserver, error) {
-	ownerID, err := validateAliyunScope(region, accountID)
+	_, err := validateAliyunScope(region, accountID)
 	if err != nil {
 		return nil, err
 	}
 	if ecsClient == nil || stsClient == nil {
 		return nil, errors.New("ECS and STS instance observer clients are required")
 	}
-	return &AliyunObserver{ecs: ecsClient, sts: stsClient, region: region, accountID: accountID, ownerID: ownerID}, nil
+	return &AliyunObserver{ecs: ecsClient, sts: stsClient, region: region, accountID: accountID}, nil
 }
 
 func validateAliyunScope(region, accountID string) (int64, error) {
@@ -96,7 +94,8 @@ func (o *AliyunObserver) Observe(ctx context.Context, scope providerinstance.Sco
 	}
 	request := ecs.CreateDescribeInstanceAttributeRequest()
 	request.RegionId = o.region
-	request.OwnerId = requests.NewInteger64(o.ownerID)
+	// OwnerId is exposed by the generated SDK but is not supported by this
+	// operation. Its authenticated credential owner is pinned by STS above.
 	request.InstanceId = scope.InstanceID
 	response, err := o.ecs.DescribeInstanceAttribute(request)
 	if ctxErr := ctx.Err(); ctxErr != nil {

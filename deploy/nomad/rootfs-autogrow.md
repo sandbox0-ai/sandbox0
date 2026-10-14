@@ -830,6 +830,14 @@ remain present. Only HTTP 404 `InvalidInstanceId.NotFound` with a provider
 request receipt qualifies as absence; missing/mismatched response identities,
 permission failures, transport errors and cancellation fail closed.
 
+The live single-instance read-only RAM credential exposed an SDK/API contract
+mismatch: populating the generated `OwnerId` field returns HTTP 400
+`UnsupportedParameter`. The observer omits that unsupported field while retaining
+the STS account check, configured region and exact instance ID. The same scoped
+credential successfully read the running instance without that field. The
+request-contract regression rejects a nonempty `OwnerId`; actual deletion and
+replacement admission still require the complete separate-machine gate.
+
 The detached-instance regression failed with the previous ESS-only method and
 passed with the physical observer. Provider, lazy-credential constructor,
 lifecycle and selected manager race tests passed on a separate isolated host.

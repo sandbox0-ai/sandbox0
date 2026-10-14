@@ -43,7 +43,9 @@ func TestAliyunObserverRequiresExplicitNotFoundInVerifiedScope(t *testing.T) {
 	reader := ecsReaderFunc(func(r *ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error) {
 		require.Equal(t, "i-exact", r.InstanceId)
 		require.Equal(t, "us-east-1", r.RegionId)
-		require.Equal(t, "1234567890123456", string(r.OwnerId))
+		// Generated SDK fields include OwnerId, but the public ECS operation
+		// rejects it with UnsupportedParameter. STS pins the credential owner.
+		require.Empty(t, r.OwnerId)
 		return nil, fmt.Errorf("wrapped: %w", providerError(404, "InvalidInstanceId.NotFound", "not-found-receipt"))
 	})
 	o, err := newAliyunObserver(reader, stsReaderFunc(verifiedIdentity), "us-east-1", "1234567890123456")

@@ -100,6 +100,9 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	stage.Identity.TaskName = state.TaskConfig.Name
 	stage.Identity.SlotNonce = state.TaskConfig.ID
 	stage.Identity.NodeUID = "fixture-node-1"
+	if uid := os.Getenv("S0_NOMAD_LIVE_NODE_UID"); uid != "" {
+		stage.Identity.NodeUID = uid
+	}
 	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	require.NoError(t, err)
 	stage.Identity.BootID = strings.TrimSpace(string(boot))
@@ -121,9 +124,13 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 	}
 	revision, err := assignment.Revision()
 	require.NoError(t, err)
+	cpus, err := os.ReadFile("/sys/fs/cgroup/cpuset.cpus.effective")
+	require.NoError(t, err)
+	mems, err := os.ReadFile("/sys/fs/cgroup/cpuset.mems.effective")
+	require.NoError(t, err)
 	resources, err := runtimeslot.NewRuntimeResourceLease("operation-1", "claim-1", state.TaskConfig.ID, "fixture-cluster",
 		state.TaskConfig.NodeID, stage.Identity.NodeUID, stage.Identity.BootID,
-		runtimeslot.RuntimeResourceRequest{Version: runtimeslot.RuntimeResourceRequestVersion, CPUMillicores: 250, MemoryBytes: 256 << 20, PIDsLimit: runtimeslot.DefaultRuntimePIDsLimit}, "0-3", "0")
+		runtimeslot.RuntimeResourceRequest{Version: runtimeslot.RuntimeResourceRequestVersion, CPUMillicores: 250, MemoryBytes: 256 << 20, PIDsLimit: runtimeslot.DefaultRuntimePIDsLimit}, strings.TrimSpace(string(cpus)), strings.TrimSpace(string(mems)))
 	require.NoError(t, err)
 	resourceDigest, err := resources.Digest()
 	require.NoError(t, err)
@@ -169,6 +176,8 @@ func TestLiveNomadClaimFixture(t *testing.T) {
 			// not a no-op rebase onto the source artifact.
 			target := liveNomadImportBase(t, image, procd, suffix+"-public-rebase")
 			require.NoError(t, os.WriteFile(filepath.Join(root, "f/public-rebase-artifact"), []byte(target.ArtifactDigest), 0600))
+		}
+		if os.Getenv("S0_NOMAD_LIVE_PUBLIC_API") == "1" || os.Getenv("S0_NOMAD_LIVE_PROVIDER_LOSS") == "1" {
 			config := defaultPluginConfig()
 			config.DirectFS = false // The isolated Nomad agent explicitly selects this.
 			version, err := NewCommandRunsc(*config).Version(t.Context())
@@ -269,6 +278,8 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 	var growing *os.File
 	var chunk []byte
 	var hashes [][sha256.Size]byte
+	growthHash := sha256.New()
+	growthDigest := ""
 	var growthTarget int64
 	growthBytes := int64(0)
 	verified := false
@@ -310,6 +321,8 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 			written, err := growing.Write(chunk)
 			require.NoError(t, err)
 			require.Equal(t, len(chunk), written)
+			_, err = growthHash.Write(chunk)
+			require.NoError(t, err)
 			require.NoError(t, growing.Sync())
 			growthBytes += int64(written)
 		}
@@ -320,6 +333,7 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 				require.Equal(t, expected, sha256.Sum256(chunk), "growth chunk=%d", index)
 			}
 			verified = true
+			growthDigest = hex.EncodeToString(growthHash.Sum(nil))
 			verificationCount++
 			lastVerification = time.Now()
 		}
@@ -328,7 +342,7 @@ func TestLiveNomadGuestPayload(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, growthBytes, position)
 		}
-		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area), "growth_bytes": growthBytes, "growth_verified": verified, "growth_verifications": verificationCount})
+		data, err := json.Marshal(map[string]any{"pid": os.Getpid(), "token": tokenText, "heap": hex.EncodeToString(digest[:]), "counter": count, "offset": offset, "mmap": binary.LittleEndian.Uint64(area), "growth_bytes": growthBytes, "growth_verified": verified, "growth_verifications": verificationCount, "growth_sha256": growthDigest})
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile("/guest-state.tmp", data, 0600))
 		require.NoError(t, os.Rename("/guest-state.tmp", "/guest-state.json"))

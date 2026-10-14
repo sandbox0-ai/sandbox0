@@ -33,6 +33,37 @@ type outageAllocation struct {
 	calls int
 }
 
+type providerRecoveryFunc func(context.Context, sandboxstore.RuntimeSlot) (bool, error)
+
+func (f providerRecoveryFunc) Recover(ctx context.Context, slot sandboxstore.RuntimeSlot) (bool, error) {
+	return f(ctx, slot)
+}
+
+func TestProviderRecoveryIsNotStarvedBehindDeadWarmCarriers(t *testing.T) {
+	f := newReconcileFixture(t, true)
+	warm := *cloneSlot(newReconcileFixture(t, false).store.slot)
+	warm.ID, warm.NodeID = "dead-warm", "unreachable-node"
+	claimed := *cloneSlot(newReconcileFixture(t, true).store.slot)
+	claimed.ID, claimed.NodeID = "dead-claimed", "unreachable-node"
+	claimed.State = sandboxstore.RuntimeSlotStateQuiescing
+	store := &outageStore{Store: f.store, stale: []sandboxstore.RuntimeSlot{warm, claimed}}
+	allocation := &outageAllocation{AllocationController: f.allocation}
+	f.reconciler.store, f.reconciler.allocation = store, allocation
+	var recovered []string
+	f.reconciler.providerRecovery = providerRecoveryFunc(func(_ context.Context, slot sandboxstore.RuntimeSlot) (bool, error) {
+		if slot.WriterGrantID == "" {
+			return false, nil
+		}
+		recovered = append(recovered, slot.ID)
+		return true, nil
+	})
+	result, err := f.reconciler.RunOnce(t.Context())
+	require.ErrorIs(t, err, ErrAllocationNodeUnavailable)
+	require.Equal(t, []string{"dead-claimed"}, recovered)
+	require.Equal(t, 2, result.Completed, "claimed provider recovery and healthy cleanup both progress")
+	require.Equal(t, 1, allocation.calls, "do not repeat dead client RPCs for provider recovery")
+}
+
 func (a *outageAllocation) Observe(ctx context.Context, target AllocationTarget) (AllocationObservation, error) {
 	if target.NodeID == "unreachable-node" {
 		a.calls++

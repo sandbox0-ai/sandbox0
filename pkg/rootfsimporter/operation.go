@@ -22,32 +22,33 @@ import (
 
 	"github.com/opencontainers/go-digest"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
 // OperationSpec is the immutable, non-secret input persisted before an OCI
 // import worker may perform local or remote side effects.
 type OperationSpec struct {
-	SourceOCIRef     string
-	Platform         ReadyArtifactPlatform
-	FormatGeneration int
-	ProcdProtocol    string
-	ProcdDigest      string
-	LogicalSizeBytes int64
-	BlockOptions     rootfsblock.BuildOptions
-	DataLayoutPolicy string
+	SourceOCIRef               string
+	Platform                   ReadyArtifactPlatform
+	FormatGeneration           int
+	ProcdProtocol              string
+	ProcdDigest                string
+	LogicalSizeBytes           int64
+	InitialFilesystemSizeBytes int64
+	BlockOptions               rootfsblock.BuildOptions
+	DataLayoutPolicy           string
 }
 
 type operationIdentity struct {
-	SourceOCIRef     string                   `json:"source_oci_ref"`
-	Platform         ReadyArtifactPlatform    `json:"platform"`
-	FormatGeneration int                      `json:"format_generation"`
-	ProcdProtocol    string                   `json:"procd_protocol"`
-	ProcdDigest      string                   `json:"procd_digest"`
-	LogicalSizeBytes int64                    `json:"logical_size_bytes"`
-	BlockOptions     rootfsblock.BuildOptions `json:"block_options"`
-	DataLayoutPolicy string                   `json:"data_layout_policy,omitempty"`
+	SourceOCIRef               string                   `json:"source_oci_ref"`
+	Platform                   ReadyArtifactPlatform    `json:"platform"`
+	FormatGeneration           int                      `json:"format_generation"`
+	ProcdProtocol              string                   `json:"procd_protocol"`
+	ProcdDigest                string                   `json:"procd_digest"`
+	LogicalSizeBytes           int64                    `json:"logical_size_bytes"`
+	InitialFilesystemSizeBytes int64                    `json:"initial_filesystem_size_bytes,omitempty"`
+	BlockOptions               rootfsblock.BuildOptions `json:"block_options"`
+	DataLayoutPolicy           string                   `json:"data_layout_policy,omitempty"`
 }
 
 // DeterministicOperation returns the canonical durable identity shared by all
@@ -89,15 +90,10 @@ func NormalizeOperationSpec(input OperationSpec) (OperationSpec, error) {
 	if err != nil || validateArtifactSHA256Digest(procdDigest) != nil {
 		return OperationSpec{}, fmt.Errorf("procd digest must be canonical SHA-256")
 	}
-	if input.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
-		input.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
-		input.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
-		return OperationSpec{}, fmt.Errorf(
-			"logical size must be between %d and %d and aligned to %d bytes",
-			rootfsartifact.MinimumLogicalSizeBytes, rootfsartifact.MaximumLogicalSizeBytes,
-			rootfsblock.LogicalBlockSize,
-		)
+	if err := ValidateGeometry(input.LogicalSizeBytes, input.InitialFilesystemSizeBytes); err != nil {
+		return OperationSpec{}, err
 	}
+
 	normalized.BlockOptions, err = NormalizeBlockOptions(input.FormatGeneration, normalized.BlockOptions)
 	if err != nil {
 		return OperationSpec{}, err

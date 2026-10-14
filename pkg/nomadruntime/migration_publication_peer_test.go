@@ -75,6 +75,7 @@ func newPlannedMigrationPeerFixture(t *testing.T, configure func(*plannedMigrati
 	identity, err := runtimecheckpoint.NewPeerIdentity()
 	require.NoError(t, err)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(source.serveMigrationPeer))
+	server.Config.ConnContext = migrationPeerConnectionContext
 	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity}, ClientAuth: tls.RequireAnyClientCert}
 	server.StartTLS()
 	endpoint, err := runtimecheckpoint.NewPeerEndpoint(strings.TrimPrefix(server.URL, "https://"), identity)

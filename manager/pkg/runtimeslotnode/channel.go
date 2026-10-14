@@ -691,6 +691,10 @@ func (h *ChannelHub) dispatch(
 			if !connection.hello.Supports(command.Kind) {
 				return protocol.NodeChannelResult{}, fmt.Errorf("node channel does not support %s: %w", command.Kind, errdefs.ErrFailedPrecondition)
 			}
+			// This authenticated stream ends the previous transport gap. A
+			// later rotation gets a fresh bounded grace, even when this exact
+			// operation ran on the healthy stream beyond the previous deadline.
+			reconnectDeadline = time.Time{}
 			result, err := connection.request(ctx, command)
 			if err == nil {
 				if result.Error != "" {

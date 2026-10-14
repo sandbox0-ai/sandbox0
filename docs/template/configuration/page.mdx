@@ -53,9 +53,22 @@ spec:
 | --- | --- | --- |
 | `image` | Yes | Normalized public or team-scoped private OCI reference pinned as `@sha256:<64 lowercase hex>`. Mutable tags and shorthand names are rejected. |
 | `resources.memory` | Yes | Default sandbox memory, such as `2Gi` or `512Mi`. It must be within the platform limits. |
-| `resources.ephemeralStorage` | No | Immutable RootFS block-device size. The default is `8Gi`; values must be exact bytes, between `300Mi` and `1Ti`, and 4096-byte aligned. |
+| `resources.ephemeralStorage` | No | Initial RootFS filesystem capacity for image imports. The default is `8Gi`; values must be exact bytes, between `300Mi` and `1Ti`, and 4096-byte aligned. |
 | `securityClass` | No | The only supported value is `privileged`, which is also the default. Capabilities apply inside the gVisor guest and do not bypass runsc or expose host devices. |
 | `env` | No | Base environment entries with `name` and `value`. |
+
+On deployments with automatic RootFS growth, the runtime expands mounted XFS
+before free space is exhausted, within the deployment's sparse device ceiling.
+Expansion keeps the sandbox's processes and open files running. Persisted data
+lives in regional object storage; host cache and uncommitted write journals have
+separate bounded budgets. Storage outages or sustained writes faster than
+publication can delay writes. A large logical ceiling does not reserve the same
+amount of host disk and does not mean unlimited storage.
+
+Fixed-size deployments use `ephemeralStorage` as the immutable device capacity.
+Changing an import setting or template does not resize existing generations;
+snapshots, captured templates and paused sandboxes retain their committed
+geometry. `df` inside the sandbox reports the current filesystem capacity.
 
 CPU is platform-derived from memory and is intentionally absent from the
 public API. Claim-time `config.resources.memory` can override the template

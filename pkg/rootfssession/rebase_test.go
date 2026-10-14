@@ -282,6 +282,43 @@ func TestManagerRebaseRequiresThreeDeviceReservationsWithoutLeaking(t *testing.T
 	require.NoError(t, result.ValidateFor(request))
 }
 
+func TestManagerRebaseUnmountFailureRetainsValidJournalAndDeviceOwnership(t *testing.T) {
+	for _, failure := range []string{"unmount-overlay", "unmount-xfs"} {
+		t.Run(failure, func(t *testing.T) {
+			objects, request := testRebaseRequest(t, failure)
+			runtime := newFakeHostRuntime(objects)
+			runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1", "/dev/fake2"}
+			runtime.failAt = failure
+			engine := &fakeRebaseEngine{err: fmt.Errorf("injected rebase apply failure")}
+			manager := newRebaseTestManager(t, t.TempDir(), objects, runtime, engine)
+			defer manager.Close()
+
+			_, err := manager.ExecuteRebase(t.Context(), request)
+			require.ErrorContains(t, err, "injected rebase apply failure")
+			current, err := manager.loadRebase(request.OperationID)
+			require.NoError(t, err, "failed unmount must retain a valid recovery journal")
+			require.False(t, current.Clean)
+			require.Zero(t, runtime.count("close-device"), "mounted backends must remain available for cleanup")
+			for _, resource := range current.Resources {
+				require.True(t, resource.XFSMountIntent)
+				require.False(t, resource.DeviceClosed)
+				require.False(t, resource.DeviceReservationReleased)
+				require.Equal(t, resource.DeviceAllocationID, runtime.reservationOwner(resource.DevicePath))
+			}
+
+			// The same durable operation can finish cleanup once the host allows
+			// unmounting, rather than failing on a contradictory journal.
+			runtime.failAt = ""
+			require.NoError(t, manager.ReconcileRebases(t.Context()))
+			_, err = manager.loadRebase(request.OperationID)
+			require.ErrorIs(t, err, errdefs.ErrNotFound)
+			for _, device := range runtime.devicePaths {
+				require.Empty(t, runtime.reservationOwner(device))
+			}
+		})
+	}
+}
+
 func TestManagerReconcileRebaseAdoptsAndCleansInterruptedResources(t *testing.T) {
 	base := t.TempDir()
 	objects, request := testRebaseRequest(t, "startup-cleanup")
@@ -313,6 +350,34 @@ func TestManagerReconcileRebaseAdoptsAndCleansInterruptedResources(t *testing.T)
 	}
 	_, err = second.loadRebase(request.OperationID)
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerRebaseShutdownPreservesMountedRecoveryIntent(t *testing.T) {
+	base := t.TempDir()
+	objects, request := testRebaseRequest(t, "failed-cleanup-shutdown")
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1", "/dev/fake2"}
+	runtime.failAt = "unmount-overlay"
+	first := newRebaseTestManager(t, base, objects, runtime, &fakeRebaseEngine{err: fmt.Errorf("injected apply failure")})
+	_, err := first.ExecuteRebase(t.Context(), request)
+	require.Error(t, err)
+	require.NoError(t, first.Close())
+	require.Equal(t, 3, runtime.count("close-device"), "shutdown must release process-owned handles")
+
+	recovery := newFakeHostRuntime(objects)
+	recovery.devicePaths = runtime.devicePaths
+	second := newRebaseTestManager(t, base, objects, recovery, &fakeRebaseEngine{})
+	defer second.Close()
+	current, err := second.loadRebase(request.OperationID)
+	require.NoError(t, err)
+	for _, resource := range current.Resources {
+		require.True(t, resource.OverlayMountIntent)
+		require.True(t, resource.XFSMountIntent)
+		require.False(t, resource.DeviceClosed, "shutdown cannot attest physical absence")
+	}
+	require.NoError(t, second.ReconcileRebases(t.Context()))
+	require.Equal(t, 3, recovery.orphanRecoveries)
+	require.Zero(t, second.NodeDirtyTailUsage().Owners)
 }
 
 func TestManagerRejectsExpiredOrExcessiveRebaseAuthorityBeforeSideEffects(t *testing.T) {

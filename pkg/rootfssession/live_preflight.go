@@ -45,7 +45,7 @@ func PreflightLiveHandoff(ctx context.Context, config Config, manifest LiveHando
 			return err
 		}
 		paths := sessionPaths(config.BranchRoot, config.MountRoot, entry.Parent)
-		if current.Version != sessionSchemaVersion || current.Parent != entry.Parent || current.State != stateReady || current.Stage == nil || current.Consumer == nil || current.Consumer.RenewalProtocol != 1 || current.Stage.Identity.WriterGrantToken != "" || current.BranchPath != paths.branch || current.XFSRoot != paths.xfs || current.MergedRoot != paths.merged {
+		if current.Version != sessionSchemaVersion || current.Parent != entry.Parent || current.State != stateReady || current.Stage == nil || current.Consumer == nil || current.Consumer.RenewalProtocol != 1 || current.Stage.Identity.WriterGrantToken != "" || current.BranchPath != sessionBranchPath(config.BranchRoot, config.MountRoot, current.Parent, current.BranchSequenceBase) || current.XFSRoot != paths.xfs || current.MergedRoot != paths.merged || current.LiveCommit != nil && (current.LiveCommit.Pending != nil || current.LiveCommit.ObsoleteBranch != nil) {
 			return fmt.Errorf("RootFS preflight durable binding is incompatible")
 		}
 		if err := current.Stage.ValidateDurableBinding(); err != nil {
@@ -63,6 +63,7 @@ func PreflightLiveHandoff(ctx context.Context, config Config, manifest LiveHando
 			Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 			GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 			LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
+			SequenceBase: current.BranchSequenceBase,
 		}, reader, rootfsblock.BranchOptions{LiveIndex: files[2*i+1]})
 		if err != nil {
 			return err

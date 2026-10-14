@@ -467,9 +467,10 @@ func (f *fakeOCIUnpacker) Import(_ context.Context, request ocirootfs.Request) (
 }
 
 type fakeFilesystemImageBuilder struct {
-	calls int
-	mode  os.FileMode
-	err   error
+	lastSize int64
+	calls    int
+	mode     os.FileMode
+	err      error
 }
 
 func (f *fakeFilesystemImageBuilder) Build(
@@ -479,6 +480,7 @@ func (f *fakeFilesystemImageBuilder) Build(
 	logicalSize int64,
 ) error {
 	f.calls++
+	f.lastSize = logicalSize
 	if _, err := os.Stat(filepath.Join(sourceRoot, ".")); err != nil {
 		return err
 	}

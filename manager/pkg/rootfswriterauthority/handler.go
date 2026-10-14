@@ -87,6 +87,14 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 		return nil, fmt.Errorf("writer authority renewal grace must be between zero and %s", sandboxstore.RootFSWriterMaxRenewGrace)
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.EscapedPath(), liveObserveSuffix) {
+			serveLiveObservation(config, writer, request)
+			return
+		}
+		if strings.HasSuffix(request.URL.EscapedPath(), liveCommitSuffix) || strings.HasSuffix(request.URL.EscapedPath(), liveInstallSuffix) {
+			serveLiveCommit(config, writer, request)
+			return
+		}
 		if request.URL.EscapedPath() == protocol.BatchRenewPath {
 			serveBatchRenew(config, writer, request)
 			return
@@ -692,6 +700,8 @@ func renewErrorCode(err error) string {
 	case errors.Is(err, context.DeadlineExceeded):
 		return protocol.RenewErrorDeadlineExceeded
 	case errors.Is(err, sandboxstore.ErrRootFSWriterGrantExpired),
+		errors.Is(err, sandboxstore.ErrRootFSHeadConflict),
+		errors.Is(err, sandboxstore.ErrRootFSGenerationConflict),
 		errors.Is(err, sandboxstore.ErrRootFSWriterLeaseExpired),
 		errors.Is(err, sandboxstore.ErrRootFSWriterEpochConflict),
 		errors.Is(err, sandboxstore.ErrRootFSWriterGrantInvalidState):

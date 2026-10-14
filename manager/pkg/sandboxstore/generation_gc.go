@@ -10,18 +10,25 @@ import (
 
 // Ancestry protects incomplete inventories, but is not an eternal root after
 // all live descendants have registered their actual mapping dependencies.
-const rootFSGenerationRetainedSQL = `
+const rootFSGenerationReadRootSQL = `
 	EXISTS (SELECT 1 FROM manager.rootfs_filesystems filesystem WHERE filesystem.head_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_snapshots snapshot WHERE snapshot.head_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_head_rollbacks rollback WHERE rollback.old_generation_id=generation.generation_id OR rollback.new_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.runtime_slots slot WHERE slot.source_generation_ref=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_writer_grants writer WHERE writer.initial_generation_id=generation.generation_id AND writer.state IN ('issued','consumed','retiring'))
+	OR EXISTS (SELECT 1 FROM manager.rootfs_writer_live_progress progress WHERE progress.committed_generation_ref=generation.generation_id OR progress.installed_generation_ref=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.sandbox_lifecycle_txns lifecycle WHERE lifecycle.phase NOT IN ('committed','aborted') AND
 		(lifecycle.expected_generation_id=generation.generation_id OR lifecycle.prepared_generation_id=generation.generation_id OR lifecycle.target_generation_id=generation.generation_id))
 	OR EXISTS (SELECT 1 FROM manager.rootfs_running_forks fork WHERE fork.source_generation_id=generation.generation_id OR fork.checkpoint_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_running_template_captures capture WHERE capture.source_generation_id=generation.generation_id OR capture.checkpoint_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_refs checkpoint WHERE checkpoint.generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_forks fork WHERE fork.generation_ref=generation.generation_id)
+	`
+
+// Ordinary generation GC also retains materialization members. Explicit
+// sandbox deletion fences uploading batches separately; completed batches keep
+// object custody in their journal without retaining a deleted filesystem.
+const rootFSGenerationRetainedSQL = rootFSGenerationReadRootSQL + `
 	OR EXISTS (SELECT 1 FROM manager.rootfs_materialization_members member WHERE member.generation_id=generation.generation_id)
 `
 
@@ -124,6 +131,8 @@ func (s *PGSandboxStore) deleteUnreferencedRootFSGenerationLeaves(ctx context.Co
 		AND NOT (`+rootFSGenerationRetainedSQL+`)
 		AND NOT EXISTS (SELECT 1 FROM manager.rootfs_generation_dependencies dependency
 			WHERE dependency.parent_generation_id=generation.generation_id)
+		AND NOT EXISTS (SELECT 1 FROM manager.rootfs_generation_live_dependencies dependency
+			WHERE dependency.base_generation_id=generation.generation_id)
 		ORDER BY generation.created_at,generation.generation_id LIMIT $2
 		FOR UPDATE OF generation SKIP LOCKED`, teamID, limit)
 	if err != nil {

@@ -30,13 +30,14 @@ func configureRootFSImportDiscovery(
 	}
 	worker, err := rootfsimportdiscovery.New(rootfsimportdiscovery.Config{
 		Sources: sources, Imports: store, Platforms: platforms,
-		FormatGeneration: cfg.RootFSImporter.FormatGeneration,
-		ProcdProtocol:    cfg.RootFSImporter.ProcdProtocol,
-		ProcdDigest:      cfg.RootFSImporter.ProcdDigest,
-		BlockOptions:     rootfsblock.BuildOptions{DataRangeBytes: cfg.RootFSImporter.DataRangeBytes, MappingGroupPolicy: cfg.RootFSImporter.MappingGroupPolicy},
-		DataLayoutPolicy: cfg.RootFSImporter.DataLayoutPolicy,
-		Interval:         cfg.RootFSImporter.DiscoveryInterval.Duration,
-		PageSize:         cfg.RootFSImporter.DiscoveryPageSize,
+		FormatGeneration:      cfg.RootFSImporter.FormatGeneration,
+		ProcdProtocol:         cfg.RootFSImporter.ProcdProtocol,
+		ProcdDigest:           cfg.RootFSImporter.ProcdDigest,
+		BlockOptions:          rootfsblock.BuildOptions{DataRangeBytes: cfg.RootFSImporter.DataRangeBytes, MappingGroupPolicy: cfg.RootFSImporter.MappingGroupPolicy},
+		DataLayoutPolicy:      cfg.RootFSImporter.DataLayoutPolicy,
+		SparseDeviceSizeBytes: cfg.RootFSImporter.SparseDeviceSizeBytes,
+		Interval:              cfg.RootFSImporter.DiscoveryInterval.Duration,
+		PageSize:              cfg.RootFSImporter.DiscoveryPageSize,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create template RootFS import discovery: %w", err)
@@ -51,6 +52,9 @@ func configureRootFSImportWorker(
 ) (*rootfsimportworker.Worker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
+	}
+	if err := rootfsimporter.ValidateSparseDeviceSize(cfg.RootFSImporter.SparseDeviceSizeBytes); err != nil {
+		return nil, err
 	}
 	format, err := rootfsimporter.ImageImportFormat(cfg.RootFSImporter.FormatGeneration)
 	if err != nil {

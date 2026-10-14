@@ -92,15 +92,14 @@ func (b BlockBuilder) build(
 	if b.Unpacker == nil || b.Filesystem == nil || b.Publisher == nil {
 		return BuildResult{}, fmt.Errorf("OCI unpacker, filesystem builder, and immutable publisher are required")
 	}
-	if request.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
-		request.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
-		request.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
-		return BuildResult{}, fmt.Errorf(
-			"logical size must be between %d and %d and aligned to %d bytes",
-			rootfsartifact.MinimumLogicalSizeBytes, rootfsartifact.MaximumLogicalSizeBytes,
-			rootfsblock.LogicalBlockSize,
-		)
+	if err := ValidateGeometry(request.LogicalSizeBytes, request.InitialFilesystemSizeBytes); err != nil {
+		return BuildResult{}, err
 	}
+	initialSize := request.InitialFilesystemSizeBytes
+	if initialSize == 0 {
+		initialSize = request.LogicalSizeBytes
+	}
+
 	blockOptions, err := rootfsblock.NormalizeBuildOptions(request.BlockOptions)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("RootFS block build options: %w", err)
@@ -163,9 +162,9 @@ func (b BlockBuilder) build(
 	imageOwned = true
 	var dataPlan rootfsartifact.XFSDataRangePlan
 	if dataRangeBuilder != nil {
-		dataPlan, err = dataRangeBuilder.BuildWithBoundedDataRanges(ctx, rootPath, imagePath, request.LogicalSizeBytes, blockOptions.DataRangeBytes)
+		dataPlan, err = dataRangeBuilder.BuildWithBoundedDataRanges(ctx, rootPath, imagePath, initialSize, blockOptions.DataRangeBytes)
 	} else {
-		err = b.Filesystem.Build(ctx, rootPath, imagePath, request.LogicalSizeBytes)
+		err = b.Filesystem.Build(ctx, rootPath, imagePath, initialSize)
 	}
 	if err != nil {
 		if errors.Is(err, rootfsartifact.ErrXFSImageStillMounted) {
@@ -181,7 +180,7 @@ func (b BlockBuilder) build(
 			return BuildResult{}, err
 		}
 	}
-	image, err := openVerifiedFilesystemImage(imagePath, request.LogicalSizeBytes)
+	image, err := openVerifiedFilesystemImage(imagePath, initialSize)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -191,7 +190,7 @@ func (b BlockBuilder) build(
 	if dataRangeBuilder != nil && dataPlan.Fallback == "" {
 		layout = dataPlan.Layout
 	}
-	built, buildErr = rootfsblock.BuildMaterializedFileGeneration(ctx, image, request.LogicalSizeBytes, b.Publisher, blockOptions, layout)
+	built, buildErr = rootfsblock.BuildMaterializedSparseFileGeneration(ctx, image, request.LogicalSizeBytes, b.Publisher, blockOptions, layout)
 	closeErr := image.Close()
 	if err := errors.Join(buildErr, closeErr); err != nil {
 		return BuildResult{}, fmt.Errorf("publish OCI block generation: %w", err)
@@ -204,14 +203,15 @@ func (b BlockBuilder) build(
 	result = BuildResult{
 		SourceOCIRef: imported.Reference, SourceOCIDigest: imported.SourceDigest,
 		ManifestDigest: imported.ManifestDigest, ConfigDigest: imported.ConfigDigest,
-		Platform:         imported.Platform,
-		LayerDigests:     append([]digest.Digest(nil), imported.LayerDigests...),
-		DiffIDs:          append([]digest.Digest(nil), imported.DiffIDs...),
-		ProcdDigest:      imported.ProcdDigest,
-		UnpackedBytes:    imported.UnpackedBytes,
-		Files:            imported.Files,
-		LogicalSizeBytes: request.LogicalSizeBytes,
-		DescriptorDigest: descriptorDigest, BaseBlockRoot: baseBlockRoot,
+		Platform:                   imported.Platform,
+		LayerDigests:               append([]digest.Digest(nil), imported.LayerDigests...),
+		DiffIDs:                    append([]digest.Digest(nil), imported.DiffIDs...),
+		ProcdDigest:                imported.ProcdDigest,
+		UnpackedBytes:              imported.UnpackedBytes,
+		Files:                      imported.Files,
+		LogicalSizeBytes:           request.LogicalSizeBytes,
+		InitialFilesystemSizeBytes: request.InitialFilesystemSizeBytes,
+		DescriptorDigest:           descriptorDigest, BaseBlockRoot: baseBlockRoot,
 		Descriptor: built.Descriptor, DescriptorBytes: append([]byte(nil), built.Payload...),
 		Objects: built.Objects, Bytes: built.Bytes,
 		References: append([]rootfsblock.ObjectReference(nil), built.References...),

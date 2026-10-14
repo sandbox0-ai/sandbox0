@@ -155,9 +155,10 @@ type Config struct {
 	RootFSProcdDigest      string
 	// Zero leaves image artifact geometry unfiltered; it is not a runtime or
 	// snapshot compatibility requirement.
-	RootFSImportDataRangeBytes     int
-	RootFSImportDataLayoutPolicy   string
-	RootFSImportMappingGroupPolicy string
+	RootFSImportDataRangeBytes        int
+	RootFSImportDataLayoutPolicy      string
+	RootFSImportMappingGroupPolicy    string
+	RootFSImportSparseDeviceSizeBytes int64
 }
 
 // Service claims resource-neutral Nomad slots and binds exact resource leases.
@@ -184,9 +185,10 @@ type Service struct {
 	rootFSProcdDigest      string
 	pauseEnqueuer          service.SandboxPauseEnqueuer
 
-	rootFSImportDataRangeBytes     int
-	rootFSImportDataLayoutPolicy   string
-	rootFSImportMappingGroupPolicy string
+	rootFSImportDataRangeBytes        int
+	rootFSImportDataLayoutPolicy      string
+	rootFSImportMappingGroupPolicy    string
+	rootFSImportSparseDeviceSizeBytes int64
 }
 
 // New validates all claim authorities. There is no partially configured mode.
@@ -243,6 +245,9 @@ func New(config Config) (*Service, error) {
 	if err := rootfsimporter.ValidateDataLayoutPolicy(config.RootFSImportDataLayoutPolicy, format, rootfsblock.BuildOptions{DataRangeBytes: config.RootFSImportDataRangeBytes}); err != nil {
 		return nil, err
 	}
+	if err := rootfsimporter.ValidateSparseDeviceSize(config.RootFSImportSparseDeviceSizeBytes); err != nil {
+		return nil, err
+	}
 	if err := rootfsimporter.ValidateMappingGroupPolicy(config.RootFSImportMappingGroupPolicy, format); err != nil {
 		return nil, err
 	}
@@ -275,10 +280,11 @@ func New(config Config) (*Service, error) {
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		rootFSFormatGeneration: config.RootFSFormatGeneration,
 		rootFSProcdProtocol:    config.RootFSProcdProtocol, rootFSProcdDigest: config.RootFSProcdDigest,
-		rootFSImportDataRangeBytes:     config.RootFSImportDataRangeBytes,
-		rootFSImportDataLayoutPolicy:   config.RootFSImportDataLayoutPolicy,
-		rootFSImportMappingGroupPolicy: config.RootFSImportMappingGroupPolicy,
-		now:                            config.Now, logger: config.Logger,
+		rootFSImportDataRangeBytes:        config.RootFSImportDataRangeBytes,
+		rootFSImportDataLayoutPolicy:      config.RootFSImportDataLayoutPolicy,
+		rootFSImportMappingGroupPolicy:    config.RootFSImportMappingGroupPolicy,
+		rootFSImportSparseDeviceSizeBytes: config.RootFSImportSparseDeviceSizeBytes,
+		now:                               config.Now, logger: config.Logger,
 	}, nil
 }
 
@@ -1442,6 +1448,10 @@ func (s *Service) prepareRootFS(
 	requirements.ImportDataLayoutPolicy = s.rootFSImportDataLayoutPolicy
 	requirements.ImportMappingGroupPolicy = s.rootFSImportMappingGroupPolicy
 	requirements.SourceOCIRef = sourceRef
+	requirements.LogicalSizeBytes, requirements.InitialFilesystemSizeBytes, err = rootfsimporter.ResolveImportGeometry(requirements.LogicalSizeBytes, s.rootFSImportSparseDeviceSizeBytes)
+	if err != nil {
+		return rootFSPlan{}, err
+	}
 	artifact, err := s.store.GetReadyRootFSBaseArtifact(
 		ctx,
 		sourceDigest,

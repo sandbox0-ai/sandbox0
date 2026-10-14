@@ -240,6 +240,9 @@ type RootFSMaintenanceConfig struct {
 // RootFSImporterConfig configures the active-active digest-pinned OCI to
 // immutable block artifact worker.
 type RootFSImporterConfig struct {
+	// SparseDeviceSizeBytes enables new imports with a separate initial XFS
+	// size and sparse device ceiling. Zero keeps fixed-size imports during rollout.
+	SparseDeviceSizeBytes int64 `yaml:"sparse_device_size_bytes" json:"-"`
 	// FormatGeneration selects new image artifacts, not existing snapshots.
 	// Zero selects format 2. Format 1 is retired and rejected.
 	FormatGeneration int `yaml:"format_generation" json:"-"`
@@ -328,6 +331,7 @@ type NodeAuthorityIdentityConfig struct {
 
 // RuntimeSlotTerminalConfig controls active-active terminal reconciliation.
 type RuntimeSlotTerminalConfig struct {
+	ProviderRecovery   bool     `yaml:"provider_recovery" json:"-"`
 	Enabled            bool     `yaml:"enabled" json:"-"`
 	NomadEndpointsFile string   `yaml:"nomad_endpoints_file" json:"-"`
 	Interval           Duration `yaml:"interval" json:"-"`

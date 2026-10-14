@@ -168,11 +168,12 @@ type WriterController interface {
 
 // Config wires independent Nomad, node, writer, and PostgreSQL authorities.
 type Config struct {
-	Store      Store
-	Allocation AllocationController
-	Node       NodeCleaner
-	Writer     WriterController
-	Limit      int
+	Store            Store
+	Allocation       AllocationController
+	Node             NodeCleaner
+	Writer           WriterController
+	ProviderRecovery ProviderRecoveryController
+	Limit            int
 }
 
 // Result summarizes one bounded reconciliation pass.
@@ -187,13 +188,14 @@ type Result struct {
 
 // Reconciler executes plugin-independent terminal cleanup.
 type Reconciler struct {
-	mu         sync.Mutex
-	after      *sandboxstore.RuntimeSlot
-	store      Store
-	allocation AllocationController
-	node       NodeCleaner
-	writer     WriterController
-	limit      int
+	mu               sync.Mutex
+	after            *sandboxstore.RuntimeSlot
+	store            Store
+	allocation       AllocationController
+	node             NodeCleaner
+	writer           WriterController
+	providerRecovery ProviderRecoveryController
+	limit            int
 }
 
 // New constructs a bounded runtime slot reconciler.
@@ -210,7 +212,7 @@ func New(config Config) (*Reconciler, error) {
 	}
 	return &Reconciler{
 		store: config.Store, allocation: config.Allocation, node: config.Node,
-		writer: config.Writer, limit: limit,
+		writer: config.Writer, providerRecovery: config.ProviderRecovery, limit: limit,
 	}, nil
 }
 
@@ -260,11 +262,11 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 		r.after = &cursor
 		processed++
 		node := nodeIncarnation{candidate.ClusterID, candidate.NodeID, candidate.NodeUID, candidate.NodeBootID}
-		if unavailable[node] {
+		if unavailable[node] && (r.providerRecovery == nil || candidate.WriterGrantID == "") {
 			result.Skipped++
 			continue
 		}
-		completed, err := r.reconcile(ctx, candidates[index].ID)
+		completed, err := r.reconcile(ctx, candidates[index].ID, unavailable[node])
 		if err != nil {
 			result.Failed++
 			errs = append(errs, fmt.Errorf("reconcile runtime slot %s: %w", candidates[index].ID, err))
@@ -282,7 +284,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
-func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error) {
+func (r *Reconciler) reconcile(ctx context.Context, slotID string, unavailable bool) (bool, error) {
 	slot, err := r.store.GetRuntimeSlot(ctx, slotID)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
@@ -329,9 +331,21 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 	}
 
+	if unavailable && r.providerRecovery != nil {
+		return r.providerRecovery.Recover(ctx, *slot)
+	}
 	target := allocationTarget(slot)
 	allocationObservation, err := r.allocation.Observe(ctx, target)
 	if err != nil {
+		if errors.Is(err, ErrAllocationNodeUnavailable) && r.providerRecovery != nil {
+			completed, recoveryErr := r.providerRecovery.Recover(ctx, *slot)
+			if recoveryErr != nil {
+				return false, errors.Join(err, recoveryErr)
+			}
+			if completed {
+				return true, nil
+			}
+		}
 		return false, fmt.Errorf("observe Nomad allocation: %w", err)
 	}
 	if err := validateAllocationObservation(allocationObservation, target); err != nil {

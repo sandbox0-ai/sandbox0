@@ -26,6 +26,35 @@ acknowledging process and memory loss. An unplanned primary loss recovers from
 the last committed generation and may lose the dirty tail. Both processes run
 on the same node; durable sandbox truth remains in PostgreSQL and S3.
 
+`nomad_runtime.live_commits` enables authenticated background RootFS commits.
+It defaults to false during the [automatic-growth rollout](../rootfs-autogrow.md).
+Upgrade every regional manager and node before enabling it. The node checks
+eligible live writers once per second, commits at 64 MiB of WAL payload (or a
+quarter of a smaller writer limit), and commits smaller nonempty tails after
+30 seconds. Pending publication/installation receipts are eligible immediately.
+At most four uploads run concurrently; writers rotate through the worker lane
+and transient failures back off for up to 30 seconds.
+
+Enabled live writers reclaim WAL pressure through a new acknowledged cut;
+they do not request the legacy pressure pause. Storage outages retain complete
+journals and apply write backpressure. Planned pause, running fork, migration
+RootFS capture and live owner transfer settle pending installation before taking
+their existing custody. Explicit `memory: true` remains mandatory for occupied
+worker rollout. Live commits alone do not enable XFS automatic growth or change
+an existing device's geometry; complete the linked rollout gates before enabling
+sparse image imports.
+
+`nomad_runtime.auto_grow` also defaults to false and requires `live_commits`.
+Its separate two-worker lane checks mounted XFS once per second, scanning idle
+owners without consuming the upload lane. Growth doubles filesystem capacity
+when available space reaches the greater of 20 percent and 64 MiB, up to the
+existing device ceiling. It preserves the exact NBD device and mounted session,
+and does not allocate the logical capacity on the host disk. Planned capture,
+release and owner transfer wait for growth to finish. An admitted Linux growth
+ioctl cannot be cancelled; its commit/reclaim path stays alive under the existing
+session owner when control workers are cancelled for a planned live update.
+Storage outages can delay that update; retain its operation fence and journal.
+
 If an interrupted planned pause leaves a claimed slot quiescing with an XFS
 reference to an NBD device after the host mount paths disappear, keep the
 regional node fence and maintenance journal. Do not disconnect the device,

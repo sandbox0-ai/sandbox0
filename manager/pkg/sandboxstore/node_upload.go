@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 // RootFSNodeUploadRequest is an internal authenticated writer capability.
@@ -62,6 +63,19 @@ func (s *PGSandboxStore) RecordRootFSNodeUpload(ctx context.Context, req *RootFS
 		}
 		if grant.State != RootFSWriterGrantStateConsumed && grant.State != RootFSWriterGrantStateRetiring {
 			return ErrRootFSWriterGrantInvalidState
+		}
+		if strings.HasPrefix(req.OperationID, "live/") {
+			sequence, err := protocol.LiveCommitSequence(grant.ID, req.OperationID)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrRootFSGenerationConflict, err)
+			}
+			progress, err := getRootFSLiveProgress(ctx, tx, grant.ID)
+			if err != nil {
+				return err
+			}
+			if progress != nil && sequence <= progress.CommittedSequence {
+				return fmt.Errorf("%w: upload belongs to an already committed live cut", ErrRootFSGenerationConflict)
+			}
 		}
 		if err = tx.QueryRow(ctx, `SELECT team_id FROM manager.rootfs_filesystems WHERE filesystem_id=$1`, grant.FilesystemID).Scan(&team); err != nil {
 			return err
@@ -135,6 +149,9 @@ func publishRootFSNodeUploads(ctx context.Context, tx rootFSWriterGrantDB, grant
 	if !catalogExists {
 		return nil
 	}
+	if err := pinPublishedRootFSLiveBase(ctx, tx, grantID, generation.ID); err != nil {
+		return err
+	}
 	var state string
 	var previous *string
 	err := tx.QueryRow(ctx, `SELECT state,generation_id FROM manager.rootfs_node_uploads WHERE grant_id=$1 AND operation_id=$2 FOR UPDATE`, grantID, operationID).Scan(&state, &previous)
@@ -175,6 +192,23 @@ func publishRootFSNodeUploads(ctx context.Context, tx rootFSWriterGrantDB, grant
 		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE manager.rootfs_node_uploads SET state='published',generation_id=$3,updated_at=clock_timestamp() WHERE grant_id=$1 AND operation_id=$2`, grantID, operationID, generation.ID)
+	return err
+}
+
+func pinPublishedRootFSLiveBase(ctx context.Context, tx rootFSWriterGrantDB, grantID, generationID string) error {
+	// Historical import/migration fixtures deliberately exercise an earlier
+	// schema. Such nodes cannot have installed a rotated live base.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('manager.rootfs_writer_live_progress') IS NOT NULL`).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO manager.rootfs_generation_live_dependencies(generation_id,base_generation_id)
+		SELECT $2,progress.installed_generation_ref FROM manager.rootfs_writer_live_progress progress
+		WHERE progress.grant_id=$1 AND progress.installed_generation_ref IS NOT NULL AND progress.installed_generation_ref<>$2
+		AND NOT (SELECT inventory_complete FROM manager.rootfs_generations WHERE generation_id=$2) ON CONFLICT DO NOTHING`, grantID, generationID)
 	return err
 }
 

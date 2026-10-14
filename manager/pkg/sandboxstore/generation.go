@@ -13,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfsartifact"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsimporter"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
@@ -59,18 +58,19 @@ type PublishPausedRootFSRebaseRequest struct {
 // by filesystems in one region. The descriptor is bounded control metadata;
 // block data and mapping pages remain in the region object store.
 type RootFSBaseArtifact struct {
-	ArtifactDigest   string
-	SourceOCIRef     string
-	SourceOCIDigest  string
-	ManifestDigest   string
-	ConfigDigest     string
-	BaseBlockRoot    string
-	FormatGeneration int
-	Platform         RootFSArtifactPlatform
-	ProcdProtocol    string
-	ProcdDigest      string
-	LogicalSizeBytes int64
-	DescriptorDigest string
+	ArtifactDigest             string
+	SourceOCIRef               string
+	SourceOCIDigest            string
+	ManifestDigest             string
+	ConfigDigest               string
+	BaseBlockRoot              string
+	FormatGeneration           int
+	Platform                   RootFSArtifactPlatform
+	ProcdProtocol              string
+	ProcdDigest                string
+	LogicalSizeBytes           int64
+	InitialFilesystemSizeBytes int64
+	DescriptorDigest           string
 	// ImportDataRangeBytes is immutable import provenance, not a runtime-format
 	// requirement. Nil means the legacy artifact's geometry is unknown.
 	ImportDataRangeBytes     *int
@@ -81,6 +81,15 @@ type RootFSBaseArtifact struct {
 	Attestation              []byte
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
+}
+
+// InitialFilesystemSize returns the import-time XFS capacity. Legacy artifacts
+// formatted the complete device and therefore use LogicalSizeBytes.
+func (a *RootFSBaseArtifact) InitialFilesystemSize() int64 {
+	if a.InitialFilesystemSizeBytes != 0 {
+		return a.InitialFilesystemSizeBytes
+	}
+	return a.LogicalSizeBytes
 }
 
 // RootFSArtifactPlatform is the OCI platform selected while converting an
@@ -135,10 +144,11 @@ type RootFSGeneration struct {
 // artifact shape. A source digest alone is insufficient because procd and the
 // immutable logical block-device size participate in runtime compatibility.
 type ReadyRootFSArtifactRequirements struct {
-	FormatGeneration int
-	LogicalSizeBytes int64
-	ProcdProtocol    string
-	ProcdDigest      string
+	FormatGeneration           int
+	LogicalSizeBytes           int64
+	InitialFilesystemSizeBytes int64
+	ProcdProtocol              string
+	ProcdDigest                string
 	// PreserveCommittedProcd is allowed only for an exact, authorized artifact
 	// digest. Its immutable attestation already binds the executable; the protocol,
 	// platform, format and logical size must still match. Image lookup forbids it.
@@ -157,11 +167,10 @@ func (r ReadyRootFSArtifactRequirements) Validate() error {
 	if r.FormatGeneration <= 0 {
 		return fmt.Errorf("format_generation must be positive")
 	}
-	if r.LogicalSizeBytes < rootfsartifact.MinimumLogicalSizeBytes ||
-		r.LogicalSizeBytes > rootfsartifact.MaximumLogicalSizeBytes ||
-		r.LogicalSizeBytes%rootfsblock.LogicalBlockSize != 0 {
-		return fmt.Errorf("logical_size_bytes is outside the supported aligned range")
+	if err := rootfsimporter.ValidateGeometry(r.LogicalSizeBytes, r.InitialFilesystemSizeBytes); err != nil {
+		return err
 	}
+
 	if err := rootfsimporter.ValidateProcdProtocol(r.ProcdProtocol); err != nil {
 		return err
 	}
@@ -453,12 +462,13 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 			AND ($11::text = '' OR source_oci_ref = $11)
 			AND data_layout_policy = $12
 			AND mapping_group_policy = $13
+			AND initial_filesystem_size_bytes = $14
 		ORDER BY format_generation DESC, created_at DESC
 		LIMIT 1
 	`, sourceOCIDigest, RootFSBaseArtifactStateReady, platform.OS,
 		platform.Architecture, platform.Variant, requirements.FormatGeneration,
 		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest,
-		requirements.ImportDataRangeBytes, requirements.SourceOCIRef, requirements.ImportDataLayoutPolicy, requirements.ImportMappingGroupPolicy))
+		requirements.ImportDataRangeBytes, requirements.SourceOCIRef, requirements.ImportDataLayoutPolicy, requirements.ImportMappingGroupPolicy, requirements.InitialFilesystemSizeBytes))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: source %s with logical size %d",
 			ErrRootFSBaseArtifactNotFound, sourceOCIDigest, requirements.LogicalSizeBytes)
@@ -498,12 +508,13 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
 			AND oci_architecture = $4
 			AND oci_variant = $5
 			AND format_generation = $6
-			AND logical_size_bytes = $7
+			AND (($11::bigint <> 0 AND logical_size_bytes = $7 AND initial_filesystem_size_bytes = $11)
+				OR ($11::bigint = 0 AND COALESCE(NULLIF(initial_filesystem_size_bytes, 0), logical_size_bytes) = $7))
 			AND procd_protocol = $8
 			AND ($10::boolean OR procd_digest = $9)
 	`, artifactDigest, RootFSBaseArtifactStateReady, platform.OS,
 		platform.Architecture, platform.Variant, requirements.FormatGeneration,
-		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest, requirements.PreserveCommittedProcd))
+		requirements.LogicalSizeBytes, requirements.ProcdProtocol, requirements.ProcdDigest, requirements.PreserveCommittedProcd, requirements.InitialFilesystemSizeBytes))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: artifact %s for %s/%s/%s", ErrRootFSBaseArtifactNotFound,
 			artifactDigest, platform.OS, platform.Architecture, platform.Variant)
@@ -1007,7 +1018,7 @@ func rootFSBaseArtifactSelectSQL() string {
 			COALESCE(attestation, ''::bytea), COALESCE(manifest_digest, ''),
 			COALESCE(config_digest, ''), COALESCE(procd_protocol, ''),
 			COALESCE(procd_digest, ''), COALESCE(logical_size_bytes, 0),
-			COALESCE(descriptor_digest, ''), import_data_range_bytes, data_layout_policy, mapping_group_policy, created_at, updated_at
+			COALESCE(descriptor_digest, ''), import_data_range_bytes, data_layout_policy, mapping_group_policy, initial_filesystem_size_bytes, created_at, updated_at
 		FROM manager.rootfs_base_artifacts `
 }
 
@@ -1029,7 +1040,7 @@ func scanRootFSBaseArtifact(row sandboxRecordScanner) (*RootFSBaseArtifact, erro
 		&artifact.ManifestDigest, &artifact.ConfigDigest, &artifact.ProcdProtocol,
 		&artifact.ProcdDigest, &artifact.LogicalSizeBytes, &artifact.DescriptorDigest,
 		&artifact.ImportDataRangeBytes, &artifact.ImportDataLayoutPolicy,
-		&artifact.ImportMappingGroupPolicy,
+		&artifact.ImportMappingGroupPolicy, &artifact.InitialFilesystemSizeBytes,
 		&artifact.CreatedAt, &artifact.UpdatedAt); err != nil {
 		return nil, err
 	}

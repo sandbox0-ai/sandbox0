@@ -18,7 +18,7 @@ func TestNodePoolClientsInitializeBeforeInstanceCredentialsAreResolved(t *testin
 	t.Setenv("ALIBABA_CLOUD_ECS_METADATA_DISABLED", "true")
 	_, err := nodepoolautoscaler.NewAliyunESS("us-east-1", "group")
 	require.NoError(t, err)
-	_, err = nodepoollifecycle.NewAliyunCloud("us-east-1", "group", []string{"route"})
+	_, err = nodepoollifecycle.NewAliyunCloud("us-east-1", "1234567890123456", "group", []string{"route"})
 	require.NoError(t, err)
 	_, err = nodeenrollment.NewAliyunCloud("us-east-1", "group", []string{"route"})
 	require.NoError(t, err)

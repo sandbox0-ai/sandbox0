@@ -86,6 +86,7 @@ func migrationPeerFixture(t *testing.T) (*nodeRuntime, *nodeRuntime, protocol.Mi
 		cert, err := runtimecheckpoint.NewPeerIdentity()
 		require.NoError(t, err)
 		server = httptest.NewUnstartedServer(http.HandlerFunc(node.serveMigrationPeer))
+		server.Config.ConnContext = migrationPeerConnectionContext
 		server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAnyClientCert}
 		server.StartTLS()
 		t.Cleanup(server.Close)

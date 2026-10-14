@@ -17,4 +17,6 @@ package rootfsartifact
 const (
 	MinimumLogicalSizeBytes = 300 << 20
 	MaximumLogicalSizeBytes = 1 << 40
+	// MaximumSparseDeviceSizeBytes is address space, not local disk reservation.
+	MaximumSparseDeviceSizeBytes = 64 << 40
 )

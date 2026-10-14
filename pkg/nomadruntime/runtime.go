@@ -60,6 +60,8 @@ type rootfsRuntime struct {
 	renewalMu         sync.Mutex
 	renewals          map[string]*rootfsRenewal
 	renewalBatcher    *writerRenewalBatcher
+	liveCommits       bool
+	autoGrow          bool
 }
 
 // RuntimeInfo returns the immutable configuration owned by this ctld runtime.
@@ -98,6 +100,9 @@ func (r *rootfsRuntime) DirtyTailPressureSessions() ([]rootfssession.DirtyTailPr
 	if r == nil || r.sessions == nil {
 		return nil, fmt.Errorf("RootFS session manager is unavailable: %w", errdefs.ErrUnavailable)
 	}
+	if r.liveCommits {
+		return nil, nil
+	}
 	return r.sessions.DirtyTailPressureSessions()
 }
 
@@ -109,6 +114,9 @@ func (r *rootfsRuntime) PlanDirtyTailPressure(
 	ctx context.Context,
 	pressure rootfssession.DirtyTailPressureSession,
 ) (string, error) {
+	if r != nil && r.liveCommits {
+		return "", fmt.Errorf("enabled live writers reclaim pressure without retirement: %w", errdefs.ErrUnavailable)
+	}
 	if r == nil || r.sessions == nil || r.authority == nil {
 		return "", fmt.Errorf("RootFS pressure planning authority is unavailable: %w", errdefs.ErrUnavailable)
 	}
@@ -134,7 +142,7 @@ func (r *rootfsRuntime) PlanDirtyTailPressure(
 // It does not fence the workload; the periodic recovery path completes sealing
 // only after the exact Nomad runtime is physically absent.
 func (r *rootfsRuntime) PlanRetire(
-	_ context.Context,
+	ctx context.Context,
 	stage rootfshandoff.StageRequest,
 	operationID string,
 ) error {
@@ -150,6 +158,9 @@ func (r *rootfsRuntime) PlanRetire(
 	)
 	if strings.TrimSpace(operationID) != expected {
 		return fmt.Errorf("planned RootFS retirement operation does not match writer binding: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := r.sessions.SettleLiveCommit(ctx, stage); err != nil {
+		return fmt.Errorf("settle live RootFS before planned retirement: %w", err)
 	}
 	if err := r.sessions.BeginRetire(stage.Parent, stage.Identity, operationID); err != nil {
 		return fmt.Errorf("persist planned RootFS retirement: %w", err)
@@ -212,6 +223,9 @@ func (r *rootfsRuntime) CaptureRunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS writer authority is not configured: %w", errdefs.ErrUnavailable)
 	}
 	durable := request.WithoutWriterGrantToken()
+	if err := r.sessions.SettleLiveCommit(ctx, durable); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
 	checkpoint, err := r.sessions.CaptureRunningFork(ctx, durable, fork)
 	if err != nil {
 		return rootfshandoff.RunningForkCheckpointResult{}, err
@@ -345,6 +359,16 @@ func newRuntime(ctx context.Context, config *Config, logger logger, imported ...
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS host runtime: %w", err)
 	}
+	var liveAuthority rootfssession.LiveCommitAuthority
+	if client, ok := authority.(liveCommitAuthorityClient); ok {
+		liveAuthority = liveCommitAuthorityAdapter{client: client}
+	}
+	if config.RootFSLiveCommits && liveAuthority == nil {
+		return nil, fmt.Errorf("live RootFS commits require authenticated regional authority")
+	}
+	if config.RootFSAutoGrow && !config.RootFSLiveCommits {
+		return nil, fmt.Errorf("automatic XFS growth requires live RootFS commits")
+	}
 	sessions, err := rootfssession.New(rootfssession.Config{
 		StatePath: config.RootFSStatePath, BranchRoot: config.RootFSBranchRoot,
 		MountRoot: config.RootFSMountRoot, MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
@@ -356,6 +380,7 @@ func newRuntime(ctx context.Context, config *Config, logger logger, imported ...
 		},
 		Source:    conditional,
 		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
+		LiveCommitAuthority: liveAuthority,
 		PublisherForRebase: func(request rootfsrebase.WorkerRequest) rootfsblock.ImmutableObjectPublisher {
 			return nodeJournalPublisher{authority: authority, operation: request.OperationID, rebase: true, publisher: rootfsblock.ObjectStorePublisher{Store: conditional}}
 		},
@@ -415,6 +440,8 @@ func newRuntime(ctx context.Context, config *Config, logger logger, imported ...
 		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),
 		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),
+		liveCommits:       config.RootFSLiveCommits,
+		autoGrow:          config.RootFSAutoGrow,
 	}, nil
 }
 

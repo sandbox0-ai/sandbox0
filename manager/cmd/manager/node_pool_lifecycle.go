@@ -26,6 +26,7 @@ func configureNodePoolLifecycle(
 	}
 	cloud, err := nodepoollifecycle.NewAliyunCloud(
 		nodePool.Region,
+		enrollment.OwnerAccountID,
 		nodePool.ScalingGroupID,
 		enrollment.RouteTableIDs,
 	)

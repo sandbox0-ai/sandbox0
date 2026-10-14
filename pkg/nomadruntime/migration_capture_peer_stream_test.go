@@ -62,6 +62,7 @@ func capturePeerTestServer(t *testing.T, d *nodeRuntime, count *atomic.Int64) *h
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		d.serveMigrationPeer(capturePeerCountWriter{w, count}, r)
 	}))
+	server.Config.ConnContext = migrationPeerConnectionContext
 	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity}, ClientAuth: tls.RequireAnyClientCert}
 	server.StartTLS()
 	endpoint, err := runtimecheckpoint.NewPeerEndpoint(strings.TrimPrefix(server.URL, "https://"), identity)

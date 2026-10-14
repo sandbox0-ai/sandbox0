@@ -28,9 +28,10 @@ feature is not deployed until the gates below have evidence attached.
 
 ## Work remaining
 
-1. Complete full regional lifecycle/fencing/GC acceptance with installed live
-   bases. Component running-fork/cold-restore gates and actual Nomad growth,
-   live ctld transfer and retained-memory pause/resume gates below passed.
+1. Requalify regional lifecycle/fencing/GC on the final release candidate.
+   The complete actual public filesystem API case passed on `32e73885` below;
+   its read-root refinement still needs a complete rerun. Retained-memory and
+   object-service interruption also require current-candidate qualification.
 2. Qualify complete node loss and replacement-node admission. Abrupt
    process-owner fencing and a separately provisioned machine's fresh-cache
    remote recovery passed below; provider loss observation and actual Nomad
@@ -257,7 +258,7 @@ evidence. Across 492 samples, worker artifacts peaked at 58,769,408 bytes;
 all mounts/devices were released. Complete public acceptance remains open
 until deletion respects rollback retention and a fresh run finishes.
 
-Immediate deletion now checks the same generation read roots as normal GC
+Immediate deletion now checks the same independent generation read roots as GC
 and preserves filesystem-level rollback references. The sandbox can become
 deleted without removing its rollback generations; ordinary expiration/GC
 later releases them. The PostgreSQL regression reproduced the exact foreign-key
@@ -265,7 +266,38 @@ failure before the correction, then proved successful deletion, retention of
 both generations during the rollback window and eventual filesystem collection
 after expiration. All nine selected deletion/restore/rebase race tests passed
 in 49.27 seconds, including retained-memory and completed-running-fork cleanup.
-The complete public API gate remains open pending the corrected fresh run.
+The corrected real public API run passed in 443.60 seconds (410.26 seconds
+for the regional fixture). It preserved the original PID 10 and managed procd
+context through 600 MiB growth and three live ctld transfers with zero task
+restarts. XFS data capacity reached 1,191,182,336 bytes within the 64-TiB device.
+The authenticated lifecycle completed two snapshots, two forks, one restore,
+one distinct imported-base rebase, three full cold NBD/S3 hashes, deletion of
+all three sandboxes and the final inventory/GC passes. All hashes matched
+`87c445f52539b5fe353694f70ae6bc875fc3212b9c27fd8a1612c0b2910b77ff`.
+Across 419 samples, worker artifacts peaked at 56,832,000 bytes, below 128 MiB;
+the runner and regional fixture exited zero and mounts/devices were released.
+Its 545-file manifest-verified archive retains receipts and regional/service
+logs. This qualifies the isolated filesystem API case on candidate `32e73885`,
+not retained-memory, complete provider loss or production rollout.
+
+Migration CI then exposed excessive retention from treating completed
+materialization members as active read roots during explicit deletion. This
+retained deleted storage billing and delayed generation removal. Deletion now
+shares the independent generation read roots while keeping its earlier
+uploading-batch fence. Completed materialization journal objects retain their
+existing deletion-race custody without keeping the deleted filesystem live;
+ordinary generation GC continues to retain materialization members. The prior
+successful API receipt remains retained; the refined candidate needs its own
+full acceptance and CI qualification.
+
+All 19 selected deletion, restore/rebase, materialization and storage-metering
+PostgreSQL race tests passed in 105.10 seconds after that refinement. The three
+previously failing CI cases now pass unchanged: deletion/recreation ends the
+previous byte-time interval, migration backfill ends orphaned storage billing,
+and completed materialization permits generation deletion while its journal
+keeps the object until the retention window ends. Rollback expiry and eventual
+filesystem collection still pass. Complete candidate CI and actual runtime
+qualification remain required.
 
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and

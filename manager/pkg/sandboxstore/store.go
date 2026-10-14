@@ -904,7 +904,7 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 			AND NOT EXISTS (
 				SELECT 1 FROM manager.rootfs_generations generation
 				WHERE generation.filesystem_id = f.filesystem_id
-					AND (`+rootFSGenerationRetainedSQL+`)
+					AND (`+rootFSGenerationReadRootSQL+`)
 			)
 			FOR UPDATE OF f
 			`, filesystemIDs)

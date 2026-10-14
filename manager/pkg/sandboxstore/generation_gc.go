@@ -10,7 +10,7 @@ import (
 
 // Ancestry protects incomplete inventories, but is not an eternal root after
 // all live descendants have registered their actual mapping dependencies.
-const rootFSGenerationRetainedSQL = `
+const rootFSGenerationReadRootSQL = `
 	EXISTS (SELECT 1 FROM manager.rootfs_filesystems filesystem WHERE filesystem.head_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_snapshots snapshot WHERE snapshot.head_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.rootfs_head_rollbacks rollback WHERE rollback.old_generation_id=generation.generation_id OR rollback.new_generation_id=generation.generation_id)
@@ -23,6 +23,12 @@ const rootFSGenerationRetainedSQL = `
 	OR EXISTS (SELECT 1 FROM manager.rootfs_running_template_captures capture WHERE capture.source_generation_id=generation.generation_id OR capture.checkpoint_generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_refs checkpoint WHERE checkpoint.generation_id=generation.generation_id)
 	OR EXISTS (SELECT 1 FROM manager.sandbox_runtime_checkpoint_forks fork WHERE fork.generation_ref=generation.generation_id)
+	`
+
+// Ordinary generation GC also retains materialization members. Explicit
+// sandbox deletion fences uploading batches separately; completed batches keep
+// object custody in their journal without retaining a deleted filesystem.
+const rootFSGenerationRetainedSQL = rootFSGenerationReadRootSQL + `
 	OR EXISTS (SELECT 1 FROM manager.rootfs_materialization_members member WHERE member.generation_id=generation.generation_id)
 `
 

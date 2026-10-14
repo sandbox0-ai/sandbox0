@@ -867,6 +867,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				AND writer.state IN ('issued','consumed','retiring'))`, filesystemIDs); err != nil {
 			return fmt.Errorf("release deleted sandbox rootfs heads: %w", err)
 		}
+		// Logical sandbox deletion does not expire independent read roots,
+		// including restore/rebase rollback custody. Leave their generations
+		// and filesystem for normal GC after those owners release their pins.
 		deletableRows, err := tx.Query(ctx, `
 				SELECT f.filesystem_id
 				FROM manager.rootfs_filesystems AS f
@@ -894,6 +897,15 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 					ON generation.generation_id = checkpoint_ref.generation_id
 				WHERE generation.filesystem_id = f.filesystem_id
 			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_head_rollbacks rollback
+				WHERE rollback.filesystem_id = f.filesystem_id
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_generations generation
+				WHERE generation.filesystem_id = f.filesystem_id
+					AND (`+rootFSGenerationRetainedSQL+`)
+			)
 			FOR UPDATE OF f
 			`, filesystemIDs)
 		if err != nil {
@@ -914,8 +926,7 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		}
 		deletableRows.Close()
 		if len(deletableFilesystemIDs) == 0 {
-			// Snapshots, forks, or another sandbox binding still retain every
-			// candidate filesystem.
+			// Independent storage owners still retain every candidate filesystem.
 			deletableFilesystemIDs = nil
 		}
 		if len(deletableFilesystemIDs) > 0 {

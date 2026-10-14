@@ -248,6 +248,25 @@ before the correction and passed in the complete 72.88-second node-channel
 race suite afterward. The fixture HTTP and claim-cleanup race suites also
 passed. Complete public acceptance still requires a fresh run.
 
+The corrected run passed rebase and all three cold hashes of the complete
+600 MiB payload, then exposed a database deletion defect: `MarkSandboxDeleted`
+attempted to delete generations still retained by a restore/rebase rollback
+record, violating its old-generation foreign key. Its nonzero 509.05-second
+receipt and 551-file archive retain regional/service logs and deletion-state
+evidence. Across 492 samples, worker artifacts peaked at 58,769,408 bytes;
+all mounts/devices were released. Complete public acceptance remains open
+until deletion respects rollback retention and a fresh run finishes.
+
+Immediate deletion now checks the same generation read roots as normal GC
+and preserves filesystem-level rollback references. The sandbox can become
+deleted without removing its rollback generations; ordinary expiration/GC
+later releases them. The PostgreSQL regression reproduced the exact foreign-key
+failure before the correction, then proved successful deletion, retention of
+both generations during the rollback window and eventual filesystem collection
+after expiration. All nine selected deletion/restore/rebase race tests passed
+in 49.27 seconds, including retained-memory and completed-running-fork cleanup.
+The complete public API gate remains open pending the corrected fresh run.
+
 The regional store gates
 `TestRootFSLiveCommitInstalledBaseRetentionS3Integration` and
 `TestRootFSLiveCommitSnapshotForkRestoreGCS3Integration` passed with PostgreSQL,

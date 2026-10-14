@@ -818,6 +818,36 @@ after a fenced owner crash; it does not prove complete provider machine-loss
 observation, actual Nomad replacement admission or crashed process-memory
 recovery. The authority/certificate and OCI provenance remain fixture-specific.
 
+## Physical provider instance observation
+
+ESS membership is not physical instance existence: a detached instance may
+still be running. Lifecycle recovery now uses the read-only `providerinstance`
+ECS observer for its provider-instance check. It pins the enrollment owner
+account and provider region, verifies the actual credential account through
+STS on every observation, and queries the exact instance with
+`DescribeInstanceAttribute`. Running, stopped and all other present statuses
+remain present. Only HTTP 404 `InvalidInstanceId.NotFound` with a provider
+request receipt qualifies as absence; missing/mismatched response identities,
+permission failures, transport errors and cancellation fail closed.
+
+The detached-instance regression failed with the previous ESS-only method and
+passed with the physical observer. Provider, lazy-credential constructor,
+lifecycle and selected manager race tests passed on a separate isolated host.
+The control role requires region/account-scoped `ecs:DescribeInstanceAttribute`
+permission before installing this manager. STS `GetCallerIdentity` needs no
+additional RAM authorization. See the official
+[ECS API contract](https://www.alibabacloud.com/help/en/ecs/developer-reference/api-ecs-2014-05-26-describeinstanceattribute)
+and [STS identity contract](https://help.aliyun.com/en/ram/developer-reference/api-sts-2015-04-01-getcalleridentity).
+
+This corrects the existing warm-carrier observation and supplies a scoped
+provider receipt; it does not retire a claimed Sandbox. Claimed-writer recovery
+still requires a separate persistent provider-absence proof, exact node/boot
+and writer fencing, atomic last-committed-head/slot/resource-lease completion,
+and actual Nomad replacement admission. Source-host namespace proofs must not
+be fabricated on a replacement machine. The earlier growth/memory/API/outage
+receipts qualify their recorded source head and binary, not this new recovery
+path or a production rollout.
+
 ## Actual Nomad, procd and live-owner transfer acceptance
 
 The isolated systemd live-node fixture now has an explicit
@@ -1032,10 +1062,26 @@ below 128 MiB. All owned mounts and devices were released before its 545-file
 SHA-256-verified private archive and the next guarded reset.
 
 The archived source manifest verified all 1,934 Go/module/build-script files
-against head `4489ad45`. The production-selected pin's complete 2 GiB real-service
-suspension run remains pending; earlier suspension receipts used a different
-procd binary. Provider-loss admission, retained older checkpoint/target CPU
-compatibility and production activation remain open.
+against head `4489ad45`. The same production-selected pin also passed complete
+2 GiB real-service suspension acceptance in 735.06 seconds; its regional fixture
+exited zero in 723.17 seconds. RustFS was actually suspended with an independently
+armed 65-second recovery timer. Across 242 paused observations, maximum observed
+write stall was 34.20 seconds and recovery was observed after 69.37 seconds,
+including polling. The original allocation/Sentry/process/context and memory/
+open-file state survived full 2 GiB verification and all three live transfers,
+with zero task restarts. XFS data capacity reached 4,966,055,936 bytes within
+the 64-TiB device. Installed sequence advanced from 537,872 to 538,408; the
+last transfer retained that same sequence. Across 720 samples, worker artifacts
+peaked at 68,468,736 bytes, below 128 MiB. The 550-file private archive was
+SHA-256 verified before guarded normal cleanup released residual mounts and
+the exited server's NBD device.
+
+All three complete live gates now qualify this exact ctld/procd/protocol on
+the recorded source head. Subsequent provider-observer changes have separate
+component tests and require their own release qualification. Complete
+provider-loss admission, retained older checkpoint/target CPU compatibility
+and production activation remain open. These passes do not diagnose the older
+outage allocation's unexplained status-137 exit.
 
 ## Migration filesystem drain and live-WAL custody
 

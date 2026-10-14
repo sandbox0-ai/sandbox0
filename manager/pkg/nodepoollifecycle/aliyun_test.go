@@ -7,6 +7,7 @@ import (
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/vpc"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,7 +250,11 @@ func TestAliyunLifecycleDistinguishesAttachedFromInServiceInstances(t *testing.T
 	}}
 	cloud, err := newAliyunCloud(client, lifecycleVPCStub{}, "asg-1", []string{"rt-1"})
 	require.NoError(t, err)
-	ids := []string{"pending", "ready", "missing"}
+	cloud.region, cloud.accountID = "us-east-1", "1663579946854466"
+	cloud.instances = instancePresenceFunc(func(_ context.Context, scope providerinstance.Scope) (providerinstance.Observation, error) {
+		return providerinstance.Observation{Scope: scope, Present: scope.InstanceID != "missing", RequestID: "physical", IdentityRequestID: "owner"}, nil
+	})
+	ids := []string{"pending", "ready", "missing", "detached"}
 	inService, err := cloud.ElasticInstancesInService(context.Background(), ids)
 	require.NoError(t, err)
 	attached, err := cloud.ElasticInstancesAttached(context.Background(), ids)
@@ -257,9 +262,17 @@ func TestAliyunLifecycleDistinguishesAttachedFromInServiceInstances(t *testing.T
 	require.False(t, inService["pending"])
 	require.True(t, inService["ready"])
 	require.False(t, inService["missing"])
-	require.True(t, attached["pending"], "provider absence means no longer attached, not merely not yet InService")
+	require.True(t, attached["pending"])
 	require.True(t, attached["ready"])
 	require.False(t, attached["missing"])
+	require.False(t, inService["detached"])
+	require.True(t, attached["detached"], "absence from ESS does not prove the physical instance is gone")
+}
+
+type instancePresenceFunc func(context.Context, providerinstance.Scope) (providerinstance.Observation, error)
+
+func (f instancePresenceFunc) Observe(ctx context.Context, scope providerinstance.Scope) (providerinstance.Observation, error) {
+	return f(ctx, scope)
 }
 
 type allocationRouteVPCStub struct {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/aliyunclient"
+	"github.com/sandbox0-ai/sandbox0/pkg/providerinstance"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ess"
@@ -45,13 +46,20 @@ func (c *AliyunCloud) ElasticInstancesAttached(
 	ctx context.Context,
 	instanceIDs []string,
 ) (map[string]bool, error) {
-	states, err := c.ElasticInstanceStates(ctx, instanceIDs)
-	if err != nil {
-		return nil, err
+	if c.instances == nil {
+		return nil, errors.New("physical provider instance observer is required")
 	}
-	result := make(map[string]bool, len(states))
-	for instanceID := range states {
-		result[instanceID] = true
+	result := make(map[string]bool, len(instanceIDs))
+	for _, instanceID := range instanceIDs {
+		scope := providerinstance.Scope{Provider: "aliyun", AccountID: c.accountID, RegionID: c.region, InstanceID: instanceID}
+		observation, err := c.instances.Observe(ctx, scope)
+		if err != nil {
+			return nil, err
+		}
+		if err := observation.ValidateFor(scope); err != nil {
+			return nil, err
+		}
+		result[instanceID] = observation.Present
 	}
 	return result, nil
 }
@@ -94,11 +102,18 @@ type aliyunLifecycleVPC interface {
 type AliyunCloud struct {
 	ess            aliyunLifecycleESS
 	vpc            aliyunLifecycleVPC
+	instances      providerinstance.Observer
+	region         string
+	accountID      string
 	scalingGroupID string
 	routeTableIDs  []string
 }
 
-func NewAliyunCloud(region, scalingGroupID string, routeTableIDs []string) (*AliyunCloud, error) {
+func NewAliyunCloud(region, accountID, scalingGroupID string, routeTableIDs []string) (*AliyunCloud, error) {
+	instances, err := providerinstance.NewAliyunObserver(region, accountID)
+	if err != nil {
+		return nil, err
+	}
 	credential := aliyunclient.Credentials()
 	essClient, err := ess.NewClientWithOptions(region, aliyunclient.Config(), credential)
 	if err != nil {
@@ -108,7 +123,12 @@ func NewAliyunCloud(region, scalingGroupID string, routeTableIDs []string) (*Ali
 	if err != nil {
 		return nil, err
 	}
-	return newAliyunCloud(essClient, vpcClient, scalingGroupID, routeTableIDs)
+	cloud, err := newAliyunCloud(essClient, vpcClient, scalingGroupID, routeTableIDs)
+	if err != nil {
+		return nil, err
+	}
+	cloud.instances, cloud.region, cloud.accountID = instances, region, accountID
+	return cloud, nil
 }
 
 func newAliyunCloud(

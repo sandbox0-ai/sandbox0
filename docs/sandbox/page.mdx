@@ -1,6 +1,10 @@
 # Sandbox
 
-A Sandbox is an isolated execution environment for long-running agents where you can run code, manage files, and control network access. Each sandbox is created from a [Template](/docs/sandbox/template) and has a durable writable RootFS that keeps its accumulated files across successful pause/resume checkpoints for the same sandbox identity. Incremental checkpoints and demand reads on resume avoid copying the entire growing filesystem.
+A sandbox gives a user's AI agent an isolated cloud computer where it can run code, install software, manage files, and control network access. Preserve the whole writable root filesystem across successful checkpoints, pause compute between tasks, and resume the same sandbox when work returns. System configuration, installed tools, dependencies, and user files share the same durable RootFS, including paths outside the project directory.
+
+Each sandbox is created from a [Template](/docs/sandbox/template). On growth-enabled templates, the RootFS expands automatically online as it fills, within the configured device ceiling, while the agent keeps running. Existing images and snapshots retain their captured geometry. Incremental checkpoints and demand reads avoid copying the entire growing filesystem during pause/resume. See [Template Configuration](/docs/sandbox/template/configuration) for growth configuration and runtime-only mounts excluded from RootFS persistence.
+
+On Sandbox0 Cloud, paused sandboxes incur no compute charges. Default pause/resume preserves files and starts fresh processes. Configure `auto_resume` for supported access paths, or resume explicitly; wake-up takes time and requires available capacity. See [Pause And Resume](/docs/sandbox/pause-resume).
 
 For shell access and file copy over standard SSH clients, see [SSH](/docs/sandbox/ssh).
 

@@ -1,14 +1,18 @@
 # Get Started
 
-Sandbox0 is a long-running agent sandbox with a durable writable RootFS. As agents install dependencies, edit code, and accumulate data, incremental checkpoints and on-demand resume avoid copying the entire growing filesystem during pause/resume. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, and credentials.
+Sandbox0 provides AI agent sandboxes so you can give every user their own cloud computer. Preserve the whole writable root filesystem, pause idle compute, and resume on demand. System configuration, installed software, dependencies, and user files persist across successful checkpoints. On growth-enabled templates, the RootFS expands automatically online while the agent keeps running. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, and credentials.
+
+**Always available. Without always-on compute costs.** On Sandbox0 Cloud, paused sandboxes incur no compute charges. An idle sandbox that stays running still accrues compute charges. Configure pause policies and supported automatic wake-up paths for your application; resume takes time and requires available capacity.
 
 ## What is Sandbox0?
 
-Sandbox0 gives long-running AI agents an isolated workspace that enables you to:
+Sandbox0 gives each user's AI agent an isolated cloud computer that enables you to:
 
 - **Run code securely** in isolated environments with full process control
+- **Release idle compute** between tasks, then resume the same sandbox explicitly or through supported access paths with `auto_resume` enabled
 - **Run for as long as needed** with `ttl=0` and `hard_ttl=0`, or set your own pause and deletion policies
-- **Persist sandbox files** across pause/resume with rootfs checkpoints tied to the sandbox identity
+- **Persist the whole writable RootFS** across pause/resume with checkpoints tied to the sandbox identity
+- **Grow RootFS automatically** online on growth-enabled templates, within the configured device ceiling, without restarting the agent
 - **Keep growing workspaces reusable** with incremental block-COW checkpoints and demand reads on resume
 - **Version and fan out durable state** with rootfs snapshots, restore, and forks
 - **Control network access** with fine-grained policies

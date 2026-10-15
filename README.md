@@ -10,15 +10,22 @@
 
 # Sandbox0
 
-**The long-running agent sandbox. Durable writable RootFS, incremental checkpoints, and on-demand resume, scheduled by Nomad and isolated by gVisor.**
+**Always available. Without always-on compute costs.**
 
-Sandbox0 is an open-source sandbox runtime for long-running AI agents. As an
-agent installs dependencies, edits code, and accumulates data, its writable
-RootFS keeps that work across runtime generations. Pause and resume are
-designed to avoid work proportional to the accumulated RootFS size: checkpoints
-publish changes, and resume reads stored blocks on demand instead of copying
-the entire filesystem. The sandbox identity and committed files remain durable
-when compute is released and later replaced.
+Sandbox0 is an open-source AI agent sandbox runtime for giving every user
+their own cloud computer. Preserve the whole writable root filesystem, pause
+idle compute, and resume on demand. System configuration, installed software,
+dependencies, and user files persist across successful checkpoints.
+
+The RootFS can grow automatically online as it fills, while the agent keeps
+running. Growth-enabled image imports set the available device ceiling;
+existing images and snapshots retain their captured geometry. The runtime
+separates durable storage from compute, with incremental checkpoints and demand
+reads that avoid copying the entire growing RootFS on every pause and resume.
+Nomad schedules compute; gVisor isolates each sandbox.
+
+On [Sandbox0 Cloud](https://sandbox0.ai/pricing), paused sandboxes incur no compute
+charges. An idle sandbox that remains running still accrues compute charges.
 
 Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates,
 credentials, and team-scoped API keys.
@@ -26,11 +33,32 @@ credentials, and team-scoped API keys.
 > Sandbox0 is under active development. Prefer the SDKs and `s0` CLI over
 > hardcoded HTTP paths, and check the docs before depending on beta surfaces.
 
+## A Cloud Computer For Every User
+
+Give each user a sandbox they can return to across tasks and sessions:
+
+- **Keep the whole RootFS:** retain the same sandbox identity and committed
+  writable filesystem, including software in `/usr/local`, configuration in
+  `/etc`, and user data under `/home` or `/workspace`.
+- **Grow online:** expand the root filesystem automatically on growth-enabled
+  templates, within the configured device ceiling, while the agent keeps running.
+- **Release idle compute:** pause between tasks while the RootFS stays in
+  durable storage. Choose your own pause and deletion policies.
+- **Resume on demand:** resume explicitly, or enable `auto_resume` for supported
+  runtime API, SSH, and restartable service access paths.
+
+Wake-up takes time and requires available capacity. Default pause/resume
+preserves filesystem state and starts fresh processes. Experimental memory
+checkpoints can also restore supported process state. See
+[pause and resume](https://sandbox0.ai/docs/sandbox/pause-resume) for configuration
+and compatibility requirements.
+
 ## Why Sandbox0
 
 | Differentiator | What it means |
 | --- | --- |
-| **Built for growing agent workspaces** | Durable writable RootFS keeps dependencies, repositories, and outputs across runs. Incremental block-COW checkpoints and demand reads avoid full-RootFS copies during pause/resume. |
+| **The whole writable RootFS persists** | Keep system configuration, installed software, dependencies, and user files across successful checkpoints, wherever they live in the RootFS. |
+| **Automatic online RootFS growth** | Growth-enabled templates expand the root filesystem as it fills, within the configured device ceiling, without restarting the agent. Existing images retain their captured geometry. |
 | **Storage and compute are separated** | Writable RootFS generations are application-encrypted and stored in S3-compatible object storage. Compute nodes keep disposable caches, not the durable source of truth. |
 | **The sandbox lifetime is policy-controlled** | `ttl` and `hard_ttl` default to `0` (disabled). Pause idle compute and later resume the same sandbox identity, or keep it running. |
 | **Optional memory checkpoints** | Explicit experimental `memory: true` pause and resume can retain supported processes and memory alongside the writable RootFS. Memory fork creates a paused child that can continue the captured processes. The default pause remains filesystem-only. |

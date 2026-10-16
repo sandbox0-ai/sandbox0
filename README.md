@@ -4,11 +4,32 @@
 
 <p align="center">
   <a href="https://sandbox0.ai/docs"><img src="https://img.shields.io/badge/docs-sandbox0.ai-0f172a?style=for-the-badge" alt="Docs" /></a>
-  <a href="https://sandbox0.ai/docs/self-hosted"><img src="https://img.shields.io/badge/self--hosted-supported-0b6bcb?style=for-the-badge" alt="Self-hosted" /></a>
+  <img src="https://img.shields.io/badge/status-archived-777777?style=for-the-badge" alt="Archived open-source version" />
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-1f8f5f?style=for-the-badge" alt="License" /></a>
 </p>
 
-# Sandbox0
+# Sandbox0 — archived open-source version
+
+> **Archived on October 16, 2026.** This repository preserves the historical
+> Apache-2.0 version of Sandbox0. It is read-only and no longer receives
+> updates, bug fixes, security fixes, issues, or pull requests.
+>
+> **Sandbox0 continues as a closed-source product.** The hosted service remains
+> available at [sandbox0.ai](https://sandbox0.ai). Current documentation is at
+> [sandbox0.ai/docs/sandbox](https://sandbox0.ai/docs/sandbox).
+>
+> For product support, bug reports, or security reports, email
+> [contact@sandbox0.ai](mailto:contact@sandbox0.ai). Do not post credentials or
+> customer data in public issues. The [CLI](https://github.com/sandbox0-ai/s0)
+> and [Go](https://github.com/sandbox0-ai/sdk-go),
+> [JavaScript/TypeScript](https://github.com/sandbox0-ai/sdk-js), and
+> [Python](https://github.com/sandbox0-ai/sdk-py) SDKs remain open source.
+>
+> The code already published here remains available under its existing
+> [Apache-2.0 license](LICENSE). That license does not cover subsequent private
+> development. Self-hosting instructions below describe this historical version.
+
+## Historical project documentation
 
 **Always available. Without always-on compute costs.**
 
@@ -30,8 +51,8 @@ charges. An idle sandbox that remains running still accrues compute charges.
 Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates,
 credentials, and team-scoped API keys.
 
-> Sandbox0 is under active development. Prefer the SDKs and `s0` CLI over
-> hardcoded HTTP paths, and check the docs before depending on beta surfaces.
+> This documentation describes the archived open-source release. For the current
+> hosted product, use the website documentation and maintained SDKs.
 
 ## A Cloud Computer For Every User
 
@@ -299,9 +320,11 @@ and SDK copies must be synchronized from it rather than edited by hand.
   dependencies.
 - Do not hand-edit generated OpenAPI or SDK output.
 
-## Contributing
+## Support
 
-Bug reports should include a minimal reproduction, relevant logs, Sandbox0
+This archived repository no longer accepts contributions. Send current product
+feedback and bug reports to [contact@sandbox0.ai](mailto:contact@sandbox0.ai).
+Reports should include a minimal reproduction, relevant logs, Sandbox0
 version or topology, and whether the deployment is Cloud or self-hosted. Remove
 API keys, tokens, private endpoints, customer data, and credentials before
 sharing logs.
